@@ -2,6 +2,8 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "RegistryOptimizationPage.h"
+#include "../UI/AsyncOperation.h"
+#include <QShowEvent>
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -929,14 +931,31 @@ namespace
 RegistryOptimizationPage::RegistryOptimizationPage(QWidget* parent)
     : QWidget(parent)
 {
+    m_profileOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     initializeUi();
     initializeConnections();
-    loadOptimizationProfile();
 }
 
 RegistryOptimizationPage::~RegistryOptimizationPage()
 {
+    m_profileOperation->close();
     cancelStateApply();
+}
+
+void RegistryOptimizationPage::showEvent(QShowEvent* event)
+{
+    if (!m_profileRequested) loadOptimizationProfile();
+    else if (m_profilePresentationDirty) presentOptimizationProfile();
+    QWidget::showEvent(event);
+}
+
+void RegistryOptimizationPage::presentOptimizationProfile()
+{
+    if (!isVisible() || !m_profilePresentationDirty) return;
+    m_profilePresentationDirty = false;
+    rebuildGroupTree();
+    rebuildItemTable();
+    applyColumnPreset(m_columnPreset);
 }
 
 void RegistryOptimizationPage::initializeUi()
@@ -1095,6 +1114,7 @@ QStringList RegistryOptimizationPage::profileCandidatePaths() const
 
 void RegistryOptimizationPage::loadOptimizationProfile()
 {
+    m_profileRequested = true;
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为优化配置已重新加载。"));
     if (m_filterDebounceTimer != nullptr) m_filterDebounceTimer->stop();
@@ -1104,87 +1124,101 @@ void RegistryOptimizationPage::loadOptimizationProfile()
     m_itemTable->setRowCount(0);
     m_groupTree->clear();
     m_detailText->setDocument({});
-
-    QString selectedPath;
-    for (const QString& candidatePath : profileCandidatePaths())
-    {
-        const QString resolvedPath = ks::profile::resolveProfileJsonPath(candidatePath);
-        if (!resolvedPath.isEmpty())
-        {
-            selectedPath = QDir::cleanPath(resolvedPath);
-            break;
-        }
-    }
-
-    if (selectedPath.isEmpty())
-    {
-        updateStatusText(QStringLiteral("未找到 profiles/%1；系统优化页已加载，但没有可显示项目。").arg(QString::fromLatin1(kOptimizationProfileFileName)));
-        return;
-    }
-
-    QJsonParseError parseError{};
-    QString readErrorText;
-    const QJsonDocument document = ks::profile::readProfileJsonDocument(selectedPath, &parseError, &readErrorText);
-    if (parseError.error != QJsonParseError::NoError || !document.isArray())
-    {
-        const QString reasonText = readErrorText.isEmpty() ? parseError.errorString() : readErrorText;
-        updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(reasonText, selectedPath));
-        return;
-    }
-
-    const QJsonArray itemArray = document.array();
-    for (const QJsonValue& itemValue : itemArray)
-    {
-        if (!itemValue.isObject()) continue;
-        const QJsonObject itemObject = itemValue.toObject();
-
-        OptimizationItem item;
-        item.groupIndex = jsonInt(itemObject, QStringLiteral("group_index"));
-        item.itemIndex = jsonInt(itemObject, QStringLiteral("item_index"));
-        item.groupNameText = jsonString(itemObject, QStringLiteral("group_name"));
-        item.itemNameText = jsonString(itemObject, QStringLiteral("item_name"));
-        item.itemTypeText = jsonString(itemObject, QStringLiteral("item_type"));
-        item.groupConditionText = jsonString(itemObject, QStringLiteral("group_condition"));
-        item.itemConditionText = jsonString(itemObject, QStringLiteral("item_condition"));
-        item.warningText = jsonString(itemObject, QStringLiteral("item_warning"));
-
-        const QJsonArray scopeArray = itemObject.value(QStringLiteral("scopes")).toArray();
-        for (const QJsonValue& scopeValue : scopeArray)
-        {
-            if (!scopeValue.isObject()) continue;
-            const QJsonObject scopeObject = scopeValue.toObject();
-            OptimizationScope scope;
-            scope.scopeText = jsonString(scopeObject, QStringLiteral("scope"));
-            scope.conditionText = jsonString(scopeObject, QStringLiteral("scope_condition"));
-
-            const QJsonArray stateArray = scopeObject.value(QStringLiteral("states")).toArray();
-            for (const QJsonValue& stateValue : stateArray)
+    m_profilePresentationDirty = false;
+    m_profileOperation->submit<QStringList, ProfileLoadResult>(profileCandidatePaths(),
+        [](const QStringList& candidates, const ks::ui::AsyncOperationToken& token) {
+            ProfileLoadResult result;
+            for (const QString& candidate : candidates)
             {
-                if (!stateValue.isObject()) continue;
-                const QJsonObject stateObject = stateValue.toObject();
-                OptimizationState state;
-                state.tagText = jsonString(stateObject, QStringLiteral("state_tag"));
-                state.labelText = jsonString(stateObject, QStringLiteral("state_label"));
-                state.conditionText = jsonString(stateObject, QStringLiteral("state_condition"));
-                state.warningText = jsonString(stateObject, QStringLiteral("state_warning"));
-
-                const QJsonArray actionArray = stateObject.value(QStringLiteral("actions")).toArray();
-                for (const QJsonValue& actionValue : actionArray)
-                {
-                    if (actionValue.isObject()) state.actionList.push_back(actionValue.toObject());
-                }
-                scope.stateList.push_back(state);
+                if (token.isCanceled()) return result;
+                const QString path = ks::profile::resolveProfileJsonPath(candidate);
+                if (!path.isEmpty()) { result.path = QDir::cleanPath(path); result.found = true; break; }
             }
-            item.scopeList.push_back(scope);
-        }
-        m_itemList.push_back(item);
-    }
+            if (!result.found || token.isCanceled()) return result;
+            QJsonParseError parseError{};
+            QString readError;
+            const QJsonDocument document = ks::profile::readProfileJsonDocument(result.path, &parseError, &readError);
+            if (parseError.error != QJsonParseError::NoError || !document.isArray())
+            {
+                result.error = readError.isEmpty() ? parseError.errorString() : readError;
+                return result;
+            }
+            result.parsed = true;
+            const QJsonArray itemArray = document.array();
+            for (const QJsonValue& itemValue : itemArray)
+            {
+                if (token.isCanceled()) return result;
+                if (!itemValue.isObject()) continue;
+                const QJsonObject itemObject = itemValue.toObject();
 
-    m_loadedProfilePath = selectedPath;
-    rebuildGroupTree();
-    rebuildItemTable();
-    applyColumnPreset(m_columnPreset);
-    updateStatusText(QStringLiteral("已加载系统优化 JSON：%1；项目 %2 个。").arg(selectedPath).arg(m_itemList.size()));
+                OptimizationItem item;
+                item.groupIndex = jsonInt(itemObject, QStringLiteral("group_index"));
+                item.itemIndex = jsonInt(itemObject, QStringLiteral("item_index"));
+                item.groupNameText = jsonString(itemObject, QStringLiteral("group_name"));
+                item.itemNameText = jsonString(itemObject, QStringLiteral("item_name"));
+                item.itemTypeText = jsonString(itemObject, QStringLiteral("item_type"));
+                item.groupConditionText = jsonString(itemObject, QStringLiteral("group_condition"));
+                item.itemConditionText = jsonString(itemObject, QStringLiteral("item_condition"));
+                item.warningText = jsonString(itemObject, QStringLiteral("item_warning"));
+
+                const QJsonArray scopeArray = itemObject.value(QStringLiteral("scopes")).toArray();
+                for (const QJsonValue& scopeValue : scopeArray)
+                {
+                    if (!scopeValue.isObject()) continue;
+                    const QJsonObject scopeObject = scopeValue.toObject();
+                    OptimizationScope scope;
+                    scope.scopeText = jsonString(scopeObject, QStringLiteral("scope"));
+                    scope.conditionText = jsonString(scopeObject, QStringLiteral("scope_condition"));
+
+                    const QJsonArray stateArray = scopeObject.value(QStringLiteral("states")).toArray();
+                    for (const QJsonValue& stateValue : stateArray)
+                    {
+                        if (!stateValue.isObject()) continue;
+                        const QJsonObject stateObject = stateValue.toObject();
+                        OptimizationState state;
+                        state.tagText = jsonString(stateObject, QStringLiteral("state_tag"));
+                        state.labelText = jsonString(stateObject, QStringLiteral("state_label"));
+                        state.conditionText = jsonString(stateObject, QStringLiteral("state_condition"));
+                        state.warningText = jsonString(stateObject, QStringLiteral("state_warning"));
+
+                        const QJsonArray actionArray = stateObject.value(QStringLiteral("actions")).toArray();
+                        for (const QJsonValue& actionValue : actionArray)
+                        {
+                            if (actionValue.isObject()) state.actionList.push_back(actionValue.toObject());
+                        }
+                        scope.stateList.push_back(state);
+                    }
+                    item.scopeList.push_back(scope);
+                }
+                result.items.push_back(std::move(item));
+            }
+
+            return result;
+        },
+        [this](const ProfileLoadResult& result, std::uint64_t) {
+            if (!result.found)
+                updateStatusText(QStringLiteral("未找到 profiles/%1；系统优化页已加载，但没有可显示项目。")
+                    .arg(QString::fromLatin1(kOptimizationProfileFileName)));
+            else if (!result.parsed)
+                updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(result.error, result.path));
+            else
+            {
+                m_loadedProfilePath = result.path;
+                m_itemList = result.items;
+                m_profilePresentationDirty = true;
+                presentOptimizationProfile();
+                updateStatusText(QStringLiteral("已加载系统优化 JSON：%1；项目 %2 个。")
+                    .arg(result.path).arg(m_itemList.size()));
+            }
+            return true;
+        },
+        [this](std::exception_ptr failure) {
+            QString reason;
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { reason = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            updateStatusText(QStringLiteral("系统优化 JSON 解析失败：%1 (%2)").arg(reason, QString()));
+        });
 }
 
 void RegistryOptimizationPage::rebuildGroupTree()

@@ -16,6 +16,7 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
@@ -27,6 +28,8 @@ class QTemporaryDir;
 class QTreeWidget;
 class QTimer;
 class CodeEditorWidget;
+class QShowEvent;
+namespace ks::ui { class AsyncOperation; }
 
 // RegistryOptimizationPage:
 // - Input: parent widget plus profiles/registry_optimization_items.json at runtime;
@@ -41,6 +44,9 @@ public:
     // - Return: no explicit return value.
     explicit RegistryOptimizationPage(QWidget* parent = nullptr);
     ~RegistryOptimizationPage() override;
+
+protected:
+    void showEvent(QShowEvent* event) override;
 
 private:
     // OptimizationState:
@@ -94,6 +100,15 @@ private:
         int scopeIndex = -1;
     };
 
+    struct ProfileLoadResult
+    {
+        QString path;
+        QString error;
+        bool found = false;
+        bool parsed = false;
+        QVector<OptimizationItem> items;
+    };
+
 private:
     // ColumnPreset：
     // - 用途：记录系统优化表格当前使用的 A/B/自定义列组；
@@ -109,6 +124,7 @@ private:
     void initializeUi();
     void initializeConnections();
     void loadOptimizationProfile();
+    void presentOptimizationProfile();
     QStringList profileCandidatePaths() const;
     void rebuildGroupTree();
     void rebuildItemTable();
@@ -160,6 +176,9 @@ private:
     ks::ui::StructuredFieldView* m_detailText = nullptr;    // 选中项目/动作的只读详情，支持语言切换重绘。
     QLabel* m_statusLabel = nullptr;             // Profile load/apply status.
 
+    std::unique_ptr<ks::ui::AsyncOperation> m_profileOperation;
+    bool m_profileRequested = false;
+    bool m_profilePresentationDirty = false;
     QString m_loadedProfilePath;                 // Actual JSON path selected from candidates.
     QVector<OptimizationItem> m_itemList;        // Parsed top-level optimization items.
     QVector<VisibleRow> m_visibleRows;           // Current table row to model mapping.
