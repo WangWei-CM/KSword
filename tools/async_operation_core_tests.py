@@ -1,6 +1,6 @@
 """Compile production AsyncOperation with QtCore only; no GUI or business IO."""
 from pathlib import Path
-import argparse, os, subprocess
+import argparse, hashlib, json, os, subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--repository-root', type=Path, default=Path(__file__).resolve().parents[1])
@@ -13,14 +13,15 @@ root = a.repository_root.resolve()
 source = (a.source_root or root).resolve()
 out = a.output_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
-ui = Path('Ksword5.1/Ksword5.1/UI')
+ui = Path('Ksword5.1/Ksword5.1/UI'); proof={'production_inputs':{}}
 for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h'):
     src = source / ui / name
     if not src.exists() and a.dependency_source_root:
         src = a.dependency_source_root.resolve() / ui / name
     if not src.exists() and a.secondary_dependency_source_root:
         src = a.secondary_dependency_source_root.resolve() / ui / name
-    (out / name).write_bytes((src if src.exists() else root / ui / name).read_bytes())
+    actual=src if src.exists() else root / ui / name;data=actual.read_bytes();(out/name).write_bytes(data)
+    proof['production_inputs'][name]={'path':str(actual),'sha256':hashlib.sha256(data).hexdigest()}
 fixture = r'''
 #include "AsyncOperation.h"
 #include "AsyncCleanupRegistry.h"
@@ -129,6 +130,18 @@ static void launchFailureTests(){
   check(ticket!=0&&copies->load()==1&&work==0&&applied==0,"request copy throws before worker accepts work");check(failure==1&&cleaned==1,"launch failure close/delete/default each settle cleanup once");check(outcome==(mode==2?Outcome::Failed:Outcome::OwnerClosed),"launch failure final outcome follows owner lifecycle");
  }
 }
+struct CleanupCaptureStats{std::atomic_int called=0,destroyed=0,calledPending=-1,destructorPending=-1;};
+struct CleanupCaptureOwner{std::shared_ptr<CleanupCaptureStats> stats;explicit CleanupCaptureOwner(std::shared_ptr<CleanupCaptureStats> value):stats(std::move(value)){}~CleanupCaptureOwner(){stats->destructorPending=static_cast<int>(ks::ui::AsyncCleanupRegistry::global().pending());++stats->destroyed;}};
+static void cleanupCaptureOrderTests(){
+ using Op=ks::ui::AsyncOperation;using Outcome=ks::ui::AsyncOperationOutcome;auto& registry=ks::ui::AsyncCleanupRegistry::global();auto* pool=QThreadPool::globalInstance();
+ for(int mode=0;mode<5;++mode){
+  registry.cancelShutdown();check(registry.pending()==0,"capture-order case starts without stale lease");auto stats=std::make_shared<CleanupCaptureStats>();auto owner=std::make_shared<CleanupCaptureOwner>(stats);std::weak_ptr<CleanupCaptureOwner> weak=owner;Op op(nullptr);QSemaphore entered,release;int applied=0,failed=0;
+  op.submitTransaction<int,int>(1,[&,mode](int value){if(mode==3){entered.release();release.acquire();}if(mode==1)throw std::runtime_error("fake worker failure");return value;},[&](int,std::uint64_t){++applied;return true;},[&](std::exception_ptr){++failed;},[owner,stats,mode](Outcome){stats->calledPending=static_cast<int>(ks::ui::AsyncCleanupRegistry::global().pending());++stats->called;if(mode==4)throw std::runtime_error("fake cleanup exception");});owner.reset();
+  if(mode==3){check(entered.tryAcquire(1,5000),"owner-close cleanup capture worker entered");op.close();check(stats->destroyed==0&&registry.pending()==1,"unfinished accepted transaction retains cleanup captures and lease");release.release();}
+  pool->waitForDone();if(mode==2)QCoreApplication::removePostedEvents(&op,QEvent::MetaCall);else if(mode!=3)pump([&]{return !op.isInFlight();});
+  check(stats->called==1&&stats->calledPending==1,"cleanup call occurs once with transaction lease retained");check(stats->destroyed==1&&weak.expired()&&stats->destructorPending==1,"cleanup capture final owner is destroyed before shutdown lease returns");check(registry.pending()==0,"lease returns only after cleanup capture destruction");check(applied==((mode==0||mode==4)?1:0)&&failed==(mode==1?1:0),"capture release preserves actual apply failure dropped and closed result semantics");op.close();check(stats->called==1&&stats->destroyed==1,"later close never repeats cleanup or final value destructor");
+ }
+}
 int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  auto* pool=QThreadPool::globalInstance();const int threads=pool->maxThreadCount();pool->setMaxThreadCount(1);
  QSemaphore entered,release;pool->start(QRunnable::create([&]{entered.release();release.acquire();}));check(entered.tryAcquire(1,5000),"pool blocker entered");
@@ -143,11 +156,12 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(order.empty(),"tasks queue behind actual pool worker");release.release();
  pump([&]{return !low.isInFlight()&&!normal.isInFlight()&&!high.isInFlight();});
  check(order==std::vector<int>({1,0,-1}),"real pool executes high/default/low");check(applied==3&&cleaned==2&&errors==0,"legacy and priority callbacks settle normally");
- pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();droppedStateTests();pool->setMaxThreadCount(threads);
+ pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();droppedStateTests();cleanupCaptureOrderTests();pool->setMaxThreadCount(threads);
  std::cout<<"ASYNC_CORE_CHECKS="<<checks<<"\nPOOL_ORDER=high,default,low\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
 '''
 (out / 'fixture.cpp').write_text(fixture, encoding='utf-8')
+proof['fixture_sha256']=hashlib.sha256((out/'fixture.cpp').read_bytes()).hexdigest();(out/'inputs.json').write_text(json.dumps(proof,indent=2),encoding='utf-8')
 vc = Path('C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207')
 if not (vc / 'bin/Hostx64/x64/cl.exe').is_file():
     vc = Path('D:/Software/VS/VC/Tools/MSVC/14.44.35207')
@@ -162,7 +176,7 @@ log = out / 'result.log'
 log.write_text('SHARED_CONTROLLER=production AsyncOperation.cpp\nHOST_TOOLS=Hostx64/x64\n', encoding='utf-8')
 def run(command, env=None):
     result = subprocess.run(command,cwd=out,env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=45)
-    with log.open('a',encoding='utf-8') as stream:stream.write(result.stdout+result.stderr+'\nEXIT_CODE='+str(result.returncode)+'\n')
+    with log.open('a',encoding='utf-8') as stream:stream.write('COMMAND='+json.dumps(command)+'\n'+result.stdout+result.stderr+'\nEXIT_CODE='+str(result.returncode)+'\n')
     print(result.stdout+result.stderr,end='')
     result.check_returncode()
 objects=[]

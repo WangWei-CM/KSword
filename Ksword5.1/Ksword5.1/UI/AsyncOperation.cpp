@@ -26,14 +26,17 @@ namespace ks::ui
         {
             if (!settled.exchange(true))
             {
+                // 收尾闭包本身也可能拥有最后一个值资源；其析构必须先于lease归还。
+                auto valueCleanup = std::move(cleanup);
                 try
                 {
-                    if (cleanup) cleanup(outcome);
+                    if (valueCleanup) valueCleanup(outcome);
                 }
                 catch (...)
                 {
                     // 用户值资源收尾失败也不得重复执行或越过析构边界。
                 }
+                valueCleanup = {}; // 不把capture留到request/队列最后一个引用销毁。
                 shutdownLease.reset(); // 值收尾结束后才允许进程退出。
             }
         }
