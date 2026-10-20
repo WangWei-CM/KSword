@@ -1,4 +1,6 @@
 #include "GhidraDecompiler.h"
+#include "../AsyncOperation.h"
+#include "../AsyncCleanupRegistry.h"
 #include "../../../../GhidraRuntimePlugin/RuntimeProfile.h"
 
 #include <QCoreApplication>
@@ -18,6 +20,7 @@
 #include <QUuid>
 #include <QtEndian>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 
 #ifdef Q_OS_WIN
@@ -435,6 +438,218 @@ public class GhidraPseudocode extends GhidraScript {
         }
         return false;
     }
+    // Only values cross the worker boundary. The lease survives owner closure and
+    // is returned after the last temporary project has actually been removed.
+    struct TemporaryWorkspace
+    {
+        QString path;
+        std::shared_ptr<std::atomic_bool> stopped = std::make_shared<std::atomic_bool>(false);
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+        ~TemporaryWorkspace()
+        {
+            if (path.isEmpty()) return;
+            auto* cleanup = QRunnable::create([directory = std::move(path), keepLease = std::move(lease)] {
+                QDir(directory).removeRecursively();
+                // keepLease ends only after directory removal, on this worker.
+                Q_UNUSED(keepLease);
+            });
+            QThreadPool::globalInstance()->start(cleanup);
+        }
+    };
+
+    struct PreparationInput
+    {
+        ks::ui::DecompilerRequest request;
+        QString directory;
+        QString temporaryRoot;
+        QByteArray progressToken;
+        std::shared_ptr<TemporaryWorkspace> resources;
+    };
+
+    struct PreparedSnapshot
+    {
+        QString error;
+        QString java;
+        QStringList arguments;
+        QString resultPath, logPath, scriptLogPath;
+        QByteArray hash;
+        QVector<QPair<quint64, quint64>> addressRanges;
+        int seconds = 0;
+    };
+
+    PreparedSnapshot prepareSnapshot(const PreparationInput& input, const ks::ui::AsyncOperationToken& token)
+    {
+        using ks::ui::DecompilerInputKind;
+        PreparedSnapshot prepared;
+        const auto canceled = [&] { return token.isCanceled() || input.resources->stopped->load(); };
+        if (canceled()) { prepared.error = QStringLiteral("cancelled"); return prepared; }
+        const auto& request = input.request;
+        const QString validation = validateRequest(request);
+        if (!validation.isEmpty()) { prepared.error = validation; return prepared; }
+        const QString directory = input.directory.isEmpty() ? ks::ui::GhidraDecompiler::findGhidraDirectory() : input.directory;
+        if (!validDirectory(directory)) { prepared.error = QStringLiteral("ghidra_not_configured"); return prepared; }
+        const QString java = findJava(directory);
+        if (java.isEmpty()) { prepared.error = QStringLiteral("java_not_found"); return prepared; }
+        QTemporaryDir temporaryDirectory(input.temporaryRoot + QStringLiteral("/KSword-decompile-XXXXXX"));
+        if (!temporaryDirectory.isValid()) { prepared.error = QStringLiteral("temporary_file_error"); return prepared; }
+        input.resources->path = temporaryDirectory.path();
+        temporaryDirectory.setAutoRemove(false);
+        const QDir temporary(input.resources->path);
+        prepared.java = java;
+        const QString snapshotPath = temporary.filePath(request.inputKind == DecompilerInputKind::PortableExecutable
+            ? QStringLiteral("snapshot.exe") : QStringLiteral("snapshot.bin"));
+        prepared.resultPath = temporary.filePath(QStringLiteral("result.json"));
+        prepared.logPath = temporary.filePath(QStringLiteral("analysis.log"));
+        prepared.scriptLogPath = temporary.filePath(QStringLiteral("script.log"));
+        if (canceled()) { prepared.error = QStringLiteral("cancelled"); return prepared; }
+        if (!writeFile(snapshotPath, request.bytes) ||
+            !writeFile(temporary.filePath(QStringLiteral("GhidraPseudocode.java")), QByteArray(GhidraScript))) {
+            prepared.error = QStringLiteral("temporary_file_error"); return prepared;
+        }
+        if (canceled()) { prepared.error = QStringLiteral("cancelled"); return prepared; }
+        prepared.hash = QCryptographicHash::hash(request.bytes, QCryptographicHash::Sha256);
+        if (request.inputKind == DecompilerInputKind::RawMemory) {
+            prepared.addressRanges.append(qMakePair(request.baseAddress, request.baseAddress + quint64(request.bytes.size()) - 1));
+        } else {
+            quint32 peOffset = 0;
+            quint16 optionalSize = 0, sections = 0;
+            quint64 imageBase = 0;
+            readLe(request.bytes, 0x3c, peOffset);
+            readLe(request.bytes, quint64(peOffset) + 6, sections);
+            readLe(request.bytes, quint64(peOffset) + 20, optionalSize);
+            const quint64 optional = quint64(peOffset) + 24;
+            if (request.x64) readLe(request.bytes, optional + 24, imageBase);
+            else {
+                quint32 base = 0;
+                readLe(request.bytes, optional + 28, base);
+                imageBase = base;
+            }
+            for (quint16 index = 0; index < sections; ++index) {
+                quint32 rva = 0, rawSize = 0, virtualSize = 0;
+                const quint64 section = optional + optionalSize + quint64(index) * 40;
+                readLe(request.bytes, section + 12, rva);
+                readLe(request.bytes, section + 16, rawSize);
+                readLe(request.bytes, section + 8, virtualSize);
+                const quint32 backedSize = std::min(rawSize, virtualSize ? virtualSize : rawSize);
+                if (backedSize) prepared.addressRanges.append(qMakePair(imageBase + rva, imageBase + rva + backedSize - 1));
+            }
+        }
+        const int seconds = std::clamp(request.timeoutSeconds, 10, 300);
+        prepared.seconds = seconds;
+        const QString selected = QString::number(request.selectedAddress, 16);
+        const QString kind = request.inputKind == DecompilerInputKind::RawMemory ? QStringLiteral("raw") : QStringLiteral("pe");
+        QStringList& arguments = prepared.arguments;
+        arguments = {
+            QStringLiteral("-Xmx1G"), QStringLiteral("-Xshare:off"), QStringLiteral("-XX:ParallelGCThreads=2"),
+            QStringLiteral("-XX:CICompilerCount=2"), QStringLiteral("-Djava.awt.headless=true"),
+            QStringLiteral("-Djava.system.class.loader=ghidra.GhidraClassLoader"),
+            QStringLiteral("-Dfile.encoding=UTF-8"), QStringLiteral("-Duser.language=en"), QStringLiteral("-Duser.country=US"),
+            QStringLiteral("-Djavax.xml.accessExternalDTD="), QStringLiteral("-Djavax.xml.accessExternalSchema="),
+            QStringLiteral("-Djavax.xml.accessExternalStylesheet="), QStringLiteral("--enable-native-access=ALL-UNNAMED"),
+            QStringLiteral("-Dapplication.settingsdir=") + temporary.filePath(QStringLiteral("settings")),
+            QStringLiteral("-Dapplication.cachedir=") + temporary.filePath(QStringLiteral("cache")),
+            QStringLiteral("-Dapplication.tempdir=") + temporary.filePath(QStringLiteral("scratch")),
+            QStringLiteral("-Djava.io.tmpdir=") + temporary.path(),
+            QStringLiteral("-cp"), QDir(directory).filePath(UtilityJar), QStringLiteral("ghidra.Ghidra"),
+            QStringLiteral("ghidra.app.util.headless.AnalyzeHeadless"), temporary.path(), QStringLiteral("Snapshot"),
+            QStringLiteral("-import"), snapshotPath, QStringLiteral("-deleteProject"),
+            QStringLiteral("-max-cpu"), QStringLiteral("2"), QStringLiteral("-analysisTimeoutPerFile"), QString::number(seconds),
+            QStringLiteral("-log"), prepared.logPath, QStringLiteral("-scriptlog"), prepared.scriptLogPath,
+            QStringLiteral("-scriptPath"), temporary.path()
+        };
+        if (request.inputKind == DecompilerInputKind::RawMemory) {
+            arguments << QStringLiteral("-loader") << QStringLiteral("BinaryLoader")
+                << QStringLiteral("-processor") << (request.x64 ? QStringLiteral("x86:LE:64:default") : QStringLiteral("x86:LE:32:default"))
+                << QStringLiteral("-cspec") << QStringLiteral("windows")
+                << QStringLiteral("-loader-baseAddr") << QString::number(request.baseAddress, 16);
+        } else {
+            arguments << QStringLiteral("-loader") << QStringLiteral("PeLoader");
+        }
+        arguments << QStringLiteral("-preScript") << QStringLiteral("GhidraPseudocode.java")
+            << QStringLiteral("prepare") << selected << kind << QString::fromLatin1(input.progressToken)
+            << QStringLiteral("-postScript") << QStringLiteral("GhidraPseudocode.java")
+            << QStringLiteral("decompile") << selected << QString::number(seconds) << prepared.resultPath << snapshotPath
+            << (request.x64 ? QStringLiteral("64") : QStringLiteral("32")) << kind << QStringLiteral("1")
+            << QString::fromLatin1(input.progressToken);
+
+        if (canceled()) prepared.error = QStringLiteral("cancelled");
+        return prepared;
+    }
+
+    struct CompletionInput
+    {
+        QString error;
+        QString resultPath;
+        QByteArray hash, diagnosticBytes;
+        quint64 selectedAddress = 0;
+        QVector<QPair<quint64, quint64>> addressRanges;
+        std::shared_ptr<TemporaryWorkspace> resources;
+    };
+
+    ks::ui::DecompilerResult readResult(const CompletionInput& input)
+    {
+        using ks::ui::DecompilerResult;
+        DecompilerResult result;
+        result.error = input.error;
+        result.snapshotSha256 = input.hash;
+        result.diagnostics = QString::fromUtf8(input.diagnosticBytes);
+        if (result.error.isEmpty()) {
+            QFile file(input.resultPath);
+            if (!file.open(QIODevice::ReadOnly) || file.size() > MaximumResultBytes) {
+                result.error = file.size() > MaximumResultBytes ? QStringLiteral("output_limit") : QStringLiteral("invalid_result");
+            } else {
+                QJsonParseError parseError;
+                const QJsonDocument document = QJsonDocument::fromJson(file.read(MaximumResultBytes + 1), &parseError);
+                const QJsonObject object = document.object();
+                quint64 selected = 0;
+                if (parseError.error != QJsonParseError::NoError || !document.isObject() ||
+                    object.value(QStringLiteral("schemaVersion")).toInt() != 1 ||
+                    !object.value(QStringLiteral("success")).isBool() ||
+                    !parseHex(object.value(QStringLiteral("selectedAddress")), selected) || selected != input.selectedAddress) {
+                    result.error = QStringLiteral("invalid_result");
+                } else if (object.value(QStringLiteral("snapshotSha256")).toString().toLatin1().toLower() != input.hash.toHex()) {
+                    result.error = QStringLiteral("snapshot_mismatch");
+                } else if (!object.value(QStringLiteral("success")).toBool()) {
+                    const QString backendError = object.value(QStringLiteral("error")).toString();
+                    const QStringList allowed { QStringLiteral("unsupported_architecture"), QStringLiteral("invalid_address"),
+                        QStringLiteral("no_function_at_address"), QStringLiteral("timeout"), QStringLiteral("output_limit"),
+                        QStringLiteral("decompilation_failed"), QStringLiteral("invalid_instruction_data") };
+                    result.error = allowed.contains(backendError) ? backendError : QStringLiteral("decompilation_failed");
+                } else {
+                    result.code = object.value(QStringLiteral("code")).toString();
+                    result.functionName = object.value(QStringLiteral("functionName")).toString();
+                    const auto lines = object.value(QStringLiteral("lineAddresses")).toArray();
+                    qsizetype lineCount = result.code.count(u'\n') + 1;
+                    if (result.code.endsWith(u'\n')) --lineCount;
+                    const auto capturedAddress = [&input](quint64 address) {
+                        return std::any_of(input.addressRanges.cbegin(), input.addressRanges.cend(),
+                            [address](const auto& range) { return address >= range.first && address <= range.second; });
+                    };
+                    bool valid = !result.code.isEmpty() && result.code.toUtf8().size() <= MaximumCodeBytes &&
+                        !result.functionName.isEmpty() && result.functionName.size() <= 4096 && object.value(QStringLiteral("lineAddresses")).isArray() &&
+                        lines.size() == lineCount && parseHex(object.value(QStringLiteral("functionAddress")), result.functionAddress) &&
+                        capturedAddress(result.functionAddress);
+                    for (const auto& value : lines) {
+                        quint64 address = 0;
+                        const bool mapped = !value.isNull();
+                        if (mapped && (!parseHex(value, address) || !capturedAddress(address))) valid = false;
+                        result.lineAddresses.append(address);
+                        result.lineAddressValid.append(mapped);
+                    }
+                    result.boundaryInferred = object.value(QStringLiteral("boundaryInferred")).toBool();
+                    if (valid && containsBadInstructionDiagnostic(result.code)) {
+                        result.code.clear(); result.lineAddresses.clear(); result.lineAddressValid.clear();
+                        result.error = QStringLiteral("invalid_instruction_data");
+                    }
+                    else if (valid) result.success = true;
+                    else { result.code.clear(); result.lineAddresses.clear(); result.lineAddressValid.clear(); result.error = QStringLiteral("invalid_result"); }
+                }
+            }
+        }
+
+        return result;
+    }
+
 }
 
 namespace ks::ui
@@ -442,7 +657,9 @@ namespace ks::ui
     struct GhidraDecompiler::State
     {
         QString directory;
-        std::unique_ptr<QTemporaryDir> temporary;
+        std::shared_ptr<TemporaryWorkspace> resources;
+        std::unique_ptr<AsyncOperation> preparation;
+        std::unique_ptr<AsyncOperation> completion;
         QProcess* process = nullptr;
         QTimer* deadline = nullptr;
         QTimer* outputCheck = nullptr;
@@ -460,6 +677,7 @@ namespace ks::ui
         quint64 revision = 0;
         QVector<QPair<quint64, quint64>> addressRanges;
         bool running = false;
+        bool finishing = false;
 #ifdef Q_OS_WIN
         HANDLE job = nullptr;
 #endif
@@ -467,6 +685,8 @@ namespace ks::ui
 
     GhidraDecompiler::GhidraDecompiler(QObject* parent) : QObject(parent), m_state(std::make_unique<State>())
     {
+        m_state->preparation = std::make_unique<AsyncOperation>(this);
+        m_state->completion = std::make_unique<AsyncOperation>(this);
         qRegisterMetaType<DecompilerResult>();
         qRegisterMetaType<DecompilerProgress>();
         m_state->deadline = new QTimer(this);
@@ -475,6 +695,7 @@ namespace ks::ui
         m_state->outputCheck = new QTimer(this);
         m_state->outputCheck->setInterval(500);
         connect(m_state->outputCheck, &QTimer::timeout, this, [this] {
+            if (m_state->resources && m_state->resources->stopped->load()) { stopProcess(QStringLiteral("cancelled")); return; }
             if (QFileInfo(m_state->resultPath).size() > MaximumResultBytes ||
                 QFileInfo(m_state->logPath).size() > MaximumLogBytes ||
                 QFileInfo(m_state->scriptLogPath).size() > MaximumLogBytes) stopProcess(QStringLiteral("output_limit"));
@@ -483,19 +704,45 @@ namespace ks::ui
 
     GhidraDecompiler::~GhidraDecompiler()
     {
+        m_state->preparation->close();
+        m_state->completion->close();
         m_state->deadline->stop();
         m_state->outputCheck->stop();
-        if (m_state->process) {
-            m_state->process->disconnect(this);
+        if (m_state->resources) m_state->resources->stopped->store(true);
 #ifdef Q_OS_WIN
-            if (m_state->job) TerminateJobObject(m_state->job, 1);
+        const std::shared_ptr<void> job(m_state->job, [](void* handle) { if (handle) CloseHandle(handle); });
+        m_state->job = nullptr;
+        if (job) TerminateJobObject(job.get(), 1);
+#else
+        const std::shared_ptr<void> job;
 #endif
-            m_state->process->kill();
-            m_state->process->waitForFinished(1000);
+        if (auto* process = m_state->process) {
+            process->disconnect(this);
+            process->setParent(nullptr);
+            // QProcess destruction waits. Retain only value cleanup ownership
+            // in a parentless reaper until its asynchronous termination ends.
+            if (process->state() != QProcess::NotRunning) {
+                const auto resources = m_state->resources;
+                // Closing during Starting must still isolate a process whose
+                // started signal has not yet assigned it to the Windows Job.
+                connect(process, &QProcess::started, process, [process, resources, job] {
+#ifdef Q_OS_WIN
+                    HANDLE handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, DWORD(process->processId()));
+                    if (handle) { if (job) AssignProcessToJobObject(job.get(), handle); CloseHandle(handle); }
+                    if (job) TerminateJobObject(job.get(), 1);
+#endif
+                    process->kill();
+                });
+                connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process,
+                    [process, resources, job](int, QProcess::ExitStatus) { process->deleteLater(); });
+                connect(process, &QProcess::errorOccurred, process, [process, resources, job](QProcess::ProcessError error) {
+                    if (error == QProcess::FailedToStart) process->deleteLater();
+                });
+                process->kill();
+            }
+            if (process->state() == QProcess::NotRunning) process->deleteLater();
+            m_state->process = nullptr;
         }
-#ifdef Q_OS_WIN
-        if (m_state->job) CloseHandle(m_state->job);
-#endif
     }
 
     bool GhidraDecompiler::isRunning() const { return m_state->running; }
@@ -523,6 +770,14 @@ namespace ks::ui
     bool GhidraDecompiler::start(const DecompilerRequest& request)
     {
         if (m_state->running) return false;
+        auto resources = std::make_shared<TemporaryWorkspace>();
+        const std::weak_ptr<std::atomic_bool> weakStop = resources->stopped;
+        resources->lease = AsyncCleanupRegistry::global().acquire([weakStop] {
+            if (const auto stopped = weakStop.lock()) stopped->store(true);
+        });
+        if (!resources->lease) return false;
+        m_state->resources = std::move(resources);
+        m_state->finishing = false;
         m_state->running = true;
         m_state->stopReason.clear();
         m_state->diagnosticBytes.clear();
@@ -547,89 +802,33 @@ namespace ks::ui
     void GhidraDecompiler::launch(const DecompilerRequest& request)
     {
         if (!publishProgress(DecompilerStage::PreparingSnapshot)) return;
-        const QString validation = validateRequest(request);
-        if (!validation.isEmpty()) { complete(validation); return; }
-        const QString directory = ghidraDirectory();
-        if (!validDirectory(directory)) { complete(QStringLiteral("ghidra_not_configured")); return; }
-        const QString java = findJava(directory);
-        if (java.isEmpty()) { complete(QStringLiteral("java_not_found")); return; }
-        m_state->temporary = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/KSword-decompile-XXXXXX"));
-        if (!m_state->temporary->isValid()) { complete(QStringLiteral("temporary_file_error")); return; }
-        const QDir temporary(m_state->temporary->path());
-        const QString input = temporary.filePath(request.inputKind == DecompilerInputKind::PortableExecutable
-            ? QStringLiteral("snapshot.exe") : QStringLiteral("snapshot.bin"));
-        m_state->resultPath = temporary.filePath(QStringLiteral("result.json"));
-        m_state->logPath = temporary.filePath(QStringLiteral("analysis.log"));
-        m_state->scriptLogPath = temporary.filePath(QStringLiteral("script.log"));
-        if (!writeFile(input, request.bytes) ||
-            !writeFile(temporary.filePath(QStringLiteral("GhidraPseudocode.java")), QByteArray(GhidraScript))) {
-            complete(QStringLiteral("temporary_file_error")); return;
-        }
-        m_state->hash = QCryptographicHash::hash(request.bytes, QCryptographicHash::Sha256);
-        if (request.inputKind == DecompilerInputKind::RawMemory) {
-            m_state->addressRanges.append(qMakePair(request.baseAddress, request.baseAddress + quint64(request.bytes.size()) - 1));
-        } else {
-            quint32 peOffset = 0;
-            quint16 optionalSize = 0, sections = 0;
-            quint64 imageBase = 0;
-            readLe(request.bytes, 0x3c, peOffset);
-            readLe(request.bytes, quint64(peOffset) + 6, sections);
-            readLe(request.bytes, quint64(peOffset) + 20, optionalSize);
-            const quint64 optional = quint64(peOffset) + 24;
-            if (request.x64) readLe(request.bytes, optional + 24, imageBase);
-            else {
-                quint32 base = 0;
-                readLe(request.bytes, optional + 28, base);
-                imageBase = base;
-            }
-            for (quint16 index = 0; index < sections; ++index) {
-                quint32 rva = 0, rawSize = 0, virtualSize = 0;
-                const quint64 section = optional + optionalSize + quint64(index) * 40;
-                readLe(request.bytes, section + 12, rva);
-                readLe(request.bytes, section + 16, rawSize);
-                readLe(request.bytes, section + 8, virtualSize);
-                const quint32 backedSize = std::min(rawSize, virtualSize ? virtualSize : rawSize);
-                if (backedSize) m_state->addressRanges.append(qMakePair(imageBase + rva, imageBase + rva + backedSize - 1));
-            }
-        }
-        const int seconds = std::clamp(request.timeoutSeconds, 10, 300);
-        const QString selected = QString::number(request.selectedAddress, 16);
-        const QString kind = request.inputKind == DecompilerInputKind::RawMemory ? QStringLiteral("raw") : QStringLiteral("pe");
-        QStringList arguments {
-            QStringLiteral("-Xmx1G"), QStringLiteral("-Xshare:off"), QStringLiteral("-XX:ParallelGCThreads=2"),
-            QStringLiteral("-XX:CICompilerCount=2"), QStringLiteral("-Djava.awt.headless=true"),
-            QStringLiteral("-Djava.system.class.loader=ghidra.GhidraClassLoader"),
-            QStringLiteral("-Dfile.encoding=UTF-8"), QStringLiteral("-Duser.language=en"), QStringLiteral("-Duser.country=US"),
-            QStringLiteral("-Djavax.xml.accessExternalDTD="), QStringLiteral("-Djavax.xml.accessExternalSchema="),
-            QStringLiteral("-Djavax.xml.accessExternalStylesheet="), QStringLiteral("--enable-native-access=ALL-UNNAMED"),
-            QStringLiteral("-Dapplication.settingsdir=") + temporary.filePath(QStringLiteral("settings")),
-            QStringLiteral("-Dapplication.cachedir=") + temporary.filePath(QStringLiteral("cache")),
-            QStringLiteral("-Dapplication.tempdir=") + temporary.filePath(QStringLiteral("scratch")),
-            QStringLiteral("-Djava.io.tmpdir=") + temporary.path(),
-            QStringLiteral("-cp"), QDir(directory).filePath(UtilityJar), QStringLiteral("ghidra.Ghidra"),
-            QStringLiteral("ghidra.app.util.headless.AnalyzeHeadless"), temporary.path(), QStringLiteral("Snapshot"),
-            QStringLiteral("-import"), input, QStringLiteral("-deleteProject"),
-            QStringLiteral("-max-cpu"), QStringLiteral("2"), QStringLiteral("-analysisTimeoutPerFile"), QString::number(seconds),
-            QStringLiteral("-log"), m_state->logPath, QStringLiteral("-scriptlog"), m_state->scriptLogPath,
-            QStringLiteral("-scriptPath"), temporary.path()
-        };
-        if (request.inputKind == DecompilerInputKind::RawMemory) {
-            arguments << QStringLiteral("-loader") << QStringLiteral("BinaryLoader")
-                << QStringLiteral("-processor") << (request.x64 ? QStringLiteral("x86:LE:64:default") : QStringLiteral("x86:LE:32:default"))
-                << QStringLiteral("-cspec") << QStringLiteral("windows")
-                << QStringLiteral("-loader-baseAddr") << QString::number(request.baseAddress, 16);
-        } else {
-            arguments << QStringLiteral("-loader") << QStringLiteral("PeLoader");
-        }
-        arguments << QStringLiteral("-preScript") << QStringLiteral("GhidraPseudocode.java")
-            << QStringLiteral("prepare") << selected << kind << QString::fromLatin1(m_state->progressToken)
-            << QStringLiteral("-postScript") << QStringLiteral("GhidraPseudocode.java")
-            << QStringLiteral("decompile") << selected << QString::number(seconds) << m_state->resultPath << input
-            << (request.x64 ? QStringLiteral("64") : QStringLiteral("32")) << kind << QStringLiteral("1")
-            << QString::fromLatin1(m_state->progressToken);
+        const quint64 revision = m_state->revision;
+        PreparationInput input { request, m_state->directory, QDir::tempPath(), m_state->progressToken, m_state->resources };
+        m_state->preparation->submit<PreparationInput, PreparedSnapshot>(std::move(input),
+            [](const PreparationInput& value, const AsyncOperationToken& token) { return prepareSnapshot(value, token); },
+            [this, revision](const PreparedSnapshot& prepared, std::uint64_t) {
+                if (!m_state->running || m_state->finishing || revision != m_state->revision) return true;
+                if (!m_state->stopReason.isEmpty() || m_state->resources->stopped->load()) {
+                    complete(m_state->stopReason.isEmpty() ? QStringLiteral("cancelled") : m_state->stopReason); return true;
+                }
+                if (!prepared.error.isEmpty()) { complete(prepared.error); return true; }
+                m_state->resultPath = prepared.resultPath;
+                m_state->logPath = prepared.logPath;
+                m_state->scriptLogPath = prepared.scriptLogPath;
+                m_state->hash = prepared.hash;
+                m_state->addressRanges = prepared.addressRanges;
+                launchProcess(prepared.java, prepared.arguments, prepared.seconds);
+                return true;
+            }, [this, revision](std::exception_ptr) {
+                if (m_state->running && revision == m_state->revision) complete(QStringLiteral("temporary_file_error"));
+            });
+    }
+
+    void GhidraDecompiler::launchProcess(const QString& java, const QStringList& arguments, int seconds)
+    {
         auto* process = new QProcess(this);
         m_state->process = process;
-        process->setWorkingDirectory(temporary.path());
+        process->setWorkingDirectory(m_state->resources->path);
         QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
         for (const auto key : { "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CLASSPATH" })
             environment.remove(QString::fromLatin1(key));
@@ -735,6 +934,8 @@ namespace ks::ui
     {
         if (!m_state->running || !m_state->stopReason.isEmpty()) return;
         m_state->stopReason = reason;
+        if (m_state->resources) m_state->resources->stopped->store(true);
+        m_state->preparation->cancel();
         m_state->deadline->stop();
         m_state->outputCheck->stop();
         if (m_state->process && m_state->process->state() != QProcess::NotRunning) {
@@ -752,66 +953,10 @@ namespace ks::ui
 
     void GhidraDecompiler::complete(const QString& error)
     {
-        if (!m_state->running) return;
+        if (!m_state->running || m_state->finishing) return;
+        m_state->finishing = true;
         m_state->deadline->stop();
         m_state->outputCheck->stop();
-        DecompilerResult result;
-        result.error = error;
-        result.snapshotSha256 = m_state->hash;
-        result.diagnostics = QString::fromUtf8(m_state->diagnosticBytes);
-        if (result.error.isEmpty()) {
-            QFile file(m_state->resultPath);
-            if (!file.open(QIODevice::ReadOnly) || file.size() > MaximumResultBytes) {
-                result.error = file.size() > MaximumResultBytes ? QStringLiteral("output_limit") : QStringLiteral("invalid_result");
-            } else {
-                QJsonParseError parseError;
-                const QJsonDocument document = QJsonDocument::fromJson(file.read(MaximumResultBytes + 1), &parseError);
-                const QJsonObject object = document.object();
-                quint64 selected = 0;
-                if (parseError.error != QJsonParseError::NoError || !document.isObject() ||
-                    object.value(QStringLiteral("schemaVersion")).toInt() != 1 ||
-                    !object.value(QStringLiteral("success")).isBool() ||
-                    !parseHex(object.value(QStringLiteral("selectedAddress")), selected) || selected != m_state->selectedAddress) {
-                    result.error = QStringLiteral("invalid_result");
-                } else if (object.value(QStringLiteral("snapshotSha256")).toString().toLatin1().toLower() != m_state->hash.toHex()) {
-                    result.error = QStringLiteral("snapshot_mismatch");
-                } else if (!object.value(QStringLiteral("success")).toBool()) {
-                    const QString backendError = object.value(QStringLiteral("error")).toString();
-                    const QStringList allowed { QStringLiteral("unsupported_architecture"), QStringLiteral("invalid_address"),
-                        QStringLiteral("no_function_at_address"), QStringLiteral("timeout"), QStringLiteral("output_limit"),
-                        QStringLiteral("decompilation_failed"), QStringLiteral("invalid_instruction_data") };
-                    result.error = allowed.contains(backendError) ? backendError : QStringLiteral("decompilation_failed");
-                } else {
-                    result.code = object.value(QStringLiteral("code")).toString();
-                    result.functionName = object.value(QStringLiteral("functionName")).toString();
-                    const auto lines = object.value(QStringLiteral("lineAddresses")).toArray();
-                    qsizetype lineCount = result.code.count(u'\n') + 1;
-                    if (result.code.endsWith(u'\n')) --lineCount;
-                    const auto capturedAddress = [this](quint64 address) {
-                        return std::any_of(m_state->addressRanges.cbegin(), m_state->addressRanges.cend(),
-                            [address](const auto& range) { return address >= range.first && address <= range.second; });
-                    };
-                    bool valid = !result.code.isEmpty() && result.code.toUtf8().size() <= MaximumCodeBytes &&
-                        !result.functionName.isEmpty() && result.functionName.size() <= 4096 && object.value(QStringLiteral("lineAddresses")).isArray() &&
-                        lines.size() == lineCount && parseHex(object.value(QStringLiteral("functionAddress")), result.functionAddress) &&
-                        capturedAddress(result.functionAddress);
-                    for (const auto& value : lines) {
-                        quint64 address = 0;
-                        const bool mapped = !value.isNull();
-                        if (mapped && (!parseHex(value, address) || !capturedAddress(address))) valid = false;
-                        result.lineAddresses.append(address);
-                        result.lineAddressValid.append(mapped);
-                    }
-                    result.boundaryInferred = object.value(QStringLiteral("boundaryInferred")).toBool();
-                    if (valid && containsBadInstructionDiagnostic(result.code)) {
-                        result.code.clear(); result.lineAddresses.clear(); result.lineAddressValid.clear();
-                        result.error = QStringLiteral("invalid_instruction_data");
-                    }
-                    else if (valid) result.success = true;
-                    else { result.code.clear(); result.lineAddresses.clear(); result.lineAddressValid.clear(); result.error = QStringLiteral("invalid_result"); }
-                }
-            }
-        }
         if (m_state->process) {
             m_state->process->disconnect(this);
             m_state->process->deleteLater();
@@ -820,9 +965,31 @@ namespace ks::ui
 #ifdef Q_OS_WIN
         if (m_state->job) { CloseHandle(m_state->job); m_state->job = nullptr; }
 #endif
-        m_state->temporary.reset();
-        m_state->running = false;
         const quint64 revision = m_state->revision;
+        CompletionInput input { error, m_state->resultPath, m_state->hash, m_state->diagnosticBytes,
+            m_state->selectedAddress, m_state->addressRanges, m_state->resources };
+        m_state->completion->submit<CompletionInput, DecompilerResult>(std::move(input),
+            [](const CompletionInput& value, const AsyncOperationToken&) { return readResult(value); },
+            [this, revision](const DecompilerResult& result, std::uint64_t) {
+                publishResult(result, revision); return true;
+            }, [this, revision](std::exception_ptr) {
+                DecompilerResult result; result.error = QStringLiteral("invalid_result");
+                result.snapshotSha256 = m_state->hash;
+                publishResult(std::move(result), revision);
+            });
+    }
+
+    void GhidraDecompiler::publishResult(DecompilerResult result, quint64 revision)
+    {
+        if (!m_state->running || revision != m_state->revision) return;
+        if (!m_state->stopReason.isEmpty() || m_state->resources->stopped->load()) {
+            result.success = false;
+            result.code.clear(); result.lineAddresses.clear(); result.lineAddressValid.clear();
+            result.error = m_state->stopReason.isEmpty() ? QStringLiteral("cancelled") : m_state->stopReason;
+        }
+        m_state->resources.reset();
+        m_state->running = false;
+        m_state->finishing = false;
         const QPointer<GhidraDecompiler> guard(this);
         // Publish the completed request before a state observer can start a new
         // request. A finished observer may also delete us or restart analysis.
