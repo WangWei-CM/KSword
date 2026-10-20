@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "minidump.status.projecting": "正在更新结果视图：%1 / %2",
     "privilege.legacy.status.loading": "状态：正在后台刷新…",
     "privilege.legacy.status.operation": "状态：正在执行账号操作…",
     "privilege.legacy.status.partial": "状态：%1 读取含失败或部分结果，共 %2 项",
@@ -6997,6 +6998,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "正在更新结果视图：%1 / %2": "正在更新结果视图：%1 / %2",
     "状态：服务刷新未返回有效结果，保留上次列表，请重试。": "状态：服务刷新未返回有效结果，保留上次列表，请重试。",
     "状态：宿主正在关闭，服务刷新未提交。": "状态：宿主正在关闭，服务刷新未提交。",
     "服务刷新已停止": "服务刷新已停止",

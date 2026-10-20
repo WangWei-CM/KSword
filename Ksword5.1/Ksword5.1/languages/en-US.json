@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "minidump.status.projecting": "Updating result view: %1 / %2",
     "privilege.legacy.status.loading": "Status: refreshing in the background…",
     "privilege.legacy.status.operation": "Status: running the account operation…",
     "privilege.legacy.status.partial": "Status: %1 contains failed or partial reads, %2 entries",
@@ -6997,6 +6998,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "正在更新结果视图：%1 / %2": "Updating result view: %1 / %2",
     "状态：服务刷新未返回有效结果，保留上次列表，请重试。": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
     "状态：宿主正在关闭，服务刷新未提交。": "Status: The host is closing. Service refresh was not submitted.",
     "服务刷新已停止": "Service refresh stopped",

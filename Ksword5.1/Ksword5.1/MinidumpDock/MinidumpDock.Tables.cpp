@@ -38,6 +38,10 @@
 #include <QPushButton>
 #include <QTabWidget>
 #include <QSignalBlocker>
+#include <QElapsedTimer>
+#include <QTimer>
+#include "UI/UiCommitCoordinator.h"
+#include "UI/TableColumnAutoFit.h"
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextBrowser>
@@ -46,6 +50,19 @@
 #include <algorithm>
 #include <memory>
 #include <vector>
+
+struct MinidumpTableProjectionState
+{
+    QPointer<QTableWidget> table;
+    std::function<void(int)> fillRow;
+    std::uint64_t generation = 0;
+    int totalRows = 0;
+    int nextRow = 0;
+    int nextColumn = 0;
+    int nextHeightRow = 0;
+    int originalPrecision = 0;
+    bool fitRows = false;
+};
 
 namespace
 {
@@ -82,29 +99,7 @@ namespace
             QVariant::fromValue<qlonglong>(ks::ui::PerfTraceNowMs()));
     }
 
-    // endFill 作用：批量填充完毕后恢复刷新并自适应列宽（限制最大宽度）。
-    void endFill(QTableWidget* const table)
-    {
-        table->resizeColumnsToContents();
-        // 列宽上限：超长路径列不允许把其它列挤出视口。
-        for (int column = 0; column < table->columnCount(); ++column)
-        {
-            // 隐藏列的 columnWidth() 返回 0，跟着钳制会把它的宽度真的写成 0，
-            // 等用户通过 A/B/C 或表头菜单把它显示出来时就成了零宽列。
-            if (table->isColumnHidden(column))
-            {
-                continue;
-            }
-            table->setColumnWidth(
-                column,
-                std::min(table->columnWidth(column), 420));
-        }
-        table->setUpdatesEnabled(true);
-        // 采集：单张表的清空、逐格填充与列宽自适应总耗时，附带最终行数。
-        const qint64 fillStartMs = table->property("perf_fill_start_ms").toLongLong();
-        ks::ui::RecordPerfSpanWithCount("perf_dump_table_fill", table->objectName(),
-            ks::ui::PerfTraceNowMs() - fillStartMs, table->rowCount());
-    }
+
 }
 
 QTableWidget* MinidumpDock::createReadOnlyTable(QWidget* parent) const
@@ -342,6 +337,7 @@ void MinidumpDock::renderResult(const ks::minidump::DumpParseResult& result)
     ks::ui::PerfScope renderPerf("perf_dump_render", QStringLiteral("render_result"));
     const QSignalBlocker tabSignalsBlocker(m_resultTabs);
     m_buildingResultCatalog = true;
+    cancelResultTableFills();
     clearResultTabs();
     m_memoryView->clearData();
     m_projectedResultPages.clear();
@@ -359,7 +355,15 @@ void MinidumpDock::renderCurrentResultPage()
     if (m_projectedResultPages.contains(page))
     {
         if (page == m_rawMemoryTabs) renderCurrentRawMemoryPage();
+        scheduleResultTableFill();
         return;
+    }
+    if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication())
+    {
+        QTableWidget* const table = currentResultTable();
+        if (table != nullptr && coordinator->deferIfBlocked(this,
+                QStringLiteral("minidump_result_projection"), {table},
+                [this]() { renderCurrentResultPage(); })) return;
     }
     m_projectedResultPages.insert(page);
     projectResult(*m_lastResult, page);
@@ -376,6 +380,7 @@ void MinidumpDock::retranslateResultPages()
     {
         if (m_projectedResultPages.contains(page)) persistentPages.insert(page);
     }
+    cancelResultTableFills();
     m_projectedResultPages.swap(persistentPages);
     const QSignalBlocker tabSignalsBlocker(m_resultTabs);
     m_buildingResultCatalog = true;
@@ -457,6 +462,145 @@ void MinidumpDock::renderCurrentRawMemoryPage()
         report->setRawText(rawText);
         layout->addWidget(report, 1);
     }
+}
+
+QTableWidget* MinidumpDock::currentResultTable() const
+{
+    QWidget* const page = m_resultTabs->currentWidget();
+    if (page == m_modulePage) return m_moduleTable;
+    if (page == m_threadPage) return m_threadTable;
+    if (page == m_memoryPage) return m_memoryTable;
+    if (page == m_handlePage) return m_handleTable;
+    if (page == m_stackPage) return m_stackTable;
+    return qobject_cast<QTableWidget*>(page);
+}
+
+void MinidumpDock::startResultTableFill(
+    QTableWidget* table, int totalRows, std::function<void(int)> fillRow)
+{
+    auto state = std::make_shared<MinidumpTableProjectionState>();
+    state->table = table;
+    state->fillRow = std::move(fillRow);
+    state->generation = m_resultProjectionGeneration;
+    state->totalRows = totalRows;
+    state->fitRows = table == m_exceptionTable;
+    state->originalPrecision = table->horizontalHeader()->resizeContentsPrecision();
+    // Bound Qt's own per-column sample; never request an all-row measurement here.
+    table->horizontalHeader()->setResizeContentsPrecision(
+        state->originalPrecision < 0 ? 1000 : std::min(state->originalPrecision, 1000));
+    ks::ui::SetTableColumnAutoFitEnabled(table, false); // This projection owns native sizing.
+    table->setEnabled(false); // Its shared action bar is a child and cannot export partial rows.
+    m_resultTableProjections[table] = std::move(state);
+    scheduleResultTableFill();
+}
+
+void MinidumpDock::restoreResultProjectionStatus()
+{
+    if (m_statusKey != QStringLiteral("minidump.status.projecting") ||
+        m_projectionPreviousStatusKey.isEmpty()) return;
+    m_statusKey = m_projectionPreviousStatusKey;
+    m_statusFallback = m_projectionPreviousStatusFallback;
+    m_statusArguments = m_projectionPreviousStatusArguments;
+    refreshStatus();
+}
+
+void MinidumpDock::cancelResultTableFills()
+{
+    ++m_resultProjectionGeneration;
+    m_resultTableTickPending = false;
+    for (const auto& entry : m_resultTableProjections)
+    {
+        const auto& state = entry.second;
+        if (state->table != nullptr)
+        {
+            state->table->horizontalHeader()->setResizeContentsPrecision(state->originalPrecision);
+            state->table->setUpdatesEnabled(true);
+            state->table->setEnabled(true);
+        }
+    }
+    m_resultTableProjections.clear();
+    restoreResultProjectionStatus();
+}
+
+void MinidumpDock::scheduleResultTableFill()
+{
+    if (!isVisible() || m_resultTableTickPending) return;
+    const auto found = m_resultTableProjections.find(currentResultTable());
+    if (found == m_resultTableProjections.end())
+    {
+        restoreResultProjectionStatus();
+        return;
+    }
+    m_resultTableTickPending = true;
+    const auto generation = m_resultProjectionGeneration;
+    QTimer::singleShot(0, this, [this, generation]()
+        {
+            if (generation != m_resultProjectionGeneration) return;
+            m_resultTableTickPending = false;
+            continueResultTableFill();
+        });
+}
+
+void MinidumpDock::continueResultTableFill()
+{
+    if (!isVisible()) return;
+    const auto found = m_resultTableProjections.find(currentResultTable());
+    if (found == m_resultTableProjections.end())
+    {
+        restoreResultProjectionStatus();
+        return;
+    }
+    const auto state = found->second;
+    QTableWidget* const table = state->table.data();
+    if (table == nullptr || state->generation != m_resultProjectionGeneration) return;
+    if (m_statusKey != QStringLiteral("minidump.status.projecting"))
+    {
+        m_projectionPreviousStatusKey = m_statusKey;
+        m_projectionPreviousStatusFallback = m_statusFallback;
+        m_projectionPreviousStatusArguments = m_statusArguments;
+    }
+    setStatus("minidump.status.projecting", "正在更新结果视图：%1 / %2",
+        {QString::number(state->nextRow), QString::number(state->totalRows)});
+    QElapsedTimer timer;
+    timer.start();
+    if (state->nextRow < state->totalRows)
+    {
+        const int end = std::min(state->nextRow + 16, state->totalRows);
+        table->setRowCount(end);
+        do
+        {
+            state->fillRow(state->nextRow++);
+        } while (state->nextRow < end && timer.elapsed() < 4);
+    }
+    else if (state->nextColumn < table->columnCount())
+    {
+        // At most one bounded native column measurement per turn, including hidden widths.
+        const int column = state->nextColumn++;
+        table->resizeColumnToContents(column);
+        if (!table->isColumnHidden(column))
+            table->setColumnWidth(column, std::min(table->columnWidth(column), 420));
+    }
+    else if (state->fitRows && state->nextHeightRow < state->totalRows)
+    {
+        int count = 0;
+        do
+        {
+            table->resizeRowToContents(state->nextHeightRow++);
+        } while (state->nextHeightRow < state->totalRows && ++count < 16 && timer.elapsed() < 4);
+    }
+    else
+    {
+        table->horizontalHeader()->setResizeContentsPrecision(state->originalPrecision);
+        table->setUpdatesEnabled(true);
+        table->setEnabled(true);
+        const qint64 started = table->property("perf_fill_start_ms").toLongLong();
+        ks::ui::RecordPerfSpanWithCount("perf_dump_table_fill", table->objectName(),
+            ks::ui::PerfTraceNowMs() - started, table->rowCount());
+        m_resultTableProjections.erase(found);
+        restoreResultProjectionStatus();
+        return;
+    }
+    scheduleResultTableFill();
 }
 
 void MinidumpDock::projectResult(
@@ -713,10 +857,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.module_offset", "模块内偏移"),
                 translated("minidump.column.weight", "证据权重"),
                 translated("minidump.column.evidence", "证据") });
-            m_blameTable->setRowCount(static_cast<int>(analysis.blame.size()));
-            int blameRow = 0;
-            for (const ks::minidump::BlameEntry& blame : analysis.blame)
-            {
+            startResultTableFill(m_blameTable, static_cast<int>(analysis.blame.size()),
+                [this, snapshot = m_lastResult](int blameRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::BlameEntry& blame = result.analysis.blame[static_cast<std::size_t>(blameRow)];
                 // moduleText：已卸载模块单独标注，它是最强的单条证据。
                 const QString moduleText = blame.unloadedModule
                     ? QStringLiteral("%1 [%2]")
@@ -738,9 +883,7 @@ void MinidumpDock::projectResult(
                 }
                 m_blameTable->setItem(blameRow, 5,
                     makeItem(localizedEvidence.join(QStringLiteral("；"))));
-                ++blameRow;
-            }
-            endFill(m_blameTable);
+                });
         }
     }
 
@@ -763,38 +906,37 @@ void MinidumpDock::projectResult(
             static_cast<int>(result.overview.size()) +
             static_cast<int>(result.diagnostics.size()) +
             (result.memoryRegionShown < result.memoryRegionTotal ? 1 : 0);
-        m_overviewTable->setRowCount(overviewRowCount);
-        int overviewRow = 0;
-        for (const ks::minidump::DumpProperty& property : result.overview)
-        {
-            m_overviewTable->setItem(overviewRow, 0,
-                makeItem(ks::i18n::sourceText(property.name)));
-            m_overviewTable->setItem(overviewRow, 1,
-                makeItem(ks::i18n::sourceText(property.value)));
-            ++overviewRow;
-        }
-        // 内存截断说明与解析告警都作为“解析告警”属性行列出。
-        if (result.memoryRegionShown < result.memoryRegionTotal)
-        {
-            m_overviewTable->setItem(overviewRow, 0,
-                makeItem(translated("minidump.overview.warning", "解析告警")));
-            m_overviewTable->setItem(overviewRow, 1,
-                makeItem(translated(
-                    "minidump.overview.memory_truncated",
-                    "内存区域过多，仅展示前 %1 / %2 条。")
-                    .arg(result.memoryRegionShown)
-                    .arg(result.memoryRegionTotal)));
-            ++overviewRow;
-        }
-        for (const QString& diagnostic : result.diagnostics)
-        {
-            m_overviewTable->setItem(overviewRow, 0,
-                makeItem(translated("minidump.overview.warning", "解析告警")));
-            m_overviewTable->setItem(overviewRow, 1,
-                makeItem(ks::i18n::sourceText(diagnostic)));
-            ++overviewRow;
-        }
-        endFill(m_overviewTable);
+        startResultTableFill(m_overviewTable, overviewRowCount,
+            [this, snapshot = m_lastResult](int overviewRow)
+            {
+                const auto& result = *snapshot;
+                const auto properties = static_cast<int>(result.overview.size());
+                if (overviewRow < properties)
+                {
+                    const auto& property = result.overview[static_cast<std::size_t>(overviewRow)];
+                    m_overviewTable->setItem(overviewRow, 0, makeItem(ks::i18n::sourceText(property.name)));
+                    m_overviewTable->setItem(overviewRow, 1, makeItem(ks::i18n::sourceText(property.value)));
+                }
+                else
+                {
+                    m_overviewTable->setItem(overviewRow, 0,
+                        makeItem(translated("minidump.overview.warning", "解析告警")));
+                    const bool truncated = result.memoryRegionShown < result.memoryRegionTotal;
+                    if (truncated && overviewRow == properties)
+                    {
+                        m_overviewTable->setItem(overviewRow, 1,
+                            makeItem(translated("minidump.overview.memory_truncated",
+                                "内存区域过多，仅展示前 %1 / %2 条。")
+                                .arg(result.memoryRegionShown).arg(result.memoryRegionTotal)));
+                    }
+                    else
+                    {
+                        const int diagnostic = overviewRow - properties - (truncated ? 1 : 0);
+                        m_overviewTable->setItem(overviewRow, 1,
+                            makeItem(ks::i18n::sourceText(result.diagnostics.at(diagnostic))));
+                    }
+                }
+            });
         }
     }
 
@@ -813,20 +955,17 @@ void MinidumpDock::projectResult(
             m_exceptionTable->setHorizontalHeaderLabels({
                 translated("minidump.column.property", "属性"),
                 translated("minidump.column.value", "值") });
-            m_exceptionTable->setRowCount(static_cast<int>(result.exceptionInfo.size()));
-            int exceptionRow = 0;
-            for (const ks::minidump::DumpProperty& property : result.exceptionInfo)
-            {
+            m_exceptionTable->setWordWrap(true);
+            startResultTableFill(m_exceptionTable, static_cast<int>(result.exceptionInfo.size()),
+                [this, snapshot = m_lastResult](int exceptionRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::DumpProperty& property = result.exceptionInfo[static_cast<std::size_t>(exceptionRow)];
                 m_exceptionTable->setItem(exceptionRow, 0,
                     makeItem(ks::i18n::sourceText(property.name)));
                 m_exceptionTable->setItem(exceptionRow, 1,
                     makeItem(ks::i18n::sourceText(property.value)));
-                ++exceptionRow;
-            }
-            endFill(m_exceptionTable);
-            // 多行“参数含义”允许换行展示。
-            m_exceptionTable->setWordWrap(true);
-            m_exceptionTable->resizeRowsToContents();
+                });
         }
     }
 
@@ -845,18 +984,16 @@ void MinidumpDock::projectResult(
             m_executionContextTable->setHorizontalHeaderLabels({
                 translated("minidump.column.property", "属性"),
                 translated("minidump.column.value", "值") });
-            m_executionContextTable->setRowCount(
-                static_cast<int>(result.executionContext.size()));
-            int contextRow = 0;
-            for (const ks::minidump::DumpProperty& property : result.executionContext)
-            {
+            startResultTableFill(m_executionContextTable, static_cast<int>(result.executionContext.size()),
+                [this, snapshot = m_lastResult](int contextRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::DumpProperty& property = result.executionContext[static_cast<std::size_t>(contextRow)];
                 m_executionContextTable->setItem(contextRow, 0,
                     makeItem(ks::i18n::sourceText(property.name)));
                 m_executionContextTable->setItem(contextRow, 1,
                     makeItem(ks::i18n::sourceText(property.value)));
-                ++contextRow;
-            }
-            endFill(m_executionContextTable);
+                });
         }
     }
 
@@ -880,10 +1017,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.frame_address", "返回地址"),
                 translated("minidump.column.stack_address", "栈地址"),
                 translated("minidump.column.frame_source", "来源") });
-            m_stackTable->setRowCount(static_cast<int>(result.stackFrames.size()));
-            int stackRow = 0;
-            for (const ks::minidump::StackFrameEntry& frame : result.stackFrames)
-            {
+            startResultTableFill(m_stackTable, static_cast<int>(result.stackFrames.size()),
+                [this, snapshot = m_lastResult](int stackRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::StackFrameEntry& frame = result.stackFrames[static_cast<std::size_t>(stackRow)];
                 m_stackTable->setItem(stackRow, 0,
                     makeItem(frame.threadId != 0
                         ? QString::number(frame.threadId)
@@ -911,9 +1049,7 @@ void MinidumpDock::projectResult(
                     makeItem(frame.fromContext
                         ? translated("minidump.stack.from_context", "上下文（可信）")
                         : translated("minidump.stack.from_scan", "栈扫描（可能误报）")));
-                ++stackRow;
-            }
-            endFill(m_stackTable);
+                });
         }
     }
 
@@ -934,11 +1070,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.event_kind", "性质"),
                 translated("minidump.column.event_summary", "摘要"),
                 translated("minidump.column.detail", "说明") });
-            m_crashHistoryTable->setRowCount(
-                static_cast<int>(result.crashHistory.size()));
-            int historyRow = 0;
-            for (const ks::minidump::CrashHistoryEntry& entry : result.crashHistory)
-            {
+            startResultTableFill(m_crashHistoryTable, static_cast<int>(result.crashHistory.size()),
+                [this, snapshot = m_lastResult](int historyRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::CrashHistoryEntry& entry = result.crashHistory[static_cast<std::size_t>(historyRow)];
                 m_crashHistoryTable->setItem(historyRow, 0,
                     makeItem(entry.time.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
                 m_crashHistoryTable->setItem(historyRow, 1,
@@ -947,9 +1083,7 @@ void MinidumpDock::projectResult(
                     makeItem(ks::i18n::sourceText(entry.summary)));
                 m_crashHistoryTable->setItem(historyRow, 3,
                     makeItem(ks::i18n::sourceText(entry.detail)));
-                ++historyRow;
-            }
-            endFill(m_crashHistoryTable);
+                });
         }
     }
 
@@ -970,19 +1104,18 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.pool_tag_source", "来源"),
                 translated("minidump.column.pool_tag_owner", "映像中出现该标记的模块"),
                 translated("minidump.column.pool_tag_purpose", "已知用途") });
-            m_poolTagTable->setRowCount(static_cast<int>(result.poolTags.size()));
-            int poolRow = 0;
-            for (const ks::minidump::PoolTagCandidate& candidate : result.poolTags)
-            {
+            startResultTableFill(m_poolTagTable, static_cast<int>(result.poolTags.size()),
+                [this, snapshot = m_lastResult](int poolRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::PoolTagCandidate& candidate = result.poolTags[static_cast<std::size_t>(poolRow)];
                 m_poolTagTable->setItem(poolRow, 0, makeItem(candidate.tagText));
                 m_poolTagTable->setItem(poolRow, 1,
                     makeItem(ks::i18n::sourceText(candidate.source)));
                 m_poolTagTable->setItem(poolRow, 2,
                     makeItem(candidate.ownerModules.join(QStringLiteral("、"))));
                 m_poolTagTable->setItem(poolRow, 3, makeItem(candidate.knownPurpose));
-                ++poolRow;
-            }
-            endFill(m_poolTagTable);
+                });
         }
     }
 
@@ -1004,10 +1137,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.image_path", "映像路径"),
                 translated("minidump.column.pdb_path", "PDB 路径"),
                 translated("minidump.column.detail", "说明") });
-            m_symbolTable->setRowCount(static_cast<int>(result.symbolStatus.size()));
-            int symbolRow = 0;
-            for (const ks::minidump::ModuleSymbolStatus& status : result.symbolStatus)
-            {
+            startResultTableFill(m_symbolTable, static_cast<int>(result.symbolStatus.size()),
+                [this, snapshot = m_lastResult](int symbolRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::ModuleSymbolStatus& status = result.symbolStatus[static_cast<std::size_t>(symbolRow)];
                 m_symbolTable->setItem(symbolRow, 0, makeItem(status.moduleName));
                 m_symbolTable->setItem(symbolRow, 1,
                     makeItem(ks::i18n::sourceText(
@@ -1016,9 +1150,7 @@ void MinidumpDock::projectResult(
                 m_symbolTable->setItem(symbolRow, 3, makeItem(status.pdbPath));
                 m_symbolTable->setItem(symbolRow, 4,
                     makeItem(ks::i18n::sourceText(status.detail)));
-                ++symbolRow;
-            }
-            endFill(m_symbolTable);
+                });
         }
     }
 
@@ -1038,17 +1170,16 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.register", "寄存器"),
                 translated("minidump.column.value", "值"),
                 translated("minidump.column.interpretation", "解读") });
-            m_registerTable->setRowCount(static_cast<int>(result.registers.size()));
-            int registerRow = 0;
-            for (const ks::minidump::RegisterEntry& registerEntry : result.registers)
-            {
+            startResultTableFill(m_registerTable, static_cast<int>(result.registers.size()),
+                [this, snapshot = m_lastResult](int registerRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::RegisterEntry& registerEntry = result.registers[static_cast<std::size_t>(registerRow)];
                 m_registerTable->setItem(registerRow, 0, makeItem(registerEntry.name));
                 m_registerTable->setItem(registerRow, 1, makeItem(hexText(registerEntry.value)));
                 m_registerTable->setItem(registerRow, 2,
                     makeItem(ks::i18n::sourceText(registerEntry.note)));
-                ++registerRow;
-            }
-            endFill(m_registerTable);
+                });
         }
     }
 
@@ -1072,19 +1203,18 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.offset", "文件偏移"),
                 translated("minidump.column.size", "大小"),
                 translated("minidump.column.note", "说明") });
-            m_streamTable->setRowCount(static_cast<int>(result.streams.size()));
-            int streamRow = 0;
-            for (const ks::minidump::StreamEntry& stream : result.streams)
-            {
+            startResultTableFill(m_streamTable, static_cast<int>(result.streams.size()),
+                [this, snapshot = m_lastResult](int streamRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::StreamEntry& stream = result.streams[static_cast<std::size_t>(streamRow)];
                 m_streamTable->setItem(streamRow, 0, makeItem(QString::number(stream.type)));
                 m_streamTable->setItem(streamRow, 1, makeItem(stream.typeName));
                 m_streamTable->setItem(streamRow, 2, makeItem(hexText(stream.rva)));
                 m_streamTable->setItem(streamRow, 3, makeItem(QString::number(stream.size)));
                 m_streamTable->setItem(streamRow, 4,
                     makeItem(ks::i18n::sourceText(stream.note)));
-                ++streamRow;
-            }
-            endFill(m_streamTable);
+                });
         }
     }
 
@@ -1111,10 +1241,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.pdb_file", "PDB 文件"),
                 translated("minidump.column.pdb_guid", "PDB GUID/Age"),
                 translated("minidump.column.checksum", "校验和") });
-            m_moduleTable->setRowCount(static_cast<int>(result.modules.size()));
-            int moduleRow = 0;
-            for (const ks::minidump::ModuleEntry& module : result.modules)
-            {
+            startResultTableFill(m_moduleTable, static_cast<int>(result.modules.size()),
+                [this, snapshot = m_lastResult](int moduleRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::ModuleEntry& module = result.modules[static_cast<std::size_t>(moduleRow)];
                 m_moduleTable->setItem(moduleRow, 0, makeItem(module.name));
                 m_moduleTable->setItem(moduleRow, 1, makeItem(hexText(module.base)));
                 m_moduleTable->setItem(moduleRow, 2, makeItem(hexText(module.size)));
@@ -1124,9 +1255,7 @@ void MinidumpDock::projectResult(
                 m_moduleTable->setItem(moduleRow, 6, makeItem(module.pdbGuidAge));
                 m_moduleTable->setItem(moduleRow, 7,
                     makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
-                ++moduleRow;
-            }
-            endFill(m_moduleTable);
+                });
         }
     }
 
@@ -1155,10 +1284,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.stack_size", "栈大小"),
                 translated("minidump.column.suspend_count", "挂起计数"),
                 translated("minidump.column.priority", "优先级") });
-            m_threadTable->setRowCount(static_cast<int>(result.threads.size()));
-            int threadRow = 0;
-            for (const ks::minidump::ThreadEntry& thread : result.threads)
-            {
+            startResultTableFill(m_threadTable, static_cast<int>(result.threads.size()),
+                [this, snapshot = m_lastResult](int threadRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::ThreadEntry& thread = result.threads[static_cast<std::size_t>(threadRow)];
                 m_threadTable->setItem(threadRow, 0, makeItem(QString::number(thread.threadId)));
                 m_threadTable->setItem(threadRow, 1,
                     makeItem(thread.faulting
@@ -1182,9 +1312,7 @@ void MinidumpDock::projectResult(
                     makeItem(QStringLiteral("%1 / %2")
                         .arg(thread.priorityClass)
                         .arg(thread.priority)));
-                ++threadRow;
-            }
-            endFill(m_threadTable);
+                });
         }
     }
 
@@ -1207,10 +1335,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.mem_protect", "保护"),
                 translated("minidump.column.mem_type", "类型"),
                 translated("minidump.column.mem_source", "来源") });
-            m_memoryTable->setRowCount(static_cast<int>(result.memoryRegions.size()));
-            int memoryRow = 0;
-            for (const ks::minidump::MemoryRegionEntry& region : result.memoryRegions)
-            {
+            startResultTableFill(m_memoryTable, static_cast<int>(result.memoryRegions.size()),
+                [this, snapshot = m_lastResult](int memoryRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::MemoryRegionEntry& region = result.memoryRegions[static_cast<std::size_t>(memoryRow)];
                 m_memoryTable->setItem(memoryRow, 0, makeItem(hexText(region.base)));
                 m_memoryTable->setItem(memoryRow, 1, makeItem(hexText(region.size)));
                 m_memoryTable->setItem(memoryRow, 2, makeItem(region.state));
@@ -1218,9 +1347,7 @@ void MinidumpDock::projectResult(
                 m_memoryTable->setItem(memoryRow, 4, makeItem(region.type));
                 m_memoryTable->setItem(memoryRow, 5,
                     makeItem(ks::i18n::sourceText(region.source)));
-                ++memoryRow;
-            }
-            endFill(m_memoryTable);
+                });
         }
     }
 
@@ -1280,10 +1407,11 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.granted_access", "访问掩码"),
                 translated("minidump.column.handle_count", "句柄计数"),
                 translated("minidump.column.pointer_count", "指针计数") });
-            m_handleTable->setRowCount(static_cast<int>(result.handles.size()));
-            int handleRow = 0;
-            for (const ks::minidump::HandleEntry& handle : result.handles)
-            {
+            startResultTableFill(m_handleTable, static_cast<int>(result.handles.size()),
+                [this, snapshot = m_lastResult](int handleRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::HandleEntry& handle = result.handles[static_cast<std::size_t>(handleRow)];
                 m_handleTable->setItem(handleRow, 0, makeItem(hexText(handle.handleValue)));
                 m_handleTable->setItem(handleRow, 1, makeItem(handle.typeName));
                 m_handleTable->setItem(handleRow, 2, makeItem(handle.objectName));
@@ -1291,9 +1419,7 @@ void MinidumpDock::projectResult(
                 m_handleTable->setItem(handleRow, 4, makeItem(hexText(handle.grantedAccess)));
                 m_handleTable->setItem(handleRow, 5, makeItem(QString::number(handle.handleCount)));
                 m_handleTable->setItem(handleRow, 6, makeItem(QString::number(handle.pointerCount)));
-                ++handleRow;
-            }
-            endFill(m_handleTable);
+                });
         }
     }
 
@@ -1315,19 +1441,18 @@ void MinidumpDock::projectResult(
                 translated("minidump.column.size", "大小"),
                 translated("minidump.column.timestamp", "时间戳"),
                 translated("minidump.column.checksum", "校验和") });
-            m_unloadedTable->setRowCount(static_cast<int>(result.unloadedModules.size()));
-            int unloadedRow = 0;
-            for (const ks::minidump::UnloadedModuleEntry& module : result.unloadedModules)
-            {
+            startResultTableFill(m_unloadedTable, static_cast<int>(result.unloadedModules.size()),
+                [this, snapshot = m_lastResult](int unloadedRow)
+                {
+                    const auto& result = *snapshot;
+                    const ks::minidump::UnloadedModuleEntry& module = result.unloadedModules[static_cast<std::size_t>(unloadedRow)];
                 m_unloadedTable->setItem(unloadedRow, 0, makeItem(module.name));
                 m_unloadedTable->setItem(unloadedRow, 1, makeItem(hexText(module.base)));
                 m_unloadedTable->setItem(unloadedRow, 2, makeItem(hexText(module.size)));
                 m_unloadedTable->setItem(unloadedRow, 3, makeItem(module.timestampText));
                 m_unloadedTable->setItem(unloadedRow, 4,
                     makeItem(module.checksum != 0 ? hexText(module.checksum) : QString()));
-                ++unloadedRow;
-            }
-            endFill(m_unloadedTable);
+                });
         }
     }
 

@@ -23,6 +23,8 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <functional>
+#include <unordered_map>
 
 class CodeEditorWidget;
 class QEvent;
@@ -35,6 +37,7 @@ class QTableWidget;
 class QTextBrowser;
 class DumpMemoryView;
 struct MinidumpAsyncState;
+struct MinidumpTableProjectionState;
 
 namespace ks::minidump
 {
@@ -85,6 +88,12 @@ private:
     void renderCurrentResultPage();
     void renderCurrentRawMemoryPage();
     void retranslateResultPages();
+    void startResultTableFill(QTableWidget* table, int totalRows, std::function<void(int)> fillRow);
+    void scheduleResultTableFill();
+    void continueResultTableFill();
+    void cancelResultTableFills();
+    void restoreResultProjectionStatus();
+    QTableWidget* currentResultTable() const;
 
     // promptKswordRelatedCrash 作用：解析结果指向 KSword 自身组件时引导上报。
     // 参数 result：解析结果；返回值：无。
@@ -161,6 +170,12 @@ private:
     std::shared_ptr<MinidumpAsyncState> m_asyncState; // m_asyncState：跨线程投递时保护 owner 生命周期。
     QSet<QWidget*> m_projectedResultPages;
     QSet<int> m_projectedRawMemoryBlocks;
+    std::unordered_map<QTableWidget*, std::shared_ptr<MinidumpTableProjectionState>> m_resultTableProjections;
+    std::uint64_t m_resultProjectionGeneration = 0;
+    bool m_resultTableTickPending = false;
+    QString m_projectionPreviousStatusKey;
+    QString m_projectionPreviousStatusFallback;
+    QStringList m_projectionPreviousStatusArguments;
     bool m_buildingResultCatalog = false;
     bool m_buildingRawMemoryCatalog = false;
     bool m_parseBusy = false;   // m_parseBusy：解析任务是否正在运行。
