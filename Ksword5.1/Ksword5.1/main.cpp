@@ -19,6 +19,7 @@
 #include "UI/GlobalDialogTheme.h"
 #include "UI/GlobalRefreshShortcut.h"
 #include "UI/RescueDesktopSession.h"
+#include "UI/CoordinatedApplicationQuit.h"
 #include "UI/WindowChrome.h"
 #include "UI/TableColumnAutoFit.h"
 #include "UI/TableInteractionSupport.h"
@@ -721,6 +722,23 @@ namespace
         return std::wstring(cursorPointer);
     }
 
+    std::wstring parametersForRestartTakeover()
+    {
+        int count = 0;
+        LPWSTR* values = ::CommandLineToArgvW(::GetCommandLineW(), &count);
+        if (!values) return {};
+        QStringList arguments;
+        for (int index = 0; index < count; ++index) arguments.push_back(QString::fromWCharArray(values[index]));
+        ::LocalFree(values);
+        arguments = ks::ui::ArgumentsWithRestartPredecessorWait(std::move(arguments), ::GetCurrentProcessId());
+        const auto marker = QString::fromWCharArray(kPrivilegeRestartArgument);
+        if (!arguments.contains(marker, Qt::CaseInsensitive)) arguments.push_back(marker);
+        QStringList parameters;
+        for (int index = 1; index < arguments.size(); ++index)
+            parameters.push_back(ks::ui::QuoteCoordinatedRestartArgument(arguments.at(index)));
+        return parameters.join(QLatin1Char(' ')).toStdWString();
+    }
+
     // tryLaunchElevatedSelfBeforeSplash 作用：
     // - 在启动页出现前尝试 runas 拉起管理员实例；
     // - 成功则当前普通权限实例直接退出，避免双开。
@@ -734,18 +752,21 @@ namespace
         }
 
         // parameterText 作用：保存当前命令行参数，传递给新启动实例。
-        const std::wstring parameterText = appendInternalArgumentIfMissing(
-            extractCurrentProcessParameterText(),
-            kPrivilegeRestartArgument);
+        const std::wstring parameterText = parametersForRestartTakeover();
+        if (parameterText.empty()) return false;
         const std::wstring executableDirectory = resolveExecutableDirectoryPath(executablePath);
-        HINSTANCE shellResult = ::ShellExecuteW(
-            nullptr,
-            L"runas",
-            executablePath.c_str(),
-            parameterText.empty() ? nullptr : parameterText.c_str(),
-            executableDirectory.empty() ? nullptr : executableDirectory.c_str(),
-            SW_SHOWNORMAL);
-        return reinterpret_cast<INT_PTR>(shellResult) > 32;
+        SHELLEXECUTEINFOW launch{};
+        launch.cbSize = sizeof(launch);
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        launch.lpVerb = L"runas";
+        launch.lpFile = executablePath.c_str();
+        launch.lpParameters = parameterText.c_str();
+        launch.lpDirectory = executableDirectory.empty() ? nullptr : executableDirectory.c_str();
+        launch.nShow = SW_SHOWNORMAL;
+        const bool created = ::ShellExecuteExW(&launch) != FALSE;
+        const bool validChild = created && ks::crash::ValidateRestartChildProcess(launch.hProcess);
+        if (launch.hProcess) ::CloseHandle(launch.hProcess);
+        return validChild;
     }
 
     bool tryLaunchUacDeskCompanion()
@@ -787,9 +808,8 @@ namespace
 
         // commandLineText 作用：CreateProcessW 要求可写命令行缓冲区。
         std::wstring commandLineText = L"\"" + executablePath + L"\"";
-        const std::wstring parameterText = appendInternalArgumentIfMissing(
-            extractCurrentProcessParameterText(),
-            kPrivilegeRestartArgument);
+        const std::wstring parameterText = parametersForRestartTakeover();
+        if (parameterText.empty()) return false;
         if (!parameterText.empty())
         {
             commandLineText += L" ";
@@ -819,9 +839,10 @@ namespace
             return false;
         }
 
+        const bool validChild = ks::crash::ValidateRestartChildProcess(processInformation.hProcess);
         ::CloseHandle(processInformation.hThread);
         ::CloseHandle(processInformation.hProcess);
-        return true;
+        return validChild;
     }
 
     // initializeProcessDpiAwareness 作用：
@@ -1335,9 +1356,18 @@ int main(int argc, char* argv[])
     crashConfiguration.dumpFilePrefix = L"Ksword5.1";
     crashConfiguration.preferLauncherReporter = !rescueSession.active();
     ks::crash::InstallCrashHandler(crashConfiguration);
-    const bool crashRestartWait =
-        ks::crash::WaitForCrashRestartTargetFromCommandLine(
-            kRestartPredecessorWaitTimeoutMs);
+    const auto restartStatus = ks::crash::InspectRestartPredecessorFromCommandLine(
+        kRestartPredecessorWaitTimeoutMs);
+    const bool privilegeRestartLaunch = hasCommandLineArgument(kPrivilegeRestartArgument);
+    const bool crashRestartWait = restartStatus == ks::crash::RestartPredecessorStatus::PredecessorExited;
+    const bool restartParentExited = crashRestartWait ||
+        restartStatus == ks::crash::RestartPredecessorStatus::PredecessorAlreadyExited;
+    if ((privilegeRestartLaunch || restartStatus != ks::crash::RestartPredecessorStatus::NotRequested)
+        && !restartParentExited)
+    {
+        startupTraceRaw("restart handoff rejected or timed out before business initialization");
+        return 2;
+    }
     startupTraceRaw("startup trace initialized without console binding");
     initializeProcessDpiAwareness();
     startupTraceRaw("initializeProcessDpiAwareness finished");
@@ -1345,7 +1375,6 @@ int main(int argc, char* argv[])
     const std::vector<std::wstring> startupUnlockPathList = collectUnlockPathsFromCommandLine();
     // startupSettings 需在防多开判定前读取：用户关闭“防止多开”后，新启动必须直接继续创建实例。
     ks::settings::AppearanceSettings startupSettings = ks::settings::loadAppearanceSettings();
-    const bool privilegeRestartLaunch = hasCommandLineArgument(kPrivilegeRestartArgument);
     const bool skipSingleInstanceLaunch = crashRestartWait || rescueSession.active();
     if (startupSettings.preventMultipleInstances && !privilegeRestartLaunch && !skipSingleInstanceLaunch)
     {

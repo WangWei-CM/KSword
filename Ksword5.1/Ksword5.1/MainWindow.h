@@ -17,6 +17,8 @@
 #include <QEvent>
 #include <QFont>
 #include <QTimer>
+#include <QElapsedTimer>
+#include <QPointer>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QString>
@@ -54,6 +56,8 @@
 #include "SettingsDock/AppearanceSettings.h"
 // HvmAvailability：右上角虚拟化按钮的状态从这个完整取值算，见 m_hvmAvailability。
 #include "UI/HvmControl.h"
+#include "UI/AsyncCleanupRegistry.h"
+#include "UI/CoordinatedApplicationQuit.h"
 #include "StartupDock/StartupDock.h"
 #include "ServerDock/ServiceDock.h"
 #include "WindowDock/WindowDock.h"
@@ -78,6 +82,7 @@ namespace ks::ui
 
 class QDialog;
 class QScreen;
+struct MainWindowShutdownServiceState;
 
 class MainWindow : public QMainWindow
 {
@@ -213,6 +218,24 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
+    void beginCoordinatedShutdownWait();
+    void pollCoordinatedShutdown();
+    void cancelCoordinatedShutdown(bool preserveRestart = false);
+    void finishCoordinatedShutdown();
+    bool requestCoordinatedRestart(ks::ui::DeferredApplicationRestart::Launch launch);
+    ks::ui::DeferredApplicationRestart m_shutdownRestart;
+    QTimer* m_shutdownTimer = nullptr;
+    QElapsedTimer m_shutdownClock;
+    ks::ui::AsyncShutdownWait m_shutdownWait;
+    QString m_shutdownOriginalTitle;
+    std::size_t m_shutdownLastPending = static_cast<std::size_t>(-1);
+    bool m_shutdownWaiting = false;
+    bool m_shutdownFinalizing = false;
+    bool m_shutdownCleanupReady = false;
+    bool m_shutdownServiceReported = false;
+    std::shared_ptr<MainWindowShutdownServiceState> m_shutdownServiceState;
+    std::vector<QPointer<MemoryDock>> m_shutdownPreparedMemoryDocks;
+
     void initMenus();
     // initializeWindowDockMenuActions：
     // - 在辅助 Dock 创建完成后，把 ADS 原生显示/隐藏动作挂到“窗口”菜单；
@@ -279,7 +302,7 @@ private:
     // - 获取 SYSTEM 进程令牌，DuplicateTokenEx 为主令牌；
     // - 对复制令牌调用 SetTokenInformation(TokenUIAccess)；
     // - 最后通过 CreateProcessAsUserW 启动自身。
-    bool launchSelfWithSystemUiAccessToken(QString* detailTextOut);
+    bool launchSelfWithSystemUiAccessToken(const QStringList& arguments, QString* detailTextOut);
     bool queryR0DriverServiceRunning(bool& runningOut, bool fatalOnError);
     // suppressPrivilegeElevationPrompt：true 时权限不足只显示启动失败，不弹出管理员重启/UAC 提示。
     bool startR0DriverService(bool suppressPrivilegeElevationPrompt = false);

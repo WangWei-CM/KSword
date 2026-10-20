@@ -416,3 +416,11 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - `ParameterWorkspace`的form是明确0圆角实底，使用同一content颜色源填充。`AdaptivePageScroll`普通主宿主使用固定`MainSurface.canvas`；共享详情Chrome已明确给`QScrollArea`及viewport设置`WindowColor`，详情画布只认当前顶层的`ksword_detail_shell`角色。未知独立窗口不沿祖先跨窗猜底色，主宿主壁纸/透明分支保留原合成。
 - 外部卡片/页根的圆角与内部移动正文是不同职责。正文全矩形实填须与其既定底面同色；未来新增不同背景角色时应先扩展共享surface策略，不能继续沿用默认canvas。主题绑定放在滚动壳上，避免业务给content绑定`StyleWorkspacePage`时替换该契约；只监听明确canvas的Show/Parent/Style/Palette生命周期。
 - 当前这组补丁只做源码、HostX64编译与抽取生产policy的纯逻辑验证；真实主程序Paint region、DPI/背景/外角和首帧仍由用户手测。paint面积变化不能直接宣称FPS或耗时倍数。
+## 异步事务与退出资源（2026-10-20）
+
+- `AsyncOperation::submit` 保留一个实际 worker 与一个最新 pending；尾部 `Cleanup={}, int workerPriority=0` 直接传 Qt 线程池排队优先级，不是 OS 线程优先级，也不抢占已运行调用。
+- 写操作/导出等已接受副作用使用独立 `submitTransaction` 控制器：worker 仅接值请求、不接取消令牌，busy 返回0与 `BusyRejected`；接受后先入线程池再通知状态，close/cancel/新查询不能吞事务。apply/failure 仍只留 UI 控制器，关页后不回投；值 cleanup 必须等 worker 完成且只执行一次。构造/排队异常属于“没有未完 worker”，必须先标记完成，再允许 failure 回调同步 close/delete。
+- `AsyncCleanupRegistry` 的 lease 只持值，不保活 QObject。事务由共享控制器自动登记；常驻会话在线程启动前登记弱 session 的 stop 回调，只置停止标志/唤醒，不在 UI join。STOP、归档/句柄等实际资源收尾后才归还；同一 session 不能通过 lease 回调强持自身形成环。
+- 主窗口先通过原内存退出守卫，再冻结新 lease、请求会话停止并用计时器等已接受收尾；最后才查询/停止 R0 服务。超时保持可见，提供重试/取消，不能用固定毫秒直接 quit 杀掉事务。取消退出不撤销已经接受的 STOP；等待期间新建的 MemoryDock 在就绪边界重新进入原退出确认。
+- 正常关闭、UIAccess/Admin 与功能级提权重启共用弱 owner 的协调退出入口，派生析构第一步撤销登记。运行期先冻结启动器值意图，等全部 cleanup/SCM 就绪才启动替代进程，避免子进程35s先超时而父级32s后Retry到40s才退出；Retry保留意图，用户Cancel和首轮内存确认拒绝清除意图，晚到MemoryDock重新确认保留意图。仅替换既有 wait-PID 键和值、保留其它 argv；父侧验证实际存活的 direct-child/same-exe 后才退出，失败恢复旧窗口及真实R0状态。子侧在首业务窗口/采样前验证父关系、映像及创建时间；超时或验证失败停止启动，不能靠 privilege marker 绕过等待。原崩溃报告 bool API 保持旧语义，正常接管使用独立状态矩阵。
+- 验证边界：真实 HostX64 翻译单元、QtCore 慢 STOP/事务与生产状态函数的假 WinAPI 矩阵可证明调度/值资源约束；不替代用户的实际 GUI、UAC/AppInfo、R0 STOP、语言/主题与 DPI 验收。

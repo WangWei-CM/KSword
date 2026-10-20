@@ -50,6 +50,23 @@ namespace ks
         // timeout. Callers may bypass the normal instance check only on true.
         bool WaitForCrashRestartTargetFromCommandLine(DWORD timeoutMilliseconds = 30000);
 
+        enum class RestartPredecessorStatus
+        {
+            NotRequested,
+            InvalidArgument,
+            ValidationRejected,
+            WaitFailed,
+            TimedOut,
+            PredecessorExited,
+            PredecessorAlreadyExited
+        };
+        // Normal privilege handoff needs a fail-closed result matrix. The legacy
+        // crash-reporter boolean API above keeps its existing behavior.
+        RestartPredecessorStatus InspectRestartPredecessorFromCommandLine(DWORD timeoutMilliseconds);
+        // Parent-side launch validation prevents a brokered non-child from
+        // triggering shutdown of the original instance without a valid handoff.
+        bool ValidateRestartChildProcess(HANDLE childProcess);
+
         bool CommandLineHasArgument(const wchar_t* argumentName);
     }
 }

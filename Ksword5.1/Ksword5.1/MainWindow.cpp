@@ -7,6 +7,7 @@
 #include "UI/PageNavigationBridge.h"
 #include "UI/PerfTrace.h"
 #include "UI/UiAnimationGate.h"
+#include "UI/CoordinatedApplicationQuit.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
@@ -3146,33 +3147,7 @@ namespace
         const DWORD predecessorProcessId)
     {
         argumentList = argumentsWithPrivilegeRestartMarker(std::move(argumentList));
-        const QString waitPidArgument =
-            QString::fromWCharArray(ks::crash::kCrashRestartWaitPidArgument);
-        for (int index = 1; index < argumentList.size();)
-        {
-            if (QString::compare(
-                    argumentList.at(index),
-                    waitPidArgument,
-                    Qt::CaseInsensitive) != 0)
-            {
-                ++index;
-                continue;
-            }
-
-            argumentList.removeAt(index);
-            if (index < argumentList.size())
-            {
-                bool isProcessId = false;
-                (void)argumentList.at(index).toULongLong(&isProcessId);
-                if (isProcessId)
-                {
-                    argumentList.removeAt(index);
-                }
-            }
-        }
-        argumentList.push_back(waitPidArgument);
-        argumentList.push_back(QString::number(predecessorProcessId));
-        return argumentList;
+        return ks::ui::ArgumentsWithRestartPredecessorWait(std::move(argumentList), predecessorProcessId);
     }
 
     QString formatWin32StepFailure(const QString& stepText, const DWORD errorCode)
@@ -3656,12 +3631,13 @@ namespace
         }
         ScopedHandle primaryTokenHandle(rawPrimaryTokenHandle);
 
-        const QStringList launchArgumentList = argumentsWithPrivilegeRestartMarker(argumentList);
+        const QStringList launchArgumentList = argumentsWithPrivilegeRestartTakeover(
+            argumentList, ::GetCurrentProcessId());
         QString commandLineText = quoteQStringCommandLineArgument(QString::fromWCharArray(executablePathBuffer));
         for (int index = 1; index < launchArgumentList.size(); ++index)
         {
             commandLineText += QLatin1Char(' ');
-            commandLineText += quoteQStringCommandLineArgument(launchArgumentList.at(index));
+            commandLineText += ks::ui::QuoteCoordinatedRestartArgument(launchArgumentList.at(index));
         }
 
         std::wstring mutableCommandLine = commandLineText.toStdWString();
@@ -3689,6 +3665,7 @@ namespace
             return false;
         }
 
+        const bool validRestartChild = ks::crash::ValidateRestartChildProcess(processInfo.hProcess);
         if (processInfo.hThread != nullptr)
         {
             ::CloseHandle(processInfo.hThread);
@@ -3697,6 +3674,7 @@ namespace
         {
             ::CloseHandle(processInfo.hProcess);
         }
+        if (!validRestartChild) return false;
 
         if (detailTextOut != nullptr)
         {
@@ -5261,6 +5239,15 @@ namespace
     }
 }
 
+// 后台只持该值状态；主窗口定时读取，不把GUI完成回调带入线程池。
+struct MainWindowShutdownServiceState
+{
+    R0ServiceOperationOutcome outcome;
+    bool runningKnown = false;
+    bool running = false;
+    std::atomic_bool finished{ false };
+};
+
 MainWindow::MainWindow(
     QWidget* parent,
     StartupProgressCallback startupProgressCallback,
@@ -5400,6 +5387,14 @@ MainWindow::MainWindow(
     // 显式要求“最后一个窗口关闭后退出应用”。
     // 说明：用户要求主窗口关闭时进程必须结束，这里先设置 Qt 全局退出策略。
     QApplication::setQuitOnLastWindowClosed(true);
+    const QPointer<MainWindow> quitOwner(this);
+    ks::ui::InstallCoordinatedApplicationQuit(this, [quitOwner]()
+    {
+        if (quitOwner) quitOwner->close();
+    }, [quitOwner](ks::ui::DeferredApplicationRestart::Launch launch)
+    {
+        return quitOwner && quitOwner->requestCoordinatedRestart(std::move(launch));
+    });
 
     // 设置窗口标题和大小
     setWindowTitle("KswordARK-5.1-Release");
@@ -5491,6 +5486,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
+    ks::ui::RemoveCoordinatedApplicationQuit(this);
     // 排队的 MCP 动作必须先失效，再拆除页面、驱动租约与后台消费者。
     if (m_mcpLocalBridge)
     {
@@ -5527,69 +5523,58 @@ void MainWindow::reportStartupProgress(
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (m_shutdownWaiting || m_shutdownFinalizing)
+    {
+        if (event) event->ignore();
+        return;
+    }
     // 关闭事件日志：用于排查“窗口关闭但进程仍驻留”的问题。
     kLogEvent closeEventLog;
     info << closeEventLog << "[MainWindow] 收到关闭事件，准备退出进程。" << eol;
 
-    // 全局退出守卫覆盖主 Dock 与无父窗口的进程详情内嵌 Dock，并且在任何停驱/救援退出动作之前执行。
-    // 模态确认期间拒绝重复关闭；否则同一批暂存/int3 会被再次询问，甚至重入执行。
-    if (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
+    if (!m_shutdownCleanupReady)
     {
-        if (event != nullptr)
+        // 全局退出守卫覆盖主 Dock 与无父窗口的进程详情内嵌 Dock，并且在任何停驱/救援退出动作之前执行。
+        // 模态确认期间拒绝重复关闭；否则同一批暂存/int3 会被再次询问，甚至重入执行。
+        if (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
         {
-            event->ignore();
-        }
-        return;
-    }
-    // closeGuardSelf：每个确认框都可能同步销毁主窗口，返回后不得继续保存布局或停止驱动。
-    const QPointer<MainWindow> closeGuardSelf(this);
-    if (qApp != nullptr)
-    {
-        qApp->setProperty("ksword_memory_quit_guard_active", true);
-    }
-    // workbenchDocks：UI 线程上一次性取得弱指针快照，避免后续模态事件循环销毁其它详情窗导致悬空。
-    std::vector<QPointer<MemoryDock>> workbenchDocks;
-    // appendNewWorkbenchDocks：模态期间已排队的详情页构建仍会执行，把晚到 Dock 也纳入同一次退出。
-    const auto appendNewWorkbenchDocks = [&workbenchDocks]() {
-        for (QWidget* widget : QApplication::allWidgets())
-        {
-            if (auto* memoryDock = qobject_cast<MemoryDock*>(widget))
+            if (event != nullptr)
             {
-                const bool alreadyKnown = std::any_of(
-                    workbenchDocks.cbegin(), workbenchDocks.cend(),
-                    [memoryDock](const auto& knownDock) { return knownDock.data() == memoryDock; });
-                if (!alreadyKnown)
+                event->ignore();
+            }
+            return;
+        }
+        // closeGuardSelf：每个确认框都可能同步销毁主窗口，返回后不得继续保存布局或停止驱动。
+        const QPointer<MainWindow> closeGuardSelf(this);
+        if (qApp != nullptr)
+        {
+            qApp->setProperty("ksword_memory_quit_guard_active", true);
+        }
+        // workbenchDocks：UI 线程上一次性取得弱指针快照，避免后续模态事件循环销毁其它详情窗导致悬空。
+        std::vector<QPointer<MemoryDock>> workbenchDocks;
+        // appendNewWorkbenchDocks：模态期间已排队的详情页构建仍会执行，把晚到 Dock 也纳入同一次退出。
+        const auto appendNewWorkbenchDocks = [&workbenchDocks]() {
+            for (QWidget* widget : QApplication::allWidgets())
+            {
+                if (auto* memoryDock = qobject_cast<MemoryDock*>(widget))
                 {
-                    workbenchDocks.emplace_back(memoryDock);
+                    const bool alreadyKnown = std::any_of(
+                        workbenchDocks.cbegin(), workbenchDocks.cend(),
+                        [memoryDock](const auto& knownDock) { return knownDock.data() == memoryDock; });
+                    if (!alreadyKnown)
+                    {
+                        workbenchDocks.emplace_back(memoryDock);
+                    }
                 }
             }
-        }
-    };
-    appendNewWorkbenchDocks();
-    bool memoryQuitAllowed = true;
-    for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
-    {
-        // memoryDock：当前迭代独立的弱指针副本，追加晚到 Dock 时不依赖 vector 中可能失效的引用。
-        const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-        if (memoryDock && !memoryDock->prepareWorkbenchQuit())
-        {
-            memoryQuitAllowed = false;
-            break;
-        }
-        if (!closeGuardSelf)
-        {
-            break;
-        }
+        };
         appendNewWorkbenchDocks();
-    }
-    // 所有 Dock 的暂存许可都通过后才归还执行控制，取消后续确认不会提前放行前一目标。
-    // 第二阶段不重复 confirmQuit；部分释放失败时保留实际状态及恢复入口，统一撤销许可。
-    if (closeGuardSelf && memoryQuitAllowed)
-    {
+        bool memoryQuitAllowed = true;
         for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
         {
+            // memoryDock：当前迭代独立的弱指针副本，追加晚到 Dock 时不依赖 vector 中可能失效的引用。
             const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-            if (memoryDock && !memoryDock->releaseWorkbenchExecutionForQuit())
+            if (memoryDock && !memoryDock->prepareWorkbenchQuit())
             {
                 memoryQuitAllowed = false;
                 break;
@@ -5598,39 +5583,70 @@ void MainWindow::closeEvent(QCloseEvent* event)
             {
                 break;
             }
-            // HVM 释放会处理事件；若此时才创建新 Dock，本轮中止，下一次退出重新统一确认。
-            const std::size_t preparedCount = workbenchDocks.size();
             appendNewWorkbenchDocks();
-            if (workbenchDocks.size() != preparedCount)
+        }
+        // 所有 Dock 的暂存许可都通过后才归还执行控制，取消后续确认不会提前放行前一目标。
+        // 第二阶段不重复 confirmQuit；部分释放失败时保留实际状态及恢复入口，统一撤销许可。
+        if (closeGuardSelf && memoryQuitAllowed)
+        {
+            for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
             {
-                memoryQuitAllowed = false;
-                break;
+                const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
+                if (memoryDock && !memoryDock->releaseWorkbenchExecutionForQuit())
+                {
+                    memoryQuitAllowed = false;
+                    break;
+                }
+                if (!closeGuardSelf)
+                {
+                    break;
+                }
+                // HVM 释放会处理事件；若此时才创建新 Dock，本轮中止，下一次退出重新统一确认。
+                const std::size_t preparedCount = workbenchDocks.size();
+                appendNewWorkbenchDocks();
+                if (workbenchDocks.size() != preparedCount)
+                {
+                    memoryQuitAllowed = false;
+                    break;
+                }
             }
         }
-    }
-    if (!closeGuardSelf || !memoryQuitAllowed)
-    {
-        // 本次全局退出取消：清掉之前视图批准的 Keep 许可，禁止它误跳过下一次未经提示的分离安全网。
-        // 已明确批准并执行的应用/丢弃保留其结果；这不是对已执行编辑的回滚。
-        for (const auto& memoryDock : workbenchDocks)
+        if (!closeGuardSelf || !memoryQuitAllowed)
         {
-            if (memoryDock)
+            if (closeGuardSelf) m_shutdownRestart.cancel();
+            // 本次全局退出取消：清掉之前视图批准的 Keep 许可，禁止它误跳过下一次未经提示的分离安全网。
+            // 已明确批准并执行的应用/丢弃保留其结果；这不是对已执行编辑的回滚。
+            for (const auto& memoryDock : workbenchDocks)
             {
-                memoryDock->cancelWorkbenchQuit();
+                if (memoryDock)
+                {
+                    memoryDock->cancelWorkbenchQuit();
+                }
             }
         }
-    }
-    if (qApp != nullptr)
-    {
-        qApp->setProperty("ksword_memory_quit_guard_active", false);
-    }
-    if (!closeGuardSelf || !memoryQuitAllowed)
-    {
-        if (event != nullptr)
+        if (qApp != nullptr)
         {
-            event->ignore();
+            qApp->setProperty("ksword_memory_quit_guard_active", false);
         }
-        return;
+        if (!closeGuardSelf || !memoryQuitAllowed)
+        {
+            if (event != nullptr)
+            {
+                event->ignore();
+            }
+            return;
+        }
+
+        m_shutdownPreparedMemoryDocks = workbenchDocks;
+        ks::ui::AsyncCleanupRegistry::global().beginShutdown();
+        if (ks::ui::AsyncCleanupRegistry::global().pending() != 0 ||
+            g_r0ServiceOperationInFlight.load(std::memory_order_acquire))
+        {
+            if (event) event->ignore();
+            beginCoordinatedShutdownWait();
+            return;
+        }
+        m_shutdownCleanupReady = true;
     }
 
     // 暂存确认已经允许退出，之后才撤销通知；普通托盘 hide 不进入本阶段。
@@ -5652,7 +5668,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
             event->accept();
         }
         QMainWindow::closeEvent(event);
-        QCoreApplication::quit();
+        finishCoordinatedShutdown();
         return;
     }
 
@@ -5672,70 +5688,230 @@ void MainWindow::closeEvent(QCloseEvent* event)
     prepareR0DriverServiceStop();
     CallbackPromptManager::shutdownGlobalManager();
 
-    // 关闭窗口时自动停止 R0 驱动：
-    // - 先静默查询服务状态；
-    // - 若在运行则把整段 SCM 停驱交给线程池，UI 线程立刻把窗口藏起来，
-    //   不再让“SCM 卡在 STOP_PENDING”把关闭动作硬拖到 30 秒的假死。
-    bool r0RunningBeforeExit = false;
-    if (queryR0DriverServiceRunning(r0RunningBeforeExit, false) && r0RunningBeforeExit)
+    // 所有已接受会话STOP/事务收尾已归还lease后，才可停止它们依赖的R0服务。
+    // 查询与SCM动作均只持值状态；UI不隐藏，也不以固定超时杀掉未完成worker。
+    if (!m_shutdownServiceState)
     {
-        if (event != nullptr)
+        m_shutdownServiceState = std::make_shared<MainWindowShutdownServiceState>();
+        const auto serviceState = m_shutdownServiceState;
+        m_shutdownServiceReported = false;
+        g_r0ServiceOperationInFlight.store(true, std::memory_order_release);
+        g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
+        if (m_r0StatusButton) m_r0StatusButton->setEnabled(false);
+        const auto work = [serviceState]()
         {
-            // 这里必须 ignore：一旦 accept，Qt 会按 quitOnLastWindowClosed 在停驱回调
-            // 执行前就结束事件循环，回调与日志都会丢失。
-            event->ignore();
-        }
-        hide();
-
-        // 异步关闭流程只推进一次：窗口隐藏后若再收到关闭请求，直接返回，
-        // 避免重复派发停驱任务和重复排兜底定时器。
-        static bool asyncShutdownStarted = false;
-        if (asyncShutdownStarted)
+            try
+            {
+                const auto queryRunning = [serviceState]() -> DWORD
+                {
+                    serviceState->runningKnown = false;
+                    ScopedServiceHandle scm(::OpenSCManagerW(nullptr, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CONNECT));
+                    if (!scm.isValid()) return ::GetLastError();
+                    ScopedServiceHandle service(::OpenServiceW(scm.get(), kR0DriverServiceName, SERVICE_QUERY_STATUS));
+                    if (!service.isValid())
+                    {
+                        const auto error = ::GetLastError();
+                        if (error != ERROR_SERVICE_DOES_NOT_EXIST) return error;
+                        serviceState->runningKnown = true;
+                        serviceState->running = false;
+                        return ERROR_SUCCESS;
+                    }
+                    SERVICE_STATUS_PROCESS status{};
+                    DWORD error = ERROR_SUCCESS;
+                    if (!queryServiceStatus(service.get(), status, error)) return error;
+                    serviceState->runningKnown = true;
+                    serviceState->running = isRunningLikeServiceState(status.dwCurrentState);
+                    return ERROR_SUCCESS;
+                };
+                // 保留原语义：只有查询确认running-like时才停/删服务。
+                const auto queryError = queryRunning();
+                if (queryError == ERROR_SUCCESS && serviceState->running)
+                {
+                    serviceState->outcome = executeR0ServiceStopOnWorker();
+                    (void)queryRunning(); // 启动替代实例失败/取消退出时恢复实际R0状态。
+                }
+                else if (queryError == ERROR_SUCCESS)
+                {
+                    serviceState->outcome.alreadyInTargetState = true;
+                }
+                else serviceState->outcome.errorCode = queryError;
+            }
+            catch (...)
+            {
+                serviceState->outcome.errorCode = ERROR_UNHANDLED_EXCEPTION;
+            }
+            g_r0ServiceOperationInFlight.store(false, std::memory_order_release);
+            serviceState->finished.store(true, std::memory_order_release);
+        };
+        try { QThreadPool::globalInstance()->start(work); }
+        catch (...)
         {
-            return;
+            serviceState->outcome.errorCode = ERROR_UNHANDLED_EXCEPTION;
+            g_r0ServiceOperationInFlight.store(false, std::memory_order_release);
+            serviceState->finished.store(true, std::memory_order_release);
         }
-        asyncShutdownStarted = true;
+    }
+    if (event) event->ignore();
+    beginCoordinatedShutdownWait();
+}
 
-        dispatchR0ServiceStopToWorker(
-            [](const R0ServiceOperationOutcome& operationOutcome)
-            {
-                kLogEvent autoStopEvent;
-                if (operationOutcome.succeeded)
-                {
-                    info << autoStopEvent << "[MainWindow][R0] 关闭窗口时已自动停止并删除驱动服务。" << eol;
-                }
-                else
-                {
-                    warn << autoStopEvent << "[MainWindow][R0] 关闭窗口时自动停驱失败（已静默处理）。" << eol;
-                }
-                QApplication::quit();
-                QCoreApplication::exit(0);
-            });
+void MainWindow::beginCoordinatedShutdownWait()
+{
+    if (!m_shutdownTimer)
+    {
+        m_shutdownTimer = new QTimer(this);
+        m_shutdownTimer->setInterval(50);
+        connect(m_shutdownTimer, &QTimer::timeout, this, &MainWindow::pollCoordinatedShutdown);
+    }
+    if (m_shutdownOriginalTitle.isEmpty()) m_shutdownOriginalTitle = windowTitle();
+    m_shutdownWaiting = true;
+    m_r0UnavailablePromptArmed = false;
+    m_r0NotificationLifetime->store(false, std::memory_order_release);
+    m_shutdownLastPending = static_cast<std::size_t>(-1);
+    m_shutdownClock.start();
+    m_shutdownWait.start(0, static_cast<int>(kR0ServiceStopWaitTimeoutMs) + 2000);
+    if (!isVisible()) show();
+    m_shutdownTimer->start();
+}
 
-        // 兜底定时器：后台停驱异常挂住时也必须退出，避免窗口已隐藏却留下常驻进程。
-        // 超时上限取“停驱等待上限 + 2 秒余量”，正常路径永远比它先触发退出。
-        QTimer::singleShot(
-            static_cast<int>(kR0ServiceStopWaitTimeoutMs) + 2000,
-            QCoreApplication::instance(),
-            []()
-            {
-                QApplication::quit();
-                QCoreApplication::exit(0);
-            });
+void MainWindow::pollCoordinatedShutdown()
+{
+    const bool serviceFinished = m_shutdownServiceState &&
+        m_shutdownServiceState->finished.load(std::memory_order_acquire);
+    if (serviceFinished && !m_shutdownServiceReported)
+    {
+        m_shutdownServiceReported = true;
+        const auto& outcome = m_shutdownServiceState->outcome;
+        if (m_shutdownServiceState->runningKnown)
+            m_r0DriverServiceRunning = m_shutdownServiceState->running;
+        kLogEvent autoStopEvent;
+        if (outcome.succeeded)
+        {
+            info << autoStopEvent << "[MainWindow][R0] 关闭窗口时已自动停止并删除驱动服务。" << eol;
+        }
+        else if (!outcome.alreadyInTargetState)
+        {
+            warn << autoStopEvent << "[MainWindow][R0] 关闭窗口时自动停驱失败（已静默处理）。" << eol;
+        }
+    }
+    if (!m_shutdownWaiting)
+    {
+        // 用户取消退出后，已经接受的停驱仍完成；完成后恢复其真实UI状态。
+        if (!m_shutdownServiceState || serviceFinished)
+        {
+            m_shutdownTimer->stop();
+            m_shutdownServiceState.reset();
+            if (m_r0StatusButton) m_r0StatusButton->setEnabled(true);
+            refreshPrivilegeStatusButtons();
+        }
         return;
     }
-
-    // 接受关闭事件并主动触发应用退出。
-    // 这里同时调用 quit 与 exit(0)，确保事件循环尽快结束。
-    if (event != nullptr)
+    const bool servicePending = (m_shutdownServiceState && !serviceFinished) ||
+        g_r0ServiceOperationInFlight.load(std::memory_order_acquire);
+    const auto pending = ks::ui::AsyncCleanupRegistry::global().pending() + (servicePending ? 1U : 0U);
+    if (m_shutdownLastPending != pending)
     {
-        event->accept();
+        m_shutdownLastPending = pending;
+        setWindowTitle(m_shutdownOriginalTitle + QStringLiteral(" — ") + ks::i18n::contextText(
+            QStringLiteral("main.shutdown.wait.status"), QStringLiteral("正在完成后台操作（%1）"))
+            .arg(static_cast<qulonglong>(pending)));
     }
-    QApplication::quit();
-    QCoreApplication::exit(0);
+    const auto status = m_shutdownWait.poll(m_shutdownClock.elapsed(), pending);
+    if (status == ks::ui::AsyncShutdownWait::Status::Ready)
+    {
+        // 等待期间仍可能完成已排队的详情窗构造；只在就绪边界核对一次。
+        // 新工作台未经本次批准时撤销许可并重新走原两阶段守卫。
+        for (QWidget* widget : QApplication::allWidgets())
+        {
+            auto* dock = qobject_cast<MemoryDock*>(widget);
+            if (dock && std::none_of(m_shutdownPreparedMemoryDocks.cbegin(),
+                m_shutdownPreparedMemoryDocks.cend(),
+                [dock](const auto& known) { return known.data() == dock; }))
+            {
+                cancelCoordinatedShutdown(true);
+                close();
+                return;
+            }
+        }
+        m_shutdownTimer->stop();
+        m_shutdownWaiting = false;
+        setWindowTitle(m_shutdownOriginalTitle);
+        if (m_shutdownServiceState) finishCoordinatedShutdown();
+        else
+        {
+            m_shutdownCleanupReady = true;
+            close(); // 不重复暂存/执行控制确认；继续原服务关闭阶段。
+        }
+    }
+    else if (status == ks::ui::AsyncShutdownWait::Status::TimedOut)
+    {
+        m_shutdownTimer->stop();
+        const QPointer<MainWindow> guard(this);
+        const auto choice = QMessageBox::question(this,
+            ks::i18n::contextText(QStringLiteral("main.shutdown.wait.title"), QStringLiteral("等待后台操作完成")),
+            ks::i18n::contextText(QStringLiteral("main.shutdown.wait.message"),
+                QStringLiteral("仍有 %1 个后台操作正在完成事务或资源清理。程序会保持打开，不会终止已接受的操作。\n\n重试继续等待，取消返回主窗口。"))
+                .arg(static_cast<qulonglong>(pending)),
+            QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (!guard) return;
+        if (choice == QMessageBox::Retry) beginCoordinatedShutdownWait();
+        else cancelCoordinatedShutdown();
+    }
+}
+
+void MainWindow::cancelCoordinatedShutdown(const bool preserveRestart)
+{
+    if (!preserveRestart) m_shutdownRestart.cancel();
+    m_shutdownWaiting = false;
+    m_shutdownCleanupReady = false;
+    ks::ui::AsyncCleanupRegistry::global().cancelShutdown();
+    if (!m_shutdownOriginalTitle.isEmpty()) setWindowTitle(m_shutdownOriginalTitle);
+    m_r0NotificationLifetime->store(true, std::memory_order_release);
+    m_r0UnavailablePromptArmed = true;
+    if (m_privilegeStatusTimer) m_privilegeStatusTimer->start();
+    for (QWidget* widget : QApplication::allWidgets())
+    {
+        if (auto* dock = qobject_cast<MemoryDock*>(widget)) dock->cancelWorkbenchQuit();
+    }
+    m_shutdownPreparedMemoryDocks.clear();
+    if (m_shutdownServiceState) m_shutdownTimer->start();
+    else refreshPrivilegeStatusButtons();
+}
+
+void MainWindow::finishCoordinatedShutdown()
+{
+    Q_ASSERT(ks::ui::AsyncCleanupRegistry::global().pending() == 0);
+    Q_ASSERT(!g_r0ServiceOperationInFlight.load(std::memory_order_acquire));
+    if (m_shutdownTimer) m_shutdownTimer->stop();
+    if (m_shutdownFinalizing) return;
+    m_shutdownFinalizing = true;
+    if (m_shutdownRestart.hasIntent())
+    {
+        const QPointer<MainWindow> guard(this);
+        bool launched = false;
+        try { launched = m_shutdownRestart.launchWhenReady(); } catch (...) {}
+        if (!guard) return;
+        if (!launched)
+        {
+            m_shutdownFinalizing = false;
+            cancelCoordinatedShutdown();
+            return;
+        }
+    }
+    QCoreApplication::quit();
 
     kLogEvent closeFinishLog;
     info << closeFinishLog << "[MainWindow] 已提交退出请求 (exit code=0)。" << eol;
+}
+
+bool MainWindow::requestCoordinatedRestart(ks::ui::DeferredApplicationRestart::Launch launch)
+{
+    if (m_shutdownWaiting || m_shutdownCleanupReady || m_shutdownFinalizing ||
+        (qApp && qApp->property("ksword_memory_quit_guard_active").toBool()) ||
+        !m_shutdownRestart.accept(std::move(launch))) return false;
+    const QPointer<MainWindow> guard(this);
+    close(); // 首轮内存守卫拒绝与超时Cancel都清除意图，不污染下次普通关闭。
+    return guard && (m_shutdownRestart.hasIntent() || m_shutdownFinalizing);
 }
 
 void MainWindow::initResizeBorderOverlays()
@@ -8971,7 +9147,7 @@ bool MainWindow::hasUiAccessPrivilege() const
     return uiAccessEnabled;
 }
 
-bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
+bool MainWindow::launchSelfWithSystemUiAccessToken(const QStringList& arguments, QString* detailTextOut)
 {
     if (detailTextOut != nullptr)
     {
@@ -9197,8 +9373,13 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
     }
 
     QString commandLineText = quoteWin32CommandLineArgument(selfPath);
-    commandLineText += QLatin1Char(' ');
-    commandLineText += QString::fromWCharArray(kKswordPrivilegeRestartArgument);
+    const auto launchArguments = argumentsWithPrivilegeRestartTakeover(
+        arguments, ::GetCurrentProcessId());
+    for (int index = 1; index < launchArguments.size(); ++index)
+    {
+        commandLineText += QLatin1Char(' ');
+        commandLineText += ks::ui::QuoteCoordinatedRestartArgument(launchArguments.at(index));
+    }
     std::wstring commandLineWide = commandLineText.toStdWString();
     std::wstring applicationPathWide = selfPath;
 
@@ -9229,6 +9410,8 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
 
     ScopedHandle newProcessHandle(processInformation.hProcess);
     ScopedHandle newThreadHandle(processInformation.hThread);
+    if (!ks::crash::ValidateRestartChildProcess(newProcessHandle.get()))
+        return failWithDetail(formatWin32StepFailure(QStringLiteral("CreateProcessAsUserW"), ERROR_INVALID_DATA));
     detailLineList << QStringLiteral("CreateProcessAsUserW：成功启动新实例，PID=%1。")
         .arg(processInformation.dwProcessId);
 
@@ -9245,74 +9428,64 @@ bool MainWindow::launchSelfWithSystemUiAccessToken(QString* detailTextOut)
 
 void MainWindow::handleUiAccessButtonClicked()
 {
-    // 当前实例已经带 UIAccess 时，按钮语义为回到普通用户实例；该路径不依赖任何签名证书。
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
+    const auto arguments = QCoreApplication::arguments();
+    const QPointer<MainWindow> guard(this);
+    // 启动器只在全部退出资源就绪后运行，冻结本次模式与argv。
     if (hasUiAccessPrivilege())
     {
-        QString launchDetailText;
-        const bool launchOk = launchSelfAsUnelevatedFromExplorer(QCoreApplication::arguments(), &launchDetailText);
-        if (!launchOk)
+        ks::ui::RequestCoordinatedApplicationRestart([guard, arguments]()
         {
+            if (!guard) return false;
+            QString launchDetailText;
+            const bool launchOk = launchSelfAsUnelevatedFromExplorer(arguments, &launchDetailText);
+            if (!launchOk)
+            {
+                kLogEvent logEvent;
+                err << logEvent
+                    << "[MainWindow][UIAccess] 从 UIAccess 降级重启普通实例失败: "
+                    << launchDetailText.toStdString() << eol;
+                QMessageBox::warning(guard.data(), QStringLiteral("UIAccess"),
+                    QStringLiteral("普通权限重启失败，当前实例保持运行。\n\n%1").arg(launchDetailText));
+                return false;
+            }
             kLogEvent logEvent;
-            err << logEvent
-                << "[MainWindow][UIAccess] 从 UIAccess 降级重启普通实例失败: "
-                << launchDetailText.toStdString()
-                << eol;
-            QMessageBox::warning(
-                this,
-                QStringLiteral("UIAccess"),
-                QStringLiteral("普通权限重启失败，当前实例保持运行。\n\n%1").arg(launchDetailText));
-            refreshPrivilegeStatusButtons();
-            return;
-        }
-
-        kLogEvent logEvent;
-        info << logEvent
-            << "[MainWindow][UIAccess] 当前实例已带 UIAccess，已启动普通权限实例并准备正常退出: "
-            << launchDetailText.toStdString()
-            << eol;
-        close();
+            info << logEvent
+                << "[MainWindow][UIAccess] 当前实例已带 UIAccess，已启动普通权限实例并准备正常退出: "
+                << launchDetailText.toStdString() << eol;
+            return true;
+        });
         return;
     }
 
     if (!hasAdminPrivilege())
     {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess"),
-            QStringLiteral(
-                "启用 UIAccess 需要管理员权限。\n\n"
-                "程序将先以管理员身份重新启动；重启后请再次点击 UIAccess。"));
+        QMessageBox::warning(this, QStringLiteral("UIAccess"),
+            QStringLiteral("启用 UIAccess 需要管理员权限。\n\n程序将先以管理员身份重新启动；重启后请再次点击 UIAccess。"));
         requestAdminElevationRestart();
         return;
     }
 
-    QString launchDetailText;
-    const bool launchOk = launchSelfWithSystemUiAccessToken(&launchDetailText);
-    if (!launchOk)
+    ks::ui::RequestCoordinatedApplicationRestart([guard, arguments]()
     {
-        kLogEvent logEvent;
-        err << logEvent
-            << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动失败: "
-            << launchDetailText.toStdString()
-            << eol;
-        QMessageBox::warning(
-            this,
-            QStringLiteral("UIAccess 启动失败"),
-            launchDetailText);
-        refreshPrivilegeStatusButtons();
-        return;
-    }
-
-    {
+        if (!guard) return false;
+        QString launchDetailText;
+        const bool launchOk = guard->launchSelfWithSystemUiAccessToken(arguments, &launchDetailText);
+        if (!launchOk)
+        {
+            kLogEvent logEvent;
+            err << logEvent
+                << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动失败: "
+                << launchDetailText.toStdString() << eol;
+            QMessageBox::warning(guard.data(), QStringLiteral("UIAccess 启动失败"), launchDetailText);
+            return false;
+        }
         kLogEvent logEvent;
         info << logEvent
             << "[MainWindow][UIAccess] SYSTEM TokenUIAccess fallback 启动成功: "
-            << launchDetailText.toStdString()
-            << eol;
-    }
-    // 成功路径不弹框，避免重复打断；详细步骤已经写入日志。
-    refreshPrivilegeStatusButtons();
-    QApplication::quit();
+            << launchDetailText.toStdString() << eol;
+        return true;
+    });
 }
 
 void MainWindow::startR0DriverLogPoller()
@@ -9814,6 +9987,7 @@ bool MainWindow::queryR0DriverServiceRunning(bool& runningOut, const bool fatalO
 
 bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return false;
     const auto profile = ksword::ark::queryServiceProfile();
     if (!profile.scmManagementAllowed())
     {
@@ -10085,6 +10259,7 @@ bool MainWindow::enableWindowsTestModeAndPromptReboot()
 
 bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPrompt)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return false;
     // 作用：
     // - 输入：无；驱动固定取当前 exe 目录下的 KswordARK.sys；
     // - 处理：UI 线程只做驱动文件校验与派发，SCM 创建/配置/启动/等待运行态整段交给线程池；
@@ -10181,6 +10356,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
 
 void MainWindow::handleR0StatusButtonClicked()
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
     // 作用：
     // - 输入：无；
     // - 处理：先做一次轻量的 SCM 状态查询，再按当前状态派发后台启停任务；
@@ -10204,6 +10380,7 @@ void MainWindow::handleR0StatusButtonClicked()
 
 void MainWindow::requestAdminElevationRestart(const bool enableR0AfterRestart)
 {
+    if (m_shutdownWaiting || m_shutdownCleanupReady) return;
     // 获取当前可执行文件路径，作为 runas 重启目标。
     wchar_t exePathBuffer[MAX_PATH] = {};
     const DWORD pathLength = ::GetModuleFileNameW(nullptr, exePathBuffer, static_cast<DWORD>(std::size(exePathBuffer)));
@@ -10214,33 +10391,47 @@ void MainWindow::requestAdminElevationRestart(const bool enableR0AfterRestart)
         return;
     }
 
-    QString elevationParameters = QString::fromWCharArray(kKswordPrivilegeRestartArgument);
+    auto launchArguments = argumentsWithPrivilegeRestartTakeover(
+        QCoreApplication::arguments(), ::GetCurrentProcessId());
     if (enableR0AfterRestart)
     {
-        elevationParameters += QLatin1Char(' ');
-        elevationParameters += QString::fromWCharArray(kKswordEnableR0AfterElevationArgument);
+        const auto enableArgument = QString::fromWCharArray(kKswordEnableR0AfterElevationArgument);
+        if (!containsQtArgument(launchArguments, enableArgument)) launchArguments.push_back(enableArgument);
     }
+    QStringList quotedArguments;
+    for (int index = 1; index < launchArguments.size(); ++index)
+        quotedArguments.push_back(ks::ui::QuoteCoordinatedRestartArgument(launchArguments.at(index)));
+    const QString elevationParameters = quotedArguments.join(QLatin1Char(' '));
     const std::wstring elevationParametersWide = elevationParameters.toStdWString();
+    const std::wstring executablePath(exePathBuffer);
+    const QPointer<MainWindow> guard(this);
 
     // 使用 ShellExecute("runas") 触发 UAC 提权；R0 请求会带内部参数，让提升后的实例
     // 直接执行用户刚刚确认的启用动作，而不是要求用户重启后再重复点击一次。
-    HINSTANCE shellResult = ::ShellExecuteW(
-        nullptr,
-        L"runas",
-        exePathBuffer,
-        elevationParametersWide.c_str(),
-        nullptr,
-        SW_SHOWNORMAL);
-    if (reinterpret_cast<std::intptr_t>(shellResult) <= 32)
+    ks::ui::RequestCoordinatedApplicationRestart([guard, executablePath, elevationParametersWide]()
     {
-        QMessageBox::warning(this, "Admin", "提权启动失败，可能被用户取消或系统策略阻止。");
-        return;
+    if (!guard) return false;
+    SHELLEXECUTEINFOW launch{};
+    launch.cbSize = sizeof(launch);
+    launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    launch.lpVerb = L"runas";
+    launch.lpFile = executablePath.c_str();
+    launch.lpParameters = elevationParametersWide.c_str();
+    launch.nShow = SW_SHOWNORMAL;
+    const bool created = ::ShellExecuteExW(&launch) != FALSE;
+    const bool validChild = created && ks::crash::ValidateRestartChildProcess(launch.hProcess);
+    if (launch.hProcess) ::CloseHandle(launch.hProcess);
+    if (!validChild)
+    {
+        QMessageBox::warning(guard.data(), "Admin", "提权启动失败，可能被用户取消或系统策略阻止。");
+        return false;
     }
 
     // 新进程启动成功后，当前实例退出。
     kLogEvent logEvent;
     info << logEvent << "[MainWindow] 已触发管理员重启，当前实例即将退出。" << eol;
-    QApplication::quit();
+    return true;
+    });
 }
 
 bool MainWindow::hasAdminPrivilege() const

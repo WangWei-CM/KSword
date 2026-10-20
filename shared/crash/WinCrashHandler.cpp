@@ -523,7 +523,7 @@ namespace ks
                 return found;
             }
 
-            bool IsCurrentProcessDirectChildOf(const DWORD expectedParentProcessId)
+            bool IsProcessDirectChildOf(const DWORD childProcessId, const DWORD expectedParentProcessId)
             {
                 HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                 if (snapshot == INVALID_HANDLE_VALUE)
@@ -538,7 +538,7 @@ namespace ks
                 {
                     do
                     {
-                        if (entry.th32ProcessID == ::GetCurrentProcessId())
+                        if (entry.th32ProcessID == childProcessId)
                         {
                             matches = entry.th32ParentProcessID == expectedParentProcessId;
                             break;
@@ -547,6 +547,20 @@ namespace ks
                 }
                 ::CloseHandle(snapshot);
                 return matches;
+            }
+
+            bool IsCurrentProcessDirectChildOf(const DWORD expectedParentProcessId)
+            {
+                return IsProcessDirectChildOf(::GetCurrentProcessId(), expectedParentProcessId);
+            }
+
+            bool IsParentOlderThanChild(const HANDLE parent, const HANDLE child)
+            {
+                FILETIME parentCreated{}, parentExited{}, parentKernel{}, parentUser{};
+                FILETIME childCreated{}, childExited{}, childKernel{}, childUser{};
+                return ::GetProcessTimes(parent, &parentCreated, &parentExited, &parentKernel, &parentUser)
+                    && ::GetProcessTimes(child, &childCreated, &childExited, &childKernel, &childUser)
+                    && ::CompareFileTime(&parentCreated, &childCreated) <= 0;
             }
 
             bool IsSameExecutableProcess(const HANDLE processHandle)
@@ -631,6 +645,49 @@ namespace ks
             }
             ::LocalFree(argumentVector);
             return found;
+        }
+
+        bool ValidateRestartChildProcess(const HANDLE childProcess)
+        {
+            const DWORD childId = childProcess ? ::GetProcessId(childProcess) : 0;
+            DWORD exitCode = 0;
+            return childId && ::GetExitCodeProcess(childProcess, &exitCode) && exitCode == STILL_ACTIVE
+                && IsProcessDirectChildOf(childId, ::GetCurrentProcessId())
+                && IsSameExecutableProcess(childProcess)
+                && IsParentOlderThanChild(::GetCurrentProcess(), childProcess);
+        }
+
+        RestartPredecessorStatus InspectRestartPredecessorFromCommandLine(const DWORD timeoutMilliseconds)
+        {
+            if (!CommandLineHasArgument(kCrashRestartWaitPidArgument))
+                return RestartPredecessorStatus::NotRequested;
+            unsigned long long processId = 0;
+            if (!TryReadArgumentValue(kCrashRestartWaitPidArgument, &processId) || processId == 0 ||
+                processId > static_cast<unsigned long long>(MAXDWORD) || processId == ::GetCurrentProcessId())
+                return RestartPredecessorStatus::InvalidArgument;
+            const auto predecessorId = static_cast<DWORD>(processId);
+            if (!IsCurrentProcessDirectChildOf(predecessorId))
+                return RestartPredecessorStatus::ValidationRejected;
+            HANDLE predecessor = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, predecessorId);
+            if (!predecessor)
+            {
+                // The recorded direct parent has already gone; no arbitrary live
+                // PID is accepted or waited here, and no business startup overlaps it.
+                return ::GetLastError() == ERROR_INVALID_PARAMETER
+                    ? RestartPredecessorStatus::PredecessorAlreadyExited
+                    : RestartPredecessorStatus::ValidationRejected;
+            }
+            if (!IsSameExecutableProcess(predecessor) ||
+                !IsParentOlderThanChild(predecessor, ::GetCurrentProcess()))
+            {
+                ::CloseHandle(predecessor);
+                return RestartPredecessorStatus::ValidationRejected;
+            }
+            const DWORD result = ::WaitForSingleObject(predecessor, timeoutMilliseconds);
+            ::CloseHandle(predecessor);
+            if (result == WAIT_OBJECT_0) return RestartPredecessorStatus::PredecessorExited;
+            if (result == WAIT_TIMEOUT) return RestartPredecessorStatus::TimedOut;
+            return RestartPredecessorStatus::WaitFailed;
         }
 
         bool WaitForCrashRestartTargetFromCommandLine(const DWORD timeoutMilliseconds)
