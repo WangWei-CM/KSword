@@ -44,10 +44,14 @@
 
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/StructuredFieldView.h"
+#include "../UI/AsyncOperation.h"
 
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <memory>
+#include <thread>
+#include <exception>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -71,8 +75,15 @@ namespace ks::window::layerdiag
     constexpr DWORD kWindowBandDefault = 0;
     constexpr DWORD kWindowBandUiAccess = 2;
 
+    using FrozenUiTexts = QHash<QString, QString>;
+    thread_local const FrozenUiTexts* workerTexts = nullptr;
+    thread_local const ks::ui::AsyncOperationToken* workerToken = nullptr;
+    bool readCanceled() { return workerToken != nullptr && workerToken->isCanceled(); }
+
     QString uiText(const char* key, const char* fallback)
     {
+        if (workerTexts != nullptr)
+            return workerTexts->value(QString::fromLatin1(key), QString::fromUtf8(fallback));
         return ks::i18n::text(QString::fromLatin1(key), QString::fromUtf8(fallback));
     }
 
@@ -284,6 +295,7 @@ namespace ks::window::layerdiag
         HWND current = ::GetTopWindow(nullptr);
         for (int index = 0; current != nullptr && index < kWalkLimit; ++index)
         {
+            if (readCanceled()) break;
             const quintptr raw = reinterpret_cast<quintptr>(current);
             if (visited.contains(raw))
             {
@@ -625,6 +637,7 @@ namespace ks::window::layerdiag
     {
         OwnedWindowIndex index;
         ::EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL {
+            if (readCanceled()) return FALSE;
             auto* current = reinterpret_cast<OwnedWindowIndex*>(parameter);
             if (current != nullptr)
             {
@@ -656,6 +669,7 @@ namespace ks::window::layerdiag
 
         for (HWND child : children)
         {
+            if (readCanceled()) return;
             ks::ui::FieldNode node = windowNode(child);
             const quintptr raw = reinterpret_cast<quintptr>(child);
             if (visited.contains(raw))
@@ -691,7 +705,8 @@ namespace ks::window::layerdiag
                 children->push_back(windowNode(current));
                 auto& node = children->last();
                 children = &node.children;
-                const quintptr raw = reinterpret_cast<quintptr>(current);
+                if (readCanceled()) break;
+            const quintptr raw = reinterpret_cast<quintptr>(current);
                 if (visited.contains(raw))
                 {
                     ks::ui::FieldNode cycle;
@@ -1106,6 +1121,124 @@ namespace ks::window::layerdiag
         }
     }
 
+
+    struct DesktopValue
+    {
+        HDESK handle = nullptr;
+        DWORD error = ERROR_SUCCESS;
+        ~DesktopValue() { if (handle != nullptr) ::CloseDesktop(handle); }
+    };
+
+    std::shared_ptr<DesktopValue> captureDesktopValue()
+    {
+        auto desktop = std::make_shared<DesktopValue>();
+        HANDLE duplicate = nullptr;
+        if (::DuplicateHandle(::GetCurrentProcess(), ::GetThreadDesktop(::GetCurrentThreadId()),
+            ::GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            desktop->handle = static_cast<HDESK>(duplicate);
+        else desktop->error = ::GetLastError();
+        return desktop;
+    }
+
+    enum class ReadKind { Refresh, Compare, Analysis };
+    struct ReadRequest
+    {
+        HWND target = nullptr;
+        HWND other = nullptr;
+        DWORD initialPid = 0, initialTid = 0;
+        QString initialClass;
+        ReadKind kind = ReadKind::Refresh;
+        std::optional<Snapshot> seed;
+        QString reason;
+        FrozenUiTexts texts;
+        std::shared_ptr<DesktopValue> desktop;
+    };
+    struct ReadReply
+    {
+        DWORD error = ERROR_SUCCESS;
+        bool invalidCompare = false;
+        Snapshot snapshot;
+        ks::ui::FieldDocument output, relationships, diagnosis;
+    };
+
+    FrozenUiTexts freezeReadTexts()
+    {
+        FrozenUiTexts texts;
+        texts.insert(QStringLiteral("window.layer.relations.target"), uiText("window.layer.relations.target", "[目标]"));
+        texts.insert(QStringLiteral("window.layer.relations.parent_chain"), uiText("window.layer.relations.parent_chain", "[Parent 链]"));
+        texts.insert(QStringLiteral("window.layer.relations.owner_chain"), uiText("window.layer.relations.owner_chain", "[Owner 链]"));
+        texts.insert(QStringLiteral("window.layer.relations.roots"), uiText("window.layer.relations.roots", "[Root / RootOwner / LastActivePopup]"));
+        texts.insert(QStringLiteral("window.layer.relations.owned_tree"), uiText("window.layer.relations.owned_tree", "[直接/间接 Owned 窗口树]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.invalid"), uiText("window.layer.diagnosis.invalid", "目标 HWND 已失效，不能执行层级操作。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.child"), uiText("window.layer.diagnosis.child", "目标是子窗口；Z 序只在同一父窗口的兄弟窗口之间有意义，不能设置 Window Band。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.session"), uiText("window.layer.diagnosis.session", "目标与 KSword 位于不同 Session，User32 层级操作不会跨 Session 生效。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.desktop"), uiText("window.layer.diagnosis.desktop", "目标与 KSword 位于不同 Desktop；当前线程不能直接调整其 Z 序。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uipi"), uiText("window.layer.diagnosis.uipi", "目标完整性级别高于 KSword，且当前令牌没有 UIAccess；操作可能被 UIPI 拒绝。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.app_container"), uiText("window.layer.diagnosis.app_container", "目标属于 AppContainer；部分窗口属性和跨进程操作会被限制。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.special_band"), uiText("window.layer.diagnosis.special_band", "目标位于系统或沉浸式 Window Band；Band ID 不能按数字比较，系统可能拒绝移动。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.cloaked"), uiText("window.layer.diagnosis.cloaked", "目标被 DWM Cloak；改变 Z 序不一定会让它出现在屏幕上。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.owner"), uiText("window.layer.diagnosis.owner", "目标存在 Owner/Owned 关系；TopMost 变化可能连带影响整个所有者窗口组。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.no_activate"), uiText("window.layer.diagnosis.no_activate", "目标带 WS_EX_NOACTIVATE；置顶不代表能够获得前台焦点。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.band_api_missing"), uiText("window.layer.diagnosis.band_api_missing", "当前系统未导出 GetWindowBand，无法验证 Band 操作结果。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.set_band_missing"), uiText("window.layer.diagnosis.set_band_missing", "当前系统未导出 SetWindowBand，UIAccess Band 操作不可用。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.capabilities"), uiText("window.layer.diagnosis.capabilities", "[能力状态]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uiaccess_ready"), uiText("window.layer.diagnosis.uiaccess_ready", "当前 KSword 令牌已带 UIAccess，可尝试实验性 UIAccess Band 操作。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.uiaccess_missing"), uiText("window.layer.diagnosis.uiaccess_missing", "当前 KSword 令牌没有 UIAccess；请使用主窗口 UIAccess 按钮重启后再试 UIAccess Band。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.blockers"), uiText("window.layer.diagnosis.blockers", "[可能阻断项]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.none"), uiText("window.layer.diagnosis.none", "未发现明确阻断项；最终以 API 返回值和回读结果为准。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.cautions"), uiText("window.layer.diagnosis.cautions", "[风险提示]"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.no_cautions"), uiText("window.layer.diagnosis.no_cautions", "未发现额外结构风险。"));
+        texts.insert(QStringLiteral("window.layer.diagnosis.foreground_note"), uiText("window.layer.diagnosis.foreground_note", "说明：置顶、前台激活和实际像素命中是不同状态；本页分别验证，不将其合并为一个“层级”。"));
+        return texts;
+    }
+
+    ReadReply collectRead(const ReadRequest& request, const ks::ui::AsyncOperationToken& token)
+    {
+        ReadReply reply;
+        std::exception_ptr failure;
+        // A fresh native thread binds the caller's duplicated desktop before
+        // any User32 query. Only the pool worker waits; a closing page never joins.
+        std::thread collector([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle && ::SetThreadDesktop(request.desktop->handle);
+            if (!bound) {
+                reply.error = request.desktop && request.desktop->error != ERROR_SUCCESS
+                    ? request.desktop->error : ::GetLastError();
+                if (reply.error == ERROR_SUCCESS) reply.error = ERROR_INVALID_HANDLE;
+                return;
+            }
+            workerTexts = &request.texts;
+            workerToken = &token;
+            try {
+                if (!token.isCanceled()) {
+                    reply.snapshot = request.seed.has_value() ? *request.seed : capture(request.target);
+                    if (reply.snapshot.valid && !sameWindowIdentity(reply.snapshot, request.target)) reply.snapshot.valid = false;
+                    if (!token.isCanceled()) {
+                        if (request.kind == ReadKind::Compare) {
+                            const Snapshot other = capture(request.other);
+                            reply.invalidCompare = !other.valid || !sameWindowIdentity(other, request.other);
+                            reply.output = compareDocument(reply.snapshot, other);
+                            ks::ui::FieldNode aNode, bNode;
+                            aNode.kind = bNode.kind = ks::ui::FieldNode::Kind::Section;
+                            aNode.name = QStringLiteral("A"); bNode.name = QStringLiteral("B");
+                            aNode.children = snapshotDocument(reply.snapshot, request.initialPid, request.initialTid, request.initialClass).nodes;
+                            bNode.children = snapshotDocument(other, other.pid, other.tid, other.cls).nodes;
+                            reply.output.nodes.push_back(aNode); reply.output.nodes.push_back(bNode);
+                        } else reply.output = snapshotDocument(reply.snapshot, request.initialPid, request.initialTid, request.initialClass);
+                    }
+                    if (!token.isCanceled()) reply.relationships = relationshipDocument(request.target);
+                    if (!token.isCanceled()) reply.diagnosis = diagnosisDocument(reply.snapshot, tokenInfo(::GetCurrentProcessId()),
+                        objectName(::GetThreadDesktop(::GetCurrentThreadId())), resolveSetWindowBandFunction() != nullptr);
+                }
+            } catch (...) { failure = std::current_exception(); }
+            workerTexts = nullptr; workerToken = nullptr;
+            ::SetThreadDesktop(previous);
+        });
+        collector.join();
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+
     class Page;
     QMutex& hookMutex() { static QMutex mutex; return mutex; }
     QHash<quintptr, QPointer<Page>>& hookOwners()
@@ -1120,16 +1253,18 @@ namespace ks::window::layerdiag
     {
     public:
         explicit Page(HWND target, QWidget* parent = nullptr)
-            : QWidget(parent), m_target(target)
+            : QWidget(parent), m_readOperation(std::make_unique<ks::ui::AsyncOperation>(this)),
+              m_desktop(captureDesktopValue()), m_target(target)
         {
             m_initialTid = ::GetWindowThreadProcessId(m_target, &m_initialPid);
             m_initialClass = className(m_target);
             buildUi();
-            refresh(uiText("window.layer.status.initial_snapshot", "初始快照"));
+            // Hidden WindowDetailDialog tabs perform no desktop-wide query.
         }
 
         ~Page() override
         {
+            m_readOperation->close();
             if (m_rollbackBaseline.has_value())
             {
                 restoreOriginalState(false);
@@ -1171,6 +1306,17 @@ namespace ks::window::layerdiag
                 cursor.removeSelectedText();
                 cursor.deleteChar();
             }
+        }
+
+    protected:
+        void showEvent(QShowEvent* event) override
+        {
+            QWidget::showEvent(event);
+            if (!m_initialRequested) {
+                m_initialRequested = true;
+                refresh(uiText("window.layer.status.initial_snapshot", "初始快照"));
+            }
+            projectVisibleDocuments();
         }
 
     private:
@@ -1368,6 +1514,8 @@ namespace ks::window::layerdiag
                 tabs, m_diagnostics, QStringLiteral("window.layer.tab.diagnostics"), QStringLiteral("失败原因诊断"));
             ks::i18n::LanguageManager::instance().bindTab(
                 tabs, m_events, QStringLiteral("window.layer.tab.events"), QStringLiteral("事件时间线"));
+            m_tabs = tabs;
+            connect(tabs, &QTabWidget::currentChanged, this, [this](int) { projectVisibleDocuments(); });
             updateTrackButtonText();
 
             connect(refreshButton, &QPushButton::clicked, this, [this]() { refresh(uiText("window.layer.status.manual_refresh", "手动刷新")); });
@@ -1381,7 +1529,7 @@ namespace ks::window::layerdiag
                 });
             });
             connect(copyButton, &QPushButton::clicked, this, [this]() {
-                QApplication::clipboard()->setText(m_output->plainText());
+                QApplication::clipboard()->setText(m_outputDocument.toPlainText(true));
                 m_status->setText(uiText("window.layer.status.copied", "已复制。"));
             });
             connect(exportButton, &QPushButton::clicked, this, [this]() { exportSnapshot(); });
@@ -1452,53 +1600,104 @@ namespace ks::window::layerdiag
             m_operationLog->appendPlainText(lines.join(QChar::LineFeed) + QStringLiteral("\n"));
         }
 
+        void invalidateRead()
+        {
+            ++m_readRevision;
+            m_reportBusy = false;
+            m_analysisCoherent = false;
+            m_readOperation->cancel();
+        }
+
+        void projectVisibleDocuments()
+        {
+            if (!isVisible() || m_tabs == nullptr) return;
+            QWidget* current = m_tabs->currentWidget();
+            if (current == m_output && m_outputDirty) {
+                m_outputDirty = false; m_output->setDocument(m_outputDocument);
+            } else if (current == m_relationships && m_relationshipsDirty) {
+                m_relationshipsDirty = false; m_relationships->setDocument(m_relationshipDocument);
+            } else if (current == m_diagnostics && m_diagnosticsDirty) {
+                m_diagnosticsDirty = false; m_diagnostics->setDocument(m_diagnosisDocument);
+            }
+        }
+
+        void publishOutput(const ks::ui::FieldDocument& document)
+        {
+            m_outputDocument = document; m_outputDirty = true;
+            projectVisibleDocuments();
+        }
+
+        void submitRead(ReadKind kind, const QString& reason, HWND other = nullptr,
+            std::optional<Snapshot> seed = std::nullopt)
+        {
+            const auto revision = ++m_readRevision;
+            m_reportBusy = true;
+            m_analysisCoherent = false;
+            const ReadRequest request{ m_target, other, m_initialPid, m_initialTid, m_initialClass,
+                kind, seed, reason, freezeReadTexts(), m_desktop };
+            if (kind != ReadKind::Analysis) m_status->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
+            m_readOperation->submit<ReadRequest, ReadReply>(request,
+                [](const ReadRequest& value, const ks::ui::AsyncOperationToken& token) { return collectRead(value, token); },
+                [this, revision, kind, reason](const ReadReply& reply, std::uint64_t) {
+                    if (revision != m_readRevision) return true;
+                    m_reportBusy = false;
+                    if (reply.invalidCompare) {
+                        m_exportAfterRead = false;
+                        m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。"));
+                        return true;
+                    }
+                    if (reply.error != ERROR_SUCCESS) {
+                        m_exportAfterRead = false;
+                        m_status->setText(uiText("window.layer.status.operation_failed",
+                            "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                            .arg(reason).arg(reply.error));
+                        return true;
+                    }
+                    m_relationshipDocument = reply.relationships; m_relationshipsDirty = true;
+                    m_diagnosisDocument = reply.diagnosis; m_diagnosticsDirty = true;
+                    m_analysisCoherent = true;
+                    if (kind != ReadKind::Analysis) {
+                        m_current = reply.snapshot; m_outputDocument = reply.output; m_outputDirty = true;
+                    }
+                    const QPointer<Page> guard(this);
+                    projectVisibleDocuments();
+                    if (!guard || revision != m_readRevision) return true;
+                    if (kind != ReadKind::Analysis) m_status->setText(kind == ReadKind::Compare
+                        ? uiText("window.layer.status.compare_complete", "A/B 对比完成。")
+                        : uiText("window.layer.status.completed", "%1完成：%2").arg(reason,
+                            reply.snapshot.time.toString(QStringLiteral("HH:mm:ss.zzz"))));
+                    if (m_exportAfterRead) {
+                        m_exportAfterRead = false;
+                        QTimer::singleShot(0, this, [this] { exportSnapshot(); });
+                    }
+                    return true;
+                }, [this, revision, reason](std::exception_ptr) {
+                    if (revision == m_readRevision) {
+                        m_reportBusy = false; m_exportAfterRead = false;
+                        m_status->setText(uiText("window.layer.status.operation_failed",
+                        "%1失败：Win32 错误 %2。请查看“失败原因诊断”页；权限不足时可通过主窗口 UIAccess/Admin 状态按钮恢复。")
+                        .arg(reason).arg(ERROR_GEN_FAILURE));
+                    }
+                });
+        }
+
         void updateAnalysisViews(const Snapshot& snapshot)
         {
-            if (m_relationships != nullptr)
-            {
-                m_relationships->setDocument(relationshipDocument(m_target));
-            }
-            if (m_diagnostics != nullptr)
-            {
-                m_diagnostics->setDocument(diagnosisDocument(snapshot, tokenInfo(::GetCurrentProcessId()),
-                    ks::window::layerdiag::objectName(::GetThreadDesktop(::GetCurrentThreadId())), resolveSetWindowBandFunction() != nullptr));
-            }
+            submitRead(ReadKind::Analysis, QStringLiteral("Snapshot"), nullptr, snapshot);
         }
 
         void refresh(const QString& reason)
         {
-            m_current = capture(m_target);
-            m_output->setDocument(snapshotDocument(*m_current, m_initialPid, m_initialTid, m_initialClass));
-            updateAnalysisViews(*m_current);
-            m_status->setText(uiText("window.layer.status.completed", "%1完成：%2")
-                .arg(reason, m_current->time.toString(QStringLiteral("HH:mm:ss.zzz"))));
+            submitRead(ReadKind::Refresh, reason);
         }
 
         void compareNow()
         {
             const std::optional<HWND> other = parseHwnd(m_compare->text());
-            if (!other.has_value() || ::IsWindow(*other) == FALSE)
-            {
-                m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。"));
-                return;
+            if (!other.has_value()) {
+                m_status->setText(uiText("window.layer.status.invalid_compare_target", "对比 HWND 无效或已销毁。")); return;
             }
-            const Snapshot a = capture(m_target);
-            const Snapshot b = capture(*other);
-            m_current = a;
-            updateAnalysisViews(a);
-            ks::ui::FieldDocument document = compareDocument(a, b);
-            ks::ui::FieldNode aNode;
-            aNode.kind = ks::ui::FieldNode::Kind::Section;
-            aNode.name = QStringLiteral("A");
-            aNode.children = snapshotDocument(a, m_initialPid, m_initialTid, m_initialClass).nodes;
-            document.nodes.push_back(aNode);
-            ks::ui::FieldNode bNode;
-            bNode.kind = ks::ui::FieldNode::Kind::Section;
-            bNode.name = QStringLiteral("B");
-            bNode.children = snapshotDocument(b, b.pid, b.tid, b.cls).nodes;
-            document.nodes.push_back(bNode);
-            m_output->setDocument(document);
-            m_status->setText(uiText("window.layer.status.compare_complete", "A/B 对比完成。"));
+            submitRead(ReadKind::Compare, uiText("window.layer.status.compare_complete", "A/B 对比完成。"), *other);
         }
 
         bool validateMutationTarget(const Snapshot& snapshot)
@@ -1585,6 +1784,7 @@ namespace ks::window::layerdiag
 
         void applyLayerAction(const LayerAction action)
         {
+            invalidateRead();
             const Snapshot before = capture(m_target);
             if (!validateMutationTarget(before))
             {
@@ -1741,9 +1941,10 @@ namespace ks::window::layerdiag
             HWND referenceHwnd,
             int attempt = 0)
         {
+            invalidateRead();
             const Snapshot after = capture(m_target);
             m_current = after;
-            m_output->setDocument(snapshotDocument(after, m_initialPid, m_initialTid, m_initialClass));
+            publishOutput(snapshotDocument(after, m_initialPid, m_initialTid, m_initialClass));
             updateAnalysisViews(after);
 
             bool verified = false;
@@ -1878,6 +2079,7 @@ namespace ks::window::layerdiag
 
         void restoreOriginalState(const bool notify)
         {
+            invalidateRead();
             if (!m_rollbackBaseline.has_value())
             {
                 return;
@@ -1957,9 +2159,10 @@ namespace ks::window::layerdiag
             }
 
             QTimer::singleShot(150, this, [this, baseline, bandResult, groupError, positionError, previousStillCompatible]() {
+                invalidateRead();
                 const Snapshot restored = capture(m_target);
                 m_current = restored;
-                m_output->setDocument(snapshotDocument(restored, m_initialPid, m_initialTid, m_initialClass));
+                publishOutput(snapshotDocument(restored, m_initialPid, m_initialTid, m_initialClass));
                 updateAnalysisViews(restored);
                 const bool bandRestored = !baseline.band.ok || (restored.band.ok && restored.band.value == baseline.band.value);
                 const bool topMostRestored = hasExStyleFlag(restored, WS_EX_TOPMOST) == hasExStyleFlag(baseline, WS_EX_TOPMOST);
@@ -1990,7 +2193,14 @@ namespace ks::window::layerdiag
 
         void exportSnapshot()
         {
-            if (!m_current.has_value()) refresh(uiText("window.layer.status.refresh_before_export", "导出前刷新"));
+            if (!m_current.has_value() || m_reportBusy || !m_analysisCoherent) {
+                m_exportAfterRead = true;
+                if (!m_reportBusy) {
+                    if (m_current.has_value()) updateAnalysisViews(*m_current);
+                    else refresh(uiText("window.layer.status.refresh_before_export", "导出前刷新"));
+                }
+                return;
+            }
             const QString path = QFileDialog::getSaveFileName(
                 this, uiText("window.layer.export.snapshot_title", "导出窗口层级快照"),
                 QStringLiteral("window-layer-%1.json").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
@@ -2009,10 +2219,10 @@ namespace ks::window::layerdiag
             root.insert(QStringLiteral("topMostGroupZOrderIndex"), m_current->topMostGroupZ);
             root.insert(QStringLiteral("topMostGroupWindowCount"), m_current->topMostGroupWindowCount);
             root.insert(QStringLiteral("rollbackPending"), m_rollbackBaseline.has_value());
-            root.insert(QStringLiteral("relationships"), m_relationships != nullptr ? m_relationships->plainText() : QString());
-            root.insert(QStringLiteral("diagnosis"), m_diagnostics != nullptr ? m_diagnostics->plainText() : QString());
+            root.insert(QStringLiteral("relationships"), m_relationshipDocument.toPlainText(true));
+            root.insert(QStringLiteral("diagnosis"), m_diagnosisDocument.toPlainText(true));
             root.insert(QStringLiteral("operationLog"), m_operationLog != nullptr ? m_operationLog->toPlainText() : QString());
-            root.insert(QStringLiteral("text"), m_output != nullptr ? m_output->plainText() : QString());
+            root.insert(QStringLiteral("text"), m_outputDocument.toPlainText(true));
             QFile file(path);
             if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
             {
@@ -2098,6 +2308,14 @@ namespace ks::window::layerdiag
             }
         }
 
+        std::unique_ptr<ks::ui::AsyncOperation> m_readOperation;
+        std::shared_ptr<DesktopValue> m_desktop;
+        QTabWidget* m_tabs = nullptr;
+        quint64 m_readRevision = 0;
+        bool m_initialRequested = false, m_exportAfterRead = false;
+        bool m_reportBusy = false, m_analysisCoherent = false;
+        ks::ui::FieldDocument m_outputDocument, m_relationshipDocument, m_diagnosisDocument;
+        bool m_outputDirty = false, m_relationshipsDirty = false, m_diagnosticsDirty = false;
         HWND m_target = nullptr;
         DWORD m_initialPid = 0;
         DWORD m_initialTid = 0;
