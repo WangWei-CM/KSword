@@ -4252,11 +4252,11 @@ void ProcessDetailWindow::initializeThreadTab()
     // 线程表格：
     // - 继续沿用原有列定义和刷新逻辑；
     // - 仅把显示位置从“详细信息页底部”迁移到独立标签。
-    m_threadInspectTable = new ks::ui::VisibleTableWidget(threadGroup);
+    QVector<ks::ui::ImmutableTableHeader> threadHeaders;
+    for (const auto& header : ThreadInspectHeaders) threadHeaders.push_back(ks::ui::ImmutableTableHeader(header));
+    m_threadInspectTable = new ks::ui::ImmutableValueTable(threadGroup, std::move(threadHeaders));
     // 当前进程的线程详情是辅助清单，保留复制导出而非整套对比栏。
     ks::ui::SetTableActionBarMode(m_threadInspectTable, ks::ui::TableActionBarMode::Compact);
-    m_threadInspectTable->setColumnCount(toThreadColumnIndex(ThreadRowColumn::Count));
-    m_threadInspectTable->setHorizontalHeaderLabels(ThreadInspectHeaders);
     m_threadInspectTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_threadInspectTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_threadInspectTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -4302,7 +4302,8 @@ void ProcessDetailWindow::initializeThreadTab()
     connect(openThreadStackButton, &QPushButton::clicked, this, [this]() {
         openSelectedThreadStackWindow();
         });
-    connect(m_threadInspectTable, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int) {
+    m_threadInspectTable->currentRowChanged = [this]() {
+        const int currentRow = m_threadInspectTable->currentRow();
         // 选中行详情：
         // - 输入：当前表格行；
         // - 处理：从缓存中取 ThreadInspectItem，展示固定 detail IOCTL 可读摘要；
@@ -4316,18 +4317,18 @@ void ProcessDetailWindow::initializeThreadTab()
             m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("请选择一条线程记录查看 runtime detail。")));
             return;
         }
-        const QTableWidgetItem* threadIdItem =
-            m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
-        const std::size_t cacheIndex = threadIdItem != nullptr
-            ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows.size());
-        if (cacheIndex >= m_threadInspectRows.size())
+        const QModelIndex threadIdItem =
+            m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
+        const std::size_t cacheIndex = threadIdItem.isValid()
+            ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+            : static_cast<std::size_t>(m_threadInspectRows->size());
+        if (cacheIndex >= m_threadInspectRows->size())
         {
             m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("当前线程行缺少缓存详情，请刷新线程页。")));
             return;
         }
 
-        const ThreadInspectItem& rowItem = m_threadInspectRows[cacheIndex];
+        const ThreadInspectItem& rowItem = (*m_threadInspectRows)[cacheIndex];
         const auto threadDetailStatusName = [](const std::uint32_t statusValue) -> QString
         {
             switch (statusValue)
@@ -4384,11 +4385,9 @@ void ProcessDetailWindow::initializeThreadTab()
             : rowItem.r0RuntimeDetailText));
         document.note(QStringLiteral("\n点击“采样PDB字段”可对当前 TID 按需读取 thread_detail deep offset 小字段。"));
         m_threadRuntimeSampleOutput->setDocument(document);
-        });
-    connect(m_threadInspectTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
-        openSelectedThreadStackWindow();
-    });
-    connect(m_threadInspectTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+        };
+    m_threadInspectTable->rowDoubleClicked = [this](int) { openSelectedThreadStackWindow(); };
+    connect(m_threadInspectTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition)
     {
         // 线程表右键菜单：
         // - 输入：用户在表格上的点击位置；
@@ -4402,7 +4401,7 @@ void ProcessDetailWindow::initializeThreadTab()
         const QModelIndex clickedIndex = m_threadInspectTable->indexAt(localPosition);
         if (clickedIndex.isValid())
         {
-            m_threadInspectTable->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+            m_threadInspectTable->setCurrentIndex(clickedIndex);
         }
 
         QMenu menu(m_threadInspectTable);
@@ -4414,18 +4413,18 @@ void ProcessDetailWindow::initializeThreadTab()
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         copyRowAction->setEnabled(m_threadInspectTable->currentRow() >= 0);
         const int selectedThreadRow = m_threadInspectTable->currentRow();
-        const QTableWidgetItem* const selectedThreadIdItem =
+        const QModelIndex selectedThreadIdItem =
             selectedThreadRow >= 0
-                ? m_threadInspectTable->item(
+                ? m_threadInspectTable->model()->index(
                     selectedThreadRow,
                     toThreadColumnIndex(ThreadRowColumn::ThreadId))
-                : nullptr;
-        const std::size_t selectedThreadCacheIndex = selectedThreadIdItem != nullptr
-            ? static_cast<std::size_t>(selectedThreadIdItem->data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows.size());
+                : QModelIndex();
+        const std::size_t selectedThreadCacheIndex = selectedThreadIdItem.isValid()
+            ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
+            : static_cast<std::size_t>(m_threadInspectRows->size());
         const ThreadInspectItem* const selectedThreadAffinityTarget =
-            selectedThreadCacheIndex < m_threadInspectRows.size()
-                ? &m_threadInspectRows[selectedThreadCacheIndex]
+            selectedThreadCacheIndex < m_threadInspectRows->size()
+                ? &(*m_threadInspectRows)[selectedThreadCacheIndex]
                 : nullptr;
         QMenu* const affinityMenu = ks::process::addThreadAffinitySubMenu(
             &menu,
@@ -4530,18 +4529,18 @@ void ProcessDetailWindow::initializeThreadTab()
         bool hasDriverThreadTarget = false;
         if (m_threadInspectTable->currentRow() >= 0 && m_baseRecord.pid == 4U)
         {
-            const QTableWidgetItem* selectedThreadIdItem = m_threadInspectTable->item(
+            const QModelIndex selectedThreadIdItem = m_threadInspectTable->model()->index(
                 m_threadInspectTable->currentRow(),
                 toThreadColumnIndex(ThreadRowColumn::ThreadId));
-            const std::size_t selectedCacheIndex = selectedThreadIdItem != nullptr
-                ? static_cast<std::size_t>(selectedThreadIdItem->data(Qt::UserRole).toULongLong())
-                : static_cast<std::size_t>(m_threadInspectRows.size());
+            const std::size_t selectedCacheIndex = selectedThreadIdItem.isValid()
+                ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
+                : static_cast<std::size_t>(m_threadInspectRows->size());
             hasDriverThreadTarget =
-                selectedCacheIndex < m_threadInspectRows.size() &&
-                m_threadInspectRows[selectedCacheIndex].threadId != 0U &&
-                m_threadInspectRows[selectedCacheIndex].createTime100ns != 0ULL &&
-                (m_threadInspectRows[selectedCacheIndex].startAddress != 0ULL ||
-                 m_threadInspectRows[selectedCacheIndex].win32StartAddress != 0ULL);
+                selectedCacheIndex < m_threadInspectRows->size() &&
+                (*m_threadInspectRows)[selectedCacheIndex].threadId != 0U &&
+                (*m_threadInspectRows)[selectedCacheIndex].createTime100ns != 0ULL &&
+                ((*m_threadInspectRows)[selectedCacheIndex].startAddress != 0ULL ||
+                 (*m_threadInspectRows)[selectedCacheIndex].win32StartAddress != 0ULL);
         }
         suspendDriverThreadAction->setVisible(hasDriverThreadTarget);
         resumeDriverThreadAction->setVisible(hasDriverThreadTarget);
@@ -4645,8 +4644,8 @@ void ProcessDetailWindow::initializeThreadTab()
         rowFields.reserve(m_threadInspectTable->columnCount());
         for (int columnIndex = 0; columnIndex < m_threadInspectTable->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = m_threadInspectTable->item(rowIndex, columnIndex);
-            rowFields.push_back(item != nullptr ? item->text() : QString());
+            const QModelIndex item = m_threadInspectTable->model()->index(rowIndex, columnIndex);
+            rowFields.push_back(item.isValid() ? item.data().toString() : QString());
         }
         QApplication::clipboard()->setText(rowFields.join('\t'));
     });

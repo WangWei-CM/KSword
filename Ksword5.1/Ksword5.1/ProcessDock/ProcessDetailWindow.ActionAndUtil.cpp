@@ -132,24 +132,24 @@ void ProcessDetailWindow::executeSingleTerminateMethodAction(const std::size_t m
 
 void ProcessDetailWindow::executeR0SuspendSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows->size());
+    if (cacheIndex >= m_threadInspectRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -203,24 +203,24 @@ void ProcessDetailWindow::executeR0SuspendSelectedThreadAction()
 
 void ProcessDetailWindow::executeR0ResumeSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows->size());
+    if (cacheIndex >= m_threadInspectRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -259,24 +259,24 @@ void ProcessDetailWindow::executeDriverThreadAction(
     const unsigned long action,
     const unsigned long terminateMethod)
 {
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows->size());
+    if (cacheIndex >= m_threadInspectRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectRows)[cacheIndex];
     const std::uint64_t startAddress = selectedThread.startAddress != 0ULL
         ? selectedThread.startAddress
         : selectedThread.win32StartAddress;
@@ -410,24 +410,24 @@ void ProcessDetailWindow::executeExperimentalFirmwareRebootAction()
 
 void ProcessDetailWindow::executeR0TerminateSelectedThreadAction()
 {
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         return;
     }
 
     const int currentRow = m_threadInspectTable->currentRow();
-    const QTableWidgetItem* threadIdItem = currentRow >= 0
-        ? m_threadInspectTable->item(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
-        : nullptr;
-    const std::size_t cacheIndex = threadIdItem != nullptr
-        ? static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows.size());
-    if (cacheIndex >= m_threadInspectRows.size())
+    const QModelIndex threadIdItem = currentRow >= 0
+        ? m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId))
+        : QModelIndex();
+    const std::size_t cacheIndex = threadIdItem.isValid()
+        ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
+        : static_cast<std::size_t>(m_threadInspectRows->size());
+    if (cacheIndex >= m_threadInspectRows->size())
     {
         return;
     }
 
-    const ThreadInspectItem& selectedThread = m_threadInspectRows[cacheIndex];
+    const ThreadInspectItem selectedThread = (*m_threadInspectRows)[cacheIndex];
     const std::uint32_t processId = selectedThread.processId != 0U
         ? selectedThread.processId
         : m_baseRecord.pid;
@@ -1287,7 +1287,7 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
     // 调用栈窗口入口：
     // - 当前表格行可能经过排序，因此优先读取 ThreadID 单元格保存的缓存索引；
     // - 缓存索引失效时按 TID 兜底查找，避免排序/刷新边界导致无法打开。
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         return;
     }
@@ -1299,35 +1299,35 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
         return;
     }
 
-    QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+    const QModelIndex threadIdItem = m_threadInspectTable->model()->index(
         currentRow,
         toThreadColumnIndex(ThreadRowColumn::ThreadId));
-    if (threadIdItem == nullptr)
+    if (!threadIdItem.isValid())
     {
         updateThreadInspectStatusLabel(QStringLiteral("● 当前线程行缺少 ThreadID。"), false);
         return;
     }
 
     const std::size_t cacheIndex =
-        static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
+        static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong());
     const ThreadInspectItem* selectedThread = nullptr;
-    if (cacheIndex < m_threadInspectRows.size())
+    if (cacheIndex < m_threadInspectRows->size())
     {
-        selectedThread = &m_threadInspectRows[cacheIndex];
+        selectedThread = &(*m_threadInspectRows)[cacheIndex];
     }
 
     const std::uint32_t selectedTid =
-        static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+        static_cast<std::uint32_t>(threadIdItem.data(Qt::UserRole + 1).toUInt());
     if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
     {
         const auto foundIt = std::find_if(
-            m_threadInspectRows.begin(),
-            m_threadInspectRows.end(),
+            m_threadInspectRows->begin(),
+            m_threadInspectRows->end(),
             [selectedTid](const ThreadInspectItem& rowItem)
             {
                 return rowItem.threadId == selectedTid;
             });
-        if (foundIt != m_threadInspectRows.end())
+        if (foundIt != m_threadInspectRows->end())
         {
             selectedThread = &(*foundIt);
         }
@@ -1381,7 +1381,7 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
     {
         errorTextOut->clear();
     }
-    if (m_threadInspectTable == nullptr)
+    if (m_threadInspectTable == nullptr || !m_threadInspectRows)
     {
         if (errorTextOut != nullptr)
         {
@@ -1400,10 +1400,10 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         return QString();
     }
 
-    const QTableWidgetItem* threadIdItem = m_threadInspectTable->item(
+    const QModelIndex threadIdItem = m_threadInspectTable->model()->index(
         currentRow,
         toThreadColumnIndex(ThreadRowColumn::ThreadId));
-    if (threadIdItem == nullptr)
+    if (!threadIdItem.isValid())
     {
         if (errorTextOut != nullptr)
         {
@@ -1412,23 +1412,23 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         return QString();
     }
 
-    const std::size_t cacheIndex = static_cast<std::size_t>(threadIdItem->data(Qt::UserRole).toULongLong());
-    const std::uint32_t selectedTid = static_cast<std::uint32_t>(threadIdItem->data(Qt::UserRole + 1).toUInt());
+    const std::size_t cacheIndex = static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong());
+    const std::uint32_t selectedTid = static_cast<std::uint32_t>(threadIdItem.data(Qt::UserRole + 1).toUInt());
     const ThreadInspectItem* selectedThread = nullptr;
-    if (cacheIndex < m_threadInspectRows.size())
+    if (cacheIndex < m_threadInspectRows->size())
     {
-        selectedThread = &m_threadInspectRows[cacheIndex];
+        selectedThread = &(*m_threadInspectRows)[cacheIndex];
     }
     if (selectedThread == nullptr || selectedThread->threadId != selectedTid)
     {
         const auto foundIt = std::find_if(
-            m_threadInspectRows.begin(),
-            m_threadInspectRows.end(),
+            m_threadInspectRows->begin(),
+            m_threadInspectRows->end(),
             [selectedTid](const ThreadInspectItem& rowItem)
             {
                 return rowItem.threadId == selectedTid;
             });
-        if (foundIt != m_threadInspectRows.end())
+        if (foundIt != m_threadInspectRows->end())
         {
             selectedThread = &(*foundIt);
         }

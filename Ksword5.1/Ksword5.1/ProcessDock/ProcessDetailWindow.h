@@ -231,7 +231,9 @@ private:
     // ThreadInspectRefreshResult：线程细节异步刷新结果。
     struct ThreadInspectRefreshResult
     {
-        std::vector<ThreadInspectItem> rows; // 线程行数据。
+        std::uint32_t processId = 0;
+        std::uint64_t creationTime100ns = 0;
+        std::shared_ptr<const std::vector<ThreadInspectItem>> rows; // 完整不可变线程行。
         QString diagnosticText;              // 诊断文本。
         std::uint64_t elapsedMs = 0;         // 刷新耗时（毫秒）。
     };
@@ -523,7 +525,9 @@ private:
     void refreshParentProcessSection();
     void updateWindowTitle();
     void requestAsyncThreadInspectRefresh();
-    void applyThreadInspectResult(const ThreadInspectRefreshResult& refreshResult);
+    void applyThreadInspectResult(std::uint64_t ticket, const ThreadInspectRefreshResult& refreshResult);
+    void rebuildThreadInspectTable();
+    void finishThreadInspectPresentation(const ThreadInspectRefreshResult& refreshResult, std::size_t rowCount);
     void updateThreadInspectStatusLabel(const QString& statusText, bool refreshing);
     // requestAsyncSelectedThreadRuntimeSample 作用：
     // - 对线程表当前选中 TID 执行 PDB deep runtime 小字段采样；
@@ -859,7 +863,7 @@ private:
     QPushButton* m_refreshThreadInspectButton = nullptr; // 刷新线程细节按钮。
     QPushButton* m_sampleThreadRuntimeButton = nullptr; // 当前线程 PDB 字段采样按钮。
     QLabel* m_threadInspectStatusLabel = nullptr; // 线程细节刷新状态。
-    QTableWidget* m_threadInspectTable = nullptr; // 线程细节表格。
+    ks::ui::ImmutableValueTable* m_threadInspectTable = nullptr; // 线程细节表格。
     ks::ui::StructuredFieldView* m_threadRuntimeSampleOutput = nullptr; // 当前线程 PDB deep 采样详情。
 
     // ======== 操作页控件 ========
@@ -967,7 +971,7 @@ private:
     bool m_threadRuntimeSampleRefreshing = false;  // 当前线程 PDB 采样是否正在进行。
     std::uint64_t m_threadRuntimeSampleTicket = 0; // 当前线程 PDB 采样防乱序序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
-    std::vector<ThreadInspectItem> m_threadInspectRows; // 线程详情页最近一次刷新缓存。
+    std::shared_ptr<const std::vector<ThreadInspectItem>> m_threadInspectRows = std::make_shared<const std::vector<ThreadInspectItem>>(); // 线程详情页最近一次刷新缓存。
 
     // ======== Process Detail Evidence 页控件 ========
     QVBoxLayout* m_kernelObjectLayout = nullptr; // Process Detail Evidence 页总布局。
