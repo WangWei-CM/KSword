@@ -1,6 +1,7 @@
 #include "GlobalUiSearch.h"
 
 #include "TableSearchSupport.h"
+#include "TableRowFilterSupport.h"
 
 #include "../include/ads/DockWidget.h"
 #include "../Internationalization/LanguageManager.h"
@@ -13,6 +14,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -257,178 +259,6 @@ namespace
     //   下拉框条目、输入框占位符、表格/树视图水平表头；
     // - 传入 dockWidget：目标 Dock；queryText：查询；outHitList：命中输出；
     // - 传出：无返回值，命中追加到 outHitList（受单页上限约束）。
-    void collectDockSearchHits(
-        ads::CDockWidget* dockWidget,
-        const QString& queryText,
-        QVector<ks::ui::UiSearchHit>& outHitList,
-        const bool visiblePageOnly)
-    {
-        QWidget* contentWidget = dockWidget->widget();
-        if (contentWidget == nullptr)
-        {
-            return;
-        }
-
-        const QString dockTitleText = normalizeUiText(dockWidget->windowTitle());
-        QSet<QString> dedupKeySet;
-        int dockHitCount = 0;
-
-        const auto tryAppendHit = [&](QWidget* targetWidget, const QString& rawText)
-        {
-            if (dockHitCount >= kMaxHitsPerDock || targetWidget == nullptr)
-            {
-                return;
-            }
-            const QString normalizedText = normalizeUiText(rawText);
-            if (normalizedText.isEmpty())
-            {
-                return;
-            }
-            const int matchIndex = normalizedText.indexOf(queryText, 0, Qt::CaseInsensitive);
-            if (matchIndex < 0)
-            {
-                return;
-            }
-            if (!isWidgetChainRevealable(targetWidget))
-            {
-                return;
-            }
-            const QString dedupKey =
-                QString::number(reinterpret_cast<quintptr>(targetWidget), 16)
-                + QLatin1Char('\x1f')
-                + normalizedText;
-            if (dedupKeySet.contains(dedupKey))
-            {
-                return;
-            }
-            dedupKeySet.insert(dedupKey);
-
-            ks::ui::UiSearchHit hitEntry;
-            hitEntry.pageDockWidget = dockWidget;
-            hitEntry.targetWidget = targetWidget;
-            hitEntry.matchedText = normalizedText;
-            hitEntry.pagePathText = buildPagePathText(dockWidget, dockTitleText, targetWidget);
-            hitEntry.matchRank = resolveMatchRank(normalizedText, queryText, matchIndex);
-            outHitList.push_back(hitEntry);
-            ++dockHitCount;
-        };
-
-        // tryAppendTableMatches：把模型单元格命中转换成统一搜索结果。
-        const auto tryAppendTableMatches = [&](QTableView* tableView)
-        {
-            if (tableView == nullptr || dockHitCount >= kMaxHitsPerDock)
-            {
-                return;
-            }
-            const int remainingHitCount = kMaxHitsPerDock - dockHitCount;
-            const QVector<ks::ui::TableCellSearchMatch> tableMatchList =
-                ks::ui::CollectTableCellSearchMatches(
-                    tableView,
-                    queryText,
-                    remainingHitCount);
-            for (const ks::ui::TableCellSearchMatch& tableMatch : tableMatchList)
-            {
-                ks::ui::UiSearchHit hitEntry;
-                hitEntry.pageDockWidget = dockWidget;
-                hitEntry.targetWidget = tableView;
-                hitEntry.targetTableView = tableView;
-                hitEntry.targetModelIndex = tableMatch.modelIndex;
-                hitEntry.matchedText = tableMatch.matchedText;
-                hitEntry.pagePathText = buildPagePathText(
-                    dockWidget,
-                    dockTitleText,
-                    tableView)
-                    + QStringLiteral(" › ")
-                    + tableMatch.locationText;
-                hitEntry.matchRank = tableMatch.matchRank;
-                outHitList.push_back(hitEntry);
-                ++dockHitCount;
-            }
-        };
-
-        QList<QWidget*> candidateWidgetList = contentWidget->findChildren<QWidget*>();
-        candidateWidgetList.prepend(contentWidget);
-        for (QWidget* candidateWidget : candidateWidgetList)
-        {
-            if (candidateWidget == nullptr || candidateWidget->isWindow())
-            {
-                // 独立顶层窗口（下拉弹层、内嵌对话框等）不属于页面内容。
-                continue;
-            }
-            if (visiblePageOnly && !candidateWidget->isVisibleTo(contentWidget))
-            {
-                // “当前页面”只索引当前已揭示的 Tab/Stack 页面，不跨内部页签。
-                continue;
-            }
-
-            if (QLabel* labelWidget = qobject_cast<QLabel*>(candidateWidget))
-            {
-                tryAppendHit(labelWidget, labelWidget->text());
-            }
-            else if (QAbstractButton* buttonWidget = qobject_cast<QAbstractButton*>(candidateWidget))
-            {
-                tryAppendHit(buttonWidget, stripMnemonicMarkers(buttonWidget->text()));
-            }
-            else if (QGroupBox* groupBoxWidget = qobject_cast<QGroupBox*>(candidateWidget))
-            {
-                tryAppendHit(groupBoxWidget, groupBoxWidget->title());
-            }
-            else if (QTabWidget* tabWidget = qobject_cast<QTabWidget*>(candidateWidget))
-            {
-                const int firstTabIndex = visiblePageOnly ? tabWidget->currentIndex() : 0;
-                const int endTabIndex = visiblePageOnly
-                    ? std::min(tabWidget->count(), firstTabIndex + 1)
-                    : tabWidget->count();
-                for (int tabIndex = std::max(0, firstTabIndex);
-                     tabIndex < endTabIndex;
-                     ++tabIndex)
-                {
-                    tryAppendHit(
-                        tabWidget->widget(tabIndex),
-                        stripMnemonicMarkers(tabWidget->tabText(tabIndex)));
-                }
-            }
-            else if (QComboBox* comboBoxWidget = qobject_cast<QComboBox*>(candidateWidget))
-            {
-                if (comboBoxWidget->count() <= kComboBoxItemScanLimit)
-                {
-                    for (int itemIndex = 0; itemIndex < comboBoxWidget->count(); ++itemIndex)
-                    {
-                        tryAppendHit(comboBoxWidget, comboBoxWidget->itemText(itemIndex));
-                    }
-                }
-            }
-            else if (QLineEdit* lineEditWidget = qobject_cast<QLineEdit*>(candidateWidget))
-            {
-                tryAppendHit(lineEditWidget, lineEditWidget->placeholderText());
-            }
-            else if (QAbstractItemView* itemViewWidget = qobject_cast<QAbstractItemView*>(candidateWidget))
-            {
-                // 通用视图索引列头；表格视图还会追加可导航的单元格命中。
-                const bool hasHorizontalHeader =
-                    qobject_cast<QTableView*>(itemViewWidget) != nullptr
-                    || qobject_cast<QTreeView*>(itemViewWidget) != nullptr;
-                QAbstractItemModel* itemModel = itemViewWidget->model();
-                if (hasHorizontalHeader && itemModel != nullptr)
-                {
-                    const int columnCount = std::min(itemModel->columnCount(), kHeaderColumnScanLimit);
-                    for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
-                    {
-                        tryAppendHit(
-                            itemViewWidget,
-                            itemModel->headerData(columnIndex, Qt::Horizontal, Qt::DisplayRole).toString());
-                    }
-                }
-                tryAppendTableMatches(qobject_cast<QTableView*>(itemViewWidget));
-            }
-
-            if (dockHitCount >= kMaxHitsPerDock)
-            {
-                break;
-            }
-        }
-    }
-
     // collectDirectTableSearchHits：只扫描显式目标表格，供“当前表格”范围使用。
     void collectDirectTableSearchHits(
         QTableView* tableView,
@@ -801,6 +631,172 @@ namespace
 
 namespace ks::ui
 {
+    // Preserve widget/table discovery order and the existing per-dock hit cap.
+    // Each active table uses the same bounded model cursor as CurrentTable scope;
+    // one no-hit table can no longer block the complete dock callback.
+    struct GlobalUiSearchController::DockSearchCursor final : QObject
+    {
+        DockSearchCursor(ads::CDockWidget* dock, QString query, bool visibleOnly)
+            : m_dock(dock), m_content(dock ? dock->widget() : nullptr),
+              m_query(std::move(query)), m_visibleOnly(visibleOnly)
+        {
+            rebuild();
+        }
+        ads::CDockWidget* dock() const { return m_dock.data(); }
+        const QVector<UiSearchHit>& matches() const { return m_hits; }
+        bool advance()
+        {
+            if (!m_dock) { m_hits.clear(); return true; }
+            if (m_dock->widget() != m_content)
+            {
+                m_content = m_dock->widget();
+                m_restart = true;
+            }
+            if (!m_content) { m_hits.clear(); return true; }
+            for (const auto& scan : m_finishedScans)
+                if (!IsTableCellSearchCurrent(scan)) { m_restart = true; break; }
+            if (m_restart) rebuild();
+            QElapsedTimer budget;
+            budget.start();
+            int widgets = 0;
+            while (m_hits.size() < kMaxHitsPerDock)
+            {
+                if (m_tableScan)
+                {
+                    if (!ContinueTableCellSearch(m_tableScan)) return false;
+                    const bool current = IsTableCellSearchCurrent(m_tableScan);
+                    if (!current && m_activeTable && m_activeTable->model())
+                    {
+                        // A live table changed model while its cursor was in
+                        // flight. Rescan the dock rather than publish old cells.
+                        m_restart = true;
+                        return false;
+                    }
+                    appendTableMatches(CompletedTableCellSearchMatches(m_tableScan));
+                    // A table without a model is an empty candidate, not an
+                    // invalidation source that should restart the dock forever.
+                    if (current) m_finishedScans.push_back(m_tableScan);
+                    m_tableScan.reset(); m_activeTable.clear();
+                    if (budget.elapsed() >= 4) return false;
+                }
+                if (m_nextWidget >= m_candidates.size()) return true;
+                if (++widgets > 64 || budget.elapsed() >= 4) return false;
+                QWidget* candidate = m_candidates.at(m_nextWidget++).data();
+                if (!candidate || candidate->isWindow()) continue;
+                if (m_visibleOnly && !candidate->isVisibleTo(m_content.data())) continue;
+
+                if (auto* label = qobject_cast<QLabel*>(candidate)) appendHit(label, label->text());
+                else if (auto* button = qobject_cast<QAbstractButton*>(candidate))
+                    appendHit(button, stripMnemonicMarkers(button->text()));
+                else if (auto* group = qobject_cast<QGroupBox*>(candidate)) appendHit(group, group->title());
+                else if (auto* tabs = qobject_cast<QTabWidget*>(candidate))
+                {
+                    const int first = m_visibleOnly ? tabs->currentIndex() : 0;
+                    const int end = m_visibleOnly ? std::min(tabs->count(), first + 1) : tabs->count();
+                    for (int index = std::max(0, first); index < end; ++index)
+                        appendHit(tabs->widget(index), stripMnemonicMarkers(tabs->tabText(index)));
+                }
+                else if (auto* combo = qobject_cast<QComboBox*>(candidate))
+                {
+                    if (combo->count() <= kComboBoxItemScanLimit)
+                        for (int index = 0; index < combo->count(); ++index) appendHit(combo, combo->itemText(index));
+                }
+                else if (auto* edit = qobject_cast<QLineEdit*>(candidate)) appendHit(edit, edit->placeholderText());
+                else if (auto* view = qobject_cast<QAbstractItemView*>(candidate))
+                {
+                    QAbstractItemModel* model = view->model();
+                    if (model && (qobject_cast<QTableView*>(view) || qobject_cast<QTreeView*>(view)))
+                    {
+                        const int columns = std::min(model->columnCount(), kHeaderColumnScanLimit);
+                        for (int column = 0; column < columns; ++column)
+                            appendHit(view, model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
+                    }
+                    if (auto* table = qobject_cast<QTableView*>(view))
+                    {
+                        m_activeTable = table;
+                        m_tableScan = BeginTableCellSearch(table, m_query, kMaxHitsPerDock - m_hits.size());
+                        // Return before entering model data; each table gets its
+                        // own next event-loop slice even after widget discovery.
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+    private:
+        void rebuild()
+        {
+            m_restart = false; m_nextWidget = 0;
+            m_hits.clear(); m_dedup.clear(); m_candidates.clear();
+            m_tableScan.reset(); m_activeTable.clear(); m_finishedScans.clear();
+            for (const auto& connection : m_navigationConnections) QObject::disconnect(connection);
+            m_navigationConnections.clear();
+            if (!m_dock || !m_content) return;
+            m_title = normalizeUiText(m_dock->windowTitle());
+            auto candidates = m_content->findChildren<QWidget*>();
+            candidates.prepend(m_content.data());
+            for (QWidget* candidate : candidates)
+            {
+                m_candidates.push_back(candidate);
+                if (!m_visibleOnly) continue;
+                if (auto* tabs = qobject_cast<QTabWidget*>(candidate))
+                    m_navigationConnections.push_back(connect(tabs, &QTabWidget::currentChanged, this,
+                        [this]() { m_restart = true; }));
+                else if (auto* stack = qobject_cast<QStackedWidget*>(candidate))
+                    m_navigationConnections.push_back(connect(stack, &QStackedWidget::currentChanged, this,
+                        [this]() { m_restart = true; }));
+            }
+        }
+        void appendHit(QWidget* target, const QString& raw)
+        {
+            if (m_hits.size() >= kMaxHitsPerDock || !target) return;
+            const QString text = normalizeUiText(raw);
+            if (text.isEmpty()) return;
+            const int matchIndex = text.indexOf(m_query, 0, Qt::CaseInsensitive);
+            if (matchIndex < 0 || !isWidgetChainRevealable(target)) return;
+            const QString key = QString::number(reinterpret_cast<quintptr>(target),16)
+                + QLatin1Char('\x1f') + text;
+            if (m_dedup.contains(key)) return;
+            m_dedup.insert(key);
+            UiSearchHit hit;
+            hit.pageDockWidget = m_dock; hit.targetWidget = target;
+            hit.matchedText = text;
+            hit.pagePathText = buildPagePathText(m_dock.data(), m_title, target);
+            hit.matchRank = resolveMatchRank(text, m_query, matchIndex);
+            m_hits.push_back(std::move(hit));
+        }
+        void appendTableMatches(const QVector<TableCellSearchMatch>& matches)
+        {
+            for (const auto& match : matches)
+            {
+                if (!m_activeTable || m_hits.size() >= kMaxHitsPerDock) return;
+                UiSearchHit hit;
+                hit.pageDockWidget = m_dock; hit.targetWidget = m_activeTable.data();
+                hit.targetTableView = m_activeTable;
+                hit.targetModelIndex = match.modelIndex;
+                hit.matchedText = match.matchedText;
+                hit.pagePathText = buildPagePathText(m_dock.data(), m_title, m_activeTable.data())
+                    + QStringLiteral(" › ") + match.locationText;
+                hit.matchRank = match.matchRank;
+                m_hits.push_back(std::move(hit));
+            }
+        }
+        QPointer<ads::CDockWidget> m_dock;
+        QPointer<QWidget> m_content;
+        QString m_query, m_title;
+        bool m_visibleOnly = false, m_restart = false;
+        QVector<QPointer<QWidget>> m_candidates;
+        qsizetype m_nextWidget = 0;
+        QSet<QString> m_dedup;
+        QVector<UiSearchHit> m_hits;
+        QVector<QMetaObject::Connection> m_navigationConnections;
+        QPointer<QTableView> m_activeTable;
+        std::shared_ptr<TableCellSearchCursor> m_tableScan;
+        QVector<std::shared_ptr<TableCellSearchCursor>> m_finishedScans;
+    };
+
+
     GlobalUiSearchController::GlobalUiSearchController(
         QWidget* popupHostWindow,
         QLineEdit* searchInputEdit,
@@ -927,6 +923,7 @@ namespace ks::ui
         {
             ++m_searchGeneration;
             m_tableSearchCursor.reset();
+        m_dockSearchCursor.reset();
             m_searchInProgress = false;
         }
         if (!m_searchModeActive)
@@ -1006,6 +1003,7 @@ namespace ks::ui
         // 代数自增让仍在事件队列里的异步分片全部作废。
         ++m_searchGeneration;
         m_tableSearchCursor.reset();
+        m_dockSearchCursor.reset();
         m_searchInProgress = false;
         if (m_searchDebounceTimer != nullptr)
         {
@@ -1420,6 +1418,7 @@ namespace ks::ui
         m_pendingSearchDockList.clear();
         m_pendingDirectTableView.clear();
         m_tableSearchCursor.reset();
+        m_dockSearchCursor.reset();
         if (m_activeSearchScope == UiSearchScope::CurrentTable)
         {
             m_pendingDirectTableView = resolveCurrentTable();
@@ -1520,33 +1519,36 @@ namespace ks::ui
                 CompletedTableCellSearchMatches(m_tableSearchCursor),
                 m_currentHitList);
             m_tableSearchCursor.reset();
+        m_dockSearchCursor.reset();
             applySearchResultFilterToTable(
                 m_pendingDirectTableView.data());
         }
         else
         {
-            ads::CDockWidget* dockWidget =
-                m_pendingSearchDockList.at(m_nextSearchDockIndex).data();
-            if (dockWidget != nullptr)
+            QPointer<ads::CDockWidget> dock = m_pendingSearchDockList.at(m_nextSearchDockIndex);
+            if (!dock) m_dockSearchCursor.reset();
+            else
             {
-                updateSearchProgressUi(dockWidget->windowTitle());
-                // 懒加载补齐可能耗时数百毫秒，但只阻塞当前分片；
-                // 分片之间让出事件循环，进度条与输入保持响应。
-                if (m_dockPreparer)
+                if (!m_dockSearchCursor || m_dockSearchCursor->dock() != dock.data())
                 {
-                    m_dockPreparer(dockWidget);
+                    updateSearchProgressUi(dock->windowTitle());
+                    const QPointer<GlobalUiSearchController> alive(this);
+                    if (m_dockPreparer) m_dockPreparer(dock.data());
+                    if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                    if (dock && m_nestedDockPreparer) m_nestedDockPreparer(dock.data());
+                    if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                    if (dock) m_dockSearchCursor = std::make_shared<DockSearchCursor>(dock.data(),
+                        m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage);
                 }
-                if (m_nestedDockPreparer)
+                if (m_dockSearchCursor && !m_dockSearchCursor->advance())
                 {
-                    m_nestedDockPreparer(dockWidget);
+                    QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                    return;
                 }
-                collectDockSearchHits(
-                    dockWidget,
-                    m_activeQueryText,
-                    m_currentHitList,
-                    m_activeSearchScope == UiSearchScope::CurrentPage);
-                applySearchResultFiltersToDock(
-                    dockWidget,
+                if (m_dockSearchCursor)
+                    m_currentHitList += m_dockSearchCursor->matches();
+                m_dockSearchCursor.reset();
+                if (dock) applySearchResultFiltersToDock(dock.data(),
                     m_activeSearchScope == UiSearchScope::CurrentPage);
             }
         }
@@ -1563,6 +1565,14 @@ namespace ks::ui
 
     void GlobalUiSearchController::finishAsyncSearch()
     {
+        m_currentHitList.erase(std::remove_if(m_currentHitList.begin(), m_currentHitList.end(),
+            [](const UiSearchHit& hit) {
+                if (hit.targetWidget.isNull()) return true;
+                if (!hit.targetTableView) return false;
+                return !hit.targetModelIndex.isValid()
+                    || hit.targetModelIndex.model() != hit.targetTableView->model()
+                    || IsTableCellExcludedByBusinessFilter(hit.targetTableView.data(), hit.targetModelIndex);
+            }), m_currentHitList.end());
         m_searchInProgress = false;
         if (m_currentHitList.size() > kMaxTotalHits)
         {

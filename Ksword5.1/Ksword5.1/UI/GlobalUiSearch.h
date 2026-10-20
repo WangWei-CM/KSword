@@ -302,6 +302,8 @@ namespace ks::ui
         QPointer<QTableView> m_recentTableView;     // m_recentTableView：最近鼠标/键盘交互过的表格。
         QPointer<ads::CDockWidget> m_recentPageDockWidget; // m_recentPageDockWidget：最近交互控件所属 Dock。
         std::shared_ptr<TableCellSearchCursor> m_tableSearchCursor;
+        struct DockSearchCursor;
+        std::shared_ptr<DockSearchCursor> m_dockSearchCursor;
         QPointer<QTableView> m_pendingDirectTableView; // m_pendingDirectTableView：当前表格范围待扫描对象。
         QList<QPointer<QTableView>> m_filteredTableViewList; // m_filteredTableViewList：当前由通用搜索附加过滤的表格。
     };

@@ -1340,6 +1340,19 @@ namespace ks::ui
         return cursor->completed;
     }
 
+    bool IsTableCellSearchCurrent(const std::shared_ptr<TableCellSearchCursor>& cursor)
+    {
+        if (!cursor || !cursor->modelScan || cursor->cancelled || cursor->table.isNull()
+            || cursor->table->model() == nullptr || cursor->modelScan->model() == nullptr
+            || cursor->table->model() != cursor->modelScan->model()
+            || cursor->filterRevision != TableRowFilterIdentityRevision(cursor->table.data())) return false;
+        QVector<int> columns;
+        for (int column = 0; column < cursor->table->model()->columnCount(cursor->table->rootIndex()); ++column)
+            if (!cursor->table->isColumnHidden(column)
+                || isColumnHiddenByFreeze(cursor->table.data(), column)) columns.push_back(column);
+        return cursor->modelScan->isCurrent(columns, cursor->table->rootIndex());
+    }
+
     QVector<TableCellSearchMatch> CompletedTableCellSearchMatches(
         const std::shared_ptr<TableCellSearchCursor>& cursor)
     {

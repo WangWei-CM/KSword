@@ -42,6 +42,8 @@ namespace ks::ui
 
         QAbstractItemModel* model() const { return m_model.data(); }
         const QVector<Match>& matches() const { return m_matches; }
+        bool isCurrent(const QVector<int>& columns, const QModelIndex& root) const
+        { return !m_restart && columns == m_columns && root == m_root; }
         void invalidate() { m_restart = true; }
         void setRoot(const QModelIndex& root)
         { if (root != m_root) { m_root = root; m_restart = true; } }
