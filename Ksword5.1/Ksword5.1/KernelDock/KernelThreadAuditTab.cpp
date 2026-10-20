@@ -9,6 +9,7 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -32,6 +33,7 @@
 #include <QTableWidgetItem>
 #include <QThreadPool>
 #include <QTimer>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -243,7 +245,11 @@ void KernelThreadAuditTab::initializeUi()
 
     // 连接：刷新、筛选、选择、视图预设、表头菜单和行操作菜单。
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { requestRefresh(); });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { rebuildTable(); });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
     connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() { updateDetail(); });
     connect(m_overviewButton, &QPushButton::clicked, this, [this]() {
         applyColumnPreset(ViewPreset::Overview);
@@ -401,7 +407,10 @@ void KernelThreadAuditTab::applySnapshot(const Snapshot& snapshot)
 void KernelThreadAuditTab::rebuildTable()
 {
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_detailEditor);
-    const QString filterText = m_filterEdit->text().trimmed();
+    m_filterTimer->stop();
+    m_filterActive = false;
+    m_unfilteredSelection = QPersistentModelIndex();
+    ks::ui::ApplyTableRowFilter(m_table, {});
     m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
 
@@ -460,11 +469,6 @@ void KernelThreadAuditTab::rebuildTable()
             r0Value,
             protectionText
         };
-        if (!filterText.isEmpty() &&
-            !cellTexts.join(QLatin1Char(' ')).contains(filterText, Qt::CaseInsensitive))
-        {
-            continue;
-        }
 
         const int targetRow = m_table->rowCount();
         m_table->insertRow(targetRow);
@@ -472,6 +476,7 @@ void KernelThreadAuditTab::rebuildTable()
         {
             auto* item = new QTableWidgetItem(cellTexts.value(columnIndex));
             item->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            if (columnIndex == 0) item->setData(Qt::UserRole + 1, cellTexts.join(QLatin1Char(' ')));
             if (columnIndex == static_cast<int>(Column::ThreadId))
             {
                 item->setData(Qt::DisplayRole, static_cast<qulonglong>(row.threadId));
@@ -481,7 +486,51 @@ void KernelThreadAuditTab::rebuildTable()
     }
 
     m_table->setSortingEnabled(true);
-    m_table->resizeColumnsToContents();
+    if (!m_columnsSized && !m_rows.empty())
+    {
+        m_table->resizeColumnsToContents();
+        m_columnsSized = true;
+    }
+    applyFilter(false);
+}
+
+void KernelThreadAuditTab::applyFilter(const bool allowDeferred)
+{
+    const QPointer<KernelThreadAuditTab> guard(this);
+    if (allowDeferred && ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-thread-filter"),
+        {m_table}, [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString filterText = m_filterEdit->text().trimmed();
+    const bool active = !filterText.isEmpty();
+    if (active && !m_filterActive)
+    {
+        m_unfilteredSelection = m_table->currentIndex();
+        m_unfilteredHorizontalScroll = m_table->horizontalScrollBar()->value();
+        m_unfilteredVerticalScroll = m_table->verticalScrollBar()->value();
+    }
+    QSet<QPersistentModelIndex> excluded;
+    int firstVisible = -1;
+    for (int row = 0; row < m_table->rowCount(); ++row)
+    {
+        const auto* item = m_table->item(row, 0);
+        const bool visible = item != nullptr && (!active || item->data(Qt::UserRole + 1).toString().contains(filterText, Qt::CaseInsensitive));
+        if (!visible) excluded.insert(m_table->model()->index(row, 0));
+        else if (firstVisible < 0) firstVisible = row;
+    }
+    ks::ui::ApplyTableRowFilter(m_table, excluded);
+    if (!active && m_filterActive && m_unfilteredSelection.isValid())
+        m_table->setCurrentCell(m_unfilteredSelection.row(), m_unfilteredSelection.column());
+    else if (m_table->currentRow() < 0 || ks::ui::IsTableRowExcludedByFilter(m_table, m_table->currentRow()))
+    {
+        if (firstVisible >= 0) m_table->selectRow(firstVisible);
+        else { m_table->setCurrentItem(nullptr); m_table->clearSelection(); }
+    }
+    if (!active && m_filterActive)
+    {
+        m_table->horizontalScrollBar()->setValue(m_unfilteredHorizontalScroll);
+        m_table->verticalScrollBar()->setValue(m_unfilteredVerticalScroll);
+        m_unfilteredSelection = QPersistentModelIndex();
+    }
+    m_filterActive = active;
     updateDetail();
 }
 
@@ -837,6 +886,7 @@ int KernelThreadAuditTab::selectedSourceIndex() const
     {
         return -1;
     }
+    if (ks::ui::IsTableRowExcludedByFilter(m_table, selectedItems.first()->row())) return -1;
     const qulonglong sourceIndex = selectedItems.first()->data(Qt::UserRole).toULongLong();
     if (sourceIndex > static_cast<qulonglong>((std::numeric_limits<int>::max)()))
     {

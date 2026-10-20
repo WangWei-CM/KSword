@@ -6,6 +6,7 @@
 #include "../ArkDriverClient/ArkDriverTypes.h"
 
 #include <QWidget>
+#include <QPersistentModelIndex>
 
 #include <cstdint>
 #include <memory>
@@ -18,6 +19,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTableWidget;
+class QTimer;
 
 class KernelThreadAuditTab final : public QWidget
 {
@@ -191,6 +193,7 @@ private:
     void applyTranslatedText();
     void applySnapshot(const Snapshot& snapshot);
     void rebuildTable();
+    void applyFilter(bool allowDeferred = true);
     void updateDetail();
     void applyColumnPreset(ViewPreset preset);
     void updatePresetButtons();
@@ -222,6 +225,12 @@ private:
     QPushButton* m_overviewButton = nullptr;
     QPushButton* m_evidenceButton = nullptr;
     QLabel* m_statusLabel = nullptr;
+    QTimer* m_filterTimer = nullptr;
+    QPersistentModelIndex m_unfilteredSelection;
+    int m_unfilteredHorizontalScroll = 0;
+    int m_unfilteredVerticalScroll = 0;
+    bool m_filterActive = false;
+    bool m_columnsSized = false;
     QTableWidget* m_table = nullptr;
     ks::ui::StructuredFieldView* m_detailEditor = nullptr;
     std::vector<ThreadRow> m_rows;
