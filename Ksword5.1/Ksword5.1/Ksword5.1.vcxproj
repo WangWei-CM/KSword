@@ -839,6 +839,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="UI\ModelTextSearchCursor.h" />
     <ClInclude Include="UI\TableRowFilterSupport.h" />
     <ClInclude Include="UI\TableRowFilterIdentityState.h" />
     <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h" />

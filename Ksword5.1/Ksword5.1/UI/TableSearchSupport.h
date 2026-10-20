@@ -14,6 +14,7 @@
 #include <QPointer>
 #include <QString>
 #include <QVector>
+#include <memory>
 
 class QTableView;
 
@@ -61,6 +62,16 @@ namespace ks::ui
         QTableView* tableView,
         const QString& queryText,
         int maxHitCount);
+
+    // Resumable complete search: a hit limit never truncates a no-hit scan.
+    // All calls and destruction remain on the owning GUI thread. Dropping the
+    // shared cursor cancels pending work without entering the model again.
+    struct TableCellSearchCursor;
+    std::shared_ptr<TableCellSearchCursor> BeginTableCellSearch(
+        QTableView* tableView, const QString& queryText, int maxHitCount);
+    bool ContinueTableCellSearch(const std::shared_ptr<TableCellSearchCursor>& cursor);
+    QVector<TableCellSearchMatch> CompletedTableCellSearchMatches(
+        const std::shared_ptr<TableCellSearchCursor>& cursor);
 
     // RevealTableCellSearchMatch：滚动、选中并聚焦命中的表格单元格。
     void RevealTableCellSearchMatch(const TableCellSearchMatch& searchMatch);

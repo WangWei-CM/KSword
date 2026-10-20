@@ -1,4 +1,5 @@
 #include "TableSearchSupport.h"
+#include "ModelTextSearchCursor.h"
 #include "TableRowFilterSupport.h"
 #include "TableFreezeSupport.h"
 #include "./FlatButtonTheme.h"
@@ -1275,6 +1276,98 @@ namespace ks::ui
             }
         }
         return resultList;
+    }
+
+    struct TableCellSearchCursor
+    {
+        QPointer<QTableView> table;
+        std::unique_ptr<ModelTextSearchCursor> modelScan;
+        bool completed = false;
+        bool cancelled = false;
+        QString query;
+        quint64 filterRevision = 0;
+    };
+
+    std::shared_ptr<TableCellSearchCursor> BeginTableCellSearch(
+        QTableView* table, const QString& queryText, const int maxHits)
+    {
+        auto cursor = std::make_shared<TableCellSearchCursor>();
+        cursor->table = table;
+        cursor->query = queryText.trimmed();
+        if (table == nullptr || table->model() == nullptr || cursor->query.isEmpty() || maxHits <= 0)
+        {
+            cursor->completed = true;
+            cursor->cancelled = true;
+            return cursor;
+        }
+        QVector<int> columns;
+        for (int column = 0; column < table->model()->columnCount(table->rootIndex()); ++column)
+            if (!table->isColumnHidden(column) || isColumnHiddenByFreeze(table, column)) columns.push_back(column);
+        cursor->modelScan = std::make_unique<ModelTextSearchCursor>(
+            table->model(), cursor->query, columns, maxHits,
+            [guard = QPointer<QTableView>(table)](const QModelIndex& index) {
+                return guard && !IsTableCellExcludedByBusinessFilter(guard.data(), index);
+            }, table->rootIndex());
+        cursor->filterRevision = TableRowFilterIdentityRevision(table);
+        return cursor;
+    }
+
+    bool ContinueTableCellSearch(const std::shared_ptr<TableCellSearchCursor>& cursor)
+    {
+        if (!cursor || cursor->completed) return true;
+        if (cursor->table.isNull() || !cursor->modelScan || cursor->table->model() == nullptr
+            || cursor->modelScan->model() == nullptr
+            || cursor->table->model() != cursor->modelScan->model())
+        {
+            cursor->completed = cursor->cancelled = true;
+            return true;
+        }
+        QVector<int> columns;
+        for (int column = 0; column < cursor->table->model()->columnCount(cursor->table->rootIndex()); ++column)
+            if (!cursor->table->isColumnHidden(column)
+                || isColumnHiddenByFreeze(cursor->table.data(), column)) columns.push_back(column);
+        const quint64 filterRevision = TableRowFilterIdentityRevision(cursor->table.data());
+        if (filterRevision != cursor->filterRevision)
+        {
+            cursor->filterRevision = filterRevision;
+            cursor->modelScan->invalidate();
+        }
+        cursor->modelScan->setRoot(cursor->table->rootIndex());
+        cursor->modelScan->setColumns(columns);
+        const auto status = cursor->modelScan->advance();
+        cursor->completed = status != ModelTextSearchCursor::Status::Pending;
+        cursor->cancelled = status == ModelTextSearchCursor::Status::Cancelled;
+        return cursor->completed;
+    }
+
+    QVector<TableCellSearchMatch> CompletedTableCellSearchMatches(
+        const std::shared_ptr<TableCellSearchCursor>& cursor)
+    {
+        QVector<TableCellSearchMatch> results;
+        if (!cursor || !cursor->completed || cursor->cancelled || cursor->table.isNull()
+            || !cursor->modelScan || cursor->table->model() == nullptr || cursor->modelScan->model() == nullptr
+            || cursor->table->model() != cursor->modelScan->model()) return results;
+        QTableView* table = cursor->table.data();
+        const QString tableName = ResolveTableSearchDisplayName(table);
+        for (const auto& match : cursor->modelScan->matches())
+        {
+            if (!match.index.isValid() || IsTableCellExcludedByBusinessFilter(table, match.index)) continue;
+            const QString text = match.text.trimmed();
+            if (text.isEmpty()) continue;
+            const QString columnName = table->model()->headerData(
+                match.index.column(), Qt::Horizontal, Qt::DisplayRole).toString().trimmed();
+            TableCellSearchMatch result;
+            result.tableView = table;
+            result.modelIndex = match.index;
+            result.matchedText = text;
+            result.locationText = columnName.isEmpty()
+                ? ks::i18n::sourceText(QStringLiteral("%1，第 %2 行")).arg(tableName).arg(match.index.row() + 1)
+                : ks::i18n::sourceText(QStringLiteral("%1，第 %2 行，%3 列"))
+                    .arg(tableName).arg(match.index.row() + 1).arg(columnName);
+            result.matchRank = normalizedMatchRank(text, cursor->query);
+            results.push_back(result);
+        }
+        return results;
     }
 
     void RevealTableCellSearchMatch(const TableCellSearchMatch& searchMatch)

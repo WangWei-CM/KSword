@@ -22,6 +22,7 @@
 #include <QVector>
 
 #include <functional>
+#include <memory>
 
 class QCheckBox;
 class QEvent;
@@ -42,6 +43,7 @@ namespace ads
 
 namespace ks::ui
 {
+    struct TableCellSearchCursor;
     // UiSearchScope：三个搜索作用域；输入框 Tab/Shift+Tab 还会跨越独立的 CMD 模式。
     enum class UiSearchScope
     {
@@ -299,6 +301,7 @@ namespace ks::ui
         QPointer<QTableView> m_targetTableView;     // m_targetTableView：表格入口显式指定的目标表格。
         QPointer<QTableView> m_recentTableView;     // m_recentTableView：最近鼠标/键盘交互过的表格。
         QPointer<ads::CDockWidget> m_recentPageDockWidget; // m_recentPageDockWidget：最近交互控件所属 Dock。
+        std::shared_ptr<TableCellSearchCursor> m_tableSearchCursor;
         QPointer<QTableView> m_pendingDirectTableView; // m_pendingDirectTableView：当前表格范围待扫描对象。
         QList<QPointer<QTableView>> m_filteredTableViewList; // m_filteredTableViewList：当前由通用搜索附加过滤的表格。
     };

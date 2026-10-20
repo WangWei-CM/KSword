@@ -432,7 +432,7 @@ namespace
     // collectDirectTableSearchHits：只扫描显式目标表格，供“当前表格”范围使用。
     void collectDirectTableSearchHits(
         QTableView* tableView,
-        const QString& queryText,
+        const QVector<ks::ui::TableCellSearchMatch>& tableMatchList,
         QVector<ks::ui::UiSearchHit>& outHitList)
     {
         if (tableView == nullptr)
@@ -444,11 +444,6 @@ namespace
         const QString dockTitleText = dockWidget != nullptr
             ? normalizeUiText(dockWidget->windowTitle())
             : normalizeUiText(tableView->window()->windowTitle());
-        const QVector<ks::ui::TableCellSearchMatch> tableMatchList =
-            ks::ui::CollectTableCellSearchMatches(
-                tableView,
-                queryText,
-                kMaxTotalHits);
         for (const ks::ui::TableCellSearchMatch& tableMatch : tableMatchList)
         {
             ks::ui::UiSearchHit hitEntry;
@@ -928,6 +923,12 @@ namespace ks::ui
     void GlobalUiSearchController::handleQueryEdited(const QString& queryText)
     {
         m_pendingQueryText = queryText;
+        if (m_searchInProgress && queryText.trimmed() != m_activeQueryText)
+        {
+            ++m_searchGeneration;
+            m_tableSearchCursor.reset();
+            m_searchInProgress = false;
+        }
         if (!m_searchModeActive)
         {
             return;
@@ -1004,6 +1005,7 @@ namespace ks::ui
     {
         // 代数自增让仍在事件队列里的异步分片全部作废。
         ++m_searchGeneration;
+        m_tableSearchCursor.reset();
         m_searchInProgress = false;
         if (m_searchDebounceTimer != nullptr)
         {
@@ -1417,6 +1419,7 @@ namespace ks::ui
         m_currentHitList.clear();
         m_pendingSearchDockList.clear();
         m_pendingDirectTableView.clear();
+        m_tableSearchCursor.reset();
         if (m_activeSearchScope == UiSearchScope::CurrentTable)
         {
             m_pendingDirectTableView = resolveCurrentTable();
@@ -1505,10 +1508,18 @@ namespace ks::ui
 
         if (m_activeSearchScope == UiSearchScope::CurrentTable)
         {
+            if (!m_tableSearchCursor)
+                m_tableSearchCursor = BeginTableCellSearch(m_pendingDirectTableView.data(), m_activeQueryText, kMaxTotalHits);
+            if (!ContinueTableCellSearch(m_tableSearchCursor))
+            {
+                QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                return;
+            }
             collectDirectTableSearchHits(
                 m_pendingDirectTableView.data(),
-                m_activeQueryText,
+                CompletedTableCellSearchMatches(m_tableSearchCursor),
                 m_currentHitList);
+            m_tableSearchCursor.reset();
             applySearchResultFilterToTable(
                 m_pendingDirectTableView.data());
         }
