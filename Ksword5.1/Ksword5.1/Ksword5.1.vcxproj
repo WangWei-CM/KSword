@@ -996,6 +996,7 @@
     <ClInclude Include="UI\TypedSyntaxDocument.h" />
     <ClInclude Include="UI\TablePresentation.h" />
     <ClInclude Include="UI\ToolbarMetrics.h" />
+    <ClInclude Include="UI\LazyPageContent.h" />
     <ClInclude Include="UI\PageControlStyle.h" />
     <ClInclude Include="UI\PageTabMotion.h" />
     <ClInclude Include="UI\PerfTrace.h" />

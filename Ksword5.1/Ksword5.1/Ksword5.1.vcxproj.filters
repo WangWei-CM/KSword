@@ -3021,6 +3021,9 @@
     <ClInclude Include="UI\ToolbarMetrics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\LazyPageContent.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\PageControlStyle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
