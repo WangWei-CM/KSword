@@ -1002,23 +1002,11 @@ DdmaPage::ScratchDetection DdmaPage::detectScratchByOwnedFile(
     return detection;
 }
 
-DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForSelectedDisk()
+DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForDisk(
+    const ksword::ark::DdmaDiskEntry& entry)
 {
     ScratchDetection detection;
 
-    if (m_diskTable == nullptr)
-    {
-        detection.summaryText = QStringLiteral("界面尚未初始化。");
-        return detection;
-    }
-    const int row = m_diskTable->currentRow();
-    if (row < 0 || row >= static_cast<int>(m_diskCache.size()))
-    {
-        detection.summaryText = QStringLiteral("请先在上表里选中一块磁盘。");
-        return detection;
-    }
-
-    const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
     std::uint32_t driveIndex = 0U;
     if (entry.deviceName.empty() ||
         !physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex))
@@ -1043,8 +1031,6 @@ DdmaPage::ScratchDetection DdmaPage::detectScratchCandidatesForSelectedDisk()
         }
         // 失败原因要带到下一条路线的结论里，否则用户只会看到"用了间隙"，
         // 不知道更安全的那条为什么没走成。
-        m_scratchFilePath.clear();
-    if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
         const QString ownedFailure = owned.summaryText;
         ScratchDetection fallback = detectScratchCandidatesByGap(driveIndex, entry);
         fallback.summaryText = QStringLiteral("未能使用专属暂存文件（%1）改用未分配间隙：%2")
@@ -1415,83 +1401,95 @@ void DdmaPage::detectScratchFromUi()
         m_scratchDetectLabel->setText(QStringLiteral("正在侦测候选扇区..."));
     }
 
-    const ScratchDetection detection = detectScratchCandidatesForSelectedDisk();
-
-    if (!detection.ok)
+    const int row = m_diskTable != nullptr ? m_diskTable->currentRow() : -1;
+    if (row < 0 || row >= static_cast<int>(m_diskCache.size()))
     {
+        m_scratchDetectLabel->setText(QStringLiteral("请先在上表里选中一块磁盘。"));
+        return;
+    }
+    const auto entry = m_diskCache[static_cast<std::size_t>(row)];
+    struct ScratchResult
+    {
+        ScratchDetection detection;
+        ScratchContext context;
+        bool allZero = false;
+    };
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<ScratchResult>(this,
+        [entry]() {
+        ScratchResult result;
+        result.detection = detectScratchCandidatesForDisk(entry);
+        if (!result.detection.ok)
+        {
+            return result;
+        }
+        std::uint32_t driveIndex = 0U;
+        physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex);
+        const auto sectorSize = entry.sectorSize != 0U ? entry.sectorSize : 512U;
+        // Re-read context after discovery, in this same serialized transaction.
+        result.context = buildScratchContext(driveIndex,
+            result.detection.suggestedLba, sectorSize, result.allZero);
+        ks::ui::FieldNode sourceField;
+        sourceField.kind = ks::ui::FieldNode::Kind::Field;
+        sourceField.name = QStringLiteral("来源");
+        sourceField.value = !result.detection.scratchFilePath.isEmpty()
+            ? QStringLiteral("专属暂存文件 %1").arg(result.detection.scratchFilePath)
+            : result.detection.sourceText;
+        sourceField.translateValue = true;
+        result.context.fields.nodes.first().children.prepend(sourceField);
+        return result;
+    }, [this](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        const auto& detection = completed.value.detection;
+        if (!completed.failure.isEmpty() || !detection.ok)
+        {
+            m_scratchDetectLabel->setText(!completed.failure.isEmpty()
+                ? completed.failure : detection.summaryText);
+            m_scratchDetectLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            if (m_scratchContextView != nullptr)
+            {
+                m_scratchContextView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("侦测未得出候选。")));
+            }
+            if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
+            return;
+        }
+        const auto& context = completed.value.context;
+        const bool allZero = completed.value.allZero;
+
+        if (m_scratchBytesView != nullptr)
+        {
+            m_scratchBytesView->setPlainText(context.bytePreview);
+            m_scratchBytesView->setVisible(!context.bytePreview.isEmpty());
+        }
+        m_scratchFilePath = detection.scratchFilePath;
+        if (m_scratchContextView != nullptr)
+        {
+            m_scratchContextView->setDocument(context.fields);
+        }
         if (m_scratchDetectLabel != nullptr)
         {
             m_scratchDetectLabel->setText(detection.summaryText);
             m_scratchDetectLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+                QStringLiteral("color:%1;")
+                    .arg(allZero ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
         }
-        if (m_scratchContextView != nullptr)
+
+        // 只填 LBA。确认框保持不动——自动算出候选是为了省掉手算，
+        // 不是替用户承担"这块扇区可以被覆盖"这个判断。
+        if (m_scratchLbaEdit != nullptr)
         {
-            m_scratchContextView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("侦测未得出候选。")));
-            if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
+            m_scratchLbaEdit->setText(QString::number(detection.suggestedLba));
         }
-        return;
-    }
 
-    // 上下文一律现读现算，不复用侦测过程中的中间值：这一段是给用户"再确认一次"
-    // 用的，必须反映点下按钮那一刻磁盘上的真实状态。
-    std::uint32_t driveIndex = 0U;
-    std::uint32_t sectorSize = 512U;
-    if (m_diskTable != nullptr)
-    {
-        const int row = m_diskTable->currentRow();
-        if (row >= 0 && row < static_cast<int>(m_diskCache.size()))
-        {
-            const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
-            physicalDriveIndexFromDeviceName(entry.deviceName, driveIndex);
-            if (entry.sectorSize != 0U)
-            {
-                sectorSize = entry.sectorSize;
-            }
-        }
-    }
-
-    bool allZero = false;
-    ScratchContext context =
-        buildScratchContext(driveIndex, detection.suggestedLba, sectorSize, allZero);
-    ks::ui::FieldNode sourceField;
-    sourceField.kind = ks::ui::FieldNode::Kind::Field;
-    sourceField.name = QStringLiteral("来源");
-    sourceField.value = !detection.scratchFilePath.isEmpty()
-        ? QStringLiteral("专属暂存文件 %1").arg(detection.scratchFilePath) : detection.sourceText;
-    sourceField.translateValue = true;
-    context.fields.nodes.first().children.prepend(sourceField);
-
-    if (m_scratchBytesView != nullptr)
-    {
-        m_scratchBytesView->setPlainText(context.bytePreview);
-        m_scratchBytesView->setVisible(!context.bytePreview.isEmpty());
-    }
-    m_scratchFilePath = detection.scratchFilePath;
-    if (m_scratchContextView != nullptr)
-    {
-        m_scratchContextView->setDocument(context.fields);
-    }
-    if (m_scratchDetectLabel != nullptr)
-    {
-        m_scratchDetectLabel->setText(detection.summaryText);
-        m_scratchDetectLabel->setStyleSheet(
-            QStringLiteral("color:%1;")
-                .arg(allZero ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
-    }
-
-    // 只填 LBA。确认框保持不动——自动算出候选是为了省掉手算，
-    // 不是替用户承担"这块扇区可以被覆盖"这个判断。
-    if (m_scratchLbaEdit != nullptr)
-    {
-        m_scratchLbaEdit->setText(QString::number(detection.suggestedLba));
-    }
-
-    // 填完 LBA 立刻重探一次。没有这一步，磁盘表里留着的还是"未探测（需先填写
-    // 暂存 LBA）"的旧结果，用户接着点"启用选中磁盘"就会撞上一句
-    // "这块磁盘没有通过 DMA 探测"——而他刚刚才把 LBA 填好，那句话只会让人困惑。
-    // probeChannels 内部会还原选中行，并在末尾刷新会话状态。
-    probeChannels();
+        // 填完 LBA 立刻重探一次。没有这一步，磁盘表里留着的还是"未探测（需先填写
+        // 暂存 LBA）"的旧结果，用户接着点"启用选中磁盘"就会撞上一句
+        // "这块磁盘没有通过 DMA 探测"——而他刚刚才把 LBA 填好，那句话只会让人困惑。
+        // probeChannels 内部会还原选中行，并在末尾刷新会话状态。
+        probeChannels();
+    });
 }
 
 void DdmaPage::activateSelectedDisk()
@@ -1707,6 +1705,7 @@ void DdmaPage::refreshOperationState()
     const bool usable = ksword::memory_backend::isDdmaUsable(m_session, nullptr);
     const bool idle = !m_operationBusy;
     const bool selected = m_diskTable != nullptr && m_diskTable->currentRow() >= 0;
+    if (m_diskTable != nullptr) { m_diskTable->setEnabled(idle); }
     if (m_probeButton != nullptr) { m_probeButton->setEnabled(idle); }
     if (m_detectScratchButton != nullptr) { m_detectScratchButton->setEnabled(idle && selected); }
     if (m_activateButton != nullptr) { m_activateButton->setEnabled(idle && selected); }

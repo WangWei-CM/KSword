@@ -141,7 +141,7 @@ private:
     // - 处理：枚举卷 → 找出落在本磁盘上的 → 建文件并落盘 → 取 retrieval pointers
     //   拿 LCN → 用卷起始偏移与簇大小换算成磁盘 LBA。
     // - 返回：成功时 ok 为真且 scratchFilePath 非空；失败时 summaryText 说明原因。
-    ScratchDetection detectScratchByOwnedFile(
+    static ScratchDetection detectScratchByOwnedFile(
         std::uint32_t driveIndex,
         std::uint32_t sectorSize);
 
@@ -152,13 +152,13 @@ private:
     //   寄居处。所以分级交给 shared/evidence 的纯算术，本函数只负责 Win32 读取
     //   与"读回来是不是全零"这一条实测证据；
     // - 返回：侦测结果；失败时 summaryText 说明卡在哪一步。
-    ScratchDetection detectScratchCandidatesForSelectedDisk();
+    static ScratchDetection detectScratchCandidatesForDisk(const ksword::ark::DdmaDiskEntry& entry);
 
     // detectScratchCandidatesByGap：
     // - 作用：退路——当专属暂存文件那条路走不通时，改从分区表的未分配间隙里挑；
     // - 说明：分区表说"未分配"只代表没人登记，不代表那里是空的，所以分级与
     //   内容复核两道证据缺一不可。
-    ScratchDetection detectScratchCandidatesByGap(
+    static ScratchDetection detectScratchCandidatesByGap(
         std::uint32_t driveIndex,
         const ksword::ark::DdmaDiskEntry& entry);
 
@@ -173,7 +173,7 @@ private:
         ks::ui::FieldDocument fields;
         QString bytePreview; // Literal hex/ASCII view of disk bytes, not a property report.
     };
-    ScratchContext buildScratchContext(
+    static ScratchContext buildScratchContext(
         std::uint32_t driveIndex,
         std::uint64_t startLba,
         std::uint32_t sectorSize,
