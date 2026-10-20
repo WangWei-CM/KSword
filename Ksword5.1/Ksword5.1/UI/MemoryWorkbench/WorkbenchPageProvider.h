@@ -214,6 +214,10 @@ namespace ks::ui
             const std::vector<HexFetchRange>& ranges,
             std::uint64_t sourceRevision) override;
 
+        void RequestExplicitPages(const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision) override;
+        void UpdateViewportInterest(const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision) override;
+        void ProtectPages(const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision) override;
+
         // cancelAllInFlight：装配层在身份类变更（换目标/换范围/换通道，离开守卫通过
         // 之后）调用，让仍在读线程里跑着的任务、已经排队但还没开始跑的任务、甚至
         // 已经跑完但完成事件还卡在事件队列里的任务全部作废（D4）；凡是此刻还没
@@ -329,6 +333,10 @@ namespace ks::ui
         // InFlightJob：一次 RequestPages 调用对应的内部记账，定义在 .cpp。
         struct InFlightJob;
 
+        enum class ReadPurpose { Browse, ExplicitRetry, PostWrite, ExplicitRead };
+        void requestPages(const std::vector<HexFetchRange>& ranges,
+            std::uint64_t sourceRevision, ReadPurpose purpose);
+
         // PendingJobRecord：provider 自己维护的"已提交、尚未落地"的任务记账，键为
         // 票据（jobCounter_ 发出的 ticket）。只记两件事：canvasRevision（D5/D6 的
         // 画布代次守卫）与 ranges（丢弃时逐段 cancelPages 要用的粒度）。正常落地
@@ -350,6 +358,7 @@ namespace ks::ui
             // 它迟早会读到最新值）与"已经在读、可能已经读过这一页"（不能
             // 去重，否则写后重读会被吞掉，见文件头 N2 一节）。
             std::shared_ptr<std::atomic<bool>> started;
+            ReadPurpose purpose = ReadPurpose::Browse;
         };
 
         // PausedRangeRecord（N6 修复新增）：见文件头"Wave 3 第二轮...N6"一节。
@@ -386,7 +395,8 @@ namespace ks::ui
             std::uint64_t canvasRevision,
             std::uint64_t targetRevision,
             bool isDdmaChannel,
-            const std::vector<HexFetchRange>& ranges);
+            const std::vector<HexFetchRange>& ranges,
+            ReadPurpose purpose);
 
         // normalizeRangeForRetry：把一段可能未页对齐、也可能超过缓存容量的范围
         // 规整成页对齐、页数不超过 HexViewport::kMaxCachedPages 的范围，供
@@ -411,6 +421,8 @@ namespace ks::ui
         std::uint64_t generation_ = 0;
         // pendingJobs_（D4/D5/D6 新增）：见 PendingJobRecord 的说明。
         std::map<std::uint64_t, PendingJobRecord> pendingJobs_;
+        std::vector<HexFetchRange> viewportInterest_;
+        std::uint64_t viewportInterestCanvasRevision_ = 0;
         // scratchLatched_ / scratchLatchedForRevision_：DDMA 脏扇区闩锁与其所属
         // **目标**代次（决策 2 之前这里存的是画布代次，已按裁决改键）。
         bool scratchLatched_ = false;

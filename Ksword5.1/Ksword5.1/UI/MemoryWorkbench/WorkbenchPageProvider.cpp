@@ -139,8 +139,49 @@ namespace ks::ui
         gateInputsProvider_ = std::move(provider);
     }
 
+    void WorkbenchPageProvider::UpdateViewportInterest(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        viewportInterest_ = ranges;
+        viewportInterestCanvasRevision_ = sourceRevision;
+    }
+
+    void WorkbenchPageProvider::ProtectPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        for (auto& entry : pendingJobs_)
+        {
+            auto& record = entry.second;
+            if (record.canvasRevision != sourceRevision || record.purpose != ReadPurpose::Browse) continue;
+            bool overlap = false;
+            for (const auto& pending : record.ranges)
+                for (const auto& wanted : ranges)
+                {
+                    if (!pending.pageCount || !wanted.pageCount) continue;
+                    const auto left = pending.firstPageStart / ksword::memwb::HexViewport::kPageBytes;
+                    const auto right = wanted.firstPageStart / ksword::memwb::HexViewport::kPageBytes;
+                    overlap = overlap || (left <= right ? right - left < pending.pageCount
+                        : left - right < wanted.pageCount);
+                }
+            if (overlap) record.purpose = ReadPurpose::ExplicitRead;
+        }
+    }
+
     void WorkbenchPageProvider::RequestPages(
         const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        requestPages(ranges, sourceRevision, ReadPurpose::Browse);
+    }
+
+    void WorkbenchPageProvider::RequestExplicitPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision)
+    {
+        ProtectPages(ranges, sourceRevision);
+        requestPages(ranges, sourceRevision, ReadPurpose::ExplicitRead);
+    }
+
+    void WorkbenchPageProvider::requestPages(
+        const std::vector<HexFetchRange>& ranges, std::uint64_t sourceRevision, ReadPurpose purpose)
     {
         // 空请求没有任何事可做：不取会话、不判 Gate、不发起任何端口调用。
         if (ranges.empty())
@@ -249,7 +290,7 @@ namespace ks::ui
             return;
         }
 
-        submitJob(cap, canvasRevision, targetRevision, isDdmaChannel, clampedRanges);
+        submitJob(cap, canvasRevision, targetRevision, isDdmaChannel, clampedRanges, purpose);
     }
 
     void WorkbenchPageProvider::submitJob(
@@ -257,7 +298,8 @@ namespace ks::ui
         std::uint64_t canvasRevision,
         std::uint64_t targetRevision,
         bool isDdmaChannel,
-        const std::vector<HexFetchRange>& ranges)
+        const std::vector<HexFetchRange>& ranges,
+        ReadPurpose purpose)
     {
         // ---- 投给唯一的单线程读池 ----
         const std::uint64_t ticket = ++jobCounter_;
@@ -271,7 +313,7 @@ namespace ks::ui
         // 真正跑过"的任务时，只能靠这张表知道该对画布做什么。正常落地（无论
         // 新鲜/陈旧/失败/代次不符）都会在 onJobFinishedOnUiThread 开头把自己
         // 的条目摘掉。
-        pendingJobs_[ticket] = PendingJobRecord{canvasRevision, ranges, started};
+        pendingJobs_[ticket] = PendingJobRecord{canvasRevision, ranges, started, purpose};
 
         // D3：全新的一次提交，先把共享的"通道中毒"标志清回 false——保证这次
         // 请求总有机会真正问一次端口。如果它恰好排在一个"即将中毒"的任务
@@ -432,7 +474,7 @@ namespace ks::ui
             return;
         }
 
-        RequestPages(normalized, canvas_->sourceRevision());
+        requestPages(normalized, canvas_->sourceRevision(), ReadPurpose::ExplicitRetry);
     }
 
     void WorkbenchPageProvider::rereadByteRange(std::uint64_t address, std::uint64_t length)
@@ -481,7 +523,8 @@ namespace ks::ui
             for (const auto& entry : pendingJobs_)
             {
                 const PendingJobRecord& record = entry.second;
-                if (record.started && record.started->load())
+                // A replaceable browsing read must never satisfy protected post-write readback.
+                if (record.purpose != ReadPurpose::PostWrite || (record.started && record.started->load()))
                 {
                     // 已经开始跑：不提供去重覆盖，看下一条记账。
                     continue;
@@ -510,7 +553,7 @@ namespace ks::ui
             return;
         }
 
-        RequestPages({range}, canvas_->sourceRevision());
+        requestPages({range}, canvas_->sourceRevision(), ReadPurpose::PostWrite);
     }
 
     bool WorkbenchPageProvider::isSourceFresh(std::uint64_t capturedTargetRevision)

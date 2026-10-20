@@ -265,6 +265,15 @@ namespace ks::ui
     public:
         virtual ~IHexPageProvider() = default;
 
+        // Full resident interest, including cached/in-flight pages, before missing-page planning.
+        // Default adapters keep their existing synchronous/FIFO behavior.
+        virtual void UpdateViewportInterest(const std::vector<HexFetchRange>&, std::uint64_t) {}
+        // Promote pending browse ownership even when no missing-page request is produced.
+        virtual void ProtectPages(const std::vector<HexFetchRange>&, std::uint64_t) {}
+        // Explicit requests are protected; continuously visible decode/text windows are browsing.
+        virtual void RequestExplicitPages(const std::vector<HexFetchRange>& ranges, std::uint64_t revision)
+        { RequestPages(ranges, revision); }
+
         // RequestPages：请求读取一批页范围。
         // 传入：ranges 已被画布 MarkInFlight 的页范围（按距离由近到远）；
         //       sourceRevision 请求时的来源代次，回填时必须原样带回。
@@ -509,7 +518,9 @@ namespace ks::ui
         // 不使用仍停在旧地址的 caret，也不使用子页临时扩展的读取窗口。
         std::optional<AddressRange> visibleAddressRange() const;
         // Other address-backed views use the same cache/read pool without moving the HEX viewport.
-        void requestAddressRange(std::uint64_t first, std::uint64_t last);
+        enum class RangeReadPurpose { ExplicitRead, Browse };
+        void requestAddressRange(std::uint64_t first, std::uint64_t last,
+            RangeReadPurpose purpose = RangeReadPurpose::ExplicitRead);
         void setViewportReadEnabled(bool enabled);
         std::optional<AddressRange> addressSpaceRange() const;
 

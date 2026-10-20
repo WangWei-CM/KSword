@@ -383,13 +383,13 @@ namespace ks::ui
         return (canvas_ != nullptr) ? canvas_->caretAddress() : 0;
     }
 
-    void WorkbenchHexPane::requestBrowseWindow(std::uint64_t address, std::uint64_t length)
+    void WorkbenchHexPane::requestBrowseWindow(std::uint64_t address, std::uint64_t length, HexCanvas::RangeReadPurpose purpose)
     {
         if (!canvas_ || !length) return;
         const auto bounds = canvas_->addressSpaceRange();
         if (!bounds || address < bounds->first || address > bounds->last) return;
         const auto last = address + std::min<std::uint64_t>(length - 1, bounds->last - address);
-        canvas_->requestAddressRange(address, last);
+        canvas_->requestAddressRange(address, last, purpose);
         lastVisibleFirst_ = address;
         lastVisibleLast_ = last;
         hasVisibleRange_ = true;
