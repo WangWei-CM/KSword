@@ -16,6 +16,15 @@
 #include <QSignalBlocker>
 #include <QVariant>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kServiceDockNavigation[] = {
+    {"service.general", "", "", "常规", true},
+    {"service.logon", "", "", "登录", false},
+    {"service.recovery", "", "", "恢复", false},
+    {"service.dependencies", "", "", "依存关系", false},
+    {"service.audit", "", "", "审计", false}
+};
+}
 using namespace service_dock_detail;
 
 namespace
@@ -267,11 +276,11 @@ void ServiceDock::initializeDetailTabs()
     initializeDependencyTab();
     initializeAuditTab();
 
-    m_detailTabWidget->addTab(m_generalTabPage, createBlueIcon(":/Icon/process_details.svg"), QStringLiteral("常规"));
-    m_detailTabWidget->addTab(m_logonTabPage, createBlueIcon(":/Icon/process_main.svg"), QStringLiteral("登录"));
-    m_detailTabWidget->addTab(m_recoveryTabPage, createBlueIcon(":/Icon/process_refresh.svg"), QStringLiteral("恢复"));
-    m_detailTabWidget->addTab(m_dependencyTabPage, createBlueIcon(":/Icon/process_list.svg"), QStringLiteral("依存关系"));
-    m_detailTabWidget->addTab(m_auditTabPage, createBlueIcon(":/Icon/process_critical.svg"), QStringLiteral("审计"));
+    m_navigationTabs.add(kServiceDockNavigation[0], m_detailTabWidget, m_generalTabPage, createBlueIcon(":/Icon/process_details.svg"));
+    m_navigationTabs.add(kServiceDockNavigation[1], m_detailTabWidget, m_logonTabPage, createBlueIcon(":/Icon/process_main.svg"));
+    m_navigationTabs.add(kServiceDockNavigation[2], m_detailTabWidget, m_recoveryTabPage, createBlueIcon(":/Icon/process_refresh.svg"));
+    m_navigationTabs.add(kServiceDockNavigation[3], m_detailTabWidget, m_dependencyTabPage, createBlueIcon(":/Icon/process_list.svg"));
+    m_navigationTabs.add(kServiceDockNavigation[4], m_detailTabWidget, m_auditTabPage, createBlueIcon(":/Icon/process_critical.svg"));
 
     m_detailTabWidget->setTabToolTip(0, QStringLiteral("常规属性与启动类型配置"));
     m_detailTabWidget->setTabToolTip(1, QStringLiteral("服务登录身份与交互桌面配置"));
@@ -896,6 +905,20 @@ void ServiceDock::browseRecoveryProgramPath()
         m_recoveryProgramEdit->setText(QDir::toNativeSeparators(filePath));
     }
 }
+
+ks::ui::PageNavigationCatalog ServiceDock::navigationCatalog(const ServiceDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kServiceDockNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ServiceDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kServiceDockNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ServiceDock>(QStringLiteral("service")); }
 
 void ServiceDock::setDetailUnavailable(const DetailKind kind, const QString& text)
 {

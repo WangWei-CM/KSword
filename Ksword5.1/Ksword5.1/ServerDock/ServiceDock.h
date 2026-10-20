@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QStringList>
@@ -50,6 +51,9 @@ class ServiceDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ServiceDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：
     // - 初始化 ServiceDock UI；
     // - 绑定交互逻辑；
@@ -135,6 +139,8 @@ public:
     static int toServiceColumn(ServiceColumn column);
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // ServiceRecoverySettings：
     // - 作用：缓存“恢复”页可编辑配置；
     // - 供读取 Win32 配置、回填 UI、保存回服务配置三处复用。
