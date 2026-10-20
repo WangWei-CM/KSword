@@ -5,6 +5,14 @@
 #include "../UI/AsyncOperation.h"
 #include "../UI/ResultTableHost.h"
 #include "OtherDock.h"
+
+namespace {
+const ks::ui::PageNavigationTabDefinition kWindowNavigation[] = {
+    {"window.tab.list", "", "window.tab.list", "窗口列表", true},
+    {"window.tab.desktop", "", "window.tab.desktop", "桌面管理", false}
+};
+}
+
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -3915,9 +3923,7 @@ void OtherDock::initializeUi()
     // 默认把左侧窗口列表区域放宽，避免窗口标题被截断。
     m_mainSplitter->setStretchFactor(0, 4);
     m_mainSplitter->setStretchFactor(1, 1);
-    m_contentTabWidget->addTab(m_windowListPage, QStringLiteral("窗口列表"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_contentTabWidget, m_windowListPage, QStringLiteral("window.tab.list"), QStringLiteral("窗口列表"));
+    m_navigationTabs.add(kWindowNavigation[0], m_contentTabWidget, m_windowListPage);
 
     // 桌面管理页：列出窗口站与桌面，并补充 SessionId / SID / 权限状态等上下文。
     m_desktopPage = new QWidget(m_contentTabWidget);
@@ -3982,9 +3988,7 @@ void OtherDock::initializeUi()
     m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
     m_desktopPageLayout->addWidget(m_desktopTable, 1);
 
-    m_contentTabWidget->addTab(m_desktopPage, QStringLiteral("桌面管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_contentTabWidget, m_desktopPage, QStringLiteral("window.tab.desktop"), QStringLiteral("桌面管理"));
+    m_navigationTabs.add(kWindowNavigation[1], m_contentTabWidget, m_desktopPage);
 
     // 底部状态栏：展示总数、可见数、系统窗口数和当前选中信息。
     m_statusBar = new QStatusBar(this);
@@ -5015,3 +5019,17 @@ const OtherDock::WindowInfo* OtherDock::findInfoByHwnd(const quint64 hwndValue) 
     const auto found = m_windowState->byHwnd.constFind(hwndValue);
     return found == m_windowState->byHwnd.cend() ? nullptr : &m_windowState->records[found.value()];
 }
+
+ks::ui::PageNavigationCatalog OtherDock::navigationCatalog(const OtherDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kWindowNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* OtherDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kWindowNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<OtherDock>(QStringLiteral("window")); }

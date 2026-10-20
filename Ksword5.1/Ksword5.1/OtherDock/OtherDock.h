@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QSet>
@@ -57,6 +58,9 @@ class OtherDock : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const OtherDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：初始化窗口列表页与工具栏，并触发首轮枚举。
     // - 参数 parent：Qt 父控件。
@@ -124,6 +128,7 @@ protected:
 
 private:
     // ===================== UI 初始化 ======================
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
     void initializeUi();
     void initializeConnections();
     void applyViewMode();
