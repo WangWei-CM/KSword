@@ -3,6 +3,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/ResultTableHost.h"
 #include "OtherDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -36,6 +37,8 @@
 #include "../theme.h"
 #include "../UI/CodeEditorWidget.h"
 
+#include <QAbstractTableModel>
+#include <QItemSelectionModel>
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -71,6 +74,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QScreen>
 #include <QSlider>
 #include "../UI/ThemedSlider.h"
@@ -1150,6 +1154,164 @@ namespace
 // - 独立非模态窗口属性对话框；
 // - 提供标签页化属性查看与部分实时修改能力。
 // ============================================================
+template<class Value, class... Args>
+static std::shared_ptr<Value> makeWindowBackgroundValue(Args&&... args)
+{
+    return std::shared_ptr<Value>(new Value(std::forward<Args>(args)...), [](Value* value) {
+        // Large canonical/visual containers can retire from close, cancellation,
+        // a menu replacement or a dropped delivery; never destroy them on GUI.
+        QThreadPool::globalInstance()->start(QRunnable::create([value] { delete value; }));
+    });
+}
+
+namespace
+{
+    struct WindowMessageRecord
+    {
+        QString channelText;
+        quint64 hwndValue = 0;
+        quint64 messageId = 0;
+        quint64 wParamValue = 0;
+        quint64 lParamValue = 0;
+        quint64 resultValue = 0;
+        QString extraText;
+        QDateTime capturedAt;
+        quint64 sequence = 0;
+    };
+    struct WindowMessageArchive
+    {
+        std::mutex mutex;
+        std::deque<std::shared_ptr<const WindowMessageRecord>> rows;
+        quint64 nextSequence = 1;
+        quint64 revision = 1;
+        quint64 clearGeneration = 1;
+        quint64 captured = 0;
+        quint64 dropped = 0;
+        size_t limit = 5000;
+    };
+    struct WindowMessagePort
+    {
+        std::shared_ptr<WindowMessageArchive> archive;
+        quint64 targetHwnd = 0;
+        bool active = true; // protected by archive->mutex, including stop/clear boundaries
+    };
+    struct WindowMessageDisplayRow
+    {
+        quint64 sequence = 0;
+        std::array<QString, 8> cells;
+    };
+    struct WindowMessageSnapshot
+    {
+        std::vector<std::shared_ptr<const WindowMessageDisplayRow>> rows;
+        quint64 revision = 0;
+        quint64 clearGeneration = 0;
+    };
+    static void recordWindowMessage(const std::shared_ptr<WindowMessagePort>& port, WindowMessageRecord record)
+    {
+        if (!port || record.hwndValue != port->targetHwnd) return;
+        // Capture time belongs to the event, never to a later GUI flush.
+        record.capturedAt = QDateTime::currentDateTime();
+        auto value = std::make_shared<WindowMessageRecord>(std::move(record));
+        std::lock_guard<std::mutex> lock(port->archive->mutex);
+        if (!port->active) return;
+        auto& archive = *port->archive;
+        value->sequence = archive.nextSequence++;
+        ++archive.captured;
+        while (archive.rows.size() >= archive.limit)
+        {
+            archive.rows.pop_front();
+            ++archive.dropped;
+        }
+        archive.rows.push_back(std::move(value));
+        ++archive.revision;
+    }
+    static WindowMessageSnapshot prepareWindowMessages(
+        const std::shared_ptr<WindowMessageArchive>& archive,
+        const std::shared_ptr<const WindowMessageSnapshot>& previous,
+        const ks::ui::AsyncOperationToken* token)
+    {
+        WindowMessageSnapshot result;
+        std::vector<std::shared_ptr<const WindowMessageRecord>> records;
+        {
+            std::lock_guard<std::mutex> lock(archive->mutex);
+            records.assign(archive->rows.begin(), archive->rows.end());
+            result.revision = archive->revision;
+            result.clearGeneration = archive->clearGeneration;
+        }
+        result.rows.reserve(records.size());
+        const quint64 first = previous && !previous->rows.empty() ? previous->rows.front()->sequence : 0;
+        for (const auto& record : records)
+        {
+            if (token && token->isCanceled()) return {};
+            const quint64 offset = record->sequence - first;
+            if (previous && first && record->sequence >= first && offset < previous->rows.size() &&
+                previous->rows[static_cast<size_t>(offset)]->sequence == record->sequence)
+            {
+                result.rows.push_back(previous->rows[static_cast<size_t>(offset)]);
+                continue;
+            }
+            auto row = std::make_shared<WindowMessageDisplayRow>();
+            row->sequence = record->sequence;
+            row->cells = { record->capturedAt.toString(QStringLiteral("HH:mm:ss.zzz")),
+                record->channelText, hwndToText(record->hwndValue),
+                QStringLiteral("0x%1").arg(record->messageId, 4, 16, QChar('0')).toUpper(),
+                record->channelText.contains(QStringLiteral("WinEvent")) ? winEventName(static_cast<DWORD>(record->messageId))
+                    : windowMessageName(static_cast<UINT>(record->messageId)),
+                toHexText64(record->wParamValue), toHexText64(record->lParamValue),
+                record->extraText.trimmed().isEmpty() ? toHexText64(record->resultValue)
+                    : QStringLiteral("%1 | %2").arg(toHexText64(record->resultValue), record->extraText) };
+            result.rows.push_back(std::move(row));
+        }
+        return result;
+    }
+    class WindowMessageModel final : public QAbstractTableModel
+    {
+    public:
+        explicit WindowMessageModel(QObject* parent) : QAbstractTableModel(parent) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+            { return parent.isValid() || !snapshot ? 0 : static_cast<int>(snapshot->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 8; }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 || index.column() >= 8) return {};
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole)
+                return snapshot->rows[static_cast<size_t>(index.row())]->cells[static_cast<size_t>(index.column())];
+            if (role == Qt::UserRole) return QVariant::fromValue(snapshot->rows[static_cast<size_t>(index.row())]->sequence);
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size() ||
+                (role != Qt::DisplayRole && role != Qt::EditRole)) return false;
+            if (headers[section] == value.toString()) return true;
+            headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
+        }
+        void publish(std::shared_ptr<const WindowMessageSnapshot> value)
+        {
+            const QPointer<WindowMessageModel> alive(this);
+            beginResetModel();
+            if (!alive) return;
+            snapshot = std::move(value);
+            endResetModel();
+        }
+        quint64 sequenceAt(int row) const
+            { return row < 0 || row >= rowCount() ? 0 : snapshot->rows[static_cast<size_t>(row)]->sequence; }
+        int rowForSequence(quint64 sequence) const
+        {
+            if (!snapshot || snapshot->rows.empty() || sequence < snapshot->rows.front()->sequence) return -1;
+            const auto offset = sequence - snapshot->rows.front()->sequence;
+            return offset < snapshot->rows.size() && snapshot->rows[static_cast<size_t>(offset)]->sequence == sequence ? static_cast<int>(offset) : -1;
+        }
+        QStringList headers;
+        std::shared_ptr<const WindowMessageSnapshot> snapshot;
+    };
+}
+
 class WindowDetailDialog final : public QDialog
 {
 public:
@@ -1174,6 +1336,11 @@ public:
         initializeUi();
         setStyleSheet(ks::ui::BuildDetailDialogChromeStyle());
         ks::ui::applyResponsiveWindowGeometry(this, parent, QSize(1000, 820), QSize(640, 480));
+        m_messageSnapshotOperation = new ks::ui::AsyncOperation(this);
+        m_messageFlushTimer = new QTimer(this);
+        m_messageFlushTimer->setInterval(40);
+        connect(m_messageFlushTimer, &QTimer::timeout, this, [this] { flushDeferredMessageRows(); });
+        m_messageFlushTimer->start();
         refreshRuntimeInfo();
         startMessageMonitor();
     }
@@ -1182,6 +1349,7 @@ public:
     // - 作用：确保关闭详情窗时释放消息钩子句柄，避免系统残留回调。
     ~WindowDetailDialog() override
     {
+        if (m_messageSnapshotOperation) m_messageSnapshotOperation->close();
         stopMessageMonitor();
     }
 
@@ -1196,19 +1364,6 @@ private:
         QString styleDescriptionText;     // styleDescriptionText：样式说明（用于提示）。
         quint64 styleMaskValue = 0;       // styleMaskValue：Win32 样式位掩码。
         QCheckBox* checkBox = nullptr;    // checkBox：与样式位绑定的勾选控件。
-    };
-
-    // PendingMessageRow：右键菜单打开期间暂存的消息行。
-    // 消息流不能使用 latest-wins 丢弃中间事件，因此先保存在对话框队列中。
-    struct PendingMessageRow
-    {
-        QString channelText;
-        quint64 hwndValue = 0;
-        quint64 messageId = 0;
-        quint64 wParamValue = 0;
-        quint64 lParamValue = 0;
-        quint64 resultValue = 0;
-        QString extraText;
     };
 
     // appendStyleCheckBoxGroup：
@@ -1827,6 +1982,16 @@ private:
         m_messageMaxRowsSpin->setRange(200, 50000);
         m_messageMaxRowsSpin->setValue(5000);
         m_messageMaxRowsSpin->setStyleSheet(blueInputStyle());
+        connect(m_messageMaxRowsSpin, &QSpinBox::valueChanged, this, [this](int limit) {
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            m_messageArchive->limit = static_cast<size_t>(limit);
+            while (m_messageArchive->rows.size() > m_messageArchive->limit)
+            {
+                m_messageArchive->rows.pop_front();
+                ++m_messageArchive->dropped;
+            }
+            ++m_messageArchive->revision;
+        });
         monitorControlLayout->addWidget(m_messageMaxRowsSpin, 0);
 
         m_messageModeLabel = new QLabel(QStringLiteral("采集模式：未启动"), hookPage);
@@ -1848,11 +2013,12 @@ private:
         hookLayout->addLayout(monitorStatusLayout);
 
         // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
-        m_messageTable = new ks::ui::VisibleTableWidget(hookPage);
+        m_messageTable = new ks::ui::TableActionTableView(hookPage);
+        m_messageModel = new WindowMessageModel(m_messageTable);
+        m_messageTable->setProperty("ks_i18n_preserve_model_data", true);
         // 消息流的顺序由采集器记录，已有启停/清理动作；保留复制导出而非通用快照对比。
         ks::ui::SetTableActionBarMode(m_messageTable, ks::ui::TableActionBarMode::Compact);
-        m_messageTable->setColumnCount(8);
-        m_messageTable->setHorizontalHeaderLabels(QStringList{
+        m_messageModel->headers = QStringList{
             QStringLiteral("时间"),
             QStringLiteral("通道"),
             QStringLiteral("HWND"),
@@ -1861,7 +2027,14 @@ private:
             QStringLiteral("WPARAM"),
             QStringLiteral("LPARAM"),
             QStringLiteral("结果/附加")
-        });
+        };
+        ks::ui::ResultTableCapabilities messageCapabilities;
+        messageCapabilities.actionBar = ks::ui::TableActionBarMode::Compact;
+        messageCapabilities.headerClickSorting = false;
+        ks::ui::ResultTableHost::ensure(m_messageTable)->bindModel(m_messageModel,
+            {{0, QStringLiteral("time")}, {1, QStringLiteral("channel")}, {2, QStringLiteral("hwnd")},
+             {3, QStringLiteral("message_id")}, {4, QStringLiteral("message_name")}, {5, QStringLiteral("wparam")},
+             {6, QStringLiteral("lparam")}, {7, QStringLiteral("result")}}, messageCapabilities);
         m_messageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_messageTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
         m_messageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1876,7 +2049,7 @@ private:
         hookLayout->addWidget(hookSplitter, 1);
 
         // 表格右键：支持复制整行，方便与日志或抓包结果做对比分析。
-        connect(m_messageTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        connect(m_messageTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
             if (m_messageTable == nullptr)
             {
                 return;
@@ -1894,19 +2067,13 @@ private:
             }
 
             QStringList rowTexts;
-            const QList<QTableWidgetSelectionRange> selectionRanges = m_messageTable->selectedRanges();
-            for (const QTableWidgetSelectionRange& range : selectionRanges)
+            const auto rows = m_messageTable->selectionModel()->selectedRows();
+            for (const auto& index : rows)
             {
-                for (int row = range.topRow(); row <= range.bottomRow(); ++row)
-                {
-                    QStringList singleRow;
-                    for (int col = 0; col < m_messageTable->columnCount(); ++col)
-                    {
-                        QTableWidgetItem* item = m_messageTable->item(row, col);
-                        singleRow << (item == nullptr ? QString() : item->text());
-                    }
-                    rowTexts << singleRow.join('\t');
-                }
+                QStringList singleRow;
+                for (int col = 0; col < m_messageModel->columnCount(); ++col)
+                    singleRow << m_messageModel->index(index.row(), col).data().toString();
+                rowTexts << singleRow.join('\t');
             }
             if (!rowTexts.isEmpty())
             {
@@ -2326,17 +2493,22 @@ private:
     // 清空消息表：重置可视列表与计数器。
     void clearMessageTable()
     {
-        m_deferredMessageRows.clear();
-        if (m_messageTable != nullptr)
+        if (m_messageSnapshotOperation) m_messageSnapshotOperation->cancel();
+        auto retired = makeWindowBackgroundValue<std::deque<std::shared_ptr<const WindowMessageRecord>>>();
         {
-            m_messageTable->setRowCount(0);
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            retired->swap(m_messageArchive->rows);
+            m_messageArchive->captured = m_messageArchive->dropped = 0;
+            ++m_messageArchive->clearGeneration;
+            ++m_messageArchive->revision;
         }
-        m_capturedMessageCount = 0;
-        m_droppedMessageCount = 0;
-        if (m_messageCountLabel != nullptr)
-        {
-            m_messageCountLabel->setText(QStringLiteral("已记录: 0, 丢弃: 0"));
-        }
+        m_messagePrepared.reset();
+        m_messagePublishedRevision = 0;
+        const QPointer<WindowDetailDialog> alive(this);
+        if (m_messageModel) m_messageModel->publish({});
+        if (!alive) return;
+        m_capturedMessageCount = m_droppedMessageCount = 0;
+        updateMessageMonitorUiState();
     }
 
     // 启动消息监控：
@@ -2356,6 +2528,9 @@ private:
             return;
         }
 
+        m_messagePort = std::make_shared<WindowMessagePort>();
+        m_messagePort->archive = m_messageArchive;
+        m_messagePort->targetHwnd = m_info.hwndValue;
         bool monitorStarted = false;
         m_messageMonitorMode = QStringLiteral("未启动");
         m_winEventHookSnapshot = nullptr;
@@ -2433,6 +2608,11 @@ private:
     void stopMessageMonitor()
     {
         const bool wasRunning = m_messageMonitorRunning.exchange(false);
+        if (m_messagePort)
+        {
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            m_messagePort->active = false;
+        }
 
         if (m_callWndHook != nullptr)
         {
@@ -2510,137 +2690,95 @@ private:
         }
     }
 
-    // appendMessageRow 作用：
-    // - 仅在 UI 线程向表格追加一条消息记录；
-    // - 当超过最大行数时删除最早行，并累计丢弃计数。
-    void appendMessageRow(
-        const QString& channelText,
-        const quint64 hwndValue,
-        const quint64 messageId,
-        const quint64 wParamValue,
-        const quint64 lParamValue,
-        const quint64 resultValue,
-        const QString& extraText)
-    {
-        if (m_messageTable == nullptr)
-        {
-            return;
-        }
-
-        if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_messageTable}))
-        {
-            const int maxDeferredRows =
-                (m_messageMaxRowsSpin == nullptr) ? 5000 : m_messageMaxRowsSpin->value();
-            while (static_cast<int>(m_deferredMessageRows.size()) >= maxDeferredRows)
-            {
-                m_deferredMessageRows.pop_front();
-                ++m_droppedMessageCount;
-            }
-            m_deferredMessageRows.push_back({
-                channelText,
-                hwndValue,
-                messageId,
-                wParamValue,
-                lParamValue,
-                resultValue,
-                extraText
-            });
-
-            const QPointer<WindowDetailDialog> safeThis(this);
-            ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                this,
-                QStringLiteral("window-message-stream-flush"),
-                {m_messageTable},
-                [safeThis]()
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->flushDeferredMessageRows();
-                    }
-                });
-            updateMessageMonitorUiState();
-            return;
-        }
-
-        const int maxRows = (m_messageMaxRowsSpin == nullptr) ? 5000 : m_messageMaxRowsSpin->value();
-        while (m_messageTable->rowCount() >= maxRows)
-        {
-            m_messageTable->removeRow(0);
-            ++m_droppedMessageCount;
-        }
-
-        const int rowIndex = m_messageTable->rowCount();
-        m_messageTable->insertRow(rowIndex);
-
-        const QString messageNameText = (channelText.contains(QStringLiteral("WinEvent")))
-            ? winEventName(static_cast<DWORD>(messageId))
-            : windowMessageName(static_cast<UINT>(messageId));
-
-        const QString messageIdText = channelText.contains(QStringLiteral("WinEvent"))
-            ? QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper()
-            : QStringLiteral("0x%1").arg(static_cast<qulonglong>(messageId), 4, 16, QChar('0')).toUpper();
-
-        const QString resultColumnText = extraText.trimmed().isEmpty()
-            ? toHexText64(resultValue)
-            : QStringLiteral("%1 | %2").arg(toHexText64(resultValue), extraText);
-
-        m_messageTable->setItem(rowIndex, 0, new QTableWidgetItem(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))));
-        m_messageTable->setItem(rowIndex, 1, new QTableWidgetItem(channelText));
-        m_messageTable->setItem(rowIndex, 2, new QTableWidgetItem(hwndToText(hwndValue)));
-        m_messageTable->setItem(rowIndex, 3, new QTableWidgetItem(messageIdText));
-        m_messageTable->setItem(rowIndex, 4, new QTableWidgetItem(messageNameText));
-        m_messageTable->setItem(rowIndex, 5, new QTableWidgetItem(toHexText64(wParamValue)));
-        m_messageTable->setItem(rowIndex, 6, new QTableWidgetItem(toHexText64(lParamValue)));
-        m_messageTable->setItem(rowIndex, 7, new QTableWidgetItem(resultColumnText));
-
-        ++m_capturedMessageCount;
-        updateMessageMonitorUiState();
-
-        if (m_messageAutoScrollCheck != nullptr && m_messageAutoScrollCheck->isChecked())
-        {
-            m_messageTable->scrollToBottom();
-        }
-    }
-
-    // flushDeferredMessageRows 作用：
-    // - 菜单关闭后按原始顺序补写全部暂存消息；
-    // - 若另一个菜单已打开，继续保留队列并等待下一次安全回投。
+    // Producers only append to the bounded value archive. The fixed poll never
+    // creates per-event Qt tasks; invisible pages retain events without projection.
     void flushDeferredMessageRows()
     {
-        if (m_deferredMessageRows.empty())
+        quint64 revision = 0;
         {
-            return;
+            std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+            revision = m_messageArchive->revision;
+            m_capturedMessageCount = m_messageArchive->captured;
+            m_droppedMessageCount = m_messageArchive->dropped;
         }
-
-        const QPointer<WindowDetailDialog> safeThis(this);
-        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("window-message-stream-flush"),
-            {m_messageTable},
-            [safeThis]()
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->flushDeferredMessageRows();
-                }
-            }))
+        updateMessageMonitorUiState();
+        if (!m_messageTable->isVisible() || revision == m_messagePublishedRevision ||
+            !m_messageSnapshotOperation || m_messageSnapshotOperation->isBusy()) return;
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+            QStringLiteral("window-message-stream-flush"), {m_messageTable},
+            [this] { flushDeferredMessageRows(); })) return;
+        struct Request
         {
-            return;
-        }
-
-        std::deque<PendingMessageRow> pendingRows;
-        pendingRows.swap(m_deferredMessageRows);
-        for (const PendingMessageRow& pendingRow : pendingRows)
-        {
-            appendMessageRow(
-                pendingRow.channelText,
-                pendingRow.hwndValue,
-                pendingRow.messageId,
-                pendingRow.wParamValue,
-                pendingRow.lParamValue,
-                pendingRow.resultValue,
-                pendingRow.extraText);
-        }
+            std::shared_ptr<WindowMessageArchive> archive;
+            std::shared_ptr<const WindowMessageSnapshot> previous;
+        };
+        m_messageSnapshotOperation->submit<Request, std::shared_ptr<const WindowMessageSnapshot>>(
+            {m_messageArchive, m_messagePrepared},
+            [](const Request& value, const ks::ui::AsyncOperationToken& token) {
+                return makeWindowBackgroundValue<WindowMessageSnapshot>(prepareWindowMessages(value.archive, value.previous, &token));
+            },
+            [this](const std::shared_ptr<const WindowMessageSnapshot>& snapshot, std::uint64_t generation) {
+                const auto commit = [this, snapshot, generation] {
+                    if (!m_messageSnapshotOperation->isCurrent(generation)) return;
+                    bool current = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_messageArchive->mutex);
+                        current = snapshot->clearGeneration == m_messageArchive->clearGeneration;
+                    }
+                    if (current && m_messageTable->isVisible())
+                    {
+                        // Preserve selection using sequence ranges, not one index
+                        // for each of up to 50000 selected rows.
+                        std::vector<std::pair<quint64, quint64>> ranges;
+                        for (const auto& range : m_messageTable->selectionModel()->selection())
+                            ranges.emplace_back(m_messageModel->sequenceAt(range.top()), m_messageModel->sequenceAt(range.bottom()));
+                        const auto currentIndex = m_messageTable->currentIndex();
+                        const quint64 currentSequence = m_messageModel->sequenceAt(currentIndex.row());
+                        const int currentColumn = currentIndex.column();
+                        const auto topIndex = m_messageTable->indexAt(QPoint(0, 0));
+                        const quint64 topSequence = m_messageModel->sequenceAt(topIndex.row());
+                        const int topOffset = topIndex.isValid() ? m_messageTable->visualRect(topIndex).top() : 0;
+                        const QPointer<WindowDetailDialog> alive(this);
+                        m_messagePrepared = snapshot;
+                        m_messageModel->publish(snapshot);
+                        if (!alive) return;
+                        QItemSelection selection;
+                        if (!snapshot->rows.empty())
+                        {
+                            const quint64 first = snapshot->rows.front()->sequence, last = snapshot->rows.back()->sequence;
+                            for (const auto& range : ranges)
+                            {
+                                const quint64 from = std::max(first, range.first), to = std::min(last, range.second);
+                                if (from <= to)
+                                    selection.select(m_messageModel->index(m_messageModel->rowForSequence(from), 0),
+                                        m_messageModel->index(m_messageModel->rowForSequence(to), 7));
+                            }
+                        }
+                        m_messageTable->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                        if (!alive) return;
+                        const int currentRow = m_messageModel->rowForSequence(currentSequence);
+                        if (currentRow >= 0) m_messageTable->selectionModel()->setCurrentIndex(
+                            m_messageModel->index(currentRow, std::max(0, currentColumn)), QItemSelectionModel::NoUpdate);
+                        if (!alive) return;
+                        m_messagePublishedRevision = snapshot->revision;
+                        if (m_messageAutoScrollCheck->isChecked()) m_messageTable->scrollToBottom();
+                        else if (!snapshot->rows.empty())
+                        {
+                            const int top = std::max(0, m_messageModel->rowForSequence(topSequence));
+                            m_messageTable->scrollTo(m_messageModel->index(top, 0), QAbstractItemView::PositionAtTop);
+                            if (m_messageTable->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+                                m_messageTable->verticalScrollBar()->setValue(m_messageTable->verticalScrollBar()->value() - topOffset);
+                        }
+                        if (!alive) return;
+                    }
+                    m_messageSnapshotOperation->completeDeferred(generation);
+                };
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("window-message-stream-publish"), {m_messageTable}, commit)) return false;
+                commit();
+                return true;
+            },
+            [](std::exception_ptr) {});
     }
 
     // threadHookDispatch 作用：
@@ -2655,49 +2793,18 @@ private:
         const LPARAM lParamValue,
         const LRESULT resultValue)
     {
-        std::vector<WindowDetailDialog*> dialogList;
+        std::vector<std::shared_ptr<WindowMessagePort>> ports;
         {
-            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-            const auto it = s_threadDialogMap.find(threadId);
-            if (it != s_threadDialogMap.end())
-            {
-                dialogList = it->second;
-            }
+            std::lock_guard<std::mutex> lock(s_monitorRegistryMutex);
+            const auto found = s_threadDialogMap.find(threadId);
+            if (found != s_threadDialogMap.end()) ports = found->second;
         }
-
-        if (dialogList.empty() || targetHwnd == nullptr)
-        {
-            return;
-        }
-
-        for (WindowDetailDialog* dialog : dialogList)
-        {
-            if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
-            {
-                continue;
-            }
-            if (targetHwnd != dialog->targetWindowHandle())
-            {
-                continue;
-            }
-
-            const QPointer<WindowDetailDialog> guardDialog(dialog);
-            const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(targetHwnd));
-            QMetaObject::invokeMethod(qApp, [guardDialog, channelText, hwndValue, messageId, wParamValue, lParamValue, resultValue]() {
-                if (guardDialog == nullptr)
-                {
-                    return;
-                }
-                guardDialog->appendMessageRow(
-                    channelText,
-                    hwndValue,
-                    static_cast<quint64>(messageId),
-                    static_cast<quint64>(wParamValue),
-                    static_cast<quint64>(lParamValue),
-                    static_cast<quint64>(resultValue),
-                    QString());
-                }, Qt::QueuedConnection);
-        }
+        if (!targetHwnd) return;
+        for (const auto& port : ports)
+            recordWindowMessage(port, {channelText,
+                static_cast<quint64>(reinterpret_cast<quintptr>(targetHwnd)),
+                static_cast<quint64>(messageId), static_cast<quint64>(wParamValue),
+                static_cast<quint64>(lParamValue), static_cast<quint64>(resultValue), QString()});
     }
 
     // callWndHookProc：捕获 SendMessage 路径的入站消息（调用前）。
@@ -2773,45 +2880,19 @@ private:
         const DWORD eventThreadId,
         const DWORD eventTimeMs)
     {
-        WindowDetailDialog* dialog = nullptr;
+        std::shared_ptr<WindowMessagePort> port;
         {
-            std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-            const auto it = s_eventHookMap.find(hookHandle);
-            if (it != s_eventHookMap.end())
-            {
-                dialog = it->second;
-            }
+            std::lock_guard<std::mutex> lock(s_monitorRegistryMutex);
+            const auto found = s_eventHookMap.find(hookHandle);
+            if (found != s_eventHookMap.end()) port = found->second;
         }
-        if (dialog == nullptr || !dialog->m_messageMonitorRunning.load())
-        {
-            return;
-        }
-        if (windowHandle == nullptr || windowHandle != dialog->targetWindowHandle())
-        {
-            return;
-        }
-
-        const QPointer<WindowDetailDialog> guardDialog(dialog);
-        const quint64 hwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle));
-        const QString extraText = QStringLiteral("obj=%1, child=%2, thread=%3, time=%4")
-            .arg(objectId)
-            .arg(childId)
-            .arg(eventThreadId)
-            .arg(eventTimeMs);
-        QMetaObject::invokeMethod(qApp, [guardDialog, hwndValue, eventId, objectId, childId, eventThreadId, eventTimeMs, extraText]() {
-            if (guardDialog == nullptr)
-            {
-                return;
-            }
-            guardDialog->appendMessageRow(
-                QStringLiteral("WinEvent"),
-                hwndValue,
-                static_cast<quint64>(eventId),
-                static_cast<quint64>(static_cast<qint64>(objectId)),
-                static_cast<quint64>(static_cast<qint64>(childId)),
-                static_cast<quint64>(eventThreadId),
-                extraText + QStringLiteral(", tick=%1").arg(eventTimeMs));
-            }, Qt::QueuedConnection);
+        const QString extra = QStringLiteral("obj=%1, child=%2, thread=%3, time=%4")
+            .arg(objectId).arg(childId).arg(eventThreadId).arg(eventTimeMs);
+        recordWindowMessage(port, {QStringLiteral("WinEvent"),
+            static_cast<quint64>(reinterpret_cast<quintptr>(windowHandle)),
+            static_cast<quint64>(eventId), static_cast<quint64>(static_cast<qint64>(objectId)),
+            static_cast<quint64>(static_cast<qint64>(childId)), static_cast<quint64>(eventThreadId),
+            extra + QStringLiteral(", tick=%1").arg(eventTimeMs)});
     }
 
     // 注册 thread -> dialog 映射：支持同一线程被多个详情窗同时观察。
@@ -2822,11 +2903,11 @@ private:
             return;
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-        std::vector<WindowDetailDialog*>& dialogList = s_threadDialogMap[threadId];
-        const bool existed = std::find(dialogList.begin(), dialogList.end(), dialog) != dialogList.end();
+        std::vector<std::shared_ptr<WindowMessagePort>>& dialogList = s_threadDialogMap[threadId];
+        const bool existed = std::find(dialogList.begin(), dialogList.end(), dialog->m_messagePort) != dialogList.end();
         if (!existed)
         {
-            dialogList.push_back(dialog);
+            dialogList.push_back(dialog->m_messagePort);
         }
     }
 
@@ -2844,8 +2925,8 @@ private:
             return;
         }
 
-        std::vector<WindowDetailDialog*>& dialogList = it->second;
-        dialogList.erase(std::remove(dialogList.begin(), dialogList.end(), dialog), dialogList.end());
+        std::vector<std::shared_ptr<WindowMessagePort>>& dialogList = it->second;
+        dialogList.erase(std::remove(dialogList.begin(), dialogList.end(), dialog->m_messagePort), dialogList.end());
         if (dialogList.empty())
         {
             s_threadDialogMap.erase(it);
@@ -2860,7 +2941,7 @@ private:
             return;
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
-        s_eventHookMap[hookHandle] = dialog;
+        s_eventHookMap[hookHandle] = dialog->m_messagePort;
     }
 
     // 反注册 WinEvent 映射：窗口关闭或停止监控时必须调用。
@@ -2872,7 +2953,7 @@ private:
         }
         std::lock_guard<std::mutex> lockGuard(s_monitorRegistryMutex);
         const auto it = s_eventHookMap.find(hookHandle);
-        if (it != s_eventHookMap.end() && it->second == dialog)
+        if (it != s_eventHookMap.end() && it->second == dialog->m_messagePort)
         {
             s_eventHookMap.erase(it);
         }
@@ -2949,6 +3030,11 @@ private:
         QMessageBox::information(this, QStringLiteral("导出成功"), QStringLiteral("已保存到：%1").arg(outputPath));
     }
 
+    WindowMessageSnapshot prepareWindowMessagesForExport() const
+    {
+        return prepareWindowMessages(m_messageArchive, m_messagePrepared, nullptr);
+    }
+
     // 组装导出文本：集中输出所有页核心内容，便于审计留档。
     QString buildReportText() const
     {
@@ -2978,28 +3064,19 @@ private:
         text += QStringLiteral("[消息记录]\n");
         if (m_messageTable != nullptr)
         {
-            QStringList headerList;
-            for (int col = 0; col < m_messageTable->columnCount(); ++col)
+            text += m_messageModel->headers.join('\t') + QStringLiteral("\n");
+            // Explicit export reads the canonical retained archive, not a stale
+            // hidden visual snapshot. No accepted record is lost to UI cadence.
+            auto snapshot = prepareWindowMessagesForExport();
+            for (const auto& row : snapshot.rows)
             {
-                const QTableWidgetItem* headerItem = m_messageTable->horizontalHeaderItem(col);
-                headerList << (headerItem == nullptr ? QStringLiteral("Col%1").arg(col) : headerItem->text());
-            }
-            text += headerList.join('\t');
-            text += QStringLiteral("\n");
-
-            for (int row = 0; row < m_messageTable->rowCount(); ++row)
-            {
-                QStringList rowTextList;
-                for (int col = 0; col < m_messageTable->columnCount(); ++col)
-                {
-                    QTableWidgetItem* item = m_messageTable->item(row, col);
-                    rowTextList << (item == nullptr ? QString() : item->text());
-                }
-                text += rowTextList.join('\t');
-                text += QStringLiteral("\n");
+                QStringList cells;
+                for (const auto& cell : row->cells) cells << cell;
+                text += cells.join('\t') + QStringLiteral("\n");
             }
         }
         text += QStringLiteral("\n");
+
         text += QStringLiteral("[高级属性]\n%1\n").arg(m_advancedText->plainText());
         return text;
     }
@@ -3043,7 +3120,14 @@ private:
     QSpinBox* m_messageMaxRowsSpin = nullptr;      // 消息表最大保留行数。
     QLabel* m_messageModeLabel = nullptr;          // 当前采集模式标签。
     QLabel* m_messageCountLabel = nullptr;         // 已记录/丢弃计数标签。
-    QTableWidget* m_messageTable = nullptr;        // 消息列表表格。
+    QTableView* m_messageTable = nullptr;
+    WindowMessageModel* m_messageModel = nullptr;
+    std::shared_ptr<WindowMessageArchive> m_messageArchive = makeWindowBackgroundValue<WindowMessageArchive>();
+    std::shared_ptr<WindowMessagePort> m_messagePort;
+    std::shared_ptr<const WindowMessageSnapshot> m_messagePrepared;
+    ks::ui::AsyncOperation* m_messageSnapshotOperation = nullptr;
+    QTimer* m_messageFlushTimer = nullptr;
+    quint64 m_messagePublishedRevision = 0;        // 消息列表表格。
     ks::ui::StructuredFieldView* m_advancedText = nullptr;      // 高级页文本（统一文本编辑器，只读）。
 
     QPushButton* m_refreshButton = nullptr;    // 刷新按钮。
@@ -3059,20 +3143,19 @@ private:
     std::atomic_bool m_messageMonitorRunning{ false }; // 消息监控运行状态。
     bool m_threadRegistered = false;           // 是否已注册 thread->dialog 映射。
     bool m_eventRegistered = false;            // 是否已注册 eventHook->dialog 映射。
-    int m_capturedMessageCount = 0;            // 已写入消息表的消息数量。
-    int m_droppedMessageCount = 0;             // 因超过最大行数而丢弃的消息数量。
-    std::deque<PendingMessageRow> m_deferredMessageRows; // 菜单期间保持顺序的待提交消息。
+    quint64 m_capturedMessageCount = 0;            // 已写入消息表的消息数量。
+    quint64 m_droppedMessageCount = 0;             // 因超过最大行数而丢弃的消息数量。
     QString m_messageMonitorMode = QStringLiteral("未启动"); // 当前监控模式文本。
 
     static std::mutex s_monitorRegistryMutex;  // 回调映射表互斥锁，防止并发竞态。
-    static std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> s_threadDialogMap; // threadId -> 详情窗列表。
-    static std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> s_eventHookMap; // WinEvent hook -> 详情窗。
+    static std::unordered_map<DWORD, std::vector<std::shared_ptr<WindowMessagePort>>> s_threadDialogMap; // threadId -> 详情窗列表。
+    static std::unordered_map<HWINEVENTHOOK, std::shared_ptr<WindowMessagePort>> s_eventHookMap; // WinEvent hook -> 详情窗。
 };
 
 // 静态成员定义：统一管理消息回调分发映射。
 std::mutex WindowDetailDialog::s_monitorRegistryMutex;
-std::unordered_map<DWORD, std::vector<WindowDetailDialog*>> WindowDetailDialog::s_threadDialogMap;
-std::unordered_map<HWINEVENTHOOK, WindowDetailDialog*> WindowDetailDialog::s_eventHookMap;
+std::unordered_map<DWORD, std::vector<std::shared_ptr<WindowMessagePort>>> WindowDetailDialog::s_threadDialogMap;
+std::unordered_map<HWINEVENTHOOK, std::shared_ptr<WindowMessagePort>> WindowDetailDialog::s_eventHookMap;
 
 OtherDock::OtherDock(QWidget* parent)
     : QWidget(parent)
