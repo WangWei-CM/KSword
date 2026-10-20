@@ -74,6 +74,16 @@
 #include <algorithm>
 #include <thread>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kDiskEditorTabNavigation[] = {
+    {"structure", "", "", "结构解析", true},
+    {"volume", "", "", "卷映射", false},
+    {"health", "", "", "健康/能力", false},
+    {"filesystem", "", "", "文件系统取证", false},
+    {"tools", "", "", "搜索/镜像/扫描", false}
+};
+}
+
 namespace
 {
     // 分区表列索引：
@@ -550,7 +560,7 @@ namespace ks::misc
         // 解析出的字段映射是静态磁盘结构，不需要冻结对比栏。
         ks::ui::SetTableActionBarMode(m_structureTable, ks::ui::TableActionBarMode::None);
         structureLayout->addWidget(m_structureTable, 1);
-        m_advancedTabs->addTab(structurePage, QIcon(QStringLiteral(":/Icon/disk_analyze.svg")), QStringLiteral("结构解析"));
+        m_navigationTabs.add(kDiskEditorTabNavigation[0], m_advancedTabs, structurePage, QIcon(QStringLiteral(":/Icon/disk_analyze.svg")));
 
         QWidget* volumePage = new QWidget(parent);
         QVBoxLayout* volumeLayout = new QVBoxLayout(volumePage);
@@ -567,7 +577,7 @@ namespace ks::misc
         // 所选磁盘的卷映射小表是定位信息，隐藏重复工具条。
         ks::ui::SetTableActionBarMode(m_volumeTable, ks::ui::TableActionBarMode::None);
         volumeLayout->addWidget(m_volumeTable, 1);
-        m_advancedTabs->addTab(volumePage, QIcon(QStringLiteral(":/Icon/disk_volume.svg")), QStringLiteral("卷映射"));
+        m_navigationTabs.add(kDiskEditorTabNavigation[1], m_advancedTabs, volumePage, QIcon(QStringLiteral(":/Icon/disk_volume.svg")));
 
         QWidget* healthPage = new QWidget(parent);
         QVBoxLayout* healthLayout = new QVBoxLayout(healthPage);
@@ -582,7 +592,7 @@ namespace ks::misc
         // 健康与能力键值摘要不需要快照对比栏。
         ks::ui::SetTableActionBarMode(m_healthTable, ks::ui::TableActionBarMode::None);
         healthLayout->addWidget(m_healthTable, 1);
-        m_advancedTabs->addTab(healthPage, QIcon(QStringLiteral(":/Icon/disk_health.svg")), QStringLiteral("健康/能力"));
+        m_navigationTabs.add(kDiskEditorTabNavigation[2], m_advancedTabs, healthPage, QIcon(QStringLiteral(":/Icon/disk_health.svg")));
 
         auto* fileSystemForensicsPanel = new DiskFileSystemForensicsPanel(
             [this]() -> std::optional<DiskForensicsSelection>
@@ -615,10 +625,7 @@ namespace ks::misc
                 readCurrentRangeAsync(QStringLiteral("文件系统取证跳转读取"));
             },
             parent);
-        m_advancedTabs->addTab(
-            fileSystemForensicsPanel,
-            QIcon(QStringLiteral(":/Icon/disk_volume.svg")),
-            QStringLiteral("文件系统取证"));
+        m_navigationTabs.add(kDiskEditorTabNavigation[3], m_advancedTabs, fileSystemForensicsPanel, QIcon(QStringLiteral(":/Icon/disk_volume.svg")));
 
         QWidget* toolPage = new QWidget(parent);
         QVBoxLayout* toolLayout = new QVBoxLayout(toolPage);
@@ -784,7 +791,7 @@ namespace ks::misc
         ks::ui::ArrangeParameterColumns(workspace->parameters(),
             { rangeGroup }, { actionGroup }, 300);
         workspace->finish();
-        m_advancedTabs->addTab(toolPage, QIcon(QStringLiteral(":/Icon/disk_tools.svg")), QStringLiteral("搜索/镜像/扫描"));
+        m_navigationTabs.add(kDiskEditorTabNavigation[4], m_advancedTabs, toolPage, QIcon(QStringLiteral(":/Icon/disk_tools.svg")));
 
     }
 
@@ -2237,3 +2244,17 @@ namespace ks::misc
         }
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::DiskEditorTab::navigationCatalog(const DiskEditorTab* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kDiskEditorTabNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::DiskEditorTab::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kDiskEditorTabNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::DiskEditorTab>(QStringLiteral("misc.disk_editor")); }

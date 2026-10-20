@@ -16,6 +16,7 @@
 
 #include <QByteArray>
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
 
 #include <cstdint>
 #include <vector>
@@ -57,6 +58,9 @@ namespace ks::misc
     class DiskEditorTab final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const DiskEditorTab* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造函数：
         // - parent 为 Qt 父控件；
         // - 初始化 UI 后异步枚举磁盘。
@@ -68,6 +72,8 @@ namespace ks::misc
         ~DiskEditorTab() override;
 
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         // initializeUi：
         // - 创建顶部工具栏、分区视图、扇区编辑区和日志区；
         // - 无输入参数，无返回值。
