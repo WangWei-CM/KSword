@@ -47,6 +47,8 @@ namespace file_dock_detail
     // directory/item nesting without treating an exported report as data.
     ks::ui::FieldDocument buildPeAnalysisDocument(const QString& filePath);
     ks::ui::FieldDocument buildPeAnalysisDocument(const ks::file::PeAnalysisResult& result);
+    ks::ui::FieldDocument buildPeAnalysisDocument(const QString& filePath, const std::shared_ptr<std::atomic_bool>& cancel);
+    ks::ui::FieldDocument buildPeAnalysisDocument(const ks::file::PeAnalysisResult& result, const std::shared_ptr<std::atomic_bool>& cancel);
 
     // analyzePeDependencies 作用：
     // - 读取 PE Import Directory 并转换为依赖 DLL / 导入函数表；
@@ -54,4 +56,6 @@ namespace file_dock_detail
     // 参数 filePath：目标 EXE/DLL 或其它文件路径。
     // 返回：PeDependencyResult，UI 根据 success/isPe 决定显示表格或提示。
     PeDependencyResult analyzePeDependencies(const QString& filePath);
+    PeDependencyResult analyzePeDependencies(const QString& filePath, const std::shared_ptr<std::atomic_bool>& cancel);
+    PeDependencyResult analyzePeDependencies(const ks::file::PeAnalysisResult& result, const std::shared_ptr<std::atomic_bool>& cancel = {});
 }

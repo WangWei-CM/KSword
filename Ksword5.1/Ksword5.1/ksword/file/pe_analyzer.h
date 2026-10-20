@@ -11,6 +11,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -109,6 +111,11 @@ namespace ks::file
 
     PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes, const PeAnalysisOptions& options);
     PeAnalysisResult AnalyzePeFile(const std::wstring& filePath, const PeAnalysisOptions& options);
+
+    // Worker-only file service. Bytes and decoded imports are shared by exact native
+    // identity + size + write/change version. Canceling one subscriber leaves others live.
+    std::shared_ptr<const PeAnalysisResult> AnalyzePeFileShared(const std::wstring& filePath,
+        bool importsOnly, const std::shared_ptr<std::atomic_bool>& cancelled = {});
 
     // Serialize the already-decoded entries only when an export is requested.
     std::wstring ExportPeAnalysisText(const PeAnalysisResult& analysis);

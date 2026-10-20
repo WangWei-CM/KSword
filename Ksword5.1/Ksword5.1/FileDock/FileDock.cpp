@@ -6261,6 +6261,8 @@ namespace
             if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
             if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
             if (m_stagingSnapshotCancel != nullptr) m_stagingSnapshotCancel->store(true);
+            if (m_peReadCancel) m_peReadCancel->store(true);
+            if (m_dependencyReadCancel) m_dependencyReadCancel->store(true);
             for (const auto& state : m_metadataReadStates)
                 if (state != nullptr && state->cancel != nullptr) state->cancel->store(true);
             if (m_usageScanCancelRequested != nullptr)
@@ -8450,6 +8452,12 @@ namespace
             QThreadPool::globalInstance()->start(task);
         }
 
+        static QThreadPool& peAnalysisPool()
+        {
+            static QThreadPool* pool = []() { auto* value = new QThreadPool(qApp); value->setMaxThreadCount(2); return value; }();
+            return *pool;
+        }
+
         void startPeAnalysisLoad(ks::ui::StructuredFieldView* textEditorWidget)
         {
             // 用途：后台执行 PE 深度解析，返回分组字段快照。
@@ -8461,29 +8469,37 @@ namespace
                 return;
             }
 
+            if (m_peReadCancel) m_peReadCancel->store(true);
+            const auto cancel = m_peReadCancel = std::make_shared<std::atomic_bool>(false);
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<ks::ui::StructuredFieldView> editorGuard(textEditorWidget);
+            connect(textEditorWidget, &QObject::destroyed, [cancel]() { cancel->store(true); });
             ks::ui::FieldDocument loading;
             loading.note(QStringLiteral("PE 信息加载中..."));
             loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
             textEditorWidget->setDocument(loading);
+            if (!guardThis || !editorGuard) return;
             const QString filePathSnapshot = m_filePath;
-            QPointer<FileDetailDialog> guardThis(this);
-            QPointer<ks::ui::StructuredFieldView> editorGuard(textEditorWidget);
-            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot]()
+            auto* task = QRunnable::create([guardThis, editorGuard, filePathSnapshot, cancel]()
                 {
-                    const auto peDocument = file_dock_detail::buildPeAnalysisDocument(filePathSnapshot);
+                    if (cancel->load()) return;
+                    const auto peDocument = std::shared_ptr<const ks::ui::FieldDocument>(
+                        new ks::ui::FieldDocument(file_dock_detail::buildPeAnalysisDocument(filePathSnapshot, cancel)),
+                        [](const auto* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                    if (cancel->load()) return;
                     QMetaObject::invokeMethod(
                         qApp,
-                        [guardThis, editorGuard, peDocument]()
+                        [guardThis, editorGuard, peDocument, filePathSnapshot, cancel]()
                         {
-                            if (guardThis != nullptr && editorGuard != nullptr)
+                            if (guardThis != nullptr && editorGuard != nullptr && !cancel->load() && guardThis->m_filePath == filePathSnapshot)
                             {
-                                editorGuard->setDocument(peDocument);
+                                editorGuard->setDocument(*peDocument);
                             }
                         },
                         Qt::QueuedConnection);
                 });
             task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+            peAnalysisPool().start(task);
         }
 
         static PrintableStringsPreview extractPrintableStringsPreview(
@@ -8705,22 +8721,28 @@ namespace
                 return;
             }
 
+            if (m_dependencyReadCancel) m_dependencyReadCancel->store(true);
+            const auto cancel = m_dependencyReadCancel = std::make_shared<std::atomic_bool>(false);
+            const QPointer<FileDetailDialog> guardThis(this);
+            const QPointer<QTableView> tableGuard(table);
+            const QPointer<QLabel> statusGuard(statusLabel);
+            const QPointer<ks::ui::StructuredFieldView> detailGuard(detailEditor);
+            connect(table, &QObject::destroyed, [cancel]() { cancel->store(true); });
+            propertyTableModel(table)->invalidateRequest();
             statusLabel->setText(QStringLiteral("● 正在后台读取 Import Directory..."));
+            if (!guardThis || !tableGuard || !statusGuard || !detailGuard) return;
             ks::ui::FieldDocument loading;
             loading.note(QStringLiteral("依赖 DLL 加载中..."));
             loading.field(QStringLiteral("目标"), QDir::toNativeSeparators(m_filePath));
             detailEditor->setDocument(loading);
-
+            if (!guardThis || !tableGuard || !statusGuard || !detailGuard) return;
             const QString filePathSnapshot = m_filePath;
-            QPointer<FileDetailDialog> guardThis(this);
-            QPointer<QTableView> tableGuard(table);
-            QPointer<QLabel> statusGuard(statusLabel);
-            QPointer<ks::ui::StructuredFieldView> detailGuard(detailEditor);
-            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, detailGuard, filePathSnapshot]()
+            auto* task = QRunnable::create([guardThis, tableGuard, statusGuard, detailGuard, filePathSnapshot, cancel]()
                 {
                     const auto beginTime = std::chrono::steady_clock::now();
                     const file_dock_detail::PeDependencyResult result =
-                        file_dock_detail::analyzePeDependencies(filePathSnapshot);
+                        file_dock_detail::analyzePeDependencies(filePathSnapshot, cancel);
+                    if (cancel->load()) return;
                     const qint64 elapsedMs = static_cast<qint64>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - beginTime).count());
@@ -8729,6 +8751,7 @@ namespace
                     rows->rows.reserve(std::min<qsizetype>(result.rows.size(), 20000));
                     for (qsizetype index = 0; index < result.rows.size() && index < 20000; ++index)
                     {
+                        if (cancel->load()) return;
                         const auto& row = result.rows.at(index);
                         const QString functionText = row.importMode == QStringLiteral("Ordinal")
                             ? QStringLiteral("#%1").arg(row.ordinalText)
@@ -8741,24 +8764,27 @@ namespace
                     if (!result.errorText.trimmed().isEmpty()) document.note(result.errorText.trimmed());
                     document.section(QStringLiteral("依赖 DLL 名称"));
                     for (qsizetype index = 0; index < result.dllNames.size(); ++index)
+                    {
+                        if (cancel->load()) return;
                         document.field(QString::number(index + 1), result.dllNames.at(index));
+                    }
                     const auto resultSnapshot = std::shared_ptr<file_dock_detail::PeDependencyResult>(new file_dock_detail::PeDependencyResult(result),
                         [](file_dock_detail::PeDependencyResult* value) { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
                     QMetaObject::invokeMethod(
                         qApp,
-                        [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, rows, document, elapsedMs]()
+                        [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, rows, document, elapsedMs, cancel, filePathSnapshot]()
                         {
                             if (guardThis == nullptr || tableGuard == nullptr ||
-                                statusGuard == nullptr || detailGuard == nullptr)
+                                statusGuard == nullptr || detailGuard == nullptr || cancel->load() || guardThis->m_filePath != filePathSnapshot)
                             {
                                 return;
                             }
 
                             const auto commitSnapshot =
-                                [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, document, elapsedMs]()
+                                [guardThis, tableGuard, statusGuard, detailGuard, resultSnapshot, document, elapsedMs, cancel, filePathSnapshot]()
                             {
                                 if (guardThis == nullptr || tableGuard == nullptr ||
-                                    statusGuard == nullptr || detailGuard == nullptr)
+                                    statusGuard == nullptr || detailGuard == nullptr || cancel->load() || guardThis->m_filePath != filePathSnapshot)
                                 {
                                     return;
                                 }
@@ -8778,7 +8804,7 @@ namespace
                         Qt::QueuedConnection);
                 });
             task->setAutoDelete(true);
-            QThreadPool::globalInstance()->start(task);
+            peAnalysisPool().start(task);
         }
 
         void setMetadataEditorBusy(const bool busy)
@@ -13765,6 +13791,8 @@ namespace
         std::shared_ptr<std::atomic_bool> m_savePreflightCancel; // 只读签名预检可以取消，不中断已确认的写事务。
         quint64 m_savePreflightGeneration = 0; // 取消/重试后旧签名计划不能进入确认或写入。
         std::shared_ptr<std::atomic_bool> m_hashCancelRequested; // 哈希计算取消标记，后台线程共享。
+        std::shared_ptr<std::atomic_bool> m_peReadCancel;
+        std::shared_ptr<std::atomic_bool> m_dependencyReadCancel;
         std::shared_ptr<std::atomic_bool> m_usageScanCancelRequested; // 文件占用扫描取消标记，关闭属性窗时置位。
         QProgressBar* m_usageScanProgressBar = nullptr; // 属性页文件占用扫描的阶段进度条。
         bool m_usageScanInProgress = false; // 属性页占用扫描是否仍在后台执行。

@@ -33,10 +33,20 @@ namespace file_dock_detail
 
     ks::ui::FieldDocument buildPeAnalysisDocument(const QString& filePath)
     {
-        return buildPeAnalysisDocument(ks::file::AnalyzePeFile(filePath.toStdWString()));
+        return buildPeAnalysisDocument(filePath, {});
     }
 
+    ks::ui::FieldDocument buildPeAnalysisDocument(const QString& filePath, const std::shared_ptr<std::atomic_bool>& cancel)
+    {
+        const auto result = ks::file::AnalyzePeFileShared(filePath.toStdWString(), false, cancel);
+        if ((cancel && cancel->load()) || result->error == ks::file::PeAnalysisError::Cancelled) return {};
+        return buildPeAnalysisDocument(*result, cancel);
+    }
     ks::ui::FieldDocument buildPeAnalysisDocument(const ks::file::PeAnalysisResult& result)
+    {
+        return buildPeAnalysisDocument(result, {});
+    }
+    ks::ui::FieldDocument buildPeAnalysisDocument(const ks::file::PeAnalysisResult& result, const std::shared_ptr<std::atomic_bool>& cancel)
     {
         ks::ui::FieldDocument document;
         document.title = QStringLiteral("PE解析");
@@ -44,6 +54,7 @@ namespace file_dock_detail
         QVector<int> ancestors;
         for (const ks::file::PeReportEntry& entry : result.entries)
         {
+            if (cancel && cancel->load()) return {};
             if (entry.kind == ks::file::PeReportEntry::Kind::Section)
             {
                 document.section(QString::fromStdWString(entry.name));
@@ -79,12 +90,17 @@ namespace file_dock_detail
 
     PeDependencyResult analyzePeDependencies(const QString& filePath)
     {
-        // 输入 filePath 来自属性窗口；处理逻辑复用 ks::file::AnalyzePeFile 的
-        // PE32/PE32+ 头部和 Import Directory 安全解析；返回 Qt 表格模型。
+        return analyzePeDependencies(filePath, {});
+    }
+    PeDependencyResult analyzePeDependencies(const QString& filePath, const std::shared_ptr<std::atomic_bool>& cancel)
+    {
+        const auto result = ks::file::AnalyzePeFileShared(filePath.toStdWString(), true, cancel);
+        if ((cancel && cancel->load()) || result->error == ks::file::PeAnalysisError::Cancelled) return {};
+        return analyzePeDependencies(*result, cancel);
+    }
+    PeDependencyResult analyzePeDependencies(const ks::file::PeAnalysisResult& analysisResult, const std::shared_ptr<std::atomic_bool>& cancel)
+    {
         PeDependencyResult dependencyResult{};
-        const ks::file::PeAnalysisResult analysisResult =
-            ks::file::AnalyzePeFile(filePath.toStdWString());
-
         dependencyResult.success = analysisResult.success;
         dependencyResult.isPe = analysisResult.success;
         if (!analysisResult.success)
@@ -101,6 +117,7 @@ namespace file_dock_detail
         QSet<QString> seenDllNames;
         for (const ks::file::PeImportModuleSummary& module : analysisResult.importModules)
         {
+            if (cancel && cancel->load()) return {};
             const QString dllName = QString::fromStdString(module.dllName).trimmed();
             if (!dllName.isEmpty() && !seenDllNames.contains(dllName.toLower()))
             {
@@ -120,6 +137,7 @@ namespace file_dock_detail
 
             for (const ks::file::PeImportFunctionSummary& function : module.imports)
             {
+                if (cancel && cancel->load()) return {};
                 PeDependencyRow row{};
                 row.dllName = QString::fromStdString(function.dllName);
                 row.functionName = QString::fromStdString(function.functionName);
