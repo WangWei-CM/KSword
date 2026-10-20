@@ -3063,6 +3063,9 @@
     <ClInclude Include="UI\TableColumnAutoFit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\FrozenPaneRowSync.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\TableFreezeSupport.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -51,9 +51,6 @@ namespace
     // 滚动区高度归零，表格看上去彻底不动了。
     constexpr int kFrozenBandBudgetDivisor = 2;
 
-    // 主表滚动位置随可视行高刷新而抖动时，多镜像几行以免冻结列窗格底部露白。
-    constexpr int kMirrorRowMargin = 3;
-
     // FrozenPaneTableView 作用：
     // - 冻结区用的只读附属视图，与主表共享模型与选择模型；
     // - 自身不接受滚轮与滚动，一切滚动交还主表，再由控制器把窗格对齐回去。
@@ -354,6 +351,7 @@ namespace ks::ui
 
         if (addedCount > 0)
         {
+            publishFrozenSections();
             refreshGeometry();
         }
         return addedCount;
@@ -423,6 +421,7 @@ namespace ks::ui
 
         if (addedCount > 0)
         {
+            publishFrozenSections();
             refreshGeometry();
         }
         return addedCount;
@@ -592,7 +591,11 @@ namespace ks::ui
             m_targetTable->verticalHeader(),
             &QHeaderView::sectionResized,
             this,
-            onSectionChanged);
+            [this](int row, int, int) {
+                if (m_mirroringSections) return;
+                markSourceRowDirty(row);
+                if (!m_refreshing) scheduleRefresh();
+            });
         connect(
             m_targetTable->horizontalHeader(),
             &QHeaderView::sectionMoved,
@@ -614,12 +617,40 @@ namespace ks::ui
             // 行列增删和排序由 FrozenLine 里的持久索引自动平移，这里只需触发一次
             // 延迟刷新，让 enforceFrozenState 丢弃失效项并重新校正隐藏状态。
             const auto onModelChanged = [this]() { scheduleRefresh(); };
-            connect(m_targetModel, &QAbstractItemModel::modelReset, this, onModelChanged);
-            connect(m_targetModel, &QAbstractItemModel::rowsInserted, this, onModelChanged);
-            connect(m_targetModel, &QAbstractItemModel::rowsRemoved, this, onModelChanged);
+            connect(m_targetModel, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
+                // Restore only our frozen rows while their old identities are
+                // valid, so retained QHeaderView bits cannot hide new records.
+                unfreezeAllRows();
+            });
+            connect(m_targetModel, &QAbstractItemModel::modelReset, this, [this]() {
+                ++m_rowSyncGeneration;
+                const int rows = m_targetTable && m_targetTable->model()
+                    ? m_targetTable->model()->rowCount(m_targetTable->rootIndex()) : 0;
+                for (const auto& state : m_rowSyncStates) state->resizeRowCount(rows);
+                scheduleRefresh();
+            });
+            connect(m_targetModel, &QAbstractItemModel::rowsInserted, this,
+                [this](const QModelIndex& parent, int first, int last) {
+                    if (m_targetTable && parent == m_targetTable->rootIndex())
+                        for (auto it = m_rowSyncStates.begin(); it != m_rowSyncStates.end(); ++it)
+                            it.value()->rowsInserted(first, last - first + 1);
+                    scheduleRefresh();
+                });
+            connect(m_targetModel, &QAbstractItemModel::rowsRemoved, this,
+                [this](const QModelIndex& parent, int first, int last) {
+                    if (m_targetTable && parent == m_targetTable->rootIndex())
+                        for (auto it = m_rowSyncStates.begin(); it != m_rowSyncStates.end(); ++it)
+                            it.value()->rowsRemoved(first, last - first + 1);
+                    scheduleRefresh();
+                });
             connect(m_targetModel, &QAbstractItemModel::columnsInserted, this, onModelChanged);
             connect(m_targetModel, &QAbstractItemModel::columnsRemoved, this, onModelChanged);
-            connect(m_targetModel, &QAbstractItemModel::layoutChanged, this, onModelChanged);
+            const auto onModelLayoutChanged = [this]() {
+                for (const auto& state : m_rowSyncStates) state->layoutChanged();
+                scheduleRefresh();
+            };
+            connect(m_targetModel, &QAbstractItemModel::layoutChanged, this, onModelLayoutChanged);
+            connect(m_targetModel, &QAbstractItemModel::rowsMoved, this, onModelLayoutChanged);
         }
     }
 
@@ -641,6 +672,7 @@ namespace ks::ui
         {
             return;
         }
+        if (m_targetTable.isNull() || !m_targetTable->isVisible()) return;
         m_refreshScheduled = true;
         QTimer::singleShot(0, this, [this]()
             {
@@ -670,6 +702,9 @@ namespace ks::ui
 
     void TableFrozenPaneController::destroyPanes()
     {
+        ++m_rowSyncGeneration;
+        m_rowSyncStates.clear();
+        m_rowDefaultExtent = -1;
         for (QPointer<QTableView>* guardedPane : { &m_topPane, &m_leftPane, &m_cornerPane })
         {
             if (!guardedPane->isNull())
@@ -714,6 +749,7 @@ namespace ks::ui
         }
         else if (!m_topPane.isNull())
         {
+            m_rowSyncStates.remove(m_topPane.data());
             m_topPane->hide();
             m_topPane->deleteLater();
             m_topPane.clear();
@@ -725,6 +761,7 @@ namespace ks::ui
         }
         else if (!m_leftPane.isNull())
         {
+            m_rowSyncStates.remove(m_leftPane.data());
             m_leftPane->hide();
             m_leftPane->deleteLater();
             m_leftPane.clear();
@@ -736,6 +773,7 @@ namespace ks::ui
         }
         else if (!m_cornerPane.isNull())
         {
+            m_rowSyncStates.remove(m_cornerPane.data());
             m_cornerPane->hide();
             m_cornerPane->deleteLater();
             m_cornerPane.clear();
@@ -761,6 +799,8 @@ namespace ks::ui
         // setModel 会重建列宽与选择模型，只在真的换了模型时才做。
         if (pane->model() != sourceTable->model())
         {
+            m_rowSyncStates.remove(pane);
+            ++m_rowSyncGeneration;
             pane->setModel(sourceTable->model());
         }
         if (sourceTable->selectionModel() != nullptr &&
@@ -941,111 +981,142 @@ namespace ks::ui
         m_mirroringSections = false;
     }
 
-    void TableFrozenPaneController::mirrorRowLayout(
-        QTableView* pane,
-        const int firstLogicalRow,
-        const int lastLogicalRow)
+    std::shared_ptr<FrozenPaneRowSync> TableFrozenPaneController::rowSyncFor(
+        QTableView* pane, bool frozenRows)
     {
-        if (pane == nullptr || m_targetTable.isNull())
-        {
-            return;
-        }
+        if (!pane || !m_targetTable || !m_targetTable->model()) return {};
+        auto found = m_rowSyncStates.find(pane);
+        if (found != m_rowSyncStates.end()) return found.value();
+        auto state = std::make_shared<FrozenPaneRowSync>(frozenRows
+            ? FrozenPaneRowSync::Mode::FrozenRows : FrozenPaneRowSync::Mode::SourceRows);
+        state->reset(m_targetTable->model()->rowCount(m_targetTable->rootIndex()));
+        m_rowSyncStates.insert(pane, state);
+        connect(pane, &QObject::destroyed, this, [this, pane]() { m_rowSyncStates.remove(pane); });
+        scheduleRowSync();
+        return state;
+    }
 
-        QHeaderView* sourceHeader = m_targetTable->verticalHeader();
-        QHeaderView* paneHeader = pane->verticalHeader();
-        if (sourceHeader == nullptr || paneHeader == nullptr)
-        {
-            return;
-        }
+    bool TableFrozenPaneController::rowSyncPending(QTableView* pane) const
+    {
+        const auto found = m_rowSyncStates.constFind(pane);
+        return found != m_rowSyncStates.cend() && found.value()->pending();
+    }
 
-        m_mirroringSections = true;
-        paneHeader->setDefaultSectionSize(sourceHeader->defaultSectionSize());
-        const int sectionCount = std::min(sourceHeader->count(), paneHeader->count());
-        const int firstRow = std::max(0, firstLogicalRow);
-        const int lastRow = std::min(sectionCount - 1, lastLogicalRow);
-        for (int logicalRow = firstRow; logicalRow <= lastRow; ++logicalRow)
+    void TableFrozenPaneController::markSourceRowDirty(int row)
+    {
+        for (auto it = m_rowSyncStates.begin(); it != m_rowSyncStates.end(); ++it)
+            it.value()->sourceRowChanged(row);
+    }
+
+    void TableFrozenPaneController::resetRowSync()
+    {
+        ++m_rowSyncGeneration;
+        const int rows = m_targetTable && m_targetTable->model()
+            ? m_targetTable->model()->rowCount(m_targetTable->rootIndex()) : 0;
+        for (auto it = m_rowSyncStates.begin(); it != m_rowSyncStates.end(); ++it)
+            it.value()->reset(rows);
+    }
+
+    void TableFrozenPaneController::scheduleRowSync()
+    {
+        if (m_rowSyncScheduled || !m_targetTable || !m_targetTable->isVisible()) return;
+        bool pending = false;
+        for (const auto& state : m_rowSyncStates) pending |= state->pending();
+        if (!pending) return;
+        m_rowSyncScheduled = true;
+        const quint64 generation = m_rowSyncGeneration;
+        QTimer::singleShot(0, this, [this, generation]() {
+            m_rowSyncScheduled = false;
+            if (generation != m_rowSyncGeneration) { scheduleRowSync(); return; }
+            processRowSyncSlice();
+        });
+    }
+
+    void TableFrozenPaneController::processRowSyncSlice()
+    {
+        if (!m_targetTable || !m_targetTable->isVisible() || !m_targetTable->model()) return;
+        const QPointer<TableFrozenPaneController> alive(this);
+        const QPointer<QTableView> source = m_targetTable;
+        const QPointer<QAbstractItemModel> model = source->model();
+        const QPointer<QHeaderView> sourceHeader = source->verticalHeader();
+        const quint64 generation = m_rowSyncGeneration;
+        QElapsedTimer budget; budget.start();
+        int work = 0;
+        // Local shared state/weak panes survive callbacks that close the table or
+        // change its model. No iterator into the live controller hash crosses Qt.
+        QVector<QPair<QPointer<QTableView>, std::shared_ptr<FrozenPaneRowSync>>> states;
+        for (auto it = m_rowSyncStates.cbegin(); it != m_rowSyncStates.cend(); ++it)
+            states.push_back({QPointer<QTableView>(it.key()), it.value()});
+        for (const auto& entry : states)
         {
-            const bool hidden = sourceHeader->isSectionHidden(logicalRow);
-            if (paneHeader->isSectionHidden(logicalRow) != hidden)
-            {
-                paneHeader->setSectionHidden(logicalRow, hidden);
-            }
-            if (!hidden)
-            {
-                paneHeader->resizeSection(logicalRow, sourceHeader->sectionSize(logicalRow));
-            }
+            const auto pane = entry.first;
+            if (!pane || pane->model() != model || !entry.second->pending()) continue;
+            work += entry.second->drain(
+                [sourceHeader](int row) {
+                    if (!sourceHeader) return FrozenPaneRowSync::Row{true,0};
+                    const bool hidden = sourceHeader->isSectionHidden(row);
+                    return FrozenPaneRowSync::Row{hidden, hidden ? 0 : sourceHeader->sectionSize(row)};
+                },
+                [pane, source, model, alive, generation](int row, FrozenPaneRowSync::Row value) {
+                    const auto current = [&]() {
+                        return alive && generation == alive->m_rowSyncGeneration && pane && source && model
+                            && pane->model() == model && source->model() == model;
+                    };
+                    if (!current()) return false;
+                    if (pane->isRowHidden(row) != value.hidden) pane->setRowHidden(row, value.hidden);
+                    if (!current()) return false;
+                    if (!value.hidden && value.height > 0 && pane->rowHeight(row) != value.height)
+                        pane->setRowHeight(row, value.height);
+                    return current();
+                }, std::max(1, 4 - int(budget.elapsed())), std::max(1, 256 - work));
+            if (!alive || generation != m_rowSyncGeneration) return;
+            if (work >= 256 || budget.elapsed() >= 4) break;
         }
-        m_mirroringSections = false;
+        bool pending = false;
+        for (const auto& state : m_rowSyncStates) pending |= state->pending();
+        if (pending) scheduleRowSync();
+        else refreshGeometry(); // reveal fully coherent panes and align offsets
     }
 
     void TableFrozenPaneController::mirrorVisibleRowLayout(QTableView* pane)
     {
-        QTableView* tableView = m_targetTable.data();
-        if (pane == nullptr || tableView == nullptr || tableView->model() == nullptr)
-        {
-            return;
-        }
-
-        const int rowCount = tableView->model()->rowCount();
-        if (rowCount <= 0)
-        {
-            return;
-        }
-
-        int firstRow = tableView->rowAt(0);
-        if (firstRow < 0)
-        {
-            firstRow = 0;
-        }
-        int lastRow = tableView->rowAt(std::max(0, tableView->viewport()->height() - 1));
-        if (lastRow < 0)
-        {
-            lastRow = rowCount - 1;
-        }
-        if (lastRow < firstRow)
-        {
-            std::swap(firstRow, lastRow);
-        }
-        mirrorRowLayout(
-            pane,
-            std::max(0, firstRow - 1),
-            std::min(rowCount - 1, lastRow + kMirrorRowMargin));
+        QTableView* table = m_targetTable.data();
+        if (!pane || !table || !table->model()) return;
+        rowSyncFor(pane, false);
+        scheduleRowSync();
+        if (rowSyncPending(pane)) return;
+        QPointer<QHeaderView> header = pane->verticalHeader();
+        QPointer<QTableView> guard(pane), source(table);
+        ForEachViewportTableRow(table->viewport()->height(),
+            [source](int y) { return source ? source->rowAt(y) : -1; },
+            [source](int row) { return source ? source->rowViewportPosition(row) : 0; },
+            [source](int row) { return source ? source->rowHeight(row) : 1; },
+            [guard, source, header](int row) {
+                if (!guard || !source || !header) return;
+                if (guard->isRowHidden(row)) guard->setRowHidden(row, false);
+                if (!guard || !source || !header) return;
+                const int height = source->rowHeight(row);
+                if (height > 0 && header->sectionSize(row) != height) header->resizeSection(row, height);
+            });
     }
 
     void TableFrozenPaneController::applyFrozenRowFilter(QTableView* pane)
     {
-        QTableView* tableView = m_targetTable.data();
-        if (pane == nullptr || tableView == nullptr || tableView->model() == nullptr)
+        QTableView* table = m_targetTable.data();
+        if (!pane || !table || !table->model()) return;
+        // A column-only corner displays headers and has a zero-height data
+        // viewport. It needs no all-row hide map at all.
+        if (pane == m_cornerPane && m_appliedFrozenHeight <= 0)
         {
+            m_rowSyncStates.remove(pane);
             return;
         }
-
-        QHash<int, int> frozenRowHeights;
+        QHash<int,int> frozen;
         for (const FrozenLine& line : m_frozenRowLines)
-        {
-            if (line.index.isValid())
-            {
-                frozenRowHeights.insert(line.index.row(), line.extent);
-            }
-        }
-
-        m_mirroringSections = true;
-        const int rowCount = tableView->model()->rowCount();
-        for (int row = 0; row < rowCount; ++row)
-        {
-            const auto heightIterator = frozenRowHeights.constFind(row);
-            const bool frozen = heightIterator != frozenRowHeights.cend()
-                && !IsTableRowExcludedByFilter(tableView, row);
-            if (pane->isRowHidden(row) == frozen)
-            {
-                pane->setRowHidden(row, !frozen);
-            }
-            if (frozen && pane->rowHeight(row) != heightIterator.value())
-            {
-                pane->setRowHeight(row, heightIterator.value());
-            }
-        }
-        m_mirroringSections = false;
+            if (line.index.isValid() && !IsTableRowExcludedByFilter(table, line.index.row()))
+                frozen.insert(line.index.row(), line.extent);
+        if (auto state = rowSyncFor(pane, true)) state->setFrozenRows(frozen);
+        scheduleRowSync();
     }
 
     void TableFrozenPaneController::applyFrozenColumnFilter(QTableView* pane)
@@ -1223,7 +1294,8 @@ namespace ks::ui
                 viewportGeometry.top() - frozenHeight,
                 viewportGeometry.width(),
                 frozenHeight);
-            m_topPane->setVisible(frozenHeight > 0 && viewportGeometry.width() > 0);
+            m_topPane->setVisible(frozenHeight > 0 && viewportGeometry.width() > 0
+                && !rowSyncPending(m_topPane.data()));
             m_topPane->raise();
         }
         if (!m_leftPane.isNull())
@@ -1235,7 +1307,8 @@ namespace ks::ui
                 viewportGeometry.top(),
                 frozenWidth,
                 viewportGeometry.height());
-            m_leftPane->setVisible(frozenWidth > 0 && viewportGeometry.height() > 0);
+            m_leftPane->setVisible(frozenWidth > 0 && viewportGeometry.height() > 0
+                && !rowSyncPending(m_leftPane.data()));
             m_leftPane->raise();
         }
         if (!m_cornerPane.isNull())
@@ -1248,7 +1321,8 @@ namespace ks::ui
                 frozenWidth + headerWidth,
                 frozenHeight + headerHeight);
             m_cornerPane->setVisible(
-                (frozenWidth + headerWidth) > 0 && (frozenHeight + headerHeight) > 0);
+                (frozenWidth + headerWidth) > 0 && (frozenHeight + headerHeight) > 0
+                && !rowSyncPending(m_cornerPane.data()));
             m_cornerPane->raise();
         }
     }
@@ -1359,7 +1433,11 @@ namespace ks::ui
             return;
         }
 
+        if (!m_targetTable->isVisible()) return;
         m_refreshing = true;
+        const int defaultExtent = m_targetTable->verticalHeader()->defaultSectionSize();
+        if (m_rowDefaultExtent >= 0 && m_rowDefaultExtent != defaultExtent) resetRowSync();
+        m_rowDefaultExtent = defaultExtent;
 
         if (m_targetModel != m_targetTable->model())
         {

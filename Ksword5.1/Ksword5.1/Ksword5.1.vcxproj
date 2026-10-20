@@ -1007,6 +1007,7 @@
     <ClInclude Include="UI\DetailPresentation.h" />
     <ClInclude Include="UI\SmoothScrollSupport.h" />
     <ClInclude Include="UI\TableColumnAutoFit.h" />
+    <ClInclude Include="UI\FrozenPaneRowSync.h" />
     <ClInclude Include="UI\TableFreezeSupport.h" />
     <ClInclude Include="UI\TableHeaderSortingSupport.h" />
     <ClInclude Include="UI\IntegrityRiskPresentation.h" />

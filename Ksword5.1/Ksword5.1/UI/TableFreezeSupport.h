@@ -1,6 +1,9 @@
 #pragma once
 
 #include "TableRowFilterSupport.h"
+#include "FrozenPaneRowSync.h"
+#include <QHash>
+#include <memory>
 
 #include "TableSnapshotCompare.h"
 
@@ -102,7 +105,12 @@ namespace ks::ui
         void configurePane(QTableView* pane, bool showHorizontalHeader, bool showVerticalHeader);
         void bridgeFrozenHeader(QTableView* pane);
         void mirrorColumnLayout(QTableView* pane);
-        void mirrorRowLayout(QTableView* pane, int firstLogicalRow, int lastLogicalRow);
+        std::shared_ptr<FrozenPaneRowSync> rowSyncFor(QTableView* pane, bool frozenRows);
+        bool rowSyncPending(QTableView* pane) const;
+        void scheduleRowSync();
+        void processRowSyncSlice();
+        void resetRowSync();
+        void markSourceRowDirty(int row);
         void mirrorVisibleRowLayout(QTableView* pane);
         void applyFrozenRowFilter(QTableView* pane);
         void applyFrozenColumnFilter(QTableView* pane);
@@ -131,6 +139,10 @@ namespace ks::ui
         bool m_refreshing = false;
         bool m_refreshScheduled = false;
         bool m_mirroringSections = false;
+        QHash<QTableView*, std::shared_ptr<FrozenPaneRowSync>> m_rowSyncStates;
+        bool m_rowSyncScheduled = false;
+        quint64 m_rowSyncGeneration = 0;
+        int m_rowDefaultExtent = -1;
     };
 
     /*
