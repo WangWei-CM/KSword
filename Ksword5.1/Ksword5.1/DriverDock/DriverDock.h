@@ -19,6 +19,8 @@
 #include <QWidget>
 
 #include <atomic>   // std::atomic_bool：调试捕获线程运行标记。
+#include <deque>    // 最近调试记录按固定容量保留，避免头删搬移。
+#include <mutex>    // 捕获线程只接纳值数据，文档仍由 GUI 线程拥有。
 #include <cstdint>  // std::uint32_t/std::uint64_t：状态值与地址值。
 #include <memory>   // std::unique_ptr：线程对象托管。
 #include <string>   // std::string：错误文本桥接与日志输出。
@@ -81,6 +83,7 @@ protected:
     // - 处理：控件文本由 LanguageManager 绑定更新，表头由本类集中重建；
     // - 返回：无。
     void changeEvent(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // DriverServiceRecord：
@@ -179,6 +182,32 @@ private:
         QString sourceText;
         QString localizedSuffixSource;
         bool translateSourceText = false;
+        std::uint64_t sequence = 0;
+    };
+
+    struct DebugOutputSnapshot
+    {
+        std::vector<DebugOutputLineRecord> records;
+        std::uint64_t lastSequence = 0;
+        bool visible = false;
+        bool replace = false;
+    };
+
+    // 规范源仍按原策略保留最近 2000 条；隐藏只延后文档投影，不停止读取。
+    class DebugOutputBuffer final
+    {
+    public:
+        bool append(std::vector<DebugOutputLineRecord> records);
+        void setVisible(bool visible);
+        DebugOutputSnapshot snapshot(std::uint64_t afterSequence, bool force, bool clearWake);
+        std::uint64_t clear();
+
+    private:
+        std::mutex m_mutex;
+        std::deque<DebugOutputLineRecord> m_records;
+        std::uint64_t m_nextSequence = 1;
+        bool m_visible = false;
+        bool m_wakePending = false;
     };
 
 private:
@@ -544,6 +573,8 @@ private:
 
     // refreshDebugOutputLines：按当前语言重建应用提示，驱动原始消息保持不变。
     void refreshDebugOutputLines();
+    void enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records);
+    void flushDebugOutputLines(bool clearWake = true);
 
     // clearDebugOutputLines：同步清空界面与用于重翻译的记录。
     void clearDebugOutputLines();
@@ -654,7 +685,9 @@ private:
     QPushButton* m_copyDebugOutputButton = nullptr;   // 复制输出按钮。
     QLabel* m_debugCaptureStatusLabel = nullptr;      // 捕获状态标签。
     CodeEditorWidget* m_debugOutputEdit = nullptr;      // 调试输出文本框。
-    std::vector<DebugOutputLineRecord> m_debugOutputLines; // 调试输出原始记录，最多保留 2000 行。
+    DebugOutputBuffer m_debugOutputBuffer;
+    std::uint64_t m_debugOutputRenderedSequence = 0;
+    bool m_debugOutputTranslationDirty = false;
 
     // ========================= 页签4：对象信息 =========================
     QWidget* m_objectInfoPage = nullptr;              // 对象信息页容器。

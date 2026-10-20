@@ -1,11 +1,93 @@
 #include "../UI/CodeEditorWidget.h"
 #include "DriverDock.Internal.h"
 
+#include <QEvent>
+#include <QTimer>
 #include <QScrollBar>
 #include <QStringList>
 
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
+
+bool DriverDock::DebugOutputBuffer::append(std::vector<DebugOutputLineRecord> records)
+{
+    if (records.empty()) return false;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (DebugOutputLineRecord& record : records)
+    {
+        record.sequence = m_nextSequence++;
+        m_records.push_back(std::move(record));
+        if (m_records.size() > 2000U) m_records.pop_front();
+    }
+    if (!m_visible || m_wakePending) return false;
+    m_wakePending = true;
+    return true;
+}
+
+void DriverDock::DebugOutputBuffer::setVisible(bool visible)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_visible = visible;
+}
+
+DriverDock::DebugOutputSnapshot DriverDock::DebugOutputBuffer::snapshot(
+    std::uint64_t afterSequence, bool force, bool clearWake)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (clearWake) m_wakePending = false;
+    DebugOutputSnapshot result;
+    result.lastSequence = m_nextSequence - 1U;
+    result.visible = m_visible;
+    if (!m_visible) return result;
+    result.replace = force || afterSequence > result.lastSequence ||
+        (!m_records.empty() && m_records.front().sequence > afterSequence &&
+            m_records.front().sequence - afterSequence > 1U);
+    for (const DebugOutputLineRecord& record : m_records)
+    {
+        if (result.replace || record.sequence > afterSequence) result.records.push_back(record);
+    }
+    return result;
+}
+
+std::uint64_t DriverDock::DebugOutputBuffer::clear()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_records.clear();
+    return m_nextSequence - 1U;
+}
+
+void DriverDock::enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records)
+{
+    if (!m_debugOutputBuffer.append(std::move(records))) return;
+    QPointer<DriverDock> guardThis(this);
+    // 队列中只放唤醒，不逐条捕获 QString；整个批次窗口只有一个待处理任务。
+    QMetaObject::invokeMethod(this, [guardThis]()
+        {
+            if (guardThis == nullptr) return;
+            QTimer::singleShot(50, guardThis.data(), [guardThis]()
+                {
+                    if (guardThis != nullptr) guardThis->flushDebugOutputLines();
+                });
+        }, Qt::QueuedConnection);
+}
+
+bool DriverDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_debugOutputEdit)
+    {
+        if (event->type() == QEvent::Show)
+        {
+            m_debugOutputBuffer.setVisible(true);
+            // 首次绘制前补齐隐藏期数据；保留已排队唤醒，避免重复投递。
+            flushDebugOutputLines(false);
+        }
+        else if (event->type() == QEvent::Hide)
+        {
+            m_debugOutputBuffer.setVisible(false);
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
 
 void DriverDock::startDebugOutputCapture()
 {
@@ -53,172 +135,103 @@ void DriverDock::stopDebugOutputCapture()
 
 void DriverDock::runKernelDebugOutputCaptureLoop()
 {
-    // guardThis 用途：回投 UI 更新时判空，避免析构后访问悬空对象。
     QPointer<DriverDock> guardThis(this);
+    const auto updateButtons = [this, guardThis]()
+        {
+            QMetaObject::invokeMethod(this, [guardThis]()
+                {
+                    if (guardThis != nullptr) guardThis->updateDebugCaptureButtonState();
+                }, Qt::QueuedConnection);
+        };
     ksword::ark::DriverClient driverClient;
     ksword::ark::DriverHandle driverHandle = driverClient.open();
     if (!driverHandle.isValid())
     {
         const unsigned long openError = ::GetLastError();
         m_kernelDebugCaptureRunning.store(false);
-        QMetaObject::invokeMethod(this, [guardThis, openError]()
-            {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-                guardThis->appendLocalizedDebugOutputLine(
-                    QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。")
-                        .arg(openError));
-                guardThis->updateDebugCaptureButtonState();
-            }, Qt::QueuedConnection);
+        appendLocalizedDebugOutputLine(
+            QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。").arg(openError));
+        updateButtons();
         return;
     }
-
     const ksword::ark::DebugOutputControlResult startResult = driverClient.controlDebugOutput(
-        driverHandle,
-        KSWORD_ARK_DEBUG_OUTPUT_ACTION_START);
+        driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_START);
     if (!startResult.io.ok)
     {
-        const QString errorDetail = QString::fromStdString(startResult.io.message);
-        const bool unsupported = startResult.unsupported;
         m_kernelDebugCaptureRunning.store(false);
-        QMetaObject::invokeMethod(this, [guardThis, errorDetail, unsupported]()
-            {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-                guardThis->appendLocalizedDebugOutputLine(
-                    unsupported
-                        ? QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。")
-                        : QStringLiteral("启动失败：R0 调试输出回调注册失败：%1")
-                            .arg(errorDetail));
-                guardThis->updateDebugCaptureButtonState();
-            }, Qt::QueuedConnection);
+        appendLocalizedDebugOutputLine(startResult.unsupported
+            ? QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。")
+            : QStringLiteral("启动失败：R0 调试输出回调注册失败：%1")
+                .arg(QString::fromStdString(startResult.io.message)));
+        updateButtons();
         return;
     }
-
-    QMetaObject::invokeMethod(this, [guardThis]()
-        {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-            guardThis->appendLocalizedDebugOutputLine(
-                QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息..."));
-            guardThis->updateDebugCaptureButtonState();
-        }, Qt::QueuedConnection);
+    appendLocalizedDebugOutputLine(
+        QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息..."));
+    updateButtons();
 
     std::uint64_t nextSequence = 0;
     std::uint64_t reportedDroppedCount = 0;
     while (m_kernelDebugCaptureRunning.load())
     {
         const ksword::ark::DebugOutputDrainResult drainResult = driverClient.drainDebugOutput(
-            driverHandle,
-            nextSequence,
-            KSWORD_ARK_DEBUG_OUTPUT_DEFAULT_DRAIN_RECORDS);
+            driverHandle, nextSequence, KSWORD_ARK_DEBUG_OUTPUT_DEFAULT_DRAIN_RECORDS);
         if (!drainResult.io.ok)
         {
-            const QString errorDetail = QString::fromStdString(drainResult.io.message);
-            QMetaObject::invokeMethod(this, [guardThis, errorDetail]()
-                {
-                    if (guardThis == nullptr)
-                    {
-                        return;
-                    }
-                    guardThis->appendLocalizedDebugOutputLine(
-                        QStringLiteral("读取 R0 调试输出失败：%1")
-                        .arg(errorDetail));
-                }, Qt::QueuedConnection);
+            appendLocalizedDebugOutputLine(QStringLiteral("读取 R0 调试输出失败：%1")
+                .arg(QString::fromStdString(drainResult.io.message)));
             break;
         }
-
         nextSequence = drainResult.nextSequence;
         if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_OVERFLOW) != 0U &&
             drainResult.lostBeforeFirst != 0U)
         {
-            const qulonglong lostCount = static_cast<qulonglong>(drainResult.lostBeforeFirst);
-            QMetaObject::invokeMethod(this, [guardThis, lostCount]()
-                {
-                    if (guardThis != nullptr)
-                    {
-                        guardThis->appendLocalizedDebugOutputLine(
-                            QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。")
-                            .arg(lostCount));
-                    }
-                }, Qt::QueuedConnection);
+            appendLocalizedDebugOutputLine(
+                QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。")
+                    .arg(static_cast<qulonglong>(drainResult.lostBeforeFirst)));
         }
         if (drainResult.droppedCount > reportedDroppedCount)
         {
             const qulonglong droppedDelta = static_cast<qulonglong>(
                 drainResult.droppedCount - reportedDroppedCount);
             reportedDroppedCount = drainResult.droppedCount;
-            QMetaObject::invokeMethod(this, [guardThis, droppedDelta]()
-                {
-                    if (guardThis != nullptr)
-                    {
-                        guardThis->appendLocalizedDebugOutputLine(
-                            QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。")
-                            .arg(droppedDelta));
-                    }
-                }, Qt::QueuedConnection);
+            appendLocalizedDebugOutputLine(
+                QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。")
+                    .arg(droppedDelta));
         }
-
+        std::vector<DebugOutputLineRecord> outputLines;
+        outputLines.reserve(drainResult.records.size());
+        const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
         for (const ksword::ark::DebugOutputRecord& record : drainResult.records)
         {
             QString messageText = QString::fromUtf8(
-                record.text.data(),
-                static_cast<int>(record.text.size())).trimmed();
-            if (messageText.isEmpty())
-            {
-                continue;
-            }
-            const bool textTruncated =
-                (record.flags & KSWORD_ARK_DEBUG_OUTPUT_RECORD_FLAG_TEXT_TRUNCATED) != 0U;
+                record.text.data(), static_cast<int>(record.text.size())).trimmed();
+            if (messageText.isEmpty()) continue;
             const QString componentText = QString::number(record.componentId, 16)
-                .toUpper()
-                .rightJustified(8, QLatin1Char('0'));
+                .toUpper().rightJustified(8, QLatin1Char('0'));
             const QString levelText = QString::number(record.level, 16)
-                .toUpper()
-                .rightJustified(8, QLatin1Char('0'));
-            const QString outputLine = QStringLiteral("[Seq=%1][Component=0x%2][Level=0x%3] %4")
+                .toUpper().rightJustified(8, QLatin1Char('0'));
+            DebugOutputLineRecord line;
+            line.timePrefix = timePrefix;
+            line.sourceText = QStringLiteral("[Seq=%1][Component=0x%2][Level=0x%3] %4")
                 .arg(static_cast<qulonglong>(record.sequence))
                 .arg(componentText, levelText, messageText);
-            QMetaObject::invokeMethod(this, [guardThis, outputLine, textTruncated]()
-                {
-                    if (guardThis != nullptr)
-                    {
-                        guardThis->appendDebugOutputLine(
-                            outputLine,
-                            textTruncated ? QStringLiteral(" [已截断]") : QString());
-                    }
-                }, Qt::QueuedConnection);
+            if ((record.flags & KSWORD_ARK_DEBUG_OUTPUT_RECORD_FLAG_TEXT_TRUNCATED) != 0U)
+                line.localizedSuffixSource = QStringLiteral(" [已截断]");
+            outputLines.push_back(std::move(line));
         }
-
-        // 有更多记录时立即继续读取，否则短暂休眠以降低空轮询开销。
+        enqueueDebugOutputLines(std::move(outputLines));
+        // 有更多记录时立即继续读取，否则保留原空轮询休眠策略。
         if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_MORE_AVAILABLE) == 0U)
-        {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
     }
-
     const ksword::ark::DebugOutputControlResult stopResult = driverClient.controlDebugOutput(
-        driverHandle,
-        KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
+        driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
     m_kernelDebugCaptureRunning.store(false);
-    QMetaObject::invokeMethod(this, [guardThis, stopOk = stopResult.io.ok]()
-        {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-            guardThis->appendLocalizedDebugOutputLine(
-                stopOk
-                    ? QStringLiteral("R0 调试输出回调已停止。")
-                    : QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。"));
-            guardThis->updateDebugCaptureButtonState();
-        }, Qt::QueuedConnection);
+    appendLocalizedDebugOutputLine(stopResult.io.ok
+        ? QStringLiteral("R0 调试输出回调已停止。")
+        : QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。"));
+    updateButtons();
 }
 
 void DriverDock::updateDebugCaptureButtonState()
@@ -256,81 +269,59 @@ void DriverDock::appendDebugOutputLine(
     const QString& debugText,
     const QString& localizedSuffixSource)
 {
-    if (m_debugOutputEdit == nullptr)
-    {
-        return;
-    }
-
-    constexpr std::size_t kMaximumDebugOutputLines = 2000U;
-    if (m_debugOutputLines.size() >= kMaximumDebugOutputLines)
-    {
-        m_debugOutputLines.erase(m_debugOutputLines.begin());
-    }
-
     DebugOutputLineRecord record;
     record.timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     record.sourceText = debugText;
     record.localizedSuffixSource = localizedSuffixSource;
-    record.translateSourceText = false;
-    m_debugOutputLines.push_back(record);
-
-    m_debugOutputEdit->appendRawText(QStringLiteral("[%1] %2%3")
-        .arg(record.timePrefix, record.sourceText, ks::i18n::displayText(record.localizedSuffixSource)));
+    enqueueDebugOutputLines({ std::move(record) });
 }
 
 void DriverDock::appendLocalizedDebugOutputLine(const QString& sourceText)
 {
-    if (m_debugOutputEdit == nullptr)
-    {
-        return;
-    }
-
-    constexpr std::size_t kMaximumDebugOutputLines = 2000U;
-    if (m_debugOutputLines.size() >= kMaximumDebugOutputLines)
-    {
-        m_debugOutputLines.erase(m_debugOutputLines.begin());
-    }
-
     DebugOutputLineRecord record;
     record.timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     record.sourceText = sourceText;
     record.translateSourceText = true;
-    m_debugOutputLines.push_back(record);
-    m_debugOutputEdit->appendRawText(QStringLiteral("[%1] %2")
-        .arg(record.timePrefix, ks::i18n::displayText(record.sourceText)));
+    enqueueDebugOutputLines({ std::move(record) });
+}
+
+void DriverDock::flushDebugOutputLines(bool clearWake)
+{
+    const DebugOutputSnapshot snapshot = m_debugOutputBuffer.snapshot(
+        m_debugOutputRenderedSequence, m_debugOutputTranslationDirty, clearWake);
+    if (!snapshot.visible || m_debugOutputEdit == nullptr) return;
+    if (!snapshot.replace && snapshot.records.empty()) return;
+    QStringList renderedLines;
+    renderedLines.reserve(static_cast<int>(snapshot.records.size()));
+    for (const DebugOutputLineRecord& record : snapshot.records)
+    {
+        const QString lineText = record.translateSourceText
+            ? ks::i18n::displayText(record.sourceText) : record.sourceText;
+        renderedLines.push_back(QStringLiteral("[%1] %2%3")
+            .arg(record.timePrefix, lineText, ks::i18n::displayText(record.localizedSuffixSource)));
+    }
+    const QString rendered = renderedLines.join(QLatin1Char('\n'));
+    const QPointer<DriverDock> guardThis(this);
+    if (snapshot.replace)
+        m_debugOutputEdit->replaceRawText(rendered);
+    else
+        m_debugOutputEdit->appendRawText(rendered);
+    if (guardThis == nullptr) return;
+    m_debugOutputRenderedSequence = snapshot.lastSequence;
+    m_debugOutputTranslationDirty = false;
 }
 
 void DriverDock::refreshDebugOutputLines()
 {
-    if (m_debugOutputEdit == nullptr)
-    {
-        return;
-    }
-
-    QStringList renderedLines;
-    renderedLines.reserve(static_cast<int>(m_debugOutputLines.size()));
-    for (const DebugOutputLineRecord& record : m_debugOutputLines)
-    {
-        const QString lineText = record.translateSourceText
-            ? ks::i18n::displayText(record.sourceText)
-            : record.sourceText;
-        renderedLines.push_back(QStringLiteral("[%1] %2%3")
-            .arg(
-                record.timePrefix,
-                lineText,
-                ks::i18n::displayText(record.localizedSuffixSource)));
-    }
-    // 重建本地化提示时保留阅读位置，原来跟随尾部才继续跟随。
-    m_debugOutputEdit->replaceRawText(renderedLines.join(QLatin1Char('\n')));
+    m_debugOutputTranslationDirty = true;
+    flushDebugOutputLines(false);
 }
 
 void DriverDock::clearDebugOutputLines()
 {
-    m_debugOutputLines.clear();
-    if (m_debugOutputEdit != nullptr)
-    {
-        m_debugOutputEdit->clear();
-    }
+    m_debugOutputRenderedSequence = m_debugOutputBuffer.clear();
+    m_debugOutputTranslationDirty = false;
+    if (m_debugOutputEdit != nullptr) m_debugOutputEdit->clear();
 }
 
 bool DriverDock::queryDriverServiceRecords(

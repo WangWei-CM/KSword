@@ -766,6 +766,7 @@ void DriverDock::initializeDebugOutputTab()
     m_debugOutputLayout->addLayout(m_debugToolLayout);
 
     m_debugOutputEdit = new CodeEditorWidget(m_debugOutputPage);
+    m_debugOutputEdit->installEventFilter(this);
     m_debugOutputEdit->setReadOnly(true);
     m_debugOutputEdit->setMaximumBlockCount(2000);
     m_debugOutputEdit->setPlaceholderText(
