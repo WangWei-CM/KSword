@@ -402,6 +402,37 @@ namespace
 // - hosts 文件编辑。
 // ============================================================
 
+void NetworkDock::initializeVisibleDiagnosticPage()
+{
+    if (!isVisible() || m_sideTabWidget == nullptr)
+    {
+        return;
+    }
+
+    QWidget* const page = m_sideTabWidget->currentWidget();
+    // Set the one-shot gate before a query/editor load can send nested events.
+    if (page == m_routeTablePage && !m_routeInitialReadStarted)
+    {
+        m_routeInitialReadStarted = true;
+        refreshRouteTable();
+    }
+    else if (page == m_arpCachePage && !m_arpInitialReadStarted)
+    {
+        m_arpInitialReadStarted = true;
+        refreshArpCacheTable();
+    }
+    else if (page == m_dnsCachePage && !m_dnsInitialReadStarted)
+    {
+        m_dnsInitialReadStarted = true;
+        refreshDnsCacheTable();
+    }
+    else if (page == m_hostsFileEditorPage && !m_hostsInitialReadStarted)
+    {
+        m_hostsInitialReadStarted = true;
+        loadHostsFileEditor();
+    }
+}
+
 void NetworkDock::initializeRouteTableTab()
 {
     m_routeTablePage = new QWidget(this);
@@ -474,7 +505,6 @@ void NetworkDock::initializeRouteTableTab()
     connect(m_addRouteButton, &QPushButton::clicked, this, [this]() { addRouteEntry(); });
     connect(m_editRouteButton, &QPushButton::clicked, this, [this]() { editSelectedRouteEntry(); });
     connect(m_removeRouteButton, &QPushButton::clicked, this, [this]() { deleteSelectedRouteEntry(); });
-    refreshRouteTable();
 }
 
 void NetworkDock::refreshRouteTable()
@@ -993,6 +1023,11 @@ void NetworkDock::initializeHostsFileEditorTab()
     m_hostsFileEditor->setReadOnly(false);
     m_hostsFileEditorLayout->addWidget(m_hostsFileEditor, 1);
 
+    m_sideTabWidget->addTab(m_hostsFileEditorPage, QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("hosts文件编辑"));
+}
+
+void NetworkDock::loadHostsFileEditor()
+{
     QString windowsDirectory = qEnvironmentVariable("WINDIR").trimmed();
     if (windowsDirectory.isEmpty())
     {
@@ -1026,7 +1061,6 @@ void NetworkDock::initializeHostsFileEditorTab()
             << eol;
     }
 
-    m_sideTabWidget->addTab(m_hostsFileEditorPage, QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("hosts文件编辑"));
 }
 
 void NetworkDock::refreshArpCacheTable()

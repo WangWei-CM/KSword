@@ -167,6 +167,7 @@ void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
         {
+            initializeVisibleDiagnosticPage();
             QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
             if (currentPage == m_firewallPage && m_firewallPage != nullptr)
             {
@@ -1224,8 +1225,6 @@ void NetworkDock::initializeConnections()
 
     // 初始化新增页首屏数据。
     refreshMultiThreadDownloadUi();
-    refreshArpCacheTable();
-    refreshDnsCacheTable();
 }
 
 void NetworkDock::startTrafficMonitor()

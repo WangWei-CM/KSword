@@ -206,6 +206,7 @@ NetworkDock::~NetworkDock()
 void NetworkDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    initializeVisibleDiagnosticPage();
 
     if (m_httpsProxyServiceInitialized)
     {

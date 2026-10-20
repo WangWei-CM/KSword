@@ -330,6 +330,10 @@ private:
     // - 返回：无。
     void initializeUi();
 
+    // Hidden diagnostics retain their page identities but do not query global state.
+    void initializeVisibleDiagnosticPage();
+    void loadHostsFileEditor();
+
     // initializeTrafficMonitorTab：
     // - 作用：构建“流量监控”页（控制栏 + 组合过滤栏 + 报文表）。
     // - 返回：无。
@@ -1268,6 +1272,10 @@ private:
 
 private:
     // ========================= 顶层布局 =========================
+    bool m_routeInitialReadStarted = false;
+    bool m_arpInitialReadStarted = false;
+    bool m_dnsInitialReadStarted = false;
+    bool m_hostsInitialReadStarted = false;
     QVBoxLayout* m_rootLayout = nullptr;   // 根布局，只承载侧边栏 Tab 容器。
     QTabWidget* m_sideTabWidget = nullptr; // 侧边栏 Tab（West）。
 
