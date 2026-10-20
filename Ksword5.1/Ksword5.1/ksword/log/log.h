@@ -77,6 +77,21 @@ namespace ks::log
         std::time_t timestamp{};
     };
 
+    // ArchiveCursor belongs to one clear epoch and identifies the first unread row.
+    // It is captured atomically with the archive tail; consumers never infer clear from row counts.
+    struct ArchiveCursor
+    {
+        std::uint64_t epoch = 0;
+        std::size_t nextIndex = 0;
+    };
+
+    struct IncrementalSnapshot
+    {
+        ArchiveCursor cursor;
+        std::vector<Event> events;
+        bool hasMore = false;
+    };
+
     // LogEntry is the thread-safe in-memory log store.
     // Input: add receives Event values; Save receives an output path.
     // Processing: a mutex protects records and the monotonic revision.
@@ -119,6 +134,16 @@ namespace ks::log
             std::uint32_t enabledLevelMask,
             const GUID* trackedGuid = nullptr) const;
 
+        // TailCursor captures a baseline without copying archived records.
+        ArchiveCursor TailCursor() const;
+
+        // SnapshotAfter inspects at most maxRecords newly archived rows and copies only
+        // notification candidates. A stale clear epoch skips to the current tail, so
+        // clearing/re-enabling notifications never replays already archived history.
+        // Returned cursor advances across disabled levels as well as delivered events.
+        IncrementalSnapshot SnapshotAfter(
+            ArchiveCursor cursor, std::size_t maxRecords, int minimumLevel) const;
+
         // Snapshot copies all records for UI refresh/export consumers.
         // Input: none.
         // Processing: lock and copy the vector.
@@ -134,6 +159,7 @@ namespace ks::log
     private:
         mutable std::mutex m_mutex;   // Protects m_events and m_revision.
         std::vector<Event> m_events;  // Complete archived log stream.
+        std::uint64_t m_epoch = 1;    // Incremented only by clear; archive indexes are epoch-local.
         std::size_t m_revision = 0;   // Incremented after add/clear.
         std::uint64_t m_nextRecordSequence = 1; // 下一条归档日志的唯一序号；clear 后不复位，避免 UI 键重复。
     };

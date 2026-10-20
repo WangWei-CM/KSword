@@ -255,6 +255,7 @@ namespace ks::log
     {
         std::lock_guard<std::mutex> lockGuard(m_mutex);
         m_events.clear();
+        ++m_epoch;
         ++m_revision;
     }
 
@@ -350,6 +351,40 @@ namespace ks::log
         // 倒序扫描得到的是“新到旧”，表格仍按正常时间顺序“旧到新”显示。
         std::reverse(recentEvents.begin(), recentEvents.end());
         return recentEvents;
+    }
+
+    ArchiveCursor LogEntry::TailCursor() const
+    {
+        std::lock_guard<std::mutex> lockGuard(m_mutex);
+        return { m_epoch, m_events.size() };
+    }
+
+    IncrementalSnapshot LogEntry::SnapshotAfter(
+        const ArchiveCursor cursor, const std::size_t maxRecords, const int minimumLevel) const
+    {
+        IncrementalSnapshot snapshot;
+        std::lock_guard<std::mutex> lockGuard(m_mutex);
+        if (cursor.epoch != m_epoch || cursor.nextIndex > m_events.size())
+        {
+            // Preserve notification semantics across clear, even if new history has
+            // already grown past the previous count before the next timer fires.
+            snapshot.cursor = { m_epoch, m_events.size() };
+            return snapshot;
+        }
+
+        const std::size_t endIndex = cursor.nextIndex
+            + std::min(maxRecords, m_events.size() - cursor.nextIndex);
+        snapshot.events.reserve(endIndex - cursor.nextIndex);
+        for (std::size_t index = cursor.nextIndex; index < endIndex; ++index)
+        {
+            if (static_cast<int>(m_events[index].level) >= minimumLevel)
+            {
+                snapshot.events.push_back(m_events[index]);
+            }
+        }
+        snapshot.cursor = { m_epoch, endIndex };
+        snapshot.hasMore = endIndex < m_events.size();
+        return snapshot;
     }
 
     std::vector<Event> LogEntry::Snapshot() const
