@@ -1164,7 +1164,12 @@ namespace
 
         void paintEvent(QPaintEvent* eventPointer) override
         {
-            (void)eventPointer;
+            const QRegion exposedRegion = eventPointer != nullptr
+                ? eventPointer->region() : QRegion(rect());
+            if (exposedRegion.isEmpty())
+            {
+                return;
+            }
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing, true);
 
@@ -1179,48 +1184,68 @@ namespace
             const QColor primaryTextColor = KswordTheme::TextPrimaryColor();
             const QColor secondaryTextColor = KswordTheme::TextSecondaryColor();
 
-            for (int index = 0; index < static_cast<int>(m_coreValues.size()); ++index)
+            // Derive candidate rows/columns from the dirty bounds, then respect disjoint regions.
+            // Include the antialias halo and integer rounding of fractional cell bounds.
+            const QRectF exposedBounds = QRectF(exposedRegion.boundingRect()).adjusted(-2.0, -2.0, 2.0, 2.0);
+            const int coreCount = static_cast<int>(m_coreValues.size());
+            const int rowCount = (coreCount + columnCount - 1) / columnCount;
+            const int firstRow = std::max(0, static_cast<int>(std::floor(exposedBounds.top() / (kCellHeight + kGridSpacing))));
+            const int lastRow = std::min(rowCount - 1, static_cast<int>(std::floor(exposedBounds.bottom() / (kCellHeight + kGridSpacing))));
+            const int firstColumn = std::max(0, static_cast<int>(std::floor(exposedBounds.left() / (cellWidth + kGridSpacing))));
+            const int lastColumn = std::min(columnCount - 1, static_cast<int>(std::floor(exposedBounds.right() / (cellWidth + kGridSpacing))));
+            for (int row = firstRow; row <= lastRow; ++row)
             {
-                const int row = index / columnCount;
-                const int column = index % columnCount;
-                const QRectF cellRect(
-                    column * (cellWidth + kGridSpacing),
-                    row * (kCellHeight + kGridSpacing),
-                    cellWidth,
-                    kCellHeight);
-                const ProcessDetailWindow::CpuCoreValue& core =
-                    m_coreValues[static_cast<std::size_t>(index)];
+                for (int column = firstColumn; column <= lastColumn; ++column)
+                {
+                    const int index = row * columnCount + column;
+                    if (index >= coreCount)
+                    {
+                        break;
+                    }
+                    const QRectF cellRect(
+                        column * (cellWidth + kGridSpacing),
+                        row * (kCellHeight + kGridSpacing),
+                        cellWidth,
+                        kCellHeight);
+                    // QPainter clips pixels automatically; skip path/text generation as well.
+                    if (!exposedRegion.intersects(cellRect.adjusted(-1.0, -1.0, 1.0, 1.0).toAlignedRect()))
+                    {
+                        continue;
+                    }
+                    const ProcessDetailWindow::CpuCoreValue& core =
+                        m_coreValues[static_cast<std::size_t>(index)];
 
-                painter.setPen(QPen(borderColor, 1.0));
-                painter.setBrush(cardColor);
-                painter.drawRoundedRect(cellRect.adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0);
+                    painter.setPen(QPen(borderColor, 1.0));
+                    painter.setBrush(cardColor);
+                    painter.drawRoundedRect(cellRect.adjusted(0.5, 0.5, -0.5, -0.5), 4.0, 4.0);
 
-                const QRectF contentRect = cellRect.adjusted(8.0, 5.0, -8.0, -8.0);
-                QFont labelFont = painter.font();
-                labelFont.setWeight(QFont::DemiBold);
-                painter.setFont(labelFont);
-                painter.setPen(secondaryTextColor);
-                painter.drawText(contentRect, Qt::AlignLeft | Qt::AlignTop, coordinateText(core));
+                    const QRectF contentRect = cellRect.adjusted(8.0, 5.0, -8.0, -8.0);
+                    QFont labelFont = painter.font();
+                    labelFont.setWeight(QFont::DemiBold);
+                    painter.setFont(labelFont);
+                    painter.setPen(secondaryTextColor);
+                    painter.drawText(contentRect, Qt::AlignLeft | Qt::AlignTop, coordinateText(core));
 
-                QFont valueFont = painter.font();
-                valueFont.setWeight(QFont::Bold);
-                painter.setFont(valueFont);
-                painter.setPen(core.sampleReady ? primaryTextColor : secondaryTextColor);
-                painter.drawText(
-                    contentRect,
-                    Qt::AlignRight | Qt::AlignTop,
-                    core.sampleReady
-                        ? QString::number(core.percent, 'f', core.percent >= 10.0 ? 1 : 2)
-                            + QStringLiteral("%")
-                        : QStringLiteral("—"));
+                    QFont valueFont = painter.font();
+                    valueFont.setWeight(QFont::Bold);
+                    painter.setFont(valueFont);
+                    painter.setPen(core.sampleReady ? primaryTextColor : secondaryTextColor);
+                    painter.drawText(
+                        contentRect,
+                        Qt::AlignRight | Qt::AlignTop,
+                        core.sampleReady
+                            ? QString::number(core.percent, 'f', core.percent >= 10.0 ? 1 : 2)
+                                + QStringLiteral("%")
+                            : QStringLiteral("—"));
 
-                const QRectF plotRect = cellRect.adjusted(7.0, 27.0, -7.0, -7.0);
-                drawHistoryLine(
-                    painter,
-                    plotRect,
-                    m_historyByProcessorIndex[core.processorIndex],
-                    cpuColor,
-                    borderColor);
+                    const QRectF plotRect = cellRect.adjusted(7.0, 27.0, -7.0, -7.0);
+                    drawHistoryLine(
+                        painter,
+                        plotRect,
+                        m_historyByProcessorIndex[core.processorIndex],
+                        cpuColor,
+                        borderColor);
+                }
             }
 
             if (m_coreValues.empty())
