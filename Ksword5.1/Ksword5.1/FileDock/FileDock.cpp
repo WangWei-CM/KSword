@@ -232,20 +232,14 @@ namespace
     QString deletedFileRecoveryCapabilityText(
         const ks::file::NtfsDeletedFileEntry& entryValue)
     {
-        switch (entryValue.recoveryCapability)
-        {
-        case ks::file::NtfsRecoveryCapability::Resident:
-            return QStringLiteral("Resident 可恢复");
-        case ks::file::NtfsRecoveryCapability::NonResidentIntact:
-            return QStringLiteral("非驻留完整可恢复（需其它卷）");
-        case ks::file::NtfsRecoveryCapability::NonResidentAtRisk:
-            return QStringLiteral("非驻留簇已复用或完整度未知");
-        case ks::file::NtfsRecoveryCapability::UnsupportedStream:
-            return QStringLiteral("压缩、加密或跨记录流暂不支持");
-        case ks::file::NtfsRecoveryCapability::MetadataOnly:
-        default:
-            return QStringLiteral("仅元数据");
-        }
+        // Canonical search labels are immutable values shared by all candidates. Display
+        // translation remains in model::data() on the GUI thread.
+        static const std::array<QString, 5> labels{ QStringLiteral("仅元数据"),
+            QStringLiteral("Resident 可恢复"), QStringLiteral("非驻留完整可恢复（需其它卷）"),
+            QStringLiteral("非驻留簇已复用或完整度未知"), QStringLiteral("压缩、加密或跨记录流暂不支持") };
+        const int capability = static_cast<int>(entryValue.recoveryCapability);
+        return labels[capability >= 0 && capability < static_cast<int>(labels.size())
+            ? static_cast<std::size_t>(capability) : 0U];
     }
 
     struct RecoveryProjection
@@ -306,7 +300,12 @@ namespace
         auto projection = std::make_shared<RecoveryProjection>();
         const auto& entries = request.snapshot->entries;
         projection->rows.reserve(entries.size());
-        QRegularExpression expression(request.query, QRegularExpression::CaseInsensitiveOption);
+        QRegularExpression expression;
+        if (request.regex && !request.query.isEmpty())
+            expression = QRegularExpression(request.query, QRegularExpression::CaseInsensitiveOption);
+        const auto matches = [&request, &expression](const QString& text)
+        { return request.regex ? expression.match(text).hasMatch()
+            : text.contains(request.query, Qt::CaseInsensitive); };
         for (std::size_t row = 0; row < entries.size(); ++row)
         {
             if ((row & 127U) == 0 && token.isCanceled()) return result;
@@ -314,14 +313,10 @@ namespace
             bool matched = request.query.isEmpty();
             if (!matched)
             {
-                const QStringList fields{ entry.fileName, entry.pathHint,
-                    deletedFileRecoveryCapabilityText(entry) };
-                for (const QString& text : fields)
-                {
-                    if (request.regex ? expression.match(text).hasMatch()
-                        : text.contains(request.query, Qt::CaseInsensitive))
-                    { matched = true; break; }
-                }
+                // Keep field boundaries: regex cannot match across name/path/capability.
+                // Names and paths already belong to the immutable scan snapshot.
+                matched = matches(entry.fileName) || matches(entry.pathHint)
+                    || matches(deletedFileRecoveryCapabilityText(entry));
             }
             if (matched) projection->rows.push_back(static_cast<int>(row));
         }
@@ -348,6 +343,19 @@ namespace
         result.projection = std::move(projection);
         return result;
     }
+
+    struct RecoverySnapshotDeleter
+    {
+        void operator()(const FileRecoverySnapshot* snapshot) const
+        {
+            // A delayed filter/menu closure may own the final reference after model retirement.
+            // Always destroy the large values on the pool, regardless of that last owner's thread.
+            QThreadPool::globalInstance()->start(QRunnable::create([snapshot]() { delete snapshot; }));
+        }
+    };
+
+    std::shared_ptr<FileRecoverySnapshot> makeRecoverySnapshot()
+    { return { new FileRecoverySnapshot, RecoverySnapshotDeleter{} }; }
 
     void retireRecoverySnapshot(std::shared_ptr<const FileRecoverySnapshot> snapshot)
     {
@@ -13888,6 +13896,7 @@ FileDock::~FileDock()
     if (m_fileMenuOperation) m_fileMenuOperation->close();
     if (m_shortNameOperation) m_shortNameOperation->close();
     if (m_fileMutationOperation != nullptr) m_fileMutationOperation->close();
+    if (m_recoveryFilterTimer) m_recoveryFilterTimer->stop();
     if (m_recoveryScanOperation) m_recoveryScanOperation->close();
     if (m_recoveryProjectionOperation) m_recoveryProjectionOperation->close();
     retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
@@ -16405,18 +16414,27 @@ void FileDock::initializeRecoveryPage()
     connect(m_recoveryExportButton, &QPushButton::clicked, this, [this]() {
         recoverSelectedDeletedFiles();
     });
-    connect(m_recoveryFilterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        applyRecoveryFilter();
-    });
-    connect(m_recoveryFilterRegexButton, &QToolButton::toggled, this, [this](bool) {
-        applyRecoveryFilter();
-    });
+    m_recoveryFilterTimer = new QTimer(this);
+    m_recoveryFilterTimer->setSingleShot(true);
+    m_recoveryFilterTimer->setInterval(100);
+    connect(m_recoveryFilterTimer, &QTimer::timeout, this, &FileDock::applyRecoveryFilter);
+    const auto scheduleFilter = [this]()
+    {
+        // Invalidate immediately, before debounce: an old result may arrive during typing.
+        m_recoveryProjectionOperation->cancel();
+        m_recoveryFilterTimer->start();
+    };
+    connect(m_recoveryFilterEdit, &QLineEdit::textChanged, this,
+        [scheduleFilter](const QString&) { scheduleFilter(); });
+    connect(m_recoveryFilterRegexButton, &QToolButton::toggled, this,
+        [scheduleFilter](bool) { scheduleFilter(); });
 
     refreshRecoveryVolumeList();
 }
 
 void FileDock::applyRecoveryFilter()
 {
+    if (m_recoveryFilterTimer) m_recoveryFilterTimer->stop();
     if (m_recoveryTable == nullptr || m_recoveryFilterEdit == nullptr || m_recoveryModel == nullptr) return;
     auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
     if (m_recoveryScanInProgress && !m_recoveryPendingSnapshot) return;
@@ -16430,13 +16448,20 @@ void FileDock::applyRecoveryFilter()
     {
         m_recoveryProjectionOperation->cancel();
         m_recoveryFilterEdit->setToolTip(QStringLiteral("正则表达式无效，已暂不筛选。"));
-        if (!m_recoveryPendingSnapshot) return;
+        if (!m_recoveryPendingSnapshot && m_recoverySortColumn == m_recoveryAppliedSortColumn
+            && m_recoverySortOrder == m_recoveryAppliedSortOrder) return;
         // A newly completed scan uses the last committed predicate while the editor is invalid.
         query = m_recoveryAppliedFilterText;
         regex = m_recoveryAppliedFilterRegex;
     }
     else m_recoveryFilterEdit->setToolTip(QStringLiteral(
         "按输入内容实时筛选扫描结果，匹配行以外的条目会被隐藏。"));
+
+    // Clearing back to the committed predicate needs no model reset or selection replay.
+    if (!m_recoveryPendingSnapshot && model->snapshot() == snapshot
+        && query == m_recoveryAppliedFilterText && regex == m_recoveryAppliedFilterRegex
+        && m_recoverySortColumn == m_recoveryAppliedSortColumn
+        && m_recoverySortOrder == m_recoveryAppliedSortOrder) return;
 
     const RecoveryProjectionRequest request{ snapshot, query, regex,
         m_recoverySortColumn, m_recoverySortOrder };
@@ -16487,6 +16512,8 @@ void FileDock::applyRecoveryFilter()
                 m_recoveryProjectionCommit = false;
                 m_recoveryAppliedFilterText = result.request.query;
                 m_recoveryAppliedFilterRegex = result.request.regex;
+                m_recoveryAppliedSortColumn = result.request.sortColumn;
+                m_recoveryAppliedSortOrder = result.request.sortOrder;
                 if (newSnapshot)
                 {
                     const auto& value = *result.request.snapshot;
@@ -16902,7 +16929,7 @@ void FileDock::scanDeletedFilesForRecoveryAsync()
         [](const Request& value, const ks::ui::AsyncOperationToken& token)
         {
             Result result;
-            auto snapshot = std::make_shared<FileRecoverySnapshot>();
+            auto snapshot = makeRecoverySnapshot();
             snapshot->volumeRoot = value.volume;
             snapshot->revision = value.revision;
             result.ok = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(value.volume,

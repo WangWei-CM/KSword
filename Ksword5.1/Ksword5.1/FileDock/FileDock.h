@@ -47,6 +47,7 @@ class QStatusBar;
 class QTabWidget;
 class QTableWidget;
 class QTableView;
+class QTimer;
 struct FileRecoverySnapshot;
 class QToolButton;
 class QTreeView;
@@ -666,6 +667,7 @@ private:
     std::shared_ptr<const FileRecoverySnapshot> m_recoveryPendingSnapshot;
     ks::ui::AsyncOperation* m_recoveryScanOperation = nullptr;
     ks::ui::AsyncOperation* m_recoveryProjectionOperation = nullptr;
+    QTimer* m_recoveryFilterTimer = nullptr; // 输入合并；到时只派发最后条件。
     std::uint64_t m_recoverySnapshotRevision = 0;
     QSet<int> m_recoverySelectedSourceRows; // 包括临时筛选隐藏的已选记录。
     int m_recoveryCurrentSourceRow = -1;
@@ -674,6 +676,8 @@ private:
     Qt::SortOrder m_recoverySortOrder = Qt::AscendingOrder;
     QString m_recoveryAppliedFilterText;
     bool m_recoveryAppliedFilterRegex = false;
+    int m_recoveryAppliedSortColumn = -1;
+    Qt::SortOrder m_recoveryAppliedSortOrder = Qt::AscendingOrder;
     bool m_recoveryScanInProgress = false;          // 误删扫描后台任务运行状态。
     bool m_recoveryRecoverInProgress = false;       // 误删恢复后台任务运行状态。
 

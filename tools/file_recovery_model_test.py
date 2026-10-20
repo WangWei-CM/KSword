@@ -48,7 +48,9 @@ def check_editor_gate(source):
     invalid_branch = between(boundary, 'if (invalid)', 'else m_recoveryFilterEdit')
     assert 'm_recoveryProjectionOperation->cancel()' in invalid_branch, (
         'invalid regular expression no longer cancels stale projection work')
-    assert 'if (!m_recoveryPendingSnapshot) return;' in invalid_branch, (
+    assert ('if (!m_recoveryPendingSnapshot) return;' in invalid_branch
+            or ('if (!m_recoveryPendingSnapshot && m_recoverySortColumn == m_recoveryAppliedSortColumn' in invalid_branch
+                and 'm_recoverySortOrder == m_recoveryAppliedSortOrder) return;' in invalid_branch)), (
         'invalid regular expression no longer preserves the committed projection')
     assert boundary.index('.isValid()') < boundary.index('->submit<'), (
         'regular expression must be validated before a projection is submitted')
@@ -118,7 +120,9 @@ void require(bool condition, const char* message) {
 }
 
 std::shared_ptr<FileRecoverySnapshot> snapshot(int count) {
-    auto result = std::make_shared<FileRecoverySnapshot>();
+    auto result = makeRecoverySnapshot();
+    require(std::get_deleter<RecoverySnapshotDeleter>(result) != nullptr,
+            "production snapshot retains a pool deleter for late final references");
     result->volumeRoot = QStringLiteral("E:\\");
     result->revision = 42;
     result->entries.reserve(static_cast<std::size_t>(count));
