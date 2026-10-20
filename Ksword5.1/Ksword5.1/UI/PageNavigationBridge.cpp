@@ -3,10 +3,12 @@
 #include "./AsyncUiDispatcher.h"
 #include "../include/ads/DockWidget.h"
 #include <QAbstractItemView>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QSet>
 #include <QPointer>
 #include <QQueue>
 #include <QRunnable>
@@ -36,8 +38,11 @@ namespace ks::ui
         HWND client = nullptr;
         HWND server = nullptr; // 保存原生句柄，析构时不重新调用宿主 winId 创建窗口。
         QString request;
-        QString epoch;
+        QString epoch = QUuid::createUuid().toString(QUuid::WithoutBraces); // 当前Bridge实例身份。
+        QString completedRevision;
+        QCryptographicHash catalogHash{QCryptographicHash::Sha256};
         QMap<QString, Route> routes;
+        QSet<QString> catalogRouteIds; // 只有当前目录代实际登记的稳定ID可路由。
         QList<QPointer<ads::CDockWidget>> pending;
         int nextDock = 0;
         quint64 generation = 0;
@@ -154,9 +159,39 @@ namespace ks::ui
 
         QString addRoute(ads::CDockWidget* dock, QWidget* page)
         {
-            const QString id = epoch + QLatin1Char(':') + QString::number(routes.size());
+            QObject* identity = page != nullptr ? static_cast<QObject*>(page) : static_cast<QObject*>(dock);
+            QString id = identity->property("ksword_navigation_route_id").toString();
+            const auto previous = routes.constFind(id);
+            if (id.isEmpty() || (previous != routes.cend()
+                && (previous->dock != dock || previous->page != page)))
+            {
+                id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                identity->setProperty("ksword_navigation_route_id", id);
+            }
             routes.insert(id, Route{dock, page, page != nullptr});
+            catalogRouteIds.insert(id);
             return id;
+        }
+
+        void removeExpiredRoutes()
+        {
+            for (auto route = routes.begin(); route != routes.end();)
+            {
+                if (!route->dock || (route->pageRequired && !route->page))
+                {
+                    route = routes.erase(route);
+                }
+                else
+                {
+                    ++route;
+                }
+            }
+        }
+
+        void hashCatalogPart(const QJsonObject& part)
+        {
+            // 只签名实际目录内容，不混入请求token；稳定ID允许consumer跨请求复用真实行。
+            catalogHash.addData(QJsonDocument(part).toJson(QJsonDocument::Compact));
         }
 
         // 只收集导航页；表格单元格、弹窗和菜单不进入目录，也不切换页面触发业务动作。
@@ -233,7 +268,10 @@ namespace ks::ui
             if (nextDock >= pending.size())
             {
                 collecting = false;
-                reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("complete")}});
+                completedRevision = QString::fromLatin1(catalogHash.result().toHex());
+                reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("complete")},
+                    {QStringLiteral("catalog_instance"), epoch},
+                    {QStringLiteral("revision"), completedRevision}});
                 return;
             }
             const int column = nextDock++;
@@ -257,8 +295,10 @@ namespace ks::ui
                         {
                             part.append(entries[index]);
                         }
-                        reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("column")},
-                            {QStringLiteral("column"), column}, {QStringLiteral("entries"), part}});
+                        const QJsonObject message{{QStringLiteral("type"), QStringLiteral("column")},
+                            {QStringLiteral("column"), column}, {QStringLiteral("entries"), part}};
+                        hashCatalogPart(message);
+                        reply(message);
                     }
                 }
             }
@@ -271,8 +311,9 @@ namespace ks::ui
             collectWaitingForDelivery = false;
             client = sender;
             request = token;
-            epoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            routes.clear();
+            removeExpiredRoutes();
+            catalogRouteIds.clear();
+            catalogHash.reset();
             pending.clear();
             nextDock = 0;
             collecting = true;
@@ -288,15 +329,18 @@ namespace ks::ui
                 columns.append(QJsonObject{{QStringLiteral("title"), dock->windowTitle()},
                     {QStringLiteral("id"), addRoute(dock, nullptr)}});
             }
+            hashCatalogPart(QJsonObject{{QStringLiteral("columns"), columns}});
             reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("begin")},
-                {QStringLiteral("columns"), columns}});
+                {QStringLiteral("columns"), columns}, {QStringLiteral("catalog_instance"), epoch},
+                {QStringLiteral("previous_revision"), completedRevision}});
             QTimer::singleShot(0, owner, [this, expected]() { collectNext(expected); });
         }
 
         void navigate(const QString& id)
         {
             const auto found = routes.constFind(id);
-            if (found == routes.cend() || !found->dock || (found->pageRequired && !found->page))
+            if (found == routes.cend() || !catalogRouteIds.contains(id)
+                || !found->dock || (found->pageRequired && !found->page))
             {
                 reply(QJsonObject{{QStringLiteral("type"), QStringLiteral("stale")}});
                 return;
