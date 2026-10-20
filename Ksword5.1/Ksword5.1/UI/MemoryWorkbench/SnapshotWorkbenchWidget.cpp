@@ -37,6 +37,7 @@
 #include <QShortcut>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <limits>
@@ -351,6 +352,7 @@ namespace ks::ui
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         // 换源意图先领代次，再使所有比较索引失效；reset 的观察者可重入换源或销毁宿主。
         const auto previousRevision = ++m_snapshotRevision;
+        ++m_comparisonRevision;
         m_comparison->reset();
         if (!alive || previousRevision != m_snapshotRevision) return;
         invalidatePseudocode(true);
@@ -440,6 +442,7 @@ namespace ks::ui
         if (!alive || revision != m_snapshotRevision) return;
         m_disassembly->invalidateEditContext();
         ++m_snapshotRevision;
+        ++m_comparisonRevision;
         m_original = m_observed = data();
         m_history.reset();
         if (m_previousRead.size() == m_original.size())
@@ -462,6 +465,7 @@ namespace ks::ui
         ++m_snapshotRevision;
         m_history.reset();
         m_observed = m_original;
+        ++m_comparisonRevision;
         m_hex->setBuffer(m_base, m_original);
         jumpToAddress(address);
         refreshFromHexEditor();
@@ -470,6 +474,7 @@ namespace ks::ui
     {
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         const auto revision = ++m_snapshotRevision; // 清空意图也要取消所有旧行和在途来源动作。
+        ++m_comparisonRevision;
         m_comparison->reset();
         if (!alive || revision != m_snapshotRevision) return;
         invalidatePseudocode(true);
@@ -503,6 +508,7 @@ namespace ks::ui
                     reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size()));
             else m_history.reset();
             m_observed = bytes;
+            ++m_comparisonRevision;
             ++m_snapshotRevision;
             const QPointer<SnapshotWorkbenchWidget> alive(this);
             invalidatePseudocode();
@@ -557,6 +563,7 @@ namespace ks::ui
         m_disassembly->invalidateEditContext();
         const QByteArray restored(reinterpret_cast<const char*>(result->data()), static_cast<qsizetype>(result->size()));
         m_observed = restored;
+        ++m_comparisonRevision;
         ++m_snapshotRevision;
         const QPointer<SnapshotWorkbenchWidget> alive(this);
         invalidatePseudocode();
@@ -572,7 +579,9 @@ namespace ks::ui
         {
             if (m_tabs->currentIndex() == 1) rebuildDisassembly();
             if (m_tabs->currentIndex() == 2) rebuildText();
-            if (m_tabs->currentIndex() == 3) rebuildComparison();
+            // Comparison colors are resolved by model data() from the current theme.
+            // Repaint preserves the selected row/scroll position and never rescans bytes.
+            if (m_comparison) m_comparison->table()->viewport()->update();
         }
     }
     void SnapshotWorkbenchWidget::updateState()
@@ -718,7 +727,7 @@ namespace ks::ui
         synchronizeSnapshotProvider();
         const auto size = static_cast<std::uint64_t>(data().size());
         if (!size) { m_comparison->reset(); return; }
-        m_comparison->setWindow(m_base, size);
+        m_comparison->setSnapshotWindow(m_base, size, m_comparisonRevision);
     }
 
     // 共享预览只生成冻结载荷；此宿主仍只改缓存，真实写回由外层页面确认并提交。

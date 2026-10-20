@@ -200,6 +200,8 @@ namespace ks::ui
         detail::MemoryEditHistory m_history; // 当前基线之上的有界本地差异历史。
         std::uint64_t m_base = 0; // 已载入窗口起点，不等同于全部可请求范围。
         std::uint64_t m_anchor = 0; // 当前正式反汇编起点。
+        // Data-only generation: architecture, palette and permissions do not invalidate comparisons.
+        std::uint64_t m_comparisonRevision = 0;
         std::uint64_t m_snapshotRevision = 0; // 取消陈旧编辑、解释和模态动作的修订代次。
         SnapshotAddressKind m_addressKind = SnapshotAddressKind::MemoryAddress; // 当前地址或文件偏移域。
         bool m_editable = false; // 本地暂存是否开放；不代表真实目标写权限。
