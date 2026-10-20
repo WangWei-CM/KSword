@@ -4873,15 +4873,30 @@ namespace ks::process
             return ExtractFileNameFromPath(processPath);
         }
 
-        const std::vector<ProcessRecord> processList = EnumerateProcesses(ProcessEnumStrategy::SnapshotProcess32);
-        for (const ProcessRecord& processRecord : processList)
+        // A name-only fallback must not enter EnumerateProcesses: that API also
+        // collects per-process counters, global handles and GPU PDH samples.
+        const HANDLE snapshotHandle = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
         {
-            if (processRecord.pid == pid)
-            {
-                return processRecord.processName;
-            }
+            return std::string();
         }
-        return std::string();
+
+        std::string processName;
+        PROCESSENTRY32W processEntry{};
+        processEntry.dwSize = sizeof(processEntry);
+        if (::Process32FirstW(snapshotHandle, &processEntry) != FALSE)
+        {
+            do
+            {
+                if (processEntry.th32ProcessID == pid)
+                {
+                    processName = ks::str::Utf16ToUtf8(processEntry.szExeFile);
+                    break;
+                }
+            } while (::Process32NextW(snapshotHandle, &processEntry) != FALSE);
+        }
+        ::CloseHandle(snapshotHandle);
+        return processName;
     }
 
     bool ExecuteTaskKill(const std::uint32_t pid, const bool forceKill, std::string* const errorMessage)
