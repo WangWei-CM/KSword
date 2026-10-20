@@ -6520,7 +6520,7 @@ void ProcessDock::initializeConnections()
         m_processIconPathsInFlight.clear();
         stopProcessNetworkTrafficCapture();
         stopCpuCoreUsageCapture();
-        m_threadCounterSampleByIdentity.clear();
+        resetThreadCounterBaseline();
         updateProcessActivityStatusLabel();
     });
 

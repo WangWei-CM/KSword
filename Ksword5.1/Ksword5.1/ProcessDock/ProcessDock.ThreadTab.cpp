@@ -1058,6 +1058,12 @@ void ProcessDock::shutdownThreadPage()
     }
 }
 
+void ProcessDock::resetThreadCounterBaseline()
+{
+    ++m_threadCounterGeneration;
+    m_threadCounterSampleByIdentity.reset();
+}
+
 void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 {
     if (m_threadTable == nullptr)
@@ -1082,6 +1088,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 
     m_threadRefreshInProgress = true;
     const std::uint64_t localTicket = ++m_threadRefreshTicket;
+    const std::uint64_t counterGeneration = m_threadCounterGeneration;
     auto previousThreadCounters = m_threadCounterSampleByIdentity;
     auto cpuCoreUsageSnapshot = m_latestCpuCoreUsageSnapshot;
     const std::uint32_t logicalCpuCount = m_logicalCpuCount;
@@ -1103,6 +1110,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
     QRunnable* backgroundTask = QRunnable::create([
         guardThis,
         localTicket,
+        counterGeneration,
         logicalCpuCount,
         previousThreadCounters = std::move(previousThreadCounters),
         cpuCoreUsageSnapshot = std::move(cpuCoreUsageSnapshot)]() mutable {
@@ -1115,8 +1123,12 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
         const std::uint64_t currentTick100ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count() / 100);
-        auto nextThreadCounters =
-            std::make_shared<std::unordered_map<std::string, ks::process::ThreadCounterSample>>();
+        using ThreadCounters = std::unordered_map<std::string, ks::process::ThreadCounterSample>;
+        auto nextThreadCounters = std::shared_ptr<ThreadCounters>(new ThreadCounters,
+            [](ThreadCounters* retired) {
+                if (QCoreApplication::closingDown()) delete retired;
+                else QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; }));
+            });
         nextThreadCounters->reserve(threadList.size());
         for (ks::process::SystemThreadRecord& threadRecord : threadList)
         {
@@ -1124,11 +1136,19 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                 threadRecord.ownerPid,
                 threadRecord.threadId,
                 threadRecord.createTime100ns);
-            const auto previousIt = previousThreadCounters.find(identityKey);
+            const ks::process::ThreadCounterSample* previousSample = nullptr;
+            if (previousThreadCounters != nullptr)
+            {
+                const auto previousIt = previousThreadCounters->find(identityKey);
+                if (previousIt != previousThreadCounters->end())
+                {
+                    previousSample = &previousIt->second;
+                }
+            }
             ks::process::ThreadCounterSample nextSample{};
             ks::process::UpdateThreadCpuUsage(
                 threadRecord,
-                previousIt != previousThreadCounters.end() ? &previousIt->second : nullptr,
+                previousSample,
                 nextSample,
                 logicalCpuCount,
                 currentTick100ns);
@@ -1151,7 +1171,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
 
         auto deferredThreadList =
             std::make_shared<std::vector<ks::process::SystemThreadRecord>>(std::move(threadList));
-        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, usedNtQuery, r0ThreadExtensionMerged, diagnosticText, deferredThreadList, nextThreadCounters]() {
+        QMetaObject::invokeMethod(guardThis, [guardThis, localTicket, counterGeneration, usedNtQuery, r0ThreadExtensionMerged, diagnosticText, deferredThreadList, nextThreadCounters]() {
             if (guardThis == nullptr)
             {
                 return;
@@ -1170,6 +1190,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
             auto commit = [
                 guardThis,
                 localTicket,
+                counterGeneration,
                 usedNtQuery,
                 r0ThreadExtensionMerged,
                 diagnosticText,
@@ -1188,7 +1209,13 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                     QThreadPool::globalInstance()->start(QRunnable::create(
                         [retiredRecords = std::move(retiredRecords)]() {}));
                 }
-                guardThis->m_threadCounterSampleByIdentity = std::move(*nextThreadCounters);
+                // Pause/reset may have happened while the immutable worker was running.
+                // Its completed row snapshot is still valid, but its old CPU baseline must
+                // never undo that explicit reset.
+                if (guardThis->m_threadCounterGeneration == counterGeneration)
+                {
+                    guardThis->m_threadCounterSampleByIdentity = nextThreadCounters;
+                }
                 guardThis->m_threadDiagnosticText = diagnosticText;
                 guardThis->m_threadSnapshotReady = true;
                 guardThis->rebuildThreadTable();
