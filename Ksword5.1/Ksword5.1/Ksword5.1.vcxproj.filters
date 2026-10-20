@@ -2605,6 +2605,9 @@
     <ClInclude Include="ProcessDock\ProcessAffinityModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ProcessDock\ProcessActivitySeriesCache.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProcessDock\ThreadAffinityMenu.h">
       <Filter>Header Files</Filter>
     </ClInclude>

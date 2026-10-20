@@ -1231,6 +1231,7 @@
     <ClInclude Include="ProcessDock\ProcessAffinityUtils.h" />
     <ClInclude Include="ProcessDock\ProcessAffinityPersistence.h" />
     <ClInclude Include="ProcessDock\ProcessAffinityModel.h" />
+    <ClInclude Include="ProcessDock\ProcessActivitySeriesCache.h" />
     <ClInclude Include="ProcessDock\ThreadAffinityMenu.h" />
     <ClInclude Include="ProcessDock\ProcessCpuCapacityCell.h" />
     <ClInclude Include="ProcessDock\ProcessGpuTableView.h" />
