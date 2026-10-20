@@ -834,6 +834,7 @@ private:
     // 返回值：无，失败时通过提示框和日志反馈。
     void handleProcessWindowPickerRelease(const QPoint& globalPos);
     bool isProcessActivityTableSnapshotActive() const;
+    bool isProcessActivitySnapshotProjectionCurrent() const;
     void rebuildProcessActivityTableSnapshotRecords();
     QString buildProcessActivitySnapshotText(int sampleIndex) const;
     std::vector<std::string> currentProcessActivitySelectionKeys() const;
@@ -1190,6 +1191,9 @@ private:
     bool m_activityTimelinePinnedToLatest = true;   // 明确实时状态才跟随最新；图上点选最新样本也冻结。
     bool m_activityTimelineSliderUpdating = false;  // 程序更新滑块时屏蔽用户态判定。
     bool m_activityTableSnapshotActive = false;     // 下方进程表是否保持独立的历史快照；不随折线采样队列淘汰。
+    bool m_activityTableSnapshotProjectionValid = false; // 独立冻结记录是否对应当前样本版本。
+    std::uint64_t m_activityTableSnapshotSequence = 0;
+    std::uint64_t m_activityTableSnapshotRecordingTick = 0;
     int m_activityTableSnapshotIndex = -1;           // 下方进程表当前绑定的历史样本，-1 表示实时列表。
     std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。
     std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次记录开始 steady tick。
@@ -1310,6 +1314,7 @@ private:
     QPlainTextEdit* m_createResultOutput = nullptr;
 
     // ======== 刷新调度 ========
+    bool m_processTableProjectionPending = false; // 隐藏期间数据更新，重显只投影最后状态。
     QTimer* m_refreshTimer = nullptr;         // 周期刷新定时器。
     bool m_monitoringEnabled = true;          // 当前是否处于监视状态。
     bool m_refreshInProgress = false;         // 防止并发刷新的互斥标记。

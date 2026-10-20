@@ -4881,6 +4881,13 @@ void ProcessDock::showEvent(QShowEvent* event)
 
     if (m_initialRefreshScheduled)
     {
+        // Show 内部的可见性尚未稳定；只消费隐藏期间积累的展示，不额外枚举。
+        QTimer::singleShot(0, this, [this]() {
+            if (m_processTableProjectionPending && isProcessListPageVisibleForRecording())
+            {
+                rebuildTable();
+            }
+        });
         return;
     }
 
@@ -4900,6 +4907,7 @@ void ProcessDock::showEvent(QShowEvent* event)
     m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
     updateProcessActivityStatusLabel();
     requestAsyncRefresh(true);
 
@@ -5633,6 +5641,7 @@ void ProcessDock::handleProcessWindowPickerRelease(const QPoint& globalPos)
     m_activityTableSnapshotActive = false;
     m_activityTableSnapshotIndex = -1;
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
     if (m_activityTimelineSlider != nullptr && !m_activitySamples.empty())
     {
         const bool oldUpdating = m_activityTimelineSliderUpdating;
@@ -6359,6 +6368,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         kLogEvent logEvent;
         info << logEvent
             << "[ProcessDock] 内核进程对比开关变更, enabled="
@@ -6384,6 +6394,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         // 用户手动切换复选框后退出表头触发的普通扁平模式，并重置友好视图排序会话。
         m_flatListForcedByHeaderSort = false;
         m_friendlySortActive = false;
@@ -6406,6 +6417,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
 
         const int customIndex = currentCustomViewIndex();
         kLogEvent logEvent;
@@ -6446,6 +6458,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         if (m_refreshTimer != nullptr)
         {
             if (isProcessActivityRefreshAllowedNow())
@@ -6509,6 +6522,7 @@ void ProcessDock::initializeConnections()
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         m_activityNextSequence = 0;
         m_activityRecordingStartTick100ns = steadyNow100ns();
         m_activityTimelinePinnedToLatest = true;
@@ -6690,6 +6704,10 @@ void ProcessDock::initializeConnections()
         QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
         if (currentPage == m_processListPage)
         {
+            if (m_processTableProjectionPending)
+            {
+                rebuildTable();
+            }
             if (m_monitoringEnabled && m_refreshTimer != nullptr && !m_refreshTimer->isActive())
             {
                 m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
@@ -7784,9 +7802,10 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     queueProcessIconExtractionsForCurrentProcesses();
 
     appendProcessActivitySample();
-    if (isProcessActivityTableSnapshotActive())
+    if (!isProcessListPageVisibleForRecording() && !isProcessActivityTableSnapshotActive())
     {
-        rebuildProcessActivityTableSnapshotRecords();
+        // 规范数据及历史照常推进；隐藏主表只记一次待展示状态。
+        m_processTableProjectionPending = true;
     }
     const bool processTableRebuilt = shouldRebuildProcessTableForRefresh(forceUiRefresh);
     if (processTableRebuilt)
@@ -7794,8 +7813,8 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
         rebuildTable();
         m_lastProcessTableRebuildTime = nowTime;
     }
-    else if (cpuCoreSnapshotChanged &&
-        m_processTable != nullptr &&
+    else if (cpuCoreSnapshotChanged && isProcessListPageVisibleForRecording() &&
+        !isProcessActivityTableSnapshotActive() && m_processTable != nullptr &&
         m_processTable->viewport() != nullptr)
     {
         // 逐核心快照独立于整表 2 秒节流：只重绘 CPU 列可见矩形，不触碰其它列或模型行。
@@ -7980,10 +7999,19 @@ void ProcessDock::restorePersistedAffinityForNewProcesses(RefreshResult& refresh
 
 bool ProcessDock::shouldRebuildProcessTableForRefresh(const bool forceUiRefresh) const
 {
-    // 强制刷新、历史快照表格、首轮显示必须立刻重绘。
-    if (forceUiRefresh || isProcessActivityTableSnapshotActive() || m_lastProcessTableRebuildTime.time_since_epoch().count() == 0)
+    if (!isProcessListPageVisibleForRecording())
+    {
+        return false;
+    }
+    // 明确操作及重显消费一次；不变的冻结样本不被每轮实时采样重新投影。
+    if (forceUiRefresh || m_processTableProjectionPending || m_lastProcessTableRebuildTime.time_since_epoch().count() == 0)
     {
         return true;
+    }
+
+    if (isProcessActivityTableSnapshotActive())
+    {
+        return !isProcessActivitySnapshotProjectionCurrent();
     }
 
     // 非强制后台监视按独立 UI 间隔节流，避免高频采样时重建整张进程表。
@@ -8724,6 +8752,11 @@ ProcessDock::RefreshResult ProcessDock::buildRefreshResult(
 
 void ProcessDock::rebuildTable()
 {
+    if (!isProcessListPageVisibleForRecording())
+    {
+        m_processTableProjectionPending = true;
+        return;
+    }
     if (m_processTable == nullptr || m_processTableModel == nullptr || m_processSortProxy == nullptr)
     {
         return;
@@ -9140,6 +9173,9 @@ void ProcessDock::rebuildTable()
             horizontalScrollBar->maximum()));
     }
 
+    // 仅实际提交完成后清 dirty；菜单延迟回调仍保留待展示状态。
+    m_processTableProjectionPending = false;
+    m_lastProcessTableRebuildTime = std::chrono::steady_clock::now();
     // 表格重建完成后恢复刷新绘制。
     m_processTable->setUpdatesEnabled(true);
     m_processTable->viewport()->update();
@@ -9743,6 +9779,7 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
             m_activityTableSnapshotActive = false;
             m_activityTableSnapshotIndex = -1;
             m_activityTableSnapshotRecords.clear();
+            m_activityTableSnapshotProjectionValid = false;
         }
         else if (isProcessActivityTableSnapshotActive())
         {
@@ -9779,6 +9816,7 @@ void ProcessDock::previewProcessActivitySnapshotForIndex(const int sampleIndex)
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         if (m_activitySnapshotLabel != nullptr && m_activitySnapshotLabel->isVisible())
         {
             m_activitySnapshotLabel->setText(processContextText(
@@ -9815,6 +9853,7 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         previewProcessActivitySnapshotForIndex(-1);
         rebuildTable();
         updateProcessActivityStatusLabel();
@@ -9837,6 +9876,7 @@ void ProcessDock::commitProcessActivityTimelineIndex(const int sampleIndex, cons
     if (followLatest)
     {
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
     }
     if (m_activityTimelineSlider != nullptr && m_activityTimelineSlider->value() != safeIndex)
     {
@@ -9857,11 +9897,29 @@ bool ProcessDock::isProcessActivityTableSnapshotActive() const
     return m_activityTableSnapshotActive;
 }
 
+bool ProcessDock::isProcessActivitySnapshotProjectionCurrent() const
+{
+    if (!m_activityTableSnapshotProjectionValid ||
+        m_activityTableSnapshotRecordingTick != m_activityRecordingStartTick100ns)
+    {
+        return false;
+    }
+    // 已淘汰的冻结样本仍由独立记录持有，不能映射到新的索引或实时进程。
+    if (m_activityTableSnapshotIndex < 0 ||
+        m_activityTableSnapshotIndex >= static_cast<int>(m_activitySamples.size()))
+    {
+        return true;
+    }
+    return m_activityTableSnapshotSequence ==
+        m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)].sequence;
+}
+
 void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
 {
     if (!isProcessActivityTableSnapshotActive())
     {
         m_activityTableSnapshotRecords.clear();
+        m_activityTableSnapshotProjectionValid = false;
         return;
     }
 
@@ -9872,10 +9930,17 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         return;
     }
 
+    if (isProcessActivitySnapshotProjectionCurrent())
+    {
+        return;
+    }
     m_activityTableSnapshotRecords.clear();
+    m_activityTableSnapshotProjectionValid = false;
 
     const ProcessActivitySample& sample =
         m_activitySamples[static_cast<std::size_t>(m_activityTableSnapshotIndex)];
+    const std::string snapshotTime = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds)
+        .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")).toStdString();
     m_activityTableSnapshotRecords.reserve(sample.processes.size());
     for (const ProcessActivityProcessPoint& processPoint : sample.processes)
     {
@@ -9892,9 +9957,7 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         record.commandLine = "时间轴历史样本";
         record.userName = "-";
         record.signatureState = "历史快照";
-        record.startTimeText = QDateTime::fromMSecsSinceEpoch(sample.unixMilliseconds)
-            .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"))
-            .toStdString();
+        record.startTimeText = snapshotTime;
         copyProcessActivityDynamicFields(record, processPoint);
         record.activePrivateWorkingSetBytes = processPoint.processSuspended
             ? 0U
@@ -9903,6 +9966,9 @@ void ProcessDock::rebuildProcessActivityTableSnapshotRecords()
         record.dynamicCountersReady = true;
         m_activityTableSnapshotRecords.push_back(std::move(record));
     }
+    m_activityTableSnapshotSequence = sample.sequence;
+    m_activityTableSnapshotRecordingTick = m_activityRecordingStartTick100ns;
+    m_activityTableSnapshotProjectionValid = true;
 }
 
 QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) const
