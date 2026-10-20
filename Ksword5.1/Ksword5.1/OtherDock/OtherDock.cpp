@@ -772,7 +772,7 @@ namespace
     }
 
     // 按 PID 采集模块预览，每个模块保留独立身份、地址和大小字段。
-    ks::ui::FieldDocument buildModuleSummaryDocument(const std::uint32_t processId, const int maxRenderCount, int* moduleCountOut)
+    ks::ui::FieldDocument buildModuleSummaryDocument(const std::uint32_t processId, const int maxRenderCount, int* moduleCountOut, const std::function<bool()>& canceled = {})
     {
         if (moduleCountOut != nullptr)
         {
@@ -798,6 +798,7 @@ namespace
         {
             do
             {
+                if (canceled && canceled()) break;
                 ++moduleCount;
                 if (moduleCount <= maxRenderCount)
                 {
@@ -1738,15 +1739,26 @@ public:
         m_messageFlushTimer->setInterval(40);
         connect(m_messageFlushTimer, &QTimer::timeout, this, [this] { flushDeferredMessageRows(); });
         m_messageFlushTimer->start();
-        refreshRuntimeInfo();
-        startMessageMonitor();
+        m_runtimeOperation = new ks::ui::AsyncOperation(this);
+        RuntimeSnapshot initial;
+        initial.info = m_info; initial.valid = m_info.valid; initial.native = false;
+        initial.style = runtimeStyleDocument(m_info.styleValue, m_info.exStyleValue);
+        applyRuntimeBase(initial);
+        const auto unread = ks::ui::FieldDocument{}.note(QStringLiteral("未读取"));
+        for (auto* fields : {m_processThreadText, m_classText, m_hookText, m_advancedText}) fields->setDocument(unread);
+        for (auto* spin : {m_xSpin, m_ySpin, m_widthSpin, m_heightSpin})
+            connect(spin, &QSpinBox::valueChanged, this, [this] { if (!m_runtimeApplying) ++m_runtimeEditRevision; });
+        connect(m_tabWidget, &QTabWidget::currentChanged, this, [this] { requestRuntimeInfo(currentRuntimeMask()); });
+        requestRuntimeInfo(currentRuntimeMask());
     }
 
     // 析构函数：
     // - 作用：确保关闭详情窗时释放消息钩子句柄，避免系统残留回调。
     ~WindowDetailDialog() override
     {
+        if (m_tabWidget) disconnect(m_tabWidget, nullptr, this, nullptr);
         if (m_messageSnapshotOperation) m_messageSnapshotOperation->close();
+        if (m_runtimeOperation) m_runtimeOperation->close();
         stopMessageMonitor();
     }
 
@@ -1810,6 +1822,7 @@ private:
                     return;
                 }
 
+                if (!m_runtimeApplying) ++m_runtimeEditRevision;
                 // 变更后即时刷新“状态面板”的置顶/分层联动显示。
                 updateDerivedStyleControlsFromCheckBoxes();
                 if (m_styleApplyButton != nullptr)
@@ -1897,6 +1910,7 @@ private:
 
     void markAppearanceChangesPending()
     {
+        if (!m_runtimeApplying) ++m_runtimeEditRevision;
         m_styleApplyButton->setEnabled(true);
         m_applyButton->setEnabled(true);
     }
@@ -1936,32 +1950,6 @@ private:
         }
         m_styleCheckSyncing = false;
         updateDerivedStyleControlsFromCheckBoxes();
-    }
-
-    // buildStyleSummaryText：
-    // - 作用：拼接“十六进制样式值 + 每个复选框状态”的详细文本；
-    // - 调用：refreshRuntimeInfo 刷新样式文本区时调用；
-    // - 传入 styleValue/exStyleValue：实时样式值；
-    // - 传出：返回可直接写入 m_styleText 的说明文本。
-    ks::ui::FieldDocument buildStyleSummaryText(const quint64 styleValue, const quint64 exStyleValue) const
-    {
-        ks::ui::FieldDocument styleText;
-        styleText.field(QStringLiteral("Style"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(styleValue, 0, 16)));
-        styleText.field(QStringLiteral("ExStyle"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(exStyleValue, 0, 16)));
-        styleText.section(QStringLiteral("窗口样式 WS_*"));
-        for (const StyleCheckBinding& binding : m_styleCheckBindingList)
-        {
-            const bool enabled = (styleValue & binding.styleMaskValue) != 0;
-            styleText.field(binding.styleNameText, boolText(enabled));
-        }
-
-        styleText.section(QStringLiteral("扩展样式 WS_EX_*"));
-        for (const StyleCheckBinding& binding : m_exStyleCheckBindingList)
-        {
-            const bool enabled = (exStyleValue & binding.styleMaskValue) != 0;
-            styleText.field(binding.styleNameText, boolText(enabled));
-        }
-        return styleText;
     }
 
     // applyStyleCheckBoxChanges：
@@ -2317,6 +2305,7 @@ private:
         processLayout->setContentsMargins(8, 8, 8, 8);
         processLayout->setSpacing(6);
         m_processThreadText = new ks::ui::StructuredFieldView(processPage);
+        m_runtimePageMasks.insert(processPage, RuntimeProcess);
 
         processLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_processThreadText, processLayout->parentWidget()), 1);
         m_tabWidget->addTab(processPage, QIcon(QStringLiteral(":/Icon/process_threads.svg")), QStringLiteral("进程与线程"));
@@ -2329,6 +2318,7 @@ private:
         classLayout->setContentsMargins(8, 8, 8, 8);
         classLayout->setSpacing(6);
         m_classText = new ks::ui::StructuredFieldView(classPage);
+        m_runtimePageMasks.insert(classPage, RuntimeClass);
 
         classLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_classText, classLayout->parentWidget()), 1);
         m_tabWidget->addTab(classPage, QIcon(QStringLiteral(":/Icon/knowledge_book.svg")), QStringLiteral("类信息"));
@@ -2349,6 +2339,7 @@ private:
 
         // 概览文本：保留原有消息队列状态、焦点等摘要，便于快速判断窗口活性。
         m_hookText = new ks::ui::StructuredFieldView(hookPage);
+        m_runtimePageMasks.insert(hookPage, RuntimeHooks);
 
         auto* hookSplitter = new QSplitter(Qt::Vertical, hookPage);
         hookSplitter->setChildrenCollapsible(false);
@@ -2487,9 +2478,11 @@ private:
 
         // 监控控制绑定：开始/停止/清空动作。
         connect(m_messageStartButton, &QPushButton::clicked, this, [this]() {
+            m_runtimeMonitorInitialDone = true;
             startMessageMonitor();
         });
         connect(m_messageStopButton, &QPushButton::clicked, this, [this]() {
+            m_runtimeMonitorInitialDone = true;
             stopMessageMonitor();
         });
         connect(m_messageClearButton, &QPushButton::clicked, this, [this]() {
@@ -2506,6 +2499,7 @@ private:
         advancedLayout->setContentsMargins(8, 8, 8, 8);
         advancedLayout->setSpacing(6);
         m_advancedText = new ks::ui::StructuredFieldView(advancedPage);
+        m_runtimePageMasks.insert(advancedPage, RuntimeAdvanced);
 
         advancedLayout->addWidget(ks::ui::CreateDetailFieldProjection(m_advancedText, advancedLayout->parentWidget()), 1);
         m_tabWidget->addTab(advancedPage, QIcon(QStringLiteral(":/Icon/process_settings.svg")), QStringLiteral("高级属性"));
@@ -2568,96 +2562,77 @@ private:
         ks::ui::InstallDetailWindowFramework(this);
     }
 
-    // 刷新运行时信息：对句柄重新采样，避免显示陈旧数据。
-    void refreshRuntimeInfo()
+    enum : unsigned { RuntimeProcess = 1, RuntimeClass = 2, RuntimeHooks = 4, RuntimeAdvanced = 8, RuntimeAll = 15 };
+    struct RuntimeRequest
     {
-        HWND windowHandle = toHwnd(m_info.hwndValue);
-        if (::IsWindow(windowHandle) == FALSE)
+        OtherDock::WindowInfo info;
+        unsigned mask = 0;
+        DWORD queueStatus = 0; // caller GUI queue status; not the pool thread queue
+        quint64 editRevision = 0;
+    };
+    struct RuntimeSnapshot
+    {
+        OtherDock::WindowInfo info;
+        unsigned mask = 0;
+        quint64 editRevision = 0, instance = 0;
+        bool valid = false, native = true;
+        QString failure;
+        ks::ui::FieldDocument style, process, classInfo, hooks, advanced;
+    };
+    static ks::ui::FieldDocument runtimeStyleDocument(quint64 style, quint64 extended)
+    {
+        ks::ui::FieldDocument document;
+        document.field(QStringLiteral("Style"), QStringLiteral("0x%1").arg(style, 0, 16));
+        document.field(QStringLiteral("ExStyle"), QStringLiteral("0x%1").arg(extended, 0, 16));
+        document.section(QStringLiteral("窗口样式 WS_*"));
+        for (const auto& value : windowStyleFlagDefinitionList())
+            document.field(QString::fromLatin1(value.styleNameText), boolText((style & value.styleMaskValue) != 0));
+        document.section(QStringLiteral("扩展样式 WS_EX_*"));
+        for (const auto& value : windowExStyleFlagDefinitionList())
+            document.field(QString::fromLatin1(value.styleNameText), boolText((extended & value.styleMaskValue) != 0));
+        return document;
+    }
+    static std::shared_ptr<const RuntimeSnapshot> collectRuntime(const RuntimeRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        auto snapshot = makeWindowBackgroundValue<RuntimeSnapshot>();
+        auto& result = *snapshot;
+        result.info = request.info;
+        result.mask = request.mask;
+        result.editRevision = request.editRevision;
+        HWND windowHandle = toHwnd(request.info.hwndValue);
+        if (!ks::window::windowIdentityMatches(request.info.hwndValue, request.info.processId,
+            request.info.threadId, request.info.processCreationTime100ns))
         {
-            m_stateLabel->setText(QStringLiteral("窗口已失效"));
-            m_topMostCheck->setEnabled(false);
-            m_alphaSlider->setEnabled(false);
-            m_alphaSpin->setEnabled(false);
-            m_applyButton->setEnabled(false);
-            m_styleApplyButton->setEnabled(false);
-            return;
+            result.failure = QStringLiteral("目标窗口身份已变化或无法验证");
+            return snapshot;
         }
-
-        // 句柄与基础状态字段。
-        m_handleLabel->setText(hwndToText(m_info.hwndValue));
-        m_parentHandleLabel->setText(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetParent(windowHandle)))));
-        m_ownerHandleLabel->setText(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetWindow(windowHandle, GW_OWNER)))));
-        m_classNameLabel->setText(m_info.classNameText);
-        m_titleEdit->setText(m_info.titleText);
-        m_instanceLabel->setText(hwndToText(static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWLP_HINSTANCE))));
-
-        const bool visible = ::IsWindowVisible(windowHandle) != FALSE;
-        const bool enabled = ::IsWindowEnabled(windowHandle) != FALSE;
-        const bool minimized = ::IsIconic(windowHandle) != FALSE;
-        const bool maximized = ::IsZoomed(windowHandle) != FALSE;
-
-        m_stateLabel->setText(QStringLiteral("可见:%1, 可用:%2, 状态:%3")
-            .arg(boolText(visible), boolText(enabled), windowStateText(true, minimized, maximized)));
-        m_relationLabel->setText(QStringLiteral("PID=%1, TID=%2")
-            .arg(m_info.processId)
-            .arg(m_info.threadId));
-
-        // 样式信息：输出十六进制样式值与常见标记判断。
-        const quint64 styleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
-        const quint64 exStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
-        syncStyleCheckBoxes(styleValue, exStyleValue);
-        m_styleText->setDocument(buildStyleSummaryText(styleValue, exStyleValue));
-
-        // 窗口位置与尺寸写回编辑控件。
+        result.info.parentHwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(::GetParent(windowHandle)));
+        result.info.ownerHwndValue = static_cast<quint64>(reinterpret_cast<quintptr>(::GetWindow(windowHandle, GW_OWNER)));
+        result.instance = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWLP_HINSTANCE));
+        result.info.visible = ::IsWindowVisible(windowHandle) != FALSE;
+        result.info.enabled = ::IsWindowEnabled(windowHandle) != FALSE;
+        result.info.minimized = ::IsIconic(windowHandle) != FALSE;
+        result.info.maximized = ::IsZoomed(windowHandle) != FALSE;
+        result.info.styleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_STYLE));
+        result.info.exStyleValue = static_cast<quint64>(::GetWindowLongPtrW(windowHandle, GWL_EXSTYLE));
         RECT rect{};
-        const bool windowRectReady = (::GetWindowRect(windowHandle, &rect) != FALSE);
-        if (windowRectReady)
+        const bool windowRectReady = ::GetWindowRect(windowHandle, &rect) != FALSE;
+        result.info.windowRect = windowRectReady ? QRect(rect.left, rect.top, std::max<int>(1, rect.right - rect.left), std::max<int>(1, rect.bottom - rect.top)) : QRect(0, 0, 1, 1);
+        result.info.alphaValue = 255;
+        if ((result.info.exStyleValue & WS_EX_LAYERED) != 0)
         {
-            m_xSpin->setValue(rect.left);
-            m_ySpin->setValue(rect.top);
-            m_widthSpin->setValue(std::max<int>(1, static_cast<int>(rect.right - rect.left)));
-            m_heightSpin->setValue(std::max<int>(1, static_cast<int>(rect.bottom - rect.top)));
+            COLORREF key = 0; BYTE alpha = 255; DWORD flags = 0;
+            if (::GetLayeredWindowAttributes(windowHandle, &key, &alpha, &flags) && (flags & LWA_ALPHA)) result.info.alphaValue = alpha;
         }
-        else
+        result.style = runtimeStyleDocument(result.info.styleValue, result.info.exStyleValue);
+        if ((request.mask & 1) != 0 && !token.isCanceled())
         {
-            m_xSpin->setValue(0);
-            m_ySpin->setValue(0);
-            m_widthSpin->setValue(1);
-            m_heightSpin->setValue(1);
-        }
-
-        // 状态页：置顶与透明度。
-        m_topMostCheck->setEnabled(true);
-        int alphaValue = 255;
-        if ((exStyleValue & WS_EX_LAYERED) != 0)
-        {
-            COLORREF colorKey = 0;
-            BYTE alpha = 255;
-            DWORD flags = 0;
-            if (::GetLayeredWindowAttributes(windowHandle, &colorKey, &alpha, &flags) != FALSE)
-            {
-                Q_UNUSED(colorKey);
-                if ((flags & LWA_ALPHA) != 0)
-                {
-                    alphaValue = static_cast<int>(alpha);
-                }
-            }
-        }
-        const QSignalBlocker alphaSliderBlocker(m_alphaSlider);
-        const QSignalBlocker alphaSpinBlocker(m_alphaSpin);
-        m_alphaSlider->setValue(alphaValue);
-        m_alphaSpin->setValue(alphaValue);
-        m_alphaSlider->setEnabled(true);
-        m_alphaSpin->setEnabled(true);
-        m_alphaChanged = false;
-        m_applyButton->setEnabled(false);
-        m_styleApplyButton->setEnabled(false);
-
         // 进程线程信息：补齐路径、优先级、句柄计数、启动时间和模块摘要，便于排障和行为审计。
         ks::ui::FieldDocument processText;
-        processText.field(QStringLiteral("PID"), QStringLiteral("%1").arg(m_info.processId));
-        processText.field(QStringLiteral("ProcessName"), QStringLiteral("%1").arg(m_info.processNameText));
-        processText.field(QStringLiteral("TID"), QStringLiteral("%1").arg(m_info.threadId));
+        processText.field(QStringLiteral("PID"), QStringLiteral("%1").arg(request.info.processId));
+        processText.field(QStringLiteral("ProcessName"), QStringLiteral("%1").arg(request.info.processNameText));
+        processText.field(QStringLiteral("TID"), QStringLiteral("%1").arg(request.info.threadId));
         if (windowRectReady)
         {
             processText.field(QStringLiteral("WindowRect"), QStringLiteral("[%1,%2,%3,%4]").arg(QStringLiteral("%1").arg(rect.left)).arg(QStringLiteral("%1").arg(rect.top)).arg(QStringLiteral("%1").arg(rect.right)).arg(QStringLiteral("%1").arg(rect.bottom)));
@@ -2670,7 +2645,7 @@ private:
         HANDLE processHandle = ::OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
             FALSE,
-            m_info.processId);
+            request.info.processId);
         if (processHandle != nullptr)
         {
             wchar_t processPathBuffer[MAX_PATH * 2] = {};
@@ -2717,12 +2692,12 @@ private:
         }
 
         int moduleCount = 0;
-        const ks::ui::FieldDocument moduleSummary = buildModuleSummaryDocument(m_info.processId, 8, &moduleCount);
+        const ks::ui::FieldDocument moduleSummary = buildModuleSummaryDocument(request.info.processId, 8, &moduleCount, [&token] { return token.isCanceled(); });
         processText.field(QStringLiteral("ModuleCount"), QStringLiteral("%1").arg(moduleCount));
         processText.section(QStringLiteral("ModulePreview"));
         processText.nodes += moduleSummary.nodes;
 
-        HANDLE threadHandle = ::OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, m_info.threadId);
+        HANDLE threadHandle = ::OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, request.info.threadId);
         if (threadHandle != nullptr)
         {
             const int threadPriority = ::GetThreadPriority(threadHandle);
@@ -2740,11 +2715,14 @@ private:
             processText.field(QStringLiteral("ThreadOpen"), QStringLiteral("失败（线程可能已退出）"), true);
         }
         processText.field(QStringLiteral("提示"), QStringLiteral("可从右键菜单跳转到进程详细信息页。"), true);
-        m_processThreadText->setDocument(processText);
+        result.process = std::move(processText);
 
+        }
+        if ((request.mask & 2) != 0 && !token.isCanceled())
+        {
         // 类信息：展示类名、类样式、窗口过程地址以及类资源句柄。
         ks::ui::FieldDocument classText;
-        classText.field(QStringLiteral("ClassName"), QStringLiteral("%1").arg(m_info.classNameText));
+        classText.field(QStringLiteral("ClassName"), QStringLiteral("%1").arg(request.info.classNameText));
         classText.field(QStringLiteral("ClassAtom"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetClassLongPtrW(windowHandle, GCW_ATOM)), 0, 16)));
         classText.field(QStringLiteral("ClassStyle"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetClassLongPtrW(windowHandle, GCL_STYLE)), 0, 16)));
         classText.field(QStringLiteral("ClassExtraBytes"), QStringLiteral("%1").arg(static_cast<qlonglong>(::GetClassLongPtrW(windowHandle, GCL_CBCLSEXTRA))));
@@ -2770,8 +2748,11 @@ private:
                 classText.field(QStringLiteral("ClassModulePath"), QStringLiteral("%1").arg(QString::fromWCharArray(modulePathBuffer, static_cast<int>(pathLength))));
             }
         }
-        m_classText->setDocument(classText);
+        result.classInfo = std::move(classText);
 
+        }
+        if ((request.mask & 4) != 0 && !token.isCanceled())
+        {
         // 钩子/消息页：补齐消息队列状态与 GUI 线程焦点句柄，替代原先占位文本。
         int childWindowCount = 0;
         ::EnumChildWindows(
@@ -2810,9 +2791,9 @@ private:
 
         GUITHREADINFO guiThreadInfo{};
         guiThreadInfo.cbSize = sizeof(guiThreadInfo);
-        const bool guiInfoReady = (::GetGUIThreadInfo(m_info.threadId, &guiThreadInfo) != FALSE);
+        const bool guiInfoReady = (::GetGUIThreadInfo(request.info.threadId, &guiThreadInfo) != FALSE);
 
-        const DWORD queueStatus = ::GetQueueStatus(QS_ALLINPUT);
+        const DWORD queueStatus = request.queueStatus;
         ks::ui::FieldDocument hookText;
         hookText.field(QStringLiteral("IsHungAppWindow"), QStringLiteral("%1").arg(boolText(::IsHungAppWindow(windowHandle) != FALSE)));
         hookText.field(QStringLiteral("ChildWindowCount"), QStringLiteral("%1").arg(childWindowCount));
@@ -2833,8 +2814,11 @@ private:
         }
         hookText.field(QStringLiteral("ForegroundWindow"), QStringLiteral("%1").arg(hwndToText(static_cast<quint64>(reinterpret_cast<quintptr>(::GetForegroundWindow())))));
         hookText.field(QStringLiteral("说明"), QStringLiteral("系统级 Hook 链表不提供官方通用枚举接口，当前页聚焦可稳定获取的消息上下文。"), true);
-        m_hookText->setDocument(hookText);
+        result.hooks = std::move(hookText);
 
+        }
+        if ((request.mask & 8) != 0 && !token.isCanceled())
+        {
         // 高级页：补齐 DPI、属性表（GetProp/EnumPropsExW）与窗口额外字节等关键内容。
         ks::ui::FieldDocument advancedText;
         advancedText.field(QStringLiteral("UserData (GWLP_USERDATA)"), QStringLiteral("0x%1").arg(QStringLiteral("%1").arg(static_cast<qulonglong>(::GetWindowLongPtrW(windowHandle, GWLP_USERDATA)), 0, 16)));
@@ -2888,10 +2872,116 @@ private:
         {
             advancedText.field(QStringLiteral("Properties"), QStringLiteral("<none>"), true);
         }
-        m_advancedText->setDocument(advancedText);
+        result.advanced = std::move(advancedText);
 
-        // 刷新时同步更新消息监控状态标签，避免页面切换后显示陈旧模式文本。
-        updateMessageMonitorUiState();
+        }
+        if (!token.isCanceled() && ks::window::windowIdentityMatches(request.info.hwndValue,
+            request.info.processId, request.info.threadId, request.info.processCreationTime100ns)) result.valid = true;
+        else result.failure = QStringLiteral("目标窗口身份已变化或无法验证");
+        return snapshot;
+    }
+    unsigned currentRuntimeMask() const
+    { return m_runtimePageMasks.value(m_tabWidget->currentWidget(), 0); }
+
+    void refreshRuntimeInfo() { requestRuntimeInfo(RuntimeAll, true); }
+    void requestRuntimeInfo(unsigned mask, bool force = false)
+    {
+        if (!m_runtimeOperation) return;
+        if (!force && m_runtimeBaseLoaded && (mask & ~m_runtimeLoadedMask) == 0) return;
+        m_runtimePendingMask |= mask;
+        RuntimeRequest request{m_info, m_runtimePendingMask, 0, m_runtimeEditRevision};
+        if (request.mask & RuntimeHooks) request.queueStatus = ::GetQueueStatus(QS_ALLINPUT);
+        // QueueStatus is explicitly the original caller queue. Every external
+        // target query, module/tree/property walk happens only in the worker.
+        const QPointer<WindowDetailDialog> alive(this);
+        const auto pending = ks::ui::FieldDocument{}.note(QStringLiteral("读取中…"));
+        if ((mask & RuntimeProcess) && !(m_runtimeLoadedMask & RuntimeProcess)) m_processThreadText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeClass) && !(m_runtimeLoadedMask & RuntimeClass)) m_classText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeHooks) && !(m_runtimeLoadedMask & RuntimeHooks)) m_hookText->setDocument(pending);
+        if (!alive) return;
+        if ((mask & RuntimeAdvanced) && !(m_runtimeLoadedMask & RuntimeAdvanced)) m_advancedText->setDocument(pending);
+        if (!alive) return;
+        m_runtimeOperation->submit<RuntimeRequest, std::shared_ptr<const RuntimeSnapshot>>(
+            std::move(request), collectRuntime,
+            [this](const std::shared_ptr<const RuntimeSnapshot>& value, std::uint64_t) {
+                const QPointer<WindowDetailDialog> alive(this);
+                if (!value->valid)
+                {
+                    failRuntimeRead(value->mask, value->failure);
+                    return true;
+                }
+                applyRuntimeBase(*value);
+                if (!alive) return true;
+                if (!m_runtimeMonitorInitialDone)
+                {
+                    m_runtimeMonitorInitialDone = true;
+                    startMessageMonitor();
+                    if (!alive) return true;
+                }
+                if (value->mask & RuntimeProcess) { m_processThreadText->setDocument(value->process); if (!alive) return true; }
+                if (value->mask & RuntimeClass) { m_classText->setDocument(value->classInfo); if (!alive) return true; }
+                if (value->mask & RuntimeHooks) { m_hookText->setDocument(value->hooks); if (!alive) return true; }
+                if (value->mask & RuntimeAdvanced) { m_advancedText->setDocument(value->advanced); if (!alive) return true; }
+                m_runtimeLoadedMask |= value->mask;
+                m_runtimePendingMask &= ~value->mask;
+                m_runtimeBaseLoaded = true;
+                if (m_runtimeExportPending && (m_runtimeLoadedMask & RuntimeAll) == RuntimeAll)
+                {
+                    m_runtimeExportPending = false;
+                    m_exportButton->setEnabled(true);
+                    exportInfoNow();
+                }
+                return true;
+            }, [this](std::exception_ptr) { failRuntimeRead(m_runtimePendingMask, QStringLiteral("刷新失败")); });
+    }
+    void failRuntimeRead(unsigned mask, const QString& error)
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        m_stateLabel->setText(error);
+        const auto document = ks::ui::FieldDocument{}.note(error);
+        if ((mask & RuntimeProcess) && !(m_runtimeLoadedMask & RuntimeProcess)) { m_processThreadText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeClass) && !(m_runtimeLoadedMask & RuntimeClass)) { m_classText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeHooks) && !(m_runtimeLoadedMask & RuntimeHooks)) { m_hookText->setDocument(document); if (!alive) return; }
+        if ((mask & RuntimeAdvanced) && !(m_runtimeLoadedMask & RuntimeAdvanced)) { m_advancedText->setDocument(document); if (!alive) return; }
+        m_applyButton->setEnabled(false);
+        m_styleApplyButton->setEnabled(false);
+        m_runtimeExportPending = false;
+        m_exportButton->setEnabled(true);
+    }
+    void applyRuntimeBase(const RuntimeSnapshot& value)
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        m_handleLabel->setText(hwndToText(value.info.hwndValue));
+        m_parentHandleLabel->setText(hwndToText(value.info.parentHwndValue));
+        m_ownerHandleLabel->setText(hwndToText(value.info.ownerHwndValue));
+        m_classNameLabel->setText(value.info.classNameText);
+        m_instanceLabel->setText(value.native ? hwndToText(value.instance) : QStringLiteral("未读取"));
+        m_stateLabel->setText(QStringLiteral("可见:%1, 可用:%2, 状态:%3")
+            .arg(boolText(value.info.visible), boolText(value.info.enabled), windowStateText(value.valid, value.info.minimized, value.info.maximized)));
+        m_relationLabel->setText(QStringLiteral("PID=%1, TID=%2").arg(value.info.processId).arg(value.info.threadId));
+        m_styleText->setDocument(value.style);
+        if (!alive || value.editRevision != m_runtimeEditRevision) return;
+        m_runtimeApplying = true;
+        m_titleEdit->setText(value.info.titleText);
+        syncStyleCheckBoxes(value.info.styleValue, value.info.exStyleValue);
+        m_xSpin->setValue(value.info.windowRect.x());
+        m_ySpin->setValue(value.info.windowRect.y());
+        m_widthSpin->setValue(std::max(1, value.info.windowRect.width()));
+        m_heightSpin->setValue(std::max(1, value.info.windowRect.height()));
+        m_topMostCheck->setEnabled(value.valid);
+        {
+            const QSignalBlocker first(m_alphaSlider), second(m_alphaSpin);
+            m_alphaSlider->setValue(value.info.alphaValue);
+            m_alphaSpin->setValue(value.info.alphaValue);
+        }
+        m_alphaSlider->setEnabled(value.valid);
+        m_alphaSpin->setEnabled(value.valid);
+        m_alphaChanged = false;
+        m_applyButton->setEnabled(false);
+        m_styleApplyButton->setEnabled(false);
+        m_runtimeApplying = false;
     }
 
     // 清空消息表：重置可视列表与计数器。
@@ -3411,6 +3501,15 @@ private:
     // 导出信息：把当前所有标签页关键内容写入文本文件。
     void exportInfo()
     {
+        if (m_runtimeExportPending) return;
+        m_runtimeExportPending = true;
+        m_exportButton->setEnabled(false);
+        requestRuntimeInfo(RuntimeAll, true);
+    }
+    void exportInfoNow()
+    {
+        const QPointer<WindowDetailDialog> alive(this);
+        const QString reportText = buildReportText();
         const QString defaultName = QStringLiteral("window_detail_%1_%2.txt")
             .arg(QString::number(m_info.processId))
             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
@@ -3420,7 +3519,7 @@ private:
             QStringLiteral("导出窗口详情"),
             defaultName,
             QStringLiteral("文本文件 (*.txt)"));
-        if (outputPath.trimmed().isEmpty())
+        if (!alive || outputPath.trimmed().isEmpty())
         {
             return;
         }
@@ -3434,7 +3533,7 @@ private:
 
         QTextStream out(&file);
         out.setEncoding(QStringConverter::Utf8);
-        out << buildReportText();
+        out << reportText;
         file.close();
 
         QMessageBox::information(this, QStringLiteral("导出成功"), QStringLiteral("已保存到：%1").arg(outputPath));
@@ -3493,6 +3592,13 @@ private:
 
 private:
     OtherDock::WindowInfo m_info;          // 目标窗口快照。
+    ks::ui::AsyncOperation* m_runtimeOperation = nullptr;
+    QHash<QWidget*, unsigned> m_runtimePageMasks;
+    unsigned m_runtimeLoadedMask = 0, m_runtimePendingMask = 0;
+    quint64 m_runtimeEditRevision = 0;
+    bool m_runtimeBaseLoaded = false, m_runtimeApplying = false, m_runtimeExportPending = false;
+    bool m_runtimeMonitorInitialDone = false;
+
 
     QTabWidget* m_tabWidget = nullptr;     // 标签页容器。
 
