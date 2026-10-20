@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // This module is compiled once through OtherDock.WindowProtection.cpp and injects
 // a diagnostics tab with guarded, reversible layer operations. WindowDetailDialog
@@ -614,31 +614,34 @@ namespace ks::window::layerdiag
         return fields.nodes.first();
     }
 
-    struct OwnedWindowEnumContext
+    // One value adjacency snapshot per relationship document. Enumeration order
+    // is retained within each owner, including owner 0; no per-node desktop scan.
+    struct OwnedWindowIndex
     {
-        HWND owner = nullptr;
-        std::vector<HWND>* windows = nullptr;
+        QHash<quintptr, std::vector<HWND>> children;
     };
 
-    std::vector<HWND> directOwnedWindows(HWND owner)
+    OwnedWindowIndex captureOwnedWindows()
     {
-        std::vector<HWND> windows;
-        OwnedWindowEnumContext context{ owner, &windows };
+        OwnedWindowIndex index;
         ::EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL {
-            auto* current = reinterpret_cast<OwnedWindowEnumContext*>(parameter);
-            if (current != nullptr && current->windows != nullptr && ::GetWindow(hwnd, GW_OWNER) == current->owner)
+            auto* current = reinterpret_cast<OwnedWindowIndex*>(parameter);
+            if (current != nullptr)
             {
-                current->windows->push_back(hwnd);
+                const quintptr owner = reinterpret_cast<quintptr>(::GetWindow(hwnd, GW_OWNER));
+                current->children[owner].push_back(hwnd);
             }
             return TRUE;
-        }, reinterpret_cast<LPARAM>(&context));
-        return windows;
+        }, reinterpret_cast<LPARAM>(&index));
+        return index;
     }
 
-    void appendOwnedTree(HWND owner, int depth, QSet<quintptr>& visited,
+    void appendOwnedTree(const OwnedWindowIndex& index, HWND owner, int depth, QSet<quintptr>& visited,
         QVector<ks::ui::FieldNode>& nodes)
     {
-        const std::vector<HWND> children = directOwnedWindows(owner);
+        const auto found = index.children.constFind(reinterpret_cast<quintptr>(owner));
+        if (found == index.children.cend()) return;
+        const std::vector<HWND>& children = found.value();
         if (depth > 12)
         {
             if (!children.empty())
@@ -665,7 +668,7 @@ namespace ks::window::layerdiag
             else
             {
                 visited.insert(raw);
-                appendOwnedTree(child, depth + 1, visited, node.children);
+                appendOwnedTree(index, child, depth + 1, visited, node.children);
             }
             nodes.push_back(node);
         }
@@ -673,6 +676,7 @@ namespace ks::window::layerdiag
 
     ks::ui::FieldDocument relationshipDocument(HWND target)
     {
+        const OwnedWindowIndex index = captureOwnedWindows();
         ks::ui::FieldDocument document;
         document.nodes.push_back(windowNode(target, uiText("window.layer.relations.target", "[目标]")));
         auto appendChain = [&document](const QString& title, HWND first, auto next) {
@@ -718,7 +722,7 @@ namespace ks::window::layerdiag
         document.nodes.last().children.push_back(windowNode(::GetLastActivePopup(target), QStringLiteral("GetLastActivePopup")));
         document.section(uiText("window.layer.relations.owned_tree", "[直接/间接 Owned 窗口树]"));
         QSet<quintptr> visited{ reinterpret_cast<quintptr>(target) };
-        appendOwnedTree(target, 0, visited, document.nodes.last().children);
+        appendOwnedTree(index, target, 0, visited, document.nodes.last().children);
         if (document.nodes.last().children.isEmpty()) document.note(QStringLiteral("<none>"));
         return document;
     }
