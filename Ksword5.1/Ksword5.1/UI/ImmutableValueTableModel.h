@@ -99,22 +99,41 @@ namespace ks::ui
         return projection;
     }
 
+    // Complete CURRENT logical projection, including offscreen rows; no QObject access.
+    inline QString ImmutableTableDisplayCell(const ImmutableTableProjection& projection, int row, int column)
+    {
+        if (!projection.source || row < 0 || row >= projection.rows.size() || column < 0) return {};
+        const int sourceRow = projection.rows[row];
+        if (sourceRow < 0 || sourceRow >= projection.source->rows.size()) return {};
+        const auto& value = projection.source->rows[sourceRow];
+        const auto roles = value.columnRoles.constFind(column);
+        if (roles != value.columnRoles.cend())
+        {
+            const auto display = roles->constFind(Qt::DisplayRole);
+            if (display != roles->cend()) return display->toString();
+        }
+        return value.cells.value(column);
+    }
+
     class ImmutableValueTableModel final : public QAbstractTableModel
     {
     public:
         explicit ImmutableValueTableModel(int columns, std::function<QString(int)> header, QObject* parent = nullptr)
             : QAbstractTableModel(parent), m_columns(columns), m_header(std::move(header)) {}
         // Owner retires the returned previous snapshot off-thread.
-        ImmutableTableViewValues replace(ImmutableTableViewValues projection)
+        ImmutableTableViewValues replace(ImmutableTableViewValues projection, quint64 version = 0)
         {
             const QPointer<ImmutableValueTableModel> alive(this);
             beginResetModel();
             if (!alive) return projection;
             auto previous = std::move(m_projection);
             m_projection = std::move(projection);
+            m_version = version;
             endResetModel();
             return previous;
         }
+        ImmutableTableViewValues projection() const { return m_projection; }
+        quint64 version() const { return m_version; }
         ImmutableTableViewValues take() { return std::move(m_projection); }
         const ImmutableTableRow* rowAt(int row) const
         {
@@ -147,5 +166,6 @@ namespace ks::ui
         int m_columns;
         std::function<QString(int)> m_header;
         ImmutableTableViewValues m_projection;
+        quint64 m_version = 0;
     };
 }

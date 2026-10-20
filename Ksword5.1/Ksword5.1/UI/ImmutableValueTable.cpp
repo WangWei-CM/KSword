@@ -1,6 +1,7 @@
 #include "ImmutableValueTable.h"
 #include "TableRowFilterSupport.h"
 #include "TableInteractionSupport.h"
+#include "TableCompleteExport.h"
 #include <QEvent>
 #include <QFutureWatcher>
 #include <QHeaderView>
@@ -65,6 +66,20 @@ namespace ks::ui
             return header.key.isEmpty() ? ks::i18n::sourceText(header.source) : ks::i18n::contextText(header.key, header.source);
         }, this);
         setModel(state.model);
+        RegisterCompleteExportTableProducer(this, [this] {
+            CompleteExportPublishedTable published;
+            const auto projection = m_state->model->projection();
+            published.values = projection;
+            published.sourceIdentity = QStringLiteral("immutable-value-table:%1")
+                .arg(reinterpret_cast<quintptr>(this), 0, 16);
+            published.sourceVersion = m_state->model->version();
+            published.rows = projection ? static_cast<int>(projection->rows.size()) : 0;
+            published.columns = columnCount();
+            published.cell = [](const void* value, int row, int column) {
+                return ImmutableTableDisplayCell(*static_cast<const ImmutableTableProjection*>(value), row, column);
+            };
+            return published;
+        });
         setEditTriggers(QAbstractItemView::NoEditTriggers);
         setSelectionBehavior(QAbstractItemView::SelectRows);
         setSelectionMode(QAbstractItemView::SingleSelection);
@@ -270,6 +285,8 @@ namespace ks::ui
                         result->projection = std::move(prepared);
                     }
                 }
+                // Allocate the independent retirement alias on worker, before GUI publication.
+                if (result->projection) result->projection = RetainCompleteExportSnapshot(result->projection);
             }
             catch (const std::exception& exception) { result->error = QString::fromUtf8(exception.what()); }
             catch (...) { result->error = QStringLiteral("后台任务发生异常。"); }
@@ -288,7 +305,7 @@ namespace ks::ui
             return;
         }
         const QPointer<ImmutableValueTable> alive(this);
-        const bool deferred = DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("immutable-value-table"), {this},
+        const bool deferred = DeferTablePresentationIfValueCaptureOpen(this, QStringLiteral("immutable-value-table"), {this},
             [alive, projection, revision] { if (alive) alive->publish(projection, revision); });
         if (!alive) { retire(std::move(projection)); return; }
         state.deferred = deferred;
@@ -300,7 +317,7 @@ namespace ks::ui
         const QString nextVisibleKey = selected >= 0 ? state.currentKey : QString();
         const bool lost = !state.currentKey.isEmpty()
             && (!projection->source || !projection->source->byKey.contains(state.currentKey));
-        retire(state.model->replace(projection));
+        retire(state.model->replace(projection, revision));
         if (!alive) { retire(std::move(projection)); return; }
         state.publishing = false;
         if (revision == state.revision->load() && isVisible())
