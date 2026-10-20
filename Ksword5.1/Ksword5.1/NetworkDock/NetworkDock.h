@@ -47,6 +47,7 @@ class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class QTableView;
 class QTabWidget;
 class QTimer;
 class QUrl;
@@ -305,6 +306,7 @@ private:
     // MultiThreadDownloadTaskState：
     // - 作用：保存单任务下载状态、分段集合和后台线程状态；
     // - 仅供“多线程下载”页面内部逻辑使用。
+    class MultiThreadDownloadTaskModel;
     struct MultiThreadDownloadTaskState
     {
         int taskId = 0; // taskId：任务编号。
@@ -1405,7 +1407,7 @@ private:
     QPushButton* m_multiDownloadBrowseDirButton = nullptr; // 选择下载目录按钮。
     QPushButton* m_multiDownloadStartButton = nullptr; // 启动下载按钮。
     QLabel* m_multiDownloadStatusLabel = nullptr;      // 下载状态标签。
-    QTableWidget* m_multiDownloadTaskTable = nullptr;  // 下载任务总览表。
+    QTableView* m_multiDownloadTaskTable = nullptr;  // 下载任务总览表。
     QTableWidget* m_multiDownloadSegmentTable = nullptr; // 当前任务分段进度表。
     MultiThreadDownloadSegmentBarWidget* m_multiDownloadSegmentBar = nullptr; // 断节式总进度条控件。
     QLabel* m_multiDownloadTotalProgressLabel = nullptr; // 总进度百分比标签。
@@ -1626,10 +1628,13 @@ private:
     std::shared_ptr<AliveScanTaskState> m_aliveScanTaskState = std::make_shared<AliveScanTaskState>();
 
     // 多线程下载任务运行状态：支持多任务并行与界面周期刷新。
+    MultiThreadDownloadTaskModel* m_multiDownloadTaskModel = nullptr; // 完整历史模型，活动行独立增量刷新。
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_multiDownloadDispatcher; // 析构第一步关闭，后台只持共享门禁。
     mutable std::mutex m_multiDownloadTaskMutex; // m_multiDownloadTaskMutex：下载任务列表并发访问锁。
     std::vector<std::shared_ptr<MultiThreadDownloadTaskState>> m_multiDownloadTaskList; // m_multiDownloadTaskList：下载任务状态集合。
     int m_multiDownloadNextTaskId = 1; // m_multiDownloadNextTaskId：新建任务编号递增计数器。
+    int m_multiDownloadLastSegmentTaskId = 0; // 已投影的分段任务身份，切选时重新投影。
+    bool m_multiDownloadSegmentProjectionTerminal = false; // 完成分段不参加周期重复绘制。
     int m_multiDownloadSelectedTaskId = 0; // m_multiDownloadSelectedTaskId：当前分段详情面板绑定的任务编号。
     bool m_multiDownloadAutoCaptureClipboardEnabled = true; // m_multiDownloadAutoCaptureClipboardEnabled：是否启用剪贴板自动捕获。
     QStringList m_multiDownloadCaptureSuffixList; // m_multiDownloadCaptureSuffixList：当前用于识别下载链接的后缀集合。

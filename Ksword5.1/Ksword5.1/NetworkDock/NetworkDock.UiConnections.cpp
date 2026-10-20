@@ -1,3 +1,4 @@
+#include <QItemSelectionModel>
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "NetworkAuditPage.h"
@@ -797,34 +798,11 @@ void NetworkDock::initializeConnections()
             });
     }
 
-    // 多线程下载任务选中变化：切换右侧分段详情与总进度条绑定任务。
-    connect(m_multiDownloadTaskTable, &QTableWidget::itemSelectionChanged, this, [this]()
+    // Model/proxy rows may move; the stable task role selects segment identity.
+    connect(m_multiDownloadTaskTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
         {
-            if (m_multiDownloadTaskTable == nullptr)
-            {
-                return;
-            }
-
-            const QList<QTableWidgetItem*> selectedItemList = m_multiDownloadTaskTable->selectedItems();
-            if (selectedItemList.isEmpty())
-            {
-                m_multiDownloadSelectedTaskId = 0;
-                refreshMultiThreadDownloadUi();
-                return;
-            }
-
-            const int selectedRow = selectedItemList.first()->row();
-            QTableWidgetItem* idItem = m_multiDownloadTaskTable->item(selectedRow, 0);
-            if (idItem == nullptr)
-            {
-                m_multiDownloadSelectedTaskId = 0;
-                refreshMultiThreadDownloadUi();
-                return;
-            }
-
-            bool parseOk = false;
-            const int selectedTaskId = idItem->text().toInt(&parseOk, 10);
-            m_multiDownloadSelectedTaskId = parseOk ? selectedTaskId : 0;
+            const auto rows = m_multiDownloadTaskTable->selectionModel()->selectedRows(0);
+            m_multiDownloadSelectedTaskId = rows.isEmpty() ? 0 : rows.front().data(Qt::UserRole + 1).toInt();
             refreshMultiThreadDownloadUi();
         });
 
