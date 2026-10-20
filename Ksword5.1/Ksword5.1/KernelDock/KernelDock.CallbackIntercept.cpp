@@ -11,12 +11,17 @@
 #include "KernelDock.CallbackPromptManager.h"
 #include "../SettingsDock/AppearanceSettings.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../theme.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QPersistentModelIndex>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -67,6 +72,8 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <deque>
+#include <memory>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -700,77 +707,42 @@ namespace
         return trimmedText;
     }
 
-    void installCallbackTableCopyMenu(QTableWidget* tableWidget, const int processIdColumn)
+    void installCallbackTableCopyMenu(QTableView* tableWidget, const int processIdColumn)
     {
-        // installCallbackTableCopyMenu：
-        // - 输入：回调拦截页内需要复制证据行的表格；
-        // - 处理：右键选中当前行，并把所有列按 TSV 写入剪贴板；
-        // - 返回：无。只读复制，不修改规则、驱动状态或监控状态。
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-
+        if (tableWidget == nullptr) return;
         tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(tableWidget, &QTableWidget::customContextMenuRequested, tableWidget, [tableWidget, processIdColumn](const QPoint& localPosition)
+        QObject::connect(tableWidget, &QTableView::customContextMenuRequested, tableWidget, [tableWidget, processIdColumn](const QPoint& localPosition)
         {
-            const auto clickedIndex = tableWidget->indexAt(localPosition);
-            if (clickedIndex.isValid())
-            {
-                tableWidget->setCurrentCell(clickedIndex.row(), clickedIndex.column());
-            }
-
+            const auto hit = tableWidget->indexAt(localPosition);
+            if (hit.isValid()) tableWidget->setCurrentIndex(hit);
+            const QPersistentModelIndex current(tableWidget->currentIndex());
+            const QPointer<QTableView> guard(tableWidget);
             QMenu contextMenu(tableWidget);
             contextMenu.setStyleSheet(callbackRuleContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_copy_row.svg")),
                 kernelText("kernel.callback.intercept.menu.copy_current_row", QStringLiteral("复制当前行")));
-            // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(tableWidget->currentRow() >= 0);
-            const QTableWidgetItem* processIdItem =
-                processIdColumn >= 0 && processIdColumn < tableWidget->columnCount() && tableWidget->currentRow() >= 0
-                ? tableWidget->item(tableWidget->currentRow(), processIdColumn)
-                : nullptr;
+            copyRowAction->setEnabled(current.isValid());
             bool processIdOk = false;
-            const quint32 processId = processIdItem != nullptr
-                ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-                : 0U;
+            const quint32 processId = current.isValid() && processIdColumn >= 0
+                ? current.siblingAtColumn(processIdColumn).data().toString().trimmed().toUInt(&processIdOk, 10) : 0U;
             QAction* openProcessAction = nullptr;
             if (processIdColumn >= 0)
             {
-                openProcessAction = contextMenu.addAction(
-                    QIcon(QStringLiteral(":/Icon/process_details.svg")),
-                    QStringLiteral("转到进程详细信息"));
+                openProcessAction = contextMenu.addAction(QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("转到进程详细信息"));
                 openProcessAction->setEnabled(processIdOk && processId != 0U);
             }
-
             QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition));
-            if (selectedAction == openProcessAction)
-            {
-                ks::ui::OpenProcessDetailByPid(processId);
-                return;
-            }
-            if (selectedAction != copyRowAction)
-            {
-                return;
-            }
-
-            QClipboard* clipboardObject = QApplication::clipboard();
-            const int rowIndex = tableWidget->currentRow();
-            if (clipboardObject == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
-            {
-                return;
-            }
-
-            QStringList rowFields;
-            rowFields.reserve(tableWidget->columnCount());
-            for (int columnIndex = 0; columnIndex < tableWidget->columnCount(); ++columnIndex)
-            {
-                const QTableWidgetItem* item = tableWidget->item(rowIndex, columnIndex);
-                rowFields.push_back(item != nullptr ? item->text() : QString());
-            }
-            clipboardObject->setText(rowFields.join(QLatin1Char('\t')));
+            if (guard.isNull() || !current.isValid() || current.model() != guard->model()) return;
+            if (selectedAction == openProcessAction && openProcessAction != nullptr) { ks::ui::OpenProcessDetailByPid(processId); return; }
+            if (selectedAction != copyRowAction) return;
+            QClipboard* clipboard = QApplication::clipboard();
+            if (clipboard == nullptr) return;
+            QStringList fields;
+            for (int column = 0; column < guard->model()->columnCount(); ++column)
+                fields.push_back(current.siblingAtColumn(column).data().toString());
+            clipboard->setText(fields.join(QLatin1Char('\t')));
         });
     }
 
@@ -778,7 +750,7 @@ namespace
     // - 输入 tableWidget：驱动回调 Tab 内的表格；
     // - 处理：背景图模式下关闭表格和 viewport 的自动填充，确保背景图能透过表格空白区；
     // - 返回：无返回值。
-    void applyCallbackTableTransparency(QTableWidget* tableWidget)
+    void applyCallbackTableTransparency(QTableView* tableWidget)
     {
         if (tableWidget == nullptr)
         {
@@ -1675,8 +1647,78 @@ namespace
         quint32 totalQueuedBeforeDrain = 0U;        // totalQueuedBeforeDrain：取出前队列深度。
         quint32 droppedCount = 0U;                  // droppedCount：累计丢弃事件数。
         QVector<FileMonitorPreparedEvent> events;   // events：已解析完进程名的事件行。
-        QHash<quint32, QString> resolvedNames;      // resolvedNames：本轮解析出的 PID→进程名，回投后并回主缓存。
     };
+    // One append-only canonical value archive; the view requests only painted cells.
+    class FileMonitorEventModel final : public QAbstractTableModel
+    {
+    public:
+        FileMonitorEventModel(QStringList headers, QObject* parent) : QAbstractTableModel(parent), m_headers(std::move(headers)) {}
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_events.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_headers.size(); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size())
+                return QAbstractTableModel::headerData(section, orientation, role);
+            if (role == Qt::DisplayRole || role == Qt::EditRole) return m_headers[section];
+            return m_headerRoles.value(section).value(role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return false;
+            if (role == Qt::DisplayRole || role == Qt::EditRole) m_headers[section] = value.toString();
+            else m_headerRoles[section][role] = value;
+            emit headerDataChanged(orientation, section, section); return true;
+        }
+        QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.row() < 0 || index.row() >= rowCount()) return {};
+            const auto& prepared = m_events[static_cast<std::size_t>(index.row())];
+            const auto& row = prepared.eventRow;
+            const bool fsctl = (row.operationType & KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL) != 0U;
+            if (role == Qt::UserRole) return fsctl;
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+            switch (static_cast<FileMonitorColumn>(index.column()))
+            {
+            case FileMonitorColumn::Time: return utc100nsToDisplayText(static_cast<quint64>(row.timeUtc100ns));
+            case FileMonitorColumn::Pid: return QString::number(row.processId);
+            case FileMonitorColumn::Process: return prepared.processNameText;
+            case FileMonitorColumn::Path: return QString::fromStdWString(row.path);
+            case FileMonitorColumn::FsctlName: return fsctl ? fileMonitorFsctlNameText(row.fsControlCode) : QStringLiteral("-");
+            case FileMonitorColumn::ControlCode: return fsctl ? formatFileMonitorHex32(row.fsControlCode) : QStringLiteral("-");
+            case FileMonitorColumn::Status: return (row.fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_RESULT_PRESENT) != 0U ? formatFileMonitorHex32(static_cast<quint32>(row.resultStatus)) : QStringLiteral("-");
+            case FileMonitorColumn::FileObject: return formatFileMonitorHex64(row.fileObjectAddress);
+            case FileMonitorColumn::InputLength: return fsctl ? QString::number(row.fsInputBufferLength) : QStringLiteral("-");
+            case FileMonitorColumn::OutputLength: return fsctl ? QString::number(row.fsOutputBufferLength) : QStringLiteral("-");
+            default: return {};
+            }
+        }
+        void append(QVector<FileMonitorPreparedEvent> events)
+        {
+            if (events.isEmpty()) return;
+            const int first = rowCount();
+            beginInsertRows({}, first, first + static_cast<int>(events.size()) - 1);
+            for (auto& event : events) m_events.push_back(std::move(event));
+            endInsertRows();
+        }
+        void clear() { if (m_events.empty()) return; beginResetModel(); m_events.clear(); endResetModel(); }
+    private:
+        std::deque<FileMonitorPreparedEvent> m_events;
+        QStringList m_headers;
+        QHash<int, QHash<int, QVariant>> m_headerRoles;
+    };
+    class FileMonitorEventFilter final : public QSortFilterProxyModel
+    {
+    public:
+        explicit FileMonitorEventFilter(FileMonitorEventModel* source, QObject* parent) : QSortFilterProxyModel(parent)
+        { setDynamicSortFilter(false); setSortRole(Qt::DisplayRole); setSortLocaleAware(true); setSourceModel(source); }
+        void setFsctlOnly(bool only) { if (m_only == only) return; m_only = only; invalidateFilter(); }
+    protected:
+        bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+        { return !m_only || sourceModel()->index(row, 0, parent).data(Qt::UserRole).toBool(); }
+    private:
+        bool m_only = true;
+    };
+
 }
 
 class CallbackInterceptController final : public QObject
@@ -1953,11 +1995,10 @@ private:
         ks::ui::NormalizeToolbarRow(fileMonitorToolbar);
         fileMonitorLayout->addLayout(fileMonitorToolbar, 0);
 
-        m_fileMonitorTable = new ks::ui::VisibleTableWidget(fileMonitorFrame);
-        // 事件流水已有读取/清理/导出业务条，紧凑辅助动作避免重复。
+        m_fileMonitorTable = new ks::ui::TableActionTableView(fileMonitorFrame);
         ks::ui::SetTableActionBarMode(m_fileMonitorTable, ks::ui::TableActionBarMode::Compact);
-        m_fileMonitorTable->setColumnCount(static_cast<int>(FileMonitorColumn::Count));
-        m_fileMonitorTable->setHorizontalHeaderLabels(QStringList{
+        ks::ui::SetTableRowFilterBusinessOwnership(m_fileMonitorTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+        m_fileMonitorModel = new FileMonitorEventModel(QStringList{
             kernelText("kernel.callback.intercept.file_monitor.header.time", QStringLiteral("时间")),
             QStringLiteral("PID"),
             kernelText("kernel.callback.intercept.file_monitor.header.process", QStringLiteral("进程")),
@@ -1968,16 +2009,20 @@ private:
             QStringLiteral("FileObject"),
             QStringLiteral("In"),
             QStringLiteral("Out")
-            });
+            }, m_fileMonitorTable);
+        m_fileMonitorProxy = new FileMonitorEventFilter(m_fileMonitorModel, m_fileMonitorTable);
+        m_fileMonitorTable->setModel(m_fileMonitorProxy);
+        ks::ui::InstallTableHeaderClickSorting(m_fileMonitorTable);
         m_fileMonitorTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_fileMonitorTable->setSelectionMode(QAbstractItemView::SingleSelection);
         m_fileMonitorTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_fileMonitorTable->setAlternatingRowColors(true);
         m_fileMonitorTable->setWordWrap(false);
         m_fileMonitorTable->verticalHeader()->setVisible(false);
-        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        m_fileMonitorTable->horizontalHeader()->setResizeContentsPrecision(100);
+        m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
         m_fileMonitorTable->horizontalHeader()->setSectionResizeMode(static_cast<int>(FileMonitorColumn::Path), QHeaderView::Stretch);
-        m_fileMonitorTable->setStyleSheet(callbackRuleTableStyle());
+        m_fileMonitorTable->setStyleSheet(QString(callbackRuleTableStyle()).replace(QStringLiteral("QTableWidget"), QStringLiteral("QTableView")));
         applyCallbackTableTransparency(m_fileMonitorTable);
         installCallbackTableCopyMenu(m_fileMonitorTable, static_cast<int>(FileMonitorColumn::Pid));
         fileMonitorLayout->addWidget(m_fileMonitorTable, 1);
@@ -2139,7 +2184,8 @@ private:
         // - 返回：可直接填表的进程名文本。
         // 说明：仅供 UI 线程的单次、低频路径（白名单表）使用；文件监控 drain 的批量
         // 解析已经搬到后台线程，不再走这里。
-        return resolveFileMonitorProcessNameText(processId, m_fileMonitorProcessNameCache);
+        QHash<quint32, QString> names;
+        return resolveFileMonitorProcessNameText(processId, names);
     }
 
     void startFileMonitorFsctlCapture()
@@ -2211,11 +2257,10 @@ private:
         }
         m_fileMonitorDrainInFlight = true;
 
-        const QHash<quint32, QString> nameCacheSnapshot = m_fileMonitorProcessNameCache;
         QThreadPool::globalInstance()->start(
-            [guardThis, nameCacheSnapshot]()
+            [guardThis]()
             {
-                QHash<quint32, QString> workerNameCache = nameCacheSnapshot;
+                QHash<quint32, QString> workerNameCache;
                 FileMonitorDrainSnapshot snapshot;
 
                 const ksword::ark::DriverClient driverClient;
@@ -2235,7 +2280,6 @@ private:
                             resolveFileMonitorProcessNameText(eventRow.processId, workerNameCache);
                         snapshot.events.push_back(std::move(preparedEvent));
                     }
-                    snapshot.resolvedNames = std::move(workerNameCache);
                 }
 
                 QCoreApplication* const appInstance = QCoreApplication::instance();
@@ -2257,10 +2301,11 @@ private:
 
     void applyFileMonitorDrainSnapshot(FileMonitorDrainSnapshot snapshot)
     {
-        // applyFileMonitorDrainSnapshot：
-        // - 输入 snapshot：后台 drain 任务产出的纯值类型结果；
-        // - 处理：合并进程名缓存、追加表格行、刷新过滤与状态标签；
-        // - 返回：无返回值，并清除在途标志允许下一次周期性 drain。
+        const QPointer<CallbackInterceptController> guard(this);
+        auto pending = std::make_shared<FileMonitorDrainSnapshot>(std::move(snapshot));
+        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("callback-fsctl-accepted-batch"),
+            {m_fileMonitorTable}, [guard, pending]() { if (guard) guard->applyFileMonitorDrainSnapshot(std::move(*pending)); })) return;
+        snapshot = std::move(*pending);
         m_fileMonitorDrainInFlight = false;
         if (m_fileMonitorTable == nullptr || m_fileMonitorStatusLabel == nullptr)
         {
@@ -2273,75 +2318,26 @@ private:
             return;
         }
 
-        for (auto nameIterator = snapshot.resolvedNames.constBegin();
-             nameIterator != snapshot.resolvedNames.constEnd();
-             ++nameIterator)
-        {
-            m_fileMonitorProcessNameCache.insert(nameIterator.key(), nameIterator.value());
-        }
-
-        for (const FileMonitorPreparedEvent& preparedEvent : snapshot.events)
-        {
-            appendFileMonitorEventRow(preparedEvent.eventRow, preparedEvent.processNameText);
-        }
-        applyFileMonitorEventFilter();
+        const auto acceptedCount = snapshot.events.size();
+        m_fileMonitorModel->append(std::move(snapshot.events));
         m_fileMonitorStatusLabel->setText(
             kernelText("kernel.callback.intercept.file_monitor.status.drained", QStringLiteral("读取 %1 条，队列前=%2，丢弃=%3"))
-            .arg(snapshot.events.size())
+            .arg(acceptedCount)
             .arg(snapshot.totalQueuedBeforeDrain)
             .arg(snapshot.droppedCount));
     }
 
-    void appendFileMonitorEventRow(const ksword::ark::FileMonitorEventRow& eventRow, const QString& processNameText)
-    {
-        if (m_fileMonitorTable == nullptr)
-        {
-            return;
-        }
-
-        const bool isFsctlEvent =
-            (eventRow.operationType & KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL) != 0U;
-        const int rowIndex = m_fileMonitorTable->rowCount();
-        m_fileMonitorTable->insertRow(rowIndex);
-
-        QTableWidgetItem* timeItem = makeReadOnlyItem(utc100nsToDisplayText(static_cast<quint64>(eventRow.timeUtc100ns)));
-        timeItem->setData(Qt::UserRole, isFsctlEvent);
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Time), timeItem);
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Pid), makeReadOnlyItem(QString::number(eventRow.processId)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Process), makeReadOnlyItem(processNameText));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Path), makeReadOnlyItem(QString::fromStdWString(eventRow.path)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FsctlName), makeReadOnlyItem(isFsctlEvent ? fileMonitorFsctlNameText(eventRow.fsControlCode) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::ControlCode), makeReadOnlyItem(isFsctlEvent ? formatFileMonitorHex32(eventRow.fsControlCode) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::Status), makeReadOnlyItem(
-            (eventRow.fieldFlags & KSWORD_ARK_FILE_MONITOR_FIELD_RESULT_PRESENT) != 0U
-            ? formatFileMonitorHex32(static_cast<quint32>(eventRow.resultStatus))
-            : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::FileObject), makeReadOnlyItem(formatFileMonitorHex64(eventRow.fileObjectAddress)));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::InputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsInputBufferLength) : QStringLiteral("-")));
-        m_fileMonitorTable->setItem(rowIndex, static_cast<int>(FileMonitorColumn::OutputLength), makeReadOnlyItem(isFsctlEvent ? QString::number(eventRow.fsOutputBufferLength) : QStringLiteral("-")));
-    }
-
     void applyFileMonitorEventFilter()
     {
-        if (m_fileMonitorTable == nullptr || m_fileMonitorFsctlOnlyCheck == nullptr)
-        {
-            return;
-        }
-
-        const bool fsctlOnly = m_fileMonitorFsctlOnlyCheck->isChecked();
-        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
-        {
-            const QTableWidgetItem* markerItem = m_fileMonitorTable->item(rowIndex, static_cast<int>(FileMonitorColumn::Time));
-            const bool isFsctlEvent = markerItem != nullptr && markerItem->data(Qt::UserRole).toBool();
-            m_fileMonitorTable->setRowHidden(rowIndex, fsctlOnly && !isFsctlEvent);
-        }
+        if (m_fileMonitorProxy != nullptr && m_fileMonitorFsctlOnlyCheck != nullptr)
+            m_fileMonitorProxy->setFsctlOnly(m_fileMonitorFsctlOnlyCheck->isChecked());
     }
 
     void clearFileMonitorEvents()
     {
         if (m_fileMonitorTable != nullptr)
         {
-            m_fileMonitorTable->setRowCount(0);
+            m_fileMonitorModel->clear();
         }
         if (m_fileMonitorStatusLabel != nullptr)
         {
@@ -2377,24 +2373,22 @@ private:
 
         QStringList lines;
         QStringList headerCells;
-        for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+        for (int columnIndex = 0; columnIndex < m_fileMonitorTable->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* headerItem = m_fileMonitorTable->horizontalHeaderItem(columnIndex);
-            headerCells << (headerItem != nullptr ? headerItem->text() : QString());
+            headerCells << m_fileMonitorTable->model()->headerData(columnIndex, Qt::Horizontal).toString();
         }
         lines << headerCells.join(QLatin1Char('\t'));
 
-        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->rowCount(); ++rowIndex)
+        for (int rowIndex = 0; rowIndex < m_fileMonitorTable->model()->rowCount(); ++rowIndex)
         {
             if (m_fileMonitorTable->isRowHidden(rowIndex))
             {
                 continue;
             }
             QStringList rowCells;
-            for (int columnIndex = 0; columnIndex < m_fileMonitorTable->columnCount(); ++columnIndex)
+            for (int columnIndex = 0; columnIndex < m_fileMonitorTable->model()->columnCount(); ++columnIndex)
             {
-                const QTableWidgetItem* cellItem = m_fileMonitorTable->item(rowIndex, columnIndex);
-                QString cellText = cellItem != nullptr ? cellItem->text() : QString();
+                QString cellText = m_fileMonitorTable->model()->index(rowIndex, columnIndex).data().toString();
                 cellText.replace(QLatin1Char('\t'), QLatin1Char(' '));
                 cellText.replace(QLatin1Char('\n'), QLatin1Char(' '));
                 cellText.replace(QLatin1Char('\r'), QLatin1Char(' '));
@@ -6140,9 +6134,10 @@ private:
     QPushButton* m_exportFileMonitorButton = nullptr;
     QCheckBox* m_fileMonitorFsctlOnlyCheck = nullptr;
     QLabel* m_fileMonitorStatusLabel = nullptr;
-    QTableWidget* m_fileMonitorTable = nullptr;
+    QTableView* m_fileMonitorTable = nullptr;
+    FileMonitorEventModel* m_fileMonitorModel = nullptr;
+    FileMonitorEventFilter* m_fileMonitorProxy = nullptr;
     QTimer* m_fileMonitorDrainTimer = nullptr;
-    QHash<quint32, QString> m_fileMonitorProcessNameCache;
     bool m_fileMonitorDrainInFlight = false;    // m_fileMonitorDrainInFlight：后台 drain 任务在途标志，只在 UI 线程读写，防止周期定时器堆积请求。
 
     KSWORD_ARK_CALLBACK_RUNTIME_STATE m_runtimeState{};
