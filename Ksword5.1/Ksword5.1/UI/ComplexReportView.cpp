@@ -196,7 +196,7 @@ namespace ks::ui
         });
         connect(m_modes, &QTabBar::currentChanged, this, [this]()
         {
-            m_rawDirty = true;
+            // 显隐不改变规范快照/范围/类型；已显示原文继续复用同一编辑器文档和选区。
             updatePresentation();
         });
         connect(m_tree, &QTreeView::clicked, this, [this](const QModelIndex& cell)
@@ -236,7 +236,16 @@ namespace ks::ui
         QWidget::changeEvent(event);
         if (event != nullptr && event->type() == QEvent::LanguageChange)
         {
-            refreshTheme();
+            // 语言是原文版本的一部分；不依赖父投影随后恰好再次提交 document。
+            m_rawDirty = true;
+            if (m_model)
+            {
+                m_model->relocalize();
+                m_language = ks::i18n::LanguageManager::instance().currentLanguageId();
+                updateNavigation(false);
+                m_tree->setRootIndex(displayRoot());
+            }
+            refreshTheme(); // 当前原文立即更新一次，隐藏原文保留 dirty 到下次显示。
         }
     }
 
