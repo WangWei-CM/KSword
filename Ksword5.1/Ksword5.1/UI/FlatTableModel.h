@@ -2,11 +2,15 @@
 
 #include <QAbstractTableModel>
 #include <QMetaType>
+#include <QList>
+#include <QPointer>
+#include <optional>
 #include <QString>
 #include <QVariant>
 
 #include "../Internationalization/LanguageManager.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -44,10 +48,22 @@ namespace ks::ui
         // - 未提供时保持原有 reset 模式，适配日志这类没有稳定 identity 的快照。
         using KeyResolver = std::function<std::string(const RowType& row)>;
 
+        // 可选精确差异协议。空变更列表表示数据/flags 未变；单个区间的空 roles
+        // 沿用 Qt 语义，表示该列区间的所有角色（包括 flags 等未单列角色）。
+        struct ColumnChange
+        {
+            int firstColumn = 0;
+            int lastColumn = 0;
+            QList<int> roles;
+        };
+        using RowChangeResolver = std::function<std::vector<ColumnChange>(
+            const RowType& oldRow, const RowType& newRow)>;
+
         struct UpdateStats
         {
             int insertedRowCount = 0;
             int removedRowCount = 0;
+            // 精确协议只计真实变化的保留行；兼容模式/reset 沿用旧口径（全部新行）。
             int updatedRowCount = 0;
             bool orderChanged = false;
             bool modelReset = false;
@@ -70,12 +86,14 @@ namespace ks::ui
             DataResolver resolver,
             QObject* parent = nullptr,
             FlagsResolver flagsResolver = FlagsResolver(),
-            KeyResolver keyResolver = KeyResolver())
+            KeyResolver keyResolver = KeyResolver(),
+            RowChangeResolver rowChangeResolver = RowChangeResolver())
             : QAbstractTableModel(parent)
             , m_columns(std::move(columns))
             , m_dataResolver(std::move(resolver))
             , m_flagsResolver(std::move(flagsResolver))
             , m_keyResolver(std::move(keyResolver))
+            , m_rowChangeResolver(std::move(rowChangeResolver))
         {
         }
 
@@ -86,11 +104,15 @@ namespace ks::ui
         // 参数 rows：新的可见行集合。
         UpdateStats setRows(std::vector<RowType> rows)
         {
-            if (!m_keyResolver)
-            {
-                return resetRows(std::move(rows));
-            }
-            return setRowsIncrementally(std::move(rows));
+            return submitRows(std::move(rows), false);
+        }
+
+        // 仅影响后续具有稳定键的 setRows；不替换数据，也不主动发通知。
+        // resolver 必须覆盖 DataResolver/FlagsResolver 的全部行内依赖；外部状态变化
+        // 应另行失效，或暂时清除此 resolver 使用兼容的全表通知。无键/重复键仍 reset。
+        void setRowChangeResolver(RowChangeResolver resolver)
+        {
+            m_rowChangeResolver = std::move(resolver);
         }
 
         // clearRows 作用：
@@ -98,14 +120,8 @@ namespace ks::ui
         // - 供“清空日志/清空结果”这类场景直接调用。
         void clearRows()
         {
-            if (m_rows.empty())
-            {
-                return;
-            }
-
-            beginResetModel();
-            m_rows.clear();
-            endResetModel();
+            if (m_rows.empty() && !m_updatingRows) return;
+            submitRows({}, true);
         }
 
         // rowAt 作用：
@@ -230,14 +246,53 @@ namespace ks::ui
         DataResolver m_dataResolver;        // m_dataResolver：单元格角色解析器。
         FlagsResolver m_flagsResolver;      // m_flagsResolver：可选行 flags 解析器，未设置时保持默认可选。
         KeyResolver m_keyResolver;          // m_keyResolver：可选稳定行键，启用按键增量更新。
+        RowChangeResolver m_rowChangeResolver; // 可选精确差异；缺省保持全部行/列/roles 通知。
         std::vector<RowType> m_rows;        // m_rows：当前可见行快照。
+        // Qt structural notification pairs cannot nest. A synchronous observer
+        // may replace the complete UI snapshot; retain only its latest value,
+        // finish the current pair and drain it before the outer call returns.
+        bool m_updatingRows = false;
+        quint64 m_updateGeneration = 0;
+        std::optional<std::vector<RowType>> m_pendingRows;
+        bool m_pendingClear = false;
+
+        UpdateStats submitRows(std::vector<RowType> rows, bool clear)
+        {
+            const QPointer<FlatTableModel> alive(this);
+            ++m_updateGeneration;
+            if (m_updatingRows)
+            {
+                m_pendingRows = std::move(rows);
+                m_pendingClear = clear;
+                return {}; // accepted replacement; no nested Qt publication
+            }
+            m_updatingRows = true;
+            UpdateStats firstStats;
+            bool first = true;
+            for (;;)
+            {
+                const quint64 generation = m_updateGeneration;
+                const auto stats = clear || !m_keyResolver
+                    ? resetRows(std::move(rows)) : setRowsIncrementally(std::move(rows), generation);
+                if (first) { firstStats = stats; first = false; }
+                if (!alive) return firstStats;
+                if (!m_pendingRows)
+                { m_updatingRows = false; return firstStats; }
+                rows = std::move(*m_pendingRows);
+                m_pendingRows.reset();
+                clear = m_pendingClear;
+            }
+        }
+
 
         UpdateStats resetRows(std::vector<RowType> rows)
         {
             UpdateStats stats;
             stats.updatedRowCount = static_cast<int>(rows.size());
             stats.modelReset = true;
+            const QPointer<FlatTableModel> alive(this);
             beginResetModel();
+            if (!alive) return stats;
             m_rows = std::move(rows);
             endResetModel();
             return stats;
@@ -246,15 +301,18 @@ namespace ks::ui
         bool collectUniqueKeys(
             const std::vector<RowType>& rows,
             std::vector<std::string>& keyList,
-            std::unordered_set<std::string>& keySet) const
+            std::unordered_set<std::string>& keySet, const KeyResolver& resolver,
+            quint64 generation) const
         {
+            const QPointer<const FlatTableModel> alive(this);
             keyList.clear();
             keySet.clear();
             keyList.reserve(rows.size());
             keySet.reserve(rows.size());
             for (const RowType& row : rows)
             {
-                std::string key = m_keyResolver(row);
+                std::string key = resolver(row);
+                if (!alive || m_updateGeneration != generation) return false;
                 if (key.empty() || !keySet.insert(key).second)
                 {
                     return false;
@@ -264,19 +322,143 @@ namespace ks::ui
             return true;
         }
 
-        UpdateStats setRowsIncrementally(std::vector<RowType> rows)
+        struct DataChangeRectangle
         {
+            int firstRow = 0;
+            int lastRow = 0;
+            ColumnChange columns;
+        };
+
+        // 将重叠区间规范为互不相交的列段；roles 排序去重后才能合并相邻行。
+        std::vector<ColumnChange> normalizeChanges(std::vector<ColumnChange> changes) const
+        {
+            const int columnTotal = static_cast<int>(m_columns.size());
+            if (columnTotal == 0 || changes.empty()) return {};
+            std::vector<bool> changed(static_cast<std::size_t>(columnTotal), false);
+            std::vector<bool> allRoles(static_cast<std::size_t>(columnTotal), false);
+            std::vector<QList<int>> rolesByColumn(static_cast<std::size_t>(columnTotal));
+            for (const ColumnChange& change : changes)
+            {
+                const bool valid = change.firstColumn >= 0 && change.lastColumn >= change.firstColumn
+                    && change.lastColumn < columnTotal
+                    && std::all_of(change.roles.cbegin(), change.roles.cend(), [](int role) { return role >= 0; });
+                if (!valid)
+                {
+                    Q_ASSERT_X(valid, "FlatTableModel::normalizeChanges", "invalid column/role delta");
+                    // 发布构建保守失效整行，不能因调用者区间错误漏掉显示或 flags 变化。
+                    return { { 0, columnTotal - 1, {} } };
+                }
+                for (int column = change.firstColumn; column <= change.lastColumn; ++column)
+                {
+                    const std::size_t slot = static_cast<std::size_t>(column);
+                    changed[slot] = true;
+                    if (change.roles.empty())
+                    {
+                        allRoles[slot] = true;
+                        rolesByColumn[slot].clear();
+                    }
+                    else if (!allRoles[slot])
+                    {
+                        rolesByColumn[slot].append(change.roles);
+                    }
+                }
+            }
+            std::vector<ColumnChange> normalized;
+            for (int column = 0; column < columnTotal; ++column)
+            {
+                const std::size_t slot = static_cast<std::size_t>(column);
+                if (!changed[slot]) continue;
+                QList<int>& roles = rolesByColumn[slot];
+                std::sort(roles.begin(), roles.end());
+                roles.erase(std::unique(roles.begin(), roles.end()), roles.end());
+                if (!normalized.empty() && normalized.back().lastColumn + 1 == column
+                    && normalized.back().roles == roles)
+                {
+                    normalized.back().lastColumn = column;
+                }
+                else
+                {
+                    normalized.push_back({ column, column, std::move(roles) });
+                }
+            }
+            return normalized;
+        }
+
+        // 先比较旧快照，避免 beginRemove/Insert/layout 发布后才去读已替换的旧行。
+        // 新键由 rowsInserted 发布完整内容，不需额外 dataChanged；保留键按最终行号通知。
+        std::vector<DataChangeRectangle> collectDataChanges(
+            const std::vector<RowType>& rows, const std::vector<std::string>& newKeys,
+            const std::vector<std::string>& oldKeys, int& updatedRowCount,
+            const RowChangeResolver& resolver, quint64 generation) const
+        {
+            const QPointer<const FlatTableModel> alive(this);
+            std::unordered_map<std::string, std::size_t> oldRowByKey;
+            oldRowByKey.reserve(oldKeys.size());
+            for (std::size_t row = 0; row < oldKeys.size(); ++row) oldRowByKey.emplace(oldKeys[row], row);
+            std::vector<DataChangeRectangle> rectangles;
+            std::vector<std::size_t> previousRowRectangles;
+            for (std::size_t row = 0; row < rows.size(); ++row)
+            {
+                const auto oldRow = oldRowByKey.find(newKeys[row]);
+                std::vector<ColumnChange> changes;
+                if (oldRow != oldRowByKey.end())
+                {
+                    auto raw = resolver(m_rows[oldRow->second], rows[row]);
+                    if (!alive || m_updateGeneration != generation) return {};
+                    changes = normalizeChanges(raw);
+                }
+                if (!changes.empty()) ++updatedRowCount;
+                std::vector<std::size_t> currentRowRectangles;
+                currentRowRectangles.reserve(changes.size());
+                for (ColumnChange& change : changes)
+                {
+                    auto previous = std::find_if(previousRowRectangles.cbegin(), previousRowRectangles.cend(),
+                        [&rectangles, &change](std::size_t rectangle)
+                        {
+                            const ColumnChange& columns = rectangles[rectangle].columns;
+                            return columns.firstColumn == change.firstColumn
+                                && columns.lastColumn == change.lastColumn && columns.roles == change.roles;
+                        });
+                    if (previous != previousRowRectangles.cend())
+                    {
+                        rectangles[*previous].lastRow = static_cast<int>(row);
+                        currentRowRectangles.push_back(*previous);
+                    }
+                    else
+                    {
+                        currentRowRectangles.push_back(rectangles.size());
+                        rectangles.push_back({ static_cast<int>(row), static_cast<int>(row), std::move(change) });
+                    }
+                }
+                previousRowRectangles = std::move(currentRowRectangles);
+            }
+            return rectangles;
+        }
+
+        UpdateStats setRowsIncrementally(std::vector<RowType> rows, quint64 generation)
+        {
+            const QPointer<FlatTableModel> alive(this);
+            const auto current = [&] { return alive && m_updateGeneration == generation; };
+            // A callback can replace/destroy its owning std::function. Its local
+            // copy remains valid until invocation returns; model rows stay put
+            // because nested setRows/clearRows only queue complete snapshots.
+            const KeyResolver keyResolver = m_keyResolver;
+            const RowChangeResolver changeResolver = m_rowChangeResolver;
             std::vector<std::string> newKeys;
             std::unordered_set<std::string> newKeySet;
             std::vector<std::string> oldKeys;
             std::unordered_set<std::string> oldKeySet;
-            if (!collectUniqueKeys(rows, newKeys, newKeySet) ||
-                !collectUniqueKeys(m_rows, oldKeys, oldKeySet))
-            {
-                return resetRows(std::move(rows));
-            }
+            const bool validKeys = collectUniqueKeys(rows, newKeys, newKeySet, keyResolver, generation)
+                && collectUniqueKeys(m_rows, oldKeys, oldKeySet, keyResolver, generation);
+            if (!current()) return {};
+            if (!validKeys) return resetRows(std::move(rows));
 
             UpdateStats stats;
+            const bool preciseChanges = static_cast<bool>(changeResolver);
+            const std::vector<DataChangeRectangle> dataChanges = preciseChanges
+                ? collectDataChanges(rows, newKeys, oldKeys, stats.updatedRowCount, changeResolver, generation)
+                : std::vector<DataChangeRectangle>();
+            if (!current()) return stats;
 
             // 先按连续区间删除新快照中已经不存在的键。倒序处理保证剩余行号稳定。
             for (int lastRow = static_cast<int>(m_rows.size()) - 1; lastRow >= 0;)
@@ -295,9 +477,11 @@ namespace ks::ui
                     --firstRow;
                 }
                 beginRemoveRows(QModelIndex(), firstRow, lastRow);
+                if (!alive) return stats;
                 m_rows.erase(m_rows.begin() + firstRow, m_rows.begin() + lastRow + 1);
                 oldKeys.erase(oldKeys.begin() + firstRow, oldKeys.begin() + lastRow + 1);
                 endRemoveRows();
+                if (!current()) return stats;
                 stats.removedRowCount += lastRow - firstRow + 1;
                 lastRow = firstRow - 1;
             }
@@ -320,12 +504,14 @@ namespace ks::ui
                 const int firstInsertRow = static_cast<int>(m_rows.size());
                 const int lastInsertRow = firstInsertRow + static_cast<int>(insertedNewRowIndexes.size()) - 1;
                 beginInsertRows(QModelIndex(), firstInsertRow, lastInsertRow);
+                if (!alive) return stats;
                 for (const std::size_t newRow : insertedNewRowIndexes)
                 {
                     m_rows.push_back(rows[newRow]);
                     oldKeys.push_back(newKeys[newRow]);
                 }
                 endInsertRows();
+                if (!current()) return stats;
                 stats.insertedRowCount = static_cast<int>(insertedNewRowIndexes.size());
             }
 
@@ -339,6 +525,8 @@ namespace ks::ui
                     newRowByKey.emplace(newKeys[static_cast<std::size_t>(row)], row);
                 }
 
+                emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+                if (!alive) return stats;
                 const QModelIndexList oldPersistentIndexes = persistentIndexList();
                 QModelIndexList newPersistentIndexes;
                 newPersistentIndexes.reserve(oldPersistentIndexes.size());
@@ -357,22 +545,35 @@ namespace ks::ui
                         : createIndex(targetIt->second, oldIndex.column()));
                 }
 
-                emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
                 m_rows = std::move(rows);
                 changePersistentIndexList(oldPersistentIndexes, newPersistentIndexes);
                 emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+                if (!current()) return stats;
             }
             else
             {
                 m_rows = std::move(rows);
             }
 
-            stats.updatedRowCount = static_cast<int>(m_rows.size());
-            if (!m_rows.empty() && !m_columns.empty())
+            if (preciseChanges)
             {
-                emit dataChanged(
-                    index(0, 0),
-                    index(static_cast<int>(m_rows.size()) - 1, static_cast<int>(m_columns.size()) - 1));
+                for (const DataChangeRectangle& change : dataChanges)
+                {
+                    emit dataChanged(index(change.firstRow, change.columns.firstColumn),
+                        index(change.lastRow, change.columns.lastColumn), change.columns.roles);
+                    if (!current()) return stats;
+                }
+            }
+            else
+            {
+                // 未选择精确协议的旧消费者保持原有通知行为与统计口径。
+                stats.updatedRowCount = static_cast<int>(m_rows.size());
+                if (!m_rows.empty() && !m_columns.empty())
+                {
+                    emit dataChanged(
+                        index(0, 0),
+                        index(static_cast<int>(m_rows.size()) - 1, static_cast<int>(m_columns.size()) - 1));
+                }
             }
             return stats;
         }
