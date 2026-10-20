@@ -18,7 +18,12 @@ namespace ks::ui
         static MetricChartBinding* ForSeries(QLineSeries* series, std::size_t capacity = 60);
         static MetricChartBinding* Find(const QLineSeries* series);
         // append 只由采样拥有者调用；mirror 不产生另一份采样。
-        void append(MetricSample sample);
+        // 隐藏宿主可只追加规范历史，首显再补投影；默认保持既有逐样本投影。
+        void append(MetricSample sample, bool refreshProjection = true);
+        // 只控制此绑定的显示投影，不能停止采样；重新启用时补齐最新代次。
+        void setPresentationEnabled(bool enabled);
+        bool presentationEnabled() const;
+        bool projectionPending() const;
         void setXMode(MetricXMode mode);
         MetricXMode xMode() const;
         std::shared_ptr<MetricHistory> history() const;
@@ -34,6 +39,11 @@ namespace ks::ui
     private:
         QPointer<QLineSeries> m_series; // 现有绘制系列的弱引用。
         std::shared_ptr<MetricHistory> m_history; // 主图和镜像的同一采样模型。
+        // 与模型一起共享，源图隐藏追加后，镜像也能识别尚未投影的新历史。
+        std::shared_ptr<std::uint64_t> m_historyRevision = std::make_shared<std::uint64_t>(0);
+        std::uint64_t m_projectedRevision = 0;
+        bool m_projectionDirty = true;
+        bool m_presentationEnabled = true;
         MetricXMode m_xMode = MetricXMode::StableId; // 坐标投影不改变采样身份。
     };
 }

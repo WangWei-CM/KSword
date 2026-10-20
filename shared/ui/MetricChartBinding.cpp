@@ -41,21 +41,54 @@ namespace ks::ui
         }
         if (auto* binding = Find(series))
         {
-            binding->m_history->setCapacity(capacity);
+            if (binding->m_history->capacity() != capacity)
+            {
+                binding->m_history->setCapacity(capacity);
+                ++*binding->m_historyRevision;
+                binding->m_projectionDirty = true;
+            }
             return binding;
         }
         return new MetricChartBinding(series, capacity);
     }
 
-    void MetricChartBinding::append(MetricSample sample)
+    void MetricChartBinding::append(MetricSample sample, const bool refreshProjection)
     {
         m_history->append(sample);
-        refreshSeries();
+        ++*m_historyRevision;
+        m_projectionDirty = true;
+        if (refreshProjection)
+        {
+            refreshSeries();
+        }
+    }
+
+    void MetricChartBinding::setPresentationEnabled(const bool enabled)
+    {
+        m_presentationEnabled = enabled;
+        if (enabled && projectionPending())
+        {
+            refreshSeries();
+        }
+    }
+
+    bool MetricChartBinding::presentationEnabled() const
+    {
+        return m_presentationEnabled;
+    }
+
+    bool MetricChartBinding::projectionPending() const
+    {
+        return m_projectionDirty || m_projectedRevision != *m_historyRevision;
     }
 
     void MetricChartBinding::setXMode(const MetricXMode mode)
     {
-        m_xMode = mode;
+        if (m_xMode != mode)
+        {
+            m_xMode = mode;
+            m_projectionDirty = true;
+        }
     }
 
     MetricXMode MetricChartBinding::xMode() const
@@ -71,7 +104,12 @@ namespace ks::ui
     // 共享数据只替换模型来源；镜像自身 palette、字体、比例与系列仍独立。
     void MetricChartBinding::shareHistoryFrom(const MetricChartBinding& source)
     {
+        if (m_history != source.m_history || m_xMode != source.m_xMode)
+        {
+            m_projectionDirty = true;
+        }
         m_history = source.m_history;
+        m_historyRevision = source.m_historyRevision;
         m_xMode = source.m_xMode;
     }
 
@@ -81,6 +119,13 @@ namespace ks::ui
         {
             return;
         }
+        if (!m_presentationEnabled)
+        {
+            m_projectionDirty = true;
+            return;
+        }
+        // 显式刷新保留旧语义，也支持 history() 外部编辑后的主动回填。
+        const std::uint64_t revision = *m_historyRevision;
         QList<QPointF> points; // 此视图按自身坐标策略生成的临时显示投影。
         points.reserve(static_cast<qsizetype>(m_history->samples().size()));
         for (std::size_t index = 0; index < m_history->samples().size(); ++index)
@@ -89,6 +134,9 @@ namespace ks::ui
             points.append(QPointF(m_history->projectedX(index, m_xMode),
                 sample.valid ? sample.value : std::numeric_limits<double>::quiet_NaN()));
         }
+        // 在通知前消费当前代次，通知重入时新增的 dirty 不会被覆盖。
+        m_projectedRevision = revision;
+        m_projectionDirty = false;
         m_series->replace(points);
     }
 
