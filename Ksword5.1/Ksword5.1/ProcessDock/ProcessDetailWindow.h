@@ -37,6 +37,7 @@
 namespace ksword::ark
 {
     struct ProcessRuntimeDetailResult;
+    struct VirtualAddressTranslateResult;
 }
 
 class QCheckBox;
@@ -446,7 +447,7 @@ private:
     // 在 UI 线程执行。失败一律写进状态行说明原因，不静默返回。
     void applyKernelFieldWatch(
         const ksword::ark::ProcessRuntimeDetailResult& detail,
-        KernelFieldWatchTarget target);
+        KernelFieldWatchTarget target, const ksword::ark::VirtualAddressTranslateResult* preparedPte);
     // initializeHotkeyTab 作用：
     // - 构建“进程热键”页面；
     // - 覆盖窗口激活热键、菜单快捷键、PE Accelerator 资源和 .lnk 快捷方式热键。
@@ -1003,6 +1004,7 @@ private:
     QPushButton* m_watchProtectionButton = nullptr;         // 谁改了 PPL 保护级别。
     QPushButton* m_watchImageNameButton = nullptr;          // 谁改了 EPROCESS 里的进程名。
     QPushButton* m_watchProcessPteButton = nullptr;         // 谁改了 EPROCESS 那一页的映射。
+    std::unique_ptr<ks::ui::AsyncOperation> m_kernelFieldWatchOperation;
     QLabel* m_watchStatusLabel = nullptr;                   // 地址换算结果与失败原因。
     QLabel* m_sectionInfoStatusLabel = nullptr; // Section/ControlArea 查询状态。
     ks::ui::StructuredFieldView* m_sectionInfoOutput = nullptr; // Section/ControlArea 详情文本输出。

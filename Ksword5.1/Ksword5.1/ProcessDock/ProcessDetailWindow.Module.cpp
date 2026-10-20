@@ -19,6 +19,7 @@ using namespace process_detail_window_internal;
 // 显式析构第一步关闭请求门禁，随后才销毁派生页面缓存与控件成员。
 ProcessDetailWindow::~ProcessDetailWindow()
 {
+    if (m_kernelFieldWatchOperation) m_kernelFieldWatchOperation->close();
     if (m_moduleOperation)
     {
         m_moduleOperation->close();

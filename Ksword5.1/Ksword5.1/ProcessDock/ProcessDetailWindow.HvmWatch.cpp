@@ -23,6 +23,7 @@
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/HvmWatchDialog.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QLabel>
 #include <QMetaObject>
@@ -31,7 +32,7 @@
 #include <QString>
 
 #include <algorithm>
-#include <thread>
+#include <memory>
 
 namespace
 {
@@ -85,26 +86,47 @@ void ProcessDetailWindow::startKernelFieldWatch(const KernelFieldWatchTarget tar
         m_watchStatusLabel->setText(
             QStringLiteral("正在向 R0 重新查询这个进程的内核对象地址与字段偏移..."));
     }
-    QPointer<ProcessDetailWindow> safeThis(this);
-    std::thread([safeThis, processId, target]() {
-        const ksword::ark::DriverClient client;
-        const ksword::ark::ProcessRuntimeDetailResult detail =
-            client.queryProcessRuntimeDetail(processId);
-        if (safeThis == nullptr)
+    if (!m_kernelFieldWatchOperation)
+        m_kernelFieldWatchOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    struct WatchPreparationRequest
+    {
+        std::uint32_t processId;
+        std::uint64_t creationTime;
+        KernelFieldWatchTarget target;
+    };
+    struct WatchPreparation
+    {
+        ksword::ark::ProcessRuntimeDetailResult detail;
+        ksword::ark::VirtualAddressTranslateResult pte;
+        bool hasPte = false;
+    };
+    const WatchPreparationRequest request{processId, m_baseRecord.creationTime100ns, target};
+    m_kernelFieldWatchOperation->submit<WatchPreparationRequest, WatchPreparation>(request,
+        [](const WatchPreparationRequest& value, const ks::ui::AsyncOperationToken& token)
         {
-            return;
-        }
-        QMetaObject::invokeMethod(
-            safeThis,
-            [safeThis, detail, target]() {
-                if (safeThis == nullptr)
-                {
-                    return;
-                }
-                safeThis->applyKernelFieldWatch(detail, target);
-            },
-            Qt::QueuedConnection);
-    }).detach();
+            WatchPreparation prepared;
+            const ksword::ark::DriverClient client;
+            if (token.isCanceled()) return prepared;
+            prepared.detail = client.queryProcessRuntimeDetail(value.processId);
+            if (!token.isCanceled() && value.target == KernelFieldWatchTarget::ProcessObjectPte
+                && prepared.detail.io.ok && prepared.detail.response.processObjectAddress != 0ULL
+                && (prepared.detail.response.fieldFlags & KSWORD_ARK_PROCESS_DETAIL_FIELD_OBJECT_ADDRESS) != 0UL)
+            {
+                prepared.pte = client.translateVirtualAddress(0U, prepared.detail.response.processObjectAddress);
+                prepared.hasPte = true;
+            }
+            return prepared;
+        },
+        [this, request](const WatchPreparation& prepared, std::uint64_t)
+        {
+            if (request.processId != m_baseRecord.pid || request.creationTime != m_baseRecord.creationTime100ns) return true;
+            applyKernelFieldWatch(prepared.detail, request.target, prepared.hasPte ? &prepared.pte : nullptr);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            if (m_watchStatusLabel) m_watchStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+        });
 }
 
 /*
@@ -116,7 +138,8 @@ void ProcessDetailWindow::startKernelFieldWatch(const KernelFieldWatchTarget tar
  */
 void ProcessDetailWindow::applyKernelFieldWatch(
     const ksword::ark::ProcessRuntimeDetailResult& detail,
-    const KernelFieldWatchTarget target)
+    const KernelFieldWatchTarget target,
+    const ksword::ark::VirtualAddressTranslateResult* const preparedPte)
 {
     const auto report = [this](const QString& text) {
         if (m_watchStatusLabel != nullptr)
@@ -286,7 +309,7 @@ void ProcessDetailWindow::applyKernelFieldWatch(
     if (viaPte)
     {
         report(QStringLiteral("正在翻译 EPROCESS 基址所在页的页表项..."));
-        ks::ui::openHvmWatchOnPte(this, address, label);
+        if (preparedPte != nullptr) ks::ui::openHvmWatchOnPtePrepared(this, address, label, *preparedPte);
         return;
     }
     /*

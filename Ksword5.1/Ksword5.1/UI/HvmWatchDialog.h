@@ -20,6 +20,8 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 
+namespace ksword::ark { struct VirtualAddressTranslateResult; }
+
 namespace ksword::hvm
 {
     struct HvmWatchTarget;
@@ -74,6 +76,10 @@ namespace ks::ui
         QWidget* parent,
         quint64 kernelAddress,
         const QString& label);
+
+    // Present a worker-prepared page walk. This function performs no driver query.
+    void openHvmWatchOnPtePrepared(QWidget* parent, quint64 kernelAddress,
+        const QString& label, const ksword::ark::VirtualAddressTranslateResult& walk);
 
     // openHvmWatch：打开安装对话框并预填目标；用户确认后安装。
     //
