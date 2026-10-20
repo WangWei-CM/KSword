@@ -23,6 +23,8 @@
 #include <vector>      // std::vector：导航历史记录容器。
 
 // Qt 前置声明：降低头文件耦合。
+namespace ks::ui { class AsyncOperation; }
+
 class QCheckBox;
 class QAbstractTableModel;
 class QComboBox;
@@ -653,6 +655,8 @@ private:
     FilePanelWidgets m_leftPanel;              // 左侧面板状态。
     FilePanelWidgets m_rightPanel;             // 右侧面板状态。
     bool m_transferInProgress = false;         // 跨面板复制/移动后台任务是否运行。
+
+    ks::ui::AsyncOperation* m_fileAnalysisOperation = nullptr; // 单个值化分析任务，析构先关闭。
 
     // 文件解锁器后台线程状态。
     std::thread m_unlockerWorkerThread;

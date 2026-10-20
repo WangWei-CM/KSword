@@ -8,6 +8,7 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ParameterWorkspace.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/UI_All.h"
 #include "FilePropertyPeAnalyzer.h"
@@ -102,6 +103,7 @@
 #include <QPalette>
 #include <QScopedValueRollback>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -12510,6 +12512,171 @@ namespace
         bool m_themeStyleApplying = false; // 避免 PaletteChange 触发样式重入。
     };
 
+    // Pure stream accumulator: no QWidget/model/document or filesystem ownership.
+    struct FileAnalysisValues
+    {
+        QCryptographicHash md5{ QCryptographicHash::Md5 };
+        QCryptographicHash sha1{ QCryptographicHash::Sha1 };
+        QCryptographicHash sha256{ QCryptographicHash::Sha256 };
+        std::array<std::uint64_t, 256> buckets{};
+        std::uint64_t bytes = 0;
+
+        void consume(const QByteArray& chunk, const bool hash)
+        {
+            if (hash)
+            {
+                md5.addData(chunk); sha1.addData(chunk); sha256.addData(chunk);
+            }
+            else
+            {
+                for (const unsigned char byte : chunk) ++buckets[byte];
+            }
+            bytes += static_cast<std::uint64_t>(chunk.size());
+        }
+
+        double entropy() const
+        {
+            double result = 0.0;
+            if (bytes == 0) return result;
+            for (const auto count : buckets)
+            {
+                if (count == 0) continue;
+                const double probability = static_cast<double>(count) / static_cast<double>(bytes);
+                result -= probability * std::log2(probability);
+            }
+            return result;
+        }
+    };
+
+    enum class FileAnalysisReadState { Complete, Canceled, Failed };
+
+    template<class Read, class Cancel, class Progress>
+    FileAnalysisReadState readFileAnalysisValues(FileAnalysisValues& values, const bool hash,
+        Read read, Cancel canceled, Progress progress)
+    {
+        QByteArray chunk(256 * 1024, Qt::Uninitialized);
+        while (!canceled())
+        {
+            const qint64 bytes = read(chunk.data(), 256 * 1024);
+            if (bytes < 0) return FileAnalysisReadState::Failed;
+            if (bytes == 0) return canceled() ? FileAnalysisReadState::Canceled : FileAnalysisReadState::Complete;
+            chunk.resize(bytes);
+            values.consume(chunk, hash);
+            chunk.resize(256 * 1024);
+            progress(values.bytes);
+        }
+        return FileAnalysisReadState::Canceled;
+    }
+
+    struct FileAnalysisProgress
+    {
+        std::atomic_bool cancel{ false };
+        std::atomic<int> percent{ 0 };
+    };
+
+    struct FileAnalysisRequest
+    {
+        std::vector<QString> paths;
+        QString panelName;
+        bool hash = true;
+        std::shared_ptr<FileAnalysisProgress> progress;
+    };
+
+    struct FileAnalysisResult
+    {
+        int successes = 0;
+        int failures = 0;
+        bool canceled = false;
+    };
+
+    bool sameFileAnalysisIdentity(const BY_HANDLE_FILE_INFORMATION& before,
+        const BY_HANDLE_FILE_INFORMATION& after)
+    {
+        return before.dwVolumeSerialNumber == after.dwVolumeSerialNumber
+            && before.nFileIndexHigh == after.nFileIndexHigh && before.nFileIndexLow == after.nFileIndexLow
+            && before.nFileSizeHigh == after.nFileSizeHigh && before.nFileSizeLow == after.nFileSizeLow
+            && ::CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) == 0;
+    }
+
+    // Only value requests/tokens cross the worker boundary. Complete results go to the
+    // thread-safe log directly; a large selection cannot become a GUI logging loop.
+    FileAnalysisResult analyzeMenuFiles(const FileAnalysisRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileAnalysisResult result;
+        const auto canceled = [&]() { return token.isCanceled() || request.progress->cancel.load(); };
+        kLogEvent event;
+        for (std::size_t index = 0; index < request.paths.size(); ++index)
+        {
+            if (canceled()) { result.canceled = true; break; }
+            const QString& path = request.paths[index];
+            if (!QFileInfo(path).isFile()) continue; // Preserve directory skipping.
+            HANDLE handle = ::CreateFileW(path.toStdWString().c_str(), GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            DWORD failure = handle == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+            BY_HANDLE_FILE_INFORMATION before{};
+            if (failure == ERROR_SUCCESS && !::GetFileInformationByHandle(handle, &before)) failure = ::GetLastError();
+            FileAnalysisValues values;
+            const auto size = (static_cast<std::uint64_t>(before.nFileSizeHigh) << 32) | before.nFileSizeLow;
+            if (failure == ERROR_SUCCESS)
+            {
+                readFileAnalysisValues(values, request.hash,
+                    [handle, &failure](char* buffer, const DWORD capacity) -> qint64
+                    {
+                        DWORD bytes = 0;
+                        if (!::ReadFile(handle, buffer, capacity, &bytes, nullptr))
+                        { failure = ::GetLastError(); return -1; }
+                        return bytes;
+                    }, canceled, [&request, index, size](const std::uint64_t bytes)
+                    {
+                        const double fraction = size == 0 ? 1.0 : std::min(1.0, static_cast<double>(bytes) / size);
+                        request.progress->percent.store(static_cast<int>(99.0 * (index + fraction) / request.paths.size()));
+                    });
+            }
+            BY_HANDLE_FILE_INFORMATION after{};
+            if (failure == ERROR_SUCCESS && !canceled())
+            {
+                if (!::GetFileInformationByHandle(handle, &after)) failure = ::GetLastError();
+                else if (values.bytes != size || !sameFileAnalysisIdentity(before, after)) failure = ERROR_FILE_INVALID;
+                // The completed handle must still identify the selected pathname.
+                HANDLE current = ::CreateFileW(path.toStdWString().c_str(), FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                BY_HANDLE_FILE_INFORMATION currentInfo{};
+                if (failure == ERROR_SUCCESS && current == INVALID_HANDLE_VALUE) failure = ::GetLastError();
+                if (failure == ERROR_SUCCESS && !::GetFileInformationByHandle(current, &currentInfo)) failure = ::GetLastError();
+                if (failure == ERROR_SUCCESS && !sameFileAnalysisIdentity(before, currentInfo)) failure = ERROR_FILE_INVALID;
+                closeWin32Handle(current);
+            }
+            closeWin32Handle(handle);
+            if (canceled()) { result.canceled = true; break; }
+            if (failure != ERROR_SUCCESS)
+            {
+                ++result.failures;
+                warn << event << "[FileDock] file analysis failed, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", error=" << formatWin32ErrorText(failure).toStdString() << eol;
+                continue;
+            }
+            ++result.successes;
+            if (request.hash)
+            {
+                info << event << "[FileDock] 哈希计算结果, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", md5=" << QString::fromLatin1(values.md5.result().toHex()).toStdString()
+                    << ", sha1=" << QString::fromLatin1(values.sha1.result().toHex()).toStdString()
+                    << ", sha256=" << QString::fromLatin1(values.sha256.result().toHex()).toStdString() << eol;
+            }
+            else
+            {
+                info << event << "[FileDock] 熵值计算结果, filePath=" << QDir::toNativeSeparators(path).toStdString()
+                    << ", entropy=" << QString::number(values.entropy(), 'f', 4).toStdString() << eol;
+            }
+        }
+        info << event << (request.hash ? "[FileDock] 哈希计算完成, panel=" : "[FileDock] 熵值计算完成, panel=")
+            << request.panelName.toStdString() << ", successCount=" << result.successes
+            << ", failCount=" << result.failures << ", canceled=" << result.canceled << eol;
+        return result;
+    }
+
     // kRecoveryVolumeProbeGenerationProperty 作用：
     // - 用途：记录“这是第几次卷探测请求”，以动态属性挂在恢复页的卷下拉框上；
     // - 入参：无（作为 QObject::property/setProperty 的键使用）；
@@ -12911,6 +13078,7 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
+    if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
     m_uiDispatcher->close();
     // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
     releaseAllActiveOplocks(false);
@@ -16546,9 +16714,9 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     releaseAllOplocksAction->setEnabled(currentOplockCount > 0U);
     takeOwnerAction->setEnabled(hasSelection);
     detailAction->setEnabled(hasSelection);
-    hashAction->setEnabled(hasAnyFile);
+    hashAction->setEnabled(hasAnyFile && (m_fileAnalysisOperation == nullptr || !m_fileAnalysisOperation->isInFlight()));
     signAction->setEnabled(hasAnyFile);
-    entropyAction->setEnabled(hasAnyFile);
+    entropyAction->setEnabled(hasAnyFile && (m_fileAnalysisOperation == nullptr || !m_fileAnalysisOperation->isInFlight()));
     hexAction->setEnabled(singleFileOnly);
     peAction->setEnabled(singleFileOnly);
     mappedProcessScanAction->setEnabled(hasAnyFile);
@@ -16839,85 +17007,41 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             << eol;
         return;
     }
-    if (selectedAction == hashAction)
+    if (selectedAction == hashAction || selectedAction == entropyAction)
     {
-        // 哈希计算支持多选：仅对文件条目计算，目录自动跳过。
-        if (!hasAnyFile)
+        if (!hasAnyFile) return;
+        if (m_fileAnalysisOperation == nullptr) m_fileAnalysisOperation = new ks::ui::AsyncOperation(this);
+        if (m_fileAnalysisOperation->isInFlight()) return;
+        const bool hash = selectedAction == hashAction;
+        const QString title = ks::i18n::displayText(hash ? QStringLiteral("计算哈希值") : QStringLiteral("计算熵值"));
+        const auto progress = std::make_shared<FileAnalysisProgress>();
+        auto* dialog = new QProgressDialog(title, ks::i18n::displayText(QStringLiteral("取消")), 0, 100, this);
+        dialog->setWindowTitle(title);
+        dialog->setWindowModality(Qt::NonModal);
+        dialog->setAutoClose(false);
+        dialog->setAutoReset(false);
+        dialog->setMinimumDuration(0);
+        dialog->setValue(0);
+        auto* timer = new QTimer(dialog);
+        timer->setInterval(100);
+        connect(timer, &QTimer::timeout, dialog, [dialog, progress]()
         {
-            kLogEvent hashEmptyEvent;
-            warn << hashEmptyEvent
-                << "[FileDock] 哈希计算取消：未选中文件, panel="
-                << panel.panelNameText.toStdString()
-                << eol;
-            return;
-        }
-
-        kLogEvent hashEvent;
-        int successCount = 0;
-        QStringList failedLines;
-        for (const QString& path : menuPaths)
-        {
-            QFileInfo fileInfo(path);
-            if (!fileInfo.isFile())
+            const int percent = progress->percent.load();
+            if (!progress->cancel.load() && dialog->value() != percent) dialog->setValue(percent);
+        });
+        connect(dialog, &QProgressDialog::canceled, dialog, [progress]() { progress->cancel.store(true); });
+        const QPointer<QProgressDialog> guard(dialog);
+        m_fileAnalysisOperation->submit<FileAnalysisRequest, FileAnalysisResult>(
+            { menuPaths, panel.panelNameText, hash, progress }, analyzeMenuFiles,
+            [guard](const FileAnalysisResult&, std::uint64_t)
+            { if (guard) guard->deleteLater(); return true; },
+            [guard](std::exception_ptr)
             {
-                continue;
-            }
-
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                failedLines << QStringLiteral("%1 | 无法打开文件。")
-                    .arg(QDir::toNativeSeparators(path));
-                continue;
-            }
-
-            QCryptographicHash md5(QCryptographicHash::Md5);
-            QCryptographicHash sha1(QCryptographicHash::Sha1);
-            QCryptographicHash sha256(QCryptographicHash::Sha256);
-            while (!file.atEnd())
-            {
-                const QByteArray chunk = file.read(1024 * 256);
-                md5.addData(chunk);
-                sha1.addData(chunk);
-                sha256.addData(chunk);
-            }
-            file.close();
-
-            successCount += 1;
-            info << hashEvent
-                << "[FileDock] 哈希计算结果, filePath="
-                << QDir::toNativeSeparators(path).toStdString()
-                << ", md5="
-                << QString::fromLatin1(md5.result().toHex()).toStdString()
-                << ", sha1="
-                << QString::fromLatin1(sha1.result().toHex()).toStdString()
-                << ", sha256="
-                << QString::fromLatin1(sha256.result().toHex()).toStdString()
-                << eol;
-        }
-
-        if (!failedLines.isEmpty())
-        {
-            warn << hashEvent
-                << "[FileDock] 哈希计算部分失败, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << ", failCount="
-                << failedLines.size()
-                << ", failedPreview=\n"
-                << buildLogPreviewText(failedLines).toStdString()
-                << eol;
-        }
-
-        info << hashEvent
-            << "[FileDock] 哈希计算完成, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failedLines.size()
-            << eol;
+                kLogEvent event; warn << event << "[FileDock] file analysis worker failed" << eol;
+                if (guard) guard->deleteLater();
+            });
+        timer->start();
+        dialog->show();
         return;
     }
     if (selectedAction == signAction)
@@ -16976,98 +17100,6 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             << openedCount
             << ", fileSelectionCount="
             << fileSelectionCount
-            << eol;
-        return;
-    }
-    if (selectedAction == entropyAction)
-    {
-        // 熵值计算支持多选：仅统计文件条目。
-        if (!hasAnyFile)
-        {
-            kLogEvent entropyEmptyEvent;
-            warn << entropyEmptyEvent
-                << "[FileDock] 熵值计算取消：未选中文件, panel="
-                << panel.panelNameText.toStdString()
-                << eol;
-            return;
-        }
-
-        kLogEvent entropyEvent;
-        int successCount = 0;
-        QStringList failedLines;
-        for (const QString& path : menuPaths)
-        {
-            QFileInfo fileInfo(path);
-            if (!fileInfo.isFile())
-            {
-                continue;
-            }
-
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly))
-            {
-                failedLines << QStringLiteral("%1 | 无法打开文件。")
-                    .arg(QDir::toNativeSeparators(path));
-                continue;
-            }
-
-            std::array<std::uint64_t, 256> bucket{};
-            std::uint64_t totalCount = 0;
-            while (!file.atEnd())
-            {
-                const QByteArray chunk = file.read(1024 * 256);
-                for (unsigned char byteValue : chunk)
-                {
-                    bucket[byteValue] += 1;
-                    totalCount += 1;
-                }
-            }
-            file.close();
-
-            double entropy = 0.0;
-            if (totalCount > 0)
-            {
-                for (std::uint64_t count : bucket)
-                {
-                    if (count == 0)
-                    {
-                        continue;
-                    }
-                    const double p = static_cast<double>(count) / static_cast<double>(totalCount);
-                    entropy -= p * std::log2(p);
-                }
-            }
-
-            successCount += 1;
-            info << entropyEvent
-                << "[FileDock] 熵值计算结果, filePath="
-                << QDir::toNativeSeparators(path).toStdString()
-                << ", entropy="
-                << QString::number(entropy, 'f', 4).toStdString()
-                << eol;
-        }
-
-        if (!failedLines.isEmpty())
-        {
-            warn << entropyEvent
-                << "[FileDock] 熵值计算部分失败, panel="
-                << panel.panelNameText.toStdString()
-                << ", successCount="
-                << successCount
-                << ", failCount="
-                << failedLines.size()
-                << ", failedPreview=\n"
-                << buildLogPreviewText(failedLines).toStdString()
-                << eol;
-        }
-
-        info << entropyEvent
-            << "[FileDock] 熵值计算完成, panel="
-            << panel.panelNameText.toStdString()
-            << ", successCount="
-            << successCount
-            << ", failCount="
-            << failedLines.size()
             << eol;
         return;
     }
