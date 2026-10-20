@@ -1,6 +1,7 @@
 #include "LanguageManager.h"
 
 #include <QCoreApplication>
+#include <QEvent>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -22,6 +23,9 @@ namespace
 {
     QJsonArray failures;
     int checks = 0;
+#ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
+    std::vector<QObject*> runtimeVisited;
+#endif
 
 #ifdef KSWORD_I18N_TEST_GENERATION_HOOK
     std::mutex generationHookMutex;
@@ -367,6 +371,88 @@ namespace
         requireTrue(QStringLiteral("return English after snapshot cases"), manager.setLanguage(QStringLiteral("en-US"), &error));
     }
 
+
+#ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
+    void runRuntimePolicyCases(ks::i18n::LanguageManager& manager)
+    {
+        QObject root;
+        QObject unknown(&root);
+        QObject managed(&root);
+        QObject leaf(&managed);
+        QObject nested(&managed);
+        QObject nestedLeaf(&nested);
+        manager.setRuntimeTranslationManaged(&managed);
+        manager.setRuntimeTranslationManaged(&nested);
+        const auto drain = []() { QCoreApplication::processEvents(); };
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&root);
+        drain();
+        requireTrue(QStringLiteral("unknown compatibility subtree is still visited"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &unknown) != runtimeVisited.cend());
+        requireTrue(QStringLiteral("clean explicit subtree stops ancestor traversal"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) == runtimeVisited.cend());
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&root);
+        manager.markRuntimeTranslationDirty(&leaf);
+        drain();
+        requireTrue(QStringLiteral("ancestor queue does not swallow dirty leaf behind clean boundary"),
+            std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) == 1);
+        requireTrue(QStringLiteral("dirty leaf does not open its clean managed siblings"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &nestedLeaf) == runtimeVisited.cend());
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&managed);
+        manager.markRuntimeTranslationDirty(&leaf);
+        drain();
+        requireTrue(QStringLiteral("dirty boundary consumes its own source subtree once"),
+            std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) == 1
+            && std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) == 1);
+        requireTrue(QStringLiteral("nested clean boundaries remain independent"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &nested) == runtimeVisited.cend());
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&root);
+        drain();
+        requireTrue(QStringLiteral("dirty boundary returns to clean after consumption"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) == runtimeVisited.cend());
+        manager.setRuntimeTranslationManaged(&managed, false);
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&root);
+        drain();
+        requireTrue(QStringLiteral("removing managed declaration restores compatibility"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) != runtimeVisited.cend()
+            && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) != runtimeVisited.cend());
+        auto* destroyed = new QObject;
+        manager.markRuntimeTranslationDirty(destroyed);
+        delete destroyed;
+        drain();
+        requireTrue(QStringLiteral("destroyed pending runtime root is safe"), true);
+
+        // Reproduce the hidden-leaf dirty state without constructing QWidget:
+        // root is queued, managed stays clean, and leaf retains a dirty bit.
+        // Deliver the actual Show event through the real manager eventFilter
+        // installed on this QObject. No GUI or offscreen widget is involved.
+        manager.setRuntimeTranslationManaged(&managed);
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&root);
+        leaf.setProperty("ks_i18n_runtime_dirty_subtree", true);
+        leaf.installEventFilter(&manager);
+        QEvent show(QEvent::Show);
+        QCoreApplication::sendEvent(&leaf, &show);
+        requireTrue(QStringLiteral("Show prepares dirty leaf below clean boundary before queued ancestor"),
+            std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) == 1);
+        requireTrue(QStringLiteral("Show preparation does not visit the blocked outer dirty root"),
+            std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &root) == runtimeVisited.cend());
+        requireTrue(QStringLiteral("Show consumes the reachable leaf dirty bit"),
+            !leaf.property("ks_i18n_runtime_dirty_subtree").toBool());
+        requireTrue(QStringLiteral("Show retains an unrelated outer dirty request"),
+            root.property("ks_i18n_runtime_dirty_subtree").toBool());
+        drain();
+        requireTrue(QStringLiteral("later outer drain still stops at the clean boundary"),
+            std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) == 1
+            && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) == runtimeVisited.cend());
+        leaf.removeEventFilter(&manager);
+    }
+#endif
+
     int writeReport(const QString& output)
     {
         const QJsonObject result{
@@ -401,6 +487,13 @@ void ksword_i18n_test_after_source_resolved()
     generationHookCondition.wait_for(lock, std::chrono::seconds(5), []() {
         return generationHookReleased;
     });
+}
+#endif
+
+#ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
+void ksword_i18n_test_runtime_visited(QObject* object)
+{
+    runtimeVisited.push_back(object);
 }
 #endif
 
@@ -451,6 +544,9 @@ int main(int argc, char** argv)
     requireTrue(QStringLiteral("initialize English"), manager.initialize(QStringLiteral("en-US"), &error));
     runSourceCases(manager);
     runSnapshotCases(manager);
+#ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
+    runRuntimePolicyCases(manager);
+#endif
     runEvictionCases(manager);
     runConcurrencyCases(manager);
     runBorrowedInputCases(manager);

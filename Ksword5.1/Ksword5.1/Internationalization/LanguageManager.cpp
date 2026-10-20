@@ -79,6 +79,8 @@ namespace
     constexpr auto kTabToolTipKeyProperty = "ks_i18n_tab_tooltip_key";
     constexpr auto kTabToolTipFallbackProperty = "ks_i18n_tab_tooltip_fallback";
 
+    constexpr auto kRuntimeManagedProperty = "ks_i18n_runtime_managed_subtree";
+    constexpr auto kRuntimeDirtyProperty = "ks_i18n_runtime_dirty_subtree";
     constexpr auto kRuntimeWindowTitleSourceProperty = "ks_i18n_runtime_window_title_source";
     constexpr auto kRuntimeWindowTitleAppliedProperty = "ks_i18n_runtime_window_title_applied";
     constexpr auto kRuntimeToolTipSourceProperty = "ks_i18n_runtime_tooltip_source";
@@ -301,6 +303,27 @@ namespace
         }
         storageObject->setProperty(sourceProperty, result.sourceText);
         storageObject->setProperty(appliedProperty, result.appliedText);
+    }
+
+    // Inspect only the ownership path of an event inside an explicit producer.
+    // Independent windows retain their own policy and never inherit a parent's.
+    QObject* runtimeManagedAncestor(QObject* object, QObject** dirtyAncestorOut = nullptr)
+    {
+        QObject* managedAncestor = nullptr;
+        if (dirtyAncestorOut != nullptr) *dirtyAncestorOut = nullptr;
+        for (QObject* current = object; current != nullptr; current = current->parent())
+        {
+            const bool managed = current->property(kRuntimeManagedProperty).toBool();
+            const bool dirty = current->property(kRuntimeDirtyProperty).toBool();
+            if (managed) managedAncestor = current;
+            if (dirtyAncestorOut != nullptr && dirty)
+                *dirtyAncestorOut = current;
+            // An outer dirty root cannot reach this event through a clean
+            // managed boundary. Retain only a candidate below that barrier.
+            if (managed && !dirty) break;
+            if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
+        }
+        return managedAncestor;
     }
 
     QObject* runtimeTranslationRoot(QObject* object)
@@ -2079,6 +2102,23 @@ void ks::i18n::LanguageManager::bindComboBoxItem(
     comboBox->setItemText(itemIndex, text(key, fallbackText));
 }
 
+void ks::i18n::LanguageManager::setRuntimeTranslationManaged(QObject* object, const bool managed)
+{
+    if (object != nullptr && object->property(kRuntimeManagedProperty).toBool() != managed)
+        object->setProperty(kRuntimeManagedProperty, managed);
+}
+
+void ks::i18n::LanguageManager::markRuntimeTranslationDirty(QObject* object)
+{
+    if (object == nullptr || m_applyingRuntimeTranslations) return;
+    if (!object->property(kRuntimeDirtyProperty).toBool()) object->setProperty(kRuntimeDirtyProperty, true);
+    // A hidden explicit subtree has no paint to prepare yet. Its Show event
+    // consumes the dirty bit before the first frame, without touching business
+    // sampling, canonical documents or hidden model contents in the meantime.
+    const auto* widget = qobject_cast<const QWidget*>(object);
+    if (widget == nullptr || widget->isVisible()) scheduleRuntimeTranslation(object);
+}
+
 void ks::i18n::LanguageManager::retranslateAll()
 {
     QApplication* application = qobject_cast<QApplication*>(QCoreApplication::instance());
@@ -2321,10 +2361,12 @@ void ks::i18n::LanguageManager::scheduleRuntimeTranslation(QObject* object)
     const auto covers = [](QObject* ancestor, QObject* child) {
         for (QObject* current = child; current != nullptr; current = current->parent())
         {
-            if (current == ancestor)
-            {
-                return true;
-            }
+            // A clean explicit boundary terminates ancestor coverage: its
+            // independently dirtied descendant must keep its own queue entry.
+            if (current->property(kRuntimeManagedProperty).toBool()
+                && !current->property(kRuntimeDirtyProperty).toBool()) return false;
+            if (current == ancestor) return true;
+            if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
         }
         return false;
     };
@@ -2367,6 +2409,33 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     if (watched == nullptr || event == nullptr || m_applyingRuntimeTranslations
         || isHistoricalChineseLanguage(m_currentLanguageId))
     {
+        return QObject::eventFilter(watched, event);
+    }
+
+    // Only relevant compatibility triggers inspect the ancestor path. Mouse,
+    // paint and timer events incur no subtree lookup or model traversal.
+    switch (event->type())
+    {
+    case QEvent::ChildAdded:
+    case QEvent::Show:
+    case QEvent::PolishRequest:
+    case QEvent::ActionAdded:
+    case QEvent::ActionChanged:
+    case QEvent::LayoutRequest:
+    case QEvent::UpdateRequest:
+    {
+        QObject* dirtyAncestor = nullptr;
+        QObject* managedAncestor = runtimeManagedAncestor(watched, &dirtyAncestor);
+        if (event->type() == QEvent::Show && dirtyAncestor != nullptr)
+        {
+            const QPointer<QObject> guardedWatched(watched);
+            applyRuntimeTranslations(dirtyAncestor);
+            return guardedWatched.isNull(); // Consume an event whose receiver was destroyed.
+        }
+        if (managedAncestor != nullptr) return QObject::eventFilter(watched, event);
+        break;
+    }
+    default:
         return QObject::eventFilter(watched, event);
     }
 
@@ -2495,6 +2564,11 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
         {
             return;
         }
+
+        const bool explicitlyDirty = currentObject->property(kRuntimeDirtyProperty).toBool();
+        if (currentObject->property(kRuntimeManagedProperty).toBool() && !explicitlyDirty)
+            return;
+        if (explicitlyDirty) currentObject->setProperty(kRuntimeDirtyProperty, QVariant());
 
         if (QAction* action = qobject_cast<QAction*>(currentObject))
         {
@@ -2833,6 +2907,10 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
         const QObjectList childList = currentObject->children();
         for (QObject* childObject : childList)
         {
+            // A separately owned window is prepared through its own Show/root
+            // entry and the top-level language broadcast, never via its owner.
+            const auto* childWidget = qobject_cast<const QWidget*>(childObject);
+            if (childWidget != nullptr && childWidget->isWindow()) continue;
             visitObject(childObject);
         }
     };

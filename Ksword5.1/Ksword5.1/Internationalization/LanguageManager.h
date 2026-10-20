@@ -83,6 +83,16 @@ namespace ks::i18n
             int itemIndex,
             const QString& key,
             const QString& fallbackText);
+        // Opt in only after every producer in this subtree handles source
+        // templates, dynamic text and LanguageChange explicitly. Ordinary
+        // repaint/layout compatibility scans then stop at this boundary.
+        // Descendants owned by an unknown producer must remain outside it.
+        void setRuntimeTranslationManaged(QObject* object, bool managed = true);
+        // A legacy producer can explicitly dirty a small subtree after a text
+        // mutation. Visible work is coalesced; hidden widgets retain the dirty
+        // bit and are translated synchronously on their next Show before paint.
+        // Both mutation APIs run on the LanguageManager owner/GUI thread.
+        void markRuntimeTranslationDirty(QObject* object);
         void retranslateAll();
 
     private:
