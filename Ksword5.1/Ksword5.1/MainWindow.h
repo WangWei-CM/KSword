@@ -83,6 +83,7 @@ namespace ks::ui
 class QDialog;
 class QScreen;
 struct MainWindowShutdownServiceState;
+struct MainWindowMemoryQuitState;
 
 class MainWindow : public QMainWindow
 {
@@ -218,6 +219,9 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
+    ks::ui::LeaveEntryStatus prepareMemoryWorkbenchesForShutdown();
+    void cancelMemoryWorkbenchPreparation(const std::shared_ptr<MainWindowMemoryQuitState>&);
+    std::shared_ptr<MainWindowMemoryQuitState> m_memoryQuitState;
     void beginCoordinatedShutdownWait();
     void pollCoordinatedShutdown();
     void cancelCoordinatedShutdown(bool preserveRestart = false);

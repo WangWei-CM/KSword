@@ -30,6 +30,8 @@
 
 #include "../MemoryPageNavigationSchema.h"
 #include "MemoryWorkbenchView.h"
+#include <QHideEvent>
+#include <QTimer>
 #include "../ToolbarMetrics.h"
 #include "MemoryWorkbenchView.Internal.h"
 
@@ -518,7 +520,54 @@ namespace ks::ui
     void MemoryWorkbenchView::showEvent(QShowEvent* event)
     {
         QWidget::showEvent(event);
+        pageExposed_ = true;
+        QWidget* const top = window();
+        if (confirmationWindow_ != top)
+        {
+            if (confirmationWindow_) confirmationWindow_->removeEventFilter(this);
+            confirmationWindow_ = top;
+            if (top) top->installEventFilter(this);
+            windowExposed_ = top && top->isVisible();
+        }
+        schedulePendingWriteConfirmation();
         syncInt3Context();
+    }
+
+    void MemoryWorkbenchView::hideEvent(QHideEvent* event)
+    {
+        pageExposed_ = false;
+        QWidget::hideEvent(event);
+    }
+
+    bool MemoryWorkbenchView::eventFilter(QObject* watched, QEvent* event)
+    {
+        if (watched == confirmationWindow_ && event)
+        {
+            if (event->type() == QEvent::Hide) windowExposed_ = false;
+            else if (event->type() == QEvent::Show)
+            {
+                windowExposed_ = true;
+                schedulePendingWriteConfirmation();
+            }
+            else if (event->type() == QEvent::WindowStateChange) schedulePendingWriteConfirmation();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    bool MemoryWorkbenchView::canPresentWriteConfirmation() const
+    {
+        return pageExposed_ && windowExposed_ && confirmationWindow_ && isVisible()
+            && confirmationWindow_->isVisible() && !confirmationWindow_->isMinimized();
+    }
+
+    void MemoryWorkbenchView::schedulePendingWriteConfirmation()
+    {
+        if (confirmationResumeQueued_) return;
+        confirmationResumeQueued_ = true;
+        QTimer::singleShot(0, this, [this]() {
+            confirmationResumeQueued_ = false;
+            if (writeController_ && canPresentWriteConfirmation()) writeController_->resumePendingConfirmation();
+        });
     }
 
     // changeEvent：窗口激活变化时重新声明一次。内嵌进程详情窗口与主窗口同时可见时，

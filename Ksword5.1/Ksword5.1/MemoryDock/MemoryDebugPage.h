@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MemoryDebugProcessCatalog.h"
+#include "../UI/MemoryWorkbench/WorkbenchContinuation.h"
 #include <QWidget>
 #include <memory>
 
@@ -27,9 +28,10 @@ namespace ks::ui
         ~MemoryDebugPage() override;
 
         // confirmQuit：只确认暂存许可，不提前归还运行控制；全部宿主同意后再统一释放。
-        bool confirmQuit();
+        LeaveEntryStatus confirmQuit(LeaveCompletion completion = {});
         bool releaseExecutionForQuit(); // 退出第二阶段，不重复询问暂存许可。
         void cancelQuitPreparation();
+        bool quitPreparationCurrent();
 
         // prepareForNavigation：搜索/目录建立前只创建工作台控件树，不刷新目标进程或改变会话。
         void prepareForNavigation();
@@ -48,6 +50,12 @@ namespace ks::ui
         void selectProcess();
         // closeSession：用户主动关闭会话；取消离开守卫时保持全部当前状态。
         void closeSession();
+        void resumeSelectProcess(MemoryDebugProcessCandidate candidate, std::uint64_t source);
+        void finishSelectProcess(const MemoryDebugProcessCandidate& candidate);
+        void resumeCloseSession(std::uint64_t source);
+        void finishClosedSession();
+        bool finishQuitPreparation();
+        bool transitionPending_ = false;
         bool releaseExecutionControl(); // 后台释放期间冻结工作台输入，防止新增未询问的暂存修改。
         // refreshModules/openModule：使用目标层已核对所有者的模块快照导航到基址。
         void refreshModules();

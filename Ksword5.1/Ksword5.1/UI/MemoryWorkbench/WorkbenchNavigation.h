@@ -91,5 +91,7 @@ namespace ks::ui
         // 再告诉他目标不对（见 WorkbenchTarget.h 的 IdentityRequest::expectCreateTime
         // 与 WorkbenchTarget::requestIdentity 的实现）。
         TargetGone = 6,
+        // Accepted leave/apply request; original navigation continues after completion.
+        Pending = 7,
     };
 }

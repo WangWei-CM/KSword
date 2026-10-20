@@ -267,52 +267,78 @@ void MemoryDock::workbenchOnDetached()
 
 // workbenchAllowsProcessChange：附加/分离之前问一次工作台的离开守卫。
 // 视图尚未创建时没有任何东西要问；创建后守卫会按需弹暂存三选一与 int3 三选一。
-bool MemoryDock::workbenchAllowsProcessChange()
+ks::ui::LeaveEntryStatus MemoryDock::workbenchAllowsProcessChange(ks::ui::LeaveCompletion completion)
 {
     if (m_workbenchView == nullptr)
     {
-        return true;
+        return ks::ui::LeaveEntryStatus::Completed;
     }
     // 工作台钉在别的进程/内核/物理范围时，Dock 的附加或分离与它的会话无关，不该为此打扰用户：
     // 只有"跟随 Dock 且范围为进程"这类确实会改变会话的情形才问守卫。
     if (!m_workbenchView->target().wouldChangeOnDockAttach())
     {
-        return true;
+        return ks::ui::LeaveEntryStatus::Completed;
     }
-    return m_workbenchView->requestLeave(ks::ui::LeaveReason::DockAttachChange);
+    return m_workbenchView->requestLeave(ks::ui::LeaveReason::DockAttachChange, std::move(completion));
 }
 
 // confirmWorkbenchQuit：单详情窗兼容包装；全局退出直接使用下面两个阶段。
-bool MemoryDock::confirmWorkbenchQuit()
+ks::ui::LeaveEntryStatus MemoryDock::confirmWorkbenchQuit(ks::ui::LeaveCompletion completion)
 {
-    const QPointer<MemoryDock> self(this); // 许可及释放都可能进入嵌套事件循环。
-    const bool allowed = prepareWorkbenchQuit() && self && releaseWorkbenchExecutionForQuit();
-    if (self && !allowed)
+    const QPointer<MemoryDock> self(this);
+    const auto prepared = prepareWorkbenchQuit([self, completion = std::move(completion)](bool allowed) mutable {
+        if (!self) return;
+        const bool released = allowed && self->releaseWorkbenchExecutionForQuit();
+        if (!self) return;
+        if (!released) self->cancelWorkbenchQuit();
+        if (completion) completion(released);
+    });
+    if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+    if (prepared != ks::ui::LeaveEntryStatus::Completed)
     {
-        cancelWorkbenchQuit();
+        if (prepared != ks::ui::LeaveEntryStatus::Pending) cancelWorkbenchQuit();
+        return prepared;
     }
-    return self && allowed;
+    if (releaseWorkbenchExecutionForQuit() && self) return ks::ui::LeaveEntryStatus::Completed;
+    if (self) cancelWorkbenchQuit();
+    return ks::ui::LeaveEntryStatus::Rejected;
 }
 
-bool MemoryDock::prepareWorkbenchQuit()
+ks::ui::LeaveEntryStatus MemoryDock::prepareWorkbenchQuit(ks::ui::LeaveCompletion completion)
 {
-    const QPointer<MemoryDock> self(this); // 普通工作台确认后须先探活，再访问独立页。
-    if (m_workbenchView != nullptr && !m_workbenchView->confirmQuit())
+    const QPointer<MemoryDock> self(this);
+    if (m_workbenchView != nullptr)
     {
-        return false;
+        const auto status = m_workbenchView->confirmQuit([self, completion](bool allowed) mutable {
+            if (!self) return;
+            if (!allowed) { if (completion) completion(false); return; }
+            const auto debug = self->prepareMemoryDebugQuit(completion);
+            if (self && debug != ks::ui::LeaveEntryStatus::Pending && completion)
+                completion(debug == ks::ui::LeaveEntryStatus::Completed);
+        });
+        if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+        if (status != ks::ui::LeaveEntryStatus::Completed) return status;
     }
-    if (!self)
-    {
-        return false;
-    }
+    return prepareMemoryDebugQuit(std::move(completion));
+}
+
+ks::ui::LeaveEntryStatus MemoryDock::prepareMemoryDebugQuit(ks::ui::LeaveCompletion completion)
+{
     if (m_workbenchView != nullptr && !m_workbenchQuitPrepared)
     {
         m_workbenchEnabledBeforeQuit = m_workbenchView->isEnabledTo(this);
         m_workbenchQuitPrepared = true;
-        m_workbenchView->setEnabled(false); // 防止后续 Dock 模态确认期间新增未确认的暂存。
+        m_workbenchView->setEnabled(false);
     }
-    // 独立页可留有暂存补丁；主窗口停止驱动前必须同时通过这份会话的离开守卫。
-    return m_memoryDebugPage == nullptr || m_memoryDebugPage->confirmQuit();
+    return m_memoryDebugPage == nullptr ? ks::ui::LeaveEntryStatus::Completed
+        : m_memoryDebugPage->confirmQuit(std::move(completion));
+}
+
+bool MemoryDock::workbenchQuitPreparationCurrent()
+{
+    const QPointer<MemoryDock> self(this);
+    if (m_workbenchView && (!m_workbenchQuitPrepared || !m_workbenchView->quitPreparationCurrent())) return false;
+    return self && (!m_memoryDebugPage || m_memoryDebugPage->quitPreparationCurrent());
 }
 
 bool MemoryDock::releaseWorkbenchExecutionForQuit()
@@ -365,7 +391,8 @@ bool MemoryDock::navigateWorkbench(const ks::ui::NavRequest& request)
     }
     // 先切页签（会触发 currentChanged，但视图已存在，ensureWorkbenchView 是空操作）再跳转。
     m_tabWidget->setCurrentWidget(m_tabWorkbench);
-    return m_workbenchView->openAt(request) == ks::ui::NavStatus::Ok;
+    const auto status = m_workbenchView->openAt(request);
+    return status == ks::ui::NavStatus::Ok || status == ks::ui::NavStatus::Pending;
 }
 
 // jumpToAddress：统一的"跳到地址"分发器（本 Dock 附加进程的用户态地址）。

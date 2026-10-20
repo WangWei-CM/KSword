@@ -12,6 +12,7 @@
 // ============================================================
 
 #include "MemoryWorkbenchView.h"
+#include "WorkbenchWriteDiagnostics.h"
 #include "MemoryWorkbenchView.Internal.h"
 
 #include "AddressBookPanel.h"
@@ -85,6 +86,7 @@ namespace ks::ui
     void MemoryWorkbenchView::handleIdentityChange(quint32 changeMask)
     {
         cancelPointerChainResolution();
+        if (writeController_) writeController_->invalidateWriteAuthorization();
         pointerBindings_->Clear();
         pointerClearAfterPending_ = false;
         pointerTraces_.clear();
@@ -274,7 +276,9 @@ namespace ks::ui
         const auto& report = lastCommitReport_;
         if (statusBar_ != nullptr)
         {
-            statusBar_->setWriteResultText(workbench_messages::CommitReportSummary(report));
+            auto displayReport = report;
+            displayReport.failureText = workbench_write_diagnostics::Format(report.failureText).toStdString();
+            statusBar_->setWriteResultText(workbench_messages::CommitReportSummary(displayReport));
             statusBar_->reportScratchAreaDirty(report.scratchAreaDirty);
             statusBar_->setReadModifyWriteWindow(report.readModifyWriteWindow);
             statusBar_->setNeedsReread(report.needsReread);
@@ -295,11 +299,11 @@ namespace ks::ui
     {
         if (!report.failureText.empty())
         {
-            emit writeFailureText(QString::fromStdString(report.failureText));
+            emit writeFailureText(workbench_write_diagnostics::Format(report.failureText));
         }
         if (statusBar_ != nullptr)
         {
-            statusBar_->setDiagnosticsText(QString::fromStdString(report.failureText), /*autoExpand=*/true);
+            statusBar_->setDiagnosticsText(workbench_write_diagnostics::Format(report.failureText), /*autoExpand=*/true);
         }
     }
 
@@ -317,6 +321,7 @@ namespace ks::ui
     {
         if (bytesPending == 0 && pointerClearAfterPending_)
         {
+            if (writeController_) writeController_->invalidateWriteAuthorization();
             pointerBindings_->ClearActive();
             pointerClearAfterPending_ = false;
         }
@@ -359,6 +364,7 @@ namespace ks::ui
 
     void MemoryWorkbenchView::onSessionBarScopeRequested(ksword::memwb::Scope scope)
     {
+        if (leaveSequencePending_) return;
         if (target_ == nullptr || sessionBar_ == nullptr)
         {
             return;
@@ -368,8 +374,11 @@ namespace ks::ui
         const auto rememberedChannel = sessionBar_->rememberedChannel(scope);
         request.channel = rememberedChannel;
         const QPointer<MemoryWorkbenchView> self(this);
-        const bool accepted = target_->requestIdentity(request, LeaveReason::ScopeChange);
-        if (!self || !accepted)
+        const auto accepted = target_->requestIdentity(request, LeaveReason::ScopeChange,
+            [self, scope, rememberedChannel](bool allowed) {
+                if (self && allowed) self->sessionBar_->setSession(scope, rememberedChannel, true);
+            });
+        if (!self || accepted != LeaveEntryStatus::Completed)
         {
             // 被拒绝：会话逐字段不变，什么都不回写（N2 不变式）。
             return;
@@ -379,6 +388,7 @@ namespace ks::ui
 
     void MemoryWorkbenchView::onSessionBarChannelRequested(ksword::memwb::Channel channel)
     {
+        if (leaveSequencePending_) return;
         if (target_ == nullptr || sessionBar_ == nullptr)
         {
             return;
@@ -386,8 +396,11 @@ namespace ks::ui
         IdentityRequest request;
         request.channel = channel;
         const QPointer<MemoryWorkbenchView> self(this);
-        const bool accepted = target_->requestIdentity(request, LeaveReason::ChannelChange);
-        if (!self || !accepted)
+        const auto accepted = target_->requestIdentity(request, LeaveReason::ChannelChange,
+            [self, channel](bool allowed) {
+                if (self && allowed) self->sessionBar_->setSession(self->sessionBar_->currentScope(), channel, true);
+            });
+        if (!self || accepted != LeaveEntryStatus::Completed)
         {
             return;
         }
@@ -396,6 +409,7 @@ namespace ks::ui
 
     void MemoryWorkbenchView::onSessionBarModeRequested(ksword::memwb::WriteMode mode)
     {
+        if (leaveSequencePending_) return;
         if (sessionBar_ == nullptr || writeController_ == nullptr || hexPane_ == nullptr)
         {
             return;
@@ -425,29 +439,32 @@ namespace ks::ui
         {
             return;
         }
-        const auto result = writeController_->resolveModeSwitch(decision);
-        if (!self)
-        {
-            return;
-        }
-        if (result.status == ksword::memwb::ModeSwitchStatus::Switched)
+        const auto resolution = writeController_->resolveModeSwitch(decision,
+            [self, mode](const ksword::memwb::ModeSwitchResult& result) {
+                if (!self) return;
+                if (result.status == ksword::memwb::ModeSwitchStatus::Switched)
+                {
+                    self->sessionBar_->setWriteMode(mode);
+                    self->refreshConfirmationsAndSuppression();
+                }
+                else if (result.status == ksword::memwb::ModeSwitchStatus::ApplyFailed && self->statusBar_ != nullptr)
+                {
+                    const QString failureText = result.commitReport
+                        ? workbench_write_diagnostics::Format(result.commitReport->failureText) : QString();
+                    self->statusBar_->setDiagnosticsText(
+                        workbench_messages::ApplyFailedDiagnosticsPrefix() + failureText, true);
+                }
+            });
+        if (self && resolution == CommitEntryStatus::Started && writeController_->mode() == mode)
         {
             sessionBar_->setWriteMode(mode);
             refreshConfirmationsAndSuppression();
-        }
-        else if (result.status == ksword::memwb::ModeSwitchStatus::ApplyFailed && statusBar_ != nullptr)
-        {
-            const QString failureText = result.commitReport
-                ? QString::fromStdString(result.commitReport->failureText)
-                : QString();
-            statusBar_->setDiagnosticsText(
-                workbench_messages::ApplyFailedDiagnosticsPrefix() + failureText,
-                /*autoExpand=*/true);
         }
     }
 
     void MemoryWorkbenchView::onSessionBarApplyRequested()
     {
+        if (leaveSequencePending_) return;
         if (writeController_ != nullptr)
         {
             writeController_->commitPendingNow();
@@ -456,7 +473,7 @@ namespace ks::ui
 
     void MemoryWorkbenchView::onSessionBarDiscardRequested()
     {
-        if (hexPane_ == nullptr)
+        if (hexPane_ == nullptr || leaveSequencePending_ || (writeController_ && writeController_->isCommitting()))
         {
             return;
         }

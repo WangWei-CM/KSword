@@ -32,12 +32,14 @@
 #include "WorkbenchTextView.h"
 #include "WorkbenchPseudocodeView.h"
 #include "WorkbenchWriteController.h"
+#include "WorkbenchWriteDiagnostics.h"
 
 #include "../../../../shared/evidence/memory_workbench/SessionAddressResolver.h"
 
 #include <QCheckBox>
 #include <QLineEdit>
 #include <QPointer>
+#include <QScopeGuard>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -270,14 +272,27 @@ namespace ks::ui
         writeController_ = std::make_unique<WorkbenchWriteController>(this);
         writeController_->setTarget(target_.get());
         writeController_->setConfirmationSink(confirmations_.get());
-        writeController_->setAuditSink(&shared.AuditSink());
-        writeController_->setIoPortFactory([&shared]() { return shared.CreateIoPort(); });
-        writeController_->setKernelMutationPortFactory([&shared]() { return shared.CreateKernelMutationPort(); });
+        writeController_->setFrozenWriteFactories(MakeNativeFrozenWriteFactories());
+        writeController_->setOwnedAuditArchive(MakeNativeFrozenAuditSink());
+        writeController_->setDiagnosticFormatter([](const std::string& text) {
+            return workbench_write_diagnostics::Format(text).toStdString();
+        });
         const QPointer<MemoryWorkbenchView> pointerView(this);
-        writeController_->setWriteValidationCallback([pointerView](const auto& session,
-            std::uint64_t address, std::uint64_t length, std::string& reason) {
-            if (!pointerView) { reason = "pointer-view-closed"; return false; }
-            return pointerView->validatePointerChainWrite(session, address, length, reason);
+        writeController_->setConfirmationReadyCallback([pointerView]() {
+            return pointerView && pointerView->canPresentWriteConfirmation();
+        });
+        writeController_->setFrozenWriteCaptureCallback([pointerView](FrozenWriteCapture& capture, std::string& reason) {
+            if (!pointerView || pointerView->pointerClosing_ || !pointerView->target_)
+            { reason = "pointer-view-closed"; return false; }
+            if (pointerView->memoryDebugMode_ && pointerView->target_->livenessState() == LivenessState::Exited)
+            { reason = "target-exited"; return false; }
+            capture.allowKernelPhysical = pointerView->target_->policy().allowKernelPhysical;
+            capture.pointerBindings = *pointerView->pointerBindings_;
+            capture.definitions = WorkbenchShared::Instance().AddressBook().list();
+            return true;
+        });
+        writeController_->setFrozenPointerBindingsCallback([pointerView](const auto& bindings) {
+            if (pointerView && !pointerView->pointerClosing_) *pointerView->pointerBindings_ = bindings;
         });
         writeController_->setRereadRangeCallback([this](std::uint64_t address, std::uint64_t length) {
             if (pageProvider_)
@@ -304,9 +319,9 @@ namespace ks::ui
         buildUi();
         connectPipelineSignals();
         connectPanelSignals();
-        connect(&shared.AddressBook(), &AddressBookStore::entryChanged, this, [this](quint64) { cancelPointerChainResolution(); });
-        connect(&shared.AddressBook(), &AddressBookStore::entryRemoved, this, [this](quint64) { cancelPointerChainResolution(); });
-        connect(&shared.AddressBook(), &AddressBookStore::reset, this, [this]() { cancelPointerChainResolution(); });
+        connect(&shared.AddressBook(), &AddressBookStore::entryChanged, this, [this](quint64) { writeController_->invalidateWriteAuthorization(); cancelPointerChainResolution(); });
+        connect(&shared.AddressBook(), &AddressBookStore::entryRemoved, this, [this](quint64) { writeController_->invalidateWriteAuthorization(); cancelPointerChainResolution(); });
+        connect(&shared.AddressBook(), &AddressBookStore::reset, this, [this]() { writeController_->invalidateWriteAuthorization(); cancelPointerChainResolution(); });
 
         // 7) 快捷键。
         wireActions();
@@ -401,12 +416,15 @@ namespace ks::ui
             }
             // self：已有暂存可能触发离开询问，取消时保持原状态，被销毁时停止所有后续访问。
             const QPointer<MemoryWorkbenchView> self(this);
-            const bool accepted = target_->requestIdentity(request, LeaveReason::ScopeChange);
-            if (!self || !accepted)
-            {
-                return;
-            }
+            const auto accepted = target_->requestIdentity(request, LeaveReason::ScopeChange,
+                [self, embedded](bool allowed) { if (self && allowed) self->finishEmbeddedProcessMode(embedded); });
+            if (!self || accepted != LeaveEntryStatus::Completed) return;
         }
+        finishEmbeddedProcessMode(embedded);
+    }
+
+    void MemoryWorkbenchView::finishEmbeddedProcessMode(bool embedded)
+    {
         embedded_ = embedded;
         target_->setPolicy(WorkbenchTarget::Policy{
             /*lockToDock=*/embedded,
@@ -479,9 +497,9 @@ namespace ks::ui
     }
 
     // requestLeave：薄包装，直接转发 target_.requestLeave。
-    bool MemoryWorkbenchView::requestLeave(LeaveReason reason)
+    LeaveEntryStatus MemoryWorkbenchView::requestLeave(LeaveReason reason, LeaveCompletion completion)
     {
-        return target_->requestLeave(reason);
+        return target_->requestLeave(reason, std::move(completion));
     }
 
     // ---- 夹具白盒测试访问器：见头文件声明处的注释 ----
@@ -605,7 +623,7 @@ namespace ks::ui
                 if (status == ksword::memwb::ModeSwitchStatus::NeedsDecision)
                 {
                     // 重载设置不能代替用户应用/丢弃已有暂存；取消待决切换并保留当前真实模式。
-                    (void)writeController_->resolveModeSwitch(ksword::memwb::ModeSwitchDecision::Cancel);
+                    (void)writeController_->resolveModeSwitch(ksword::memwb::ModeSwitchDecision::Cancel, {});
                     if (!self)
                     {
                         return;
@@ -749,79 +767,94 @@ namespace ks::ui
     // 这里只是提供"问到的时候该怎么答"，不重复 predict 逻辑）。
     void MemoryWorkbenchView::installLeaveGuard()
     {
-        target_->setLeaveGuard([this](LeaveReason reason) -> bool {
-            // self：离开询问会进入模态事件循环，期间宿主可能同步销毁视图；返回后必须先探活。
+        target_->setLeaveGuard([this](LeaveReason reason, LeaveCompletion completion) {
             const QPointer<MemoryWorkbenchView> self(this);
-            // Int3LeaveScenario 只有三个取值：DockDetach/ProcessChange/MainWindowClose；
-            // 后者不经过这条 LeaveReason 路径（主窗口关闭走 confirmQuit，见下）。这里只需要
-            // 区分"是不是 Dock 的附加/分离事件"，其余三种 LeaveReason（ScopeChange/
-            // ChannelChange/PinChange）对 int3 账本而言都是同一类"目标可能要变了"，统一按
-            // ProcessChange 处理。
+            const auto requested = target_->capture();
+            if (!self) return LeaveEntryStatus::Rejected;
             const auto scenario = (reason == LeaveReason::DockAttachChange)
-                ? Int3LeaveScenario::DockDetach
-                : Int3LeaveScenario::ProcessChange;
-            // 每次询问都先清掉上一次的"用户已选择保留补丁"记号，只有这次明确选了才重新置位。
+                ? Int3LeaveScenario::DockDetach : Int3LeaveScenario::ProcessChange;
             int3KeptByLeaveGuard_ = false;
-            const bool allowed = runLeaveSequence(LeaveReasonDisplayText(reason), scenario);
-            if (!self)
-            {
-                return false;
-            }
-            // Dock 的附加/分离是"先问守卫、再真正分离"两步：用户在守卫里选了"保留补丁继续"
-            // （放行之后账本里当前目标仍有未还原条目）时，紧接着发出的 aboutToDetach 安全网
-            // 不得再把补丁强制还原，否则等于无视用户刚做的明确选择（见 onTargetAboutToDetach）。
-            if (allowed && reason == LeaveReason::DockAttachChange)
-            {
-                syncInt3Context();
-                if (!self)
-                {
-                    return false;
-                }
-                int3KeptByLeaveGuard_ = WorkbenchShared::Instance().Int3().HasUnrestoredForCurrentTarget();
-            }
-            return allowed;
+            const auto rememberKeep = [self, reason, requested](bool allowed) {
+                if (!self || !allowed) return false;
+                if (reason != LeaveReason::DockAttachChange) return true;
+                if (!self->target_ || self->target_->revisions().Source() != requested.rev.source) return false;
+                self->syncInt3Context();
+                if (!self || !self->target_) return false;
+                const auto current = self->target_->capture();
+                if (!self || current.rev.source != requested.rev.source
+                    || !ksword::memwb::SameTarget(current.session, requested.session)) return false;
+                self->int3KeptByLeaveGuard_ = WorkbenchShared::Instance().Int3().HasUnrestoredForCurrentTarget();
+                return true;
+            };
+            const auto status = runLeaveSequence(LeaveReasonDisplayText(reason), scenario,
+                [self, rememberKeep, completion = std::move(completion)](bool allowed) mutable {
+                    if (!self) return;
+                    const bool current = rememberKeep(allowed);
+                    if (self && completion) completion(current);
+                });
+            if (status == LeaveEntryStatus::Completed && !rememberKeep(true)) return LeaveEntryStatus::Rejected;
+            return status;
         });
     }
 
-    // confirmQuit：见头文件声明处的注释。主窗口关闭路径与"离开守卫"共用同一条三阶段原子逻辑，
-    // 只是原因文案固定为"退出程序"、int3 场景固定为 MainWindowClose。
-    bool MemoryWorkbenchView::confirmQuit()
+    LeaveEntryStatus MemoryWorkbenchView::confirmQuit(LeaveCompletion completion)
     {
         const QPointer<MemoryWorkbenchView> self(this);
         int3KeptByLeaveGuard_ = false;
-        const bool allowed = runLeaveSequence(QStringLiteral("退出程序"), Int3LeaveScenario::MainWindowClose);
-        if (!self)
-        {
-            return false;
-        }
-        if (allowed)
-        {
-            // 关闭详情窗口随后会分离内嵌 Dock；尊重这次明确选择的保留补丁。
-            syncInt3Context();
-            if (!self)
-            {
-                return false;
-            }
-            int3KeptByLeaveGuard_ = WorkbenchShared::Instance().Int3().HasUnrestoredForCurrentTarget();
-        }
-        return allowed;
+        quitCapture_.reset();
+        if (!target_) return LeaveEntryStatus::Rejected;
+        const auto requested = target_->capture();
+        if (!self) return LeaveEntryStatus::Rejected;
+        const auto rememberKeep = [self, requested](bool allowed) {
+            if (!self || !allowed || !self->target_
+                || self->target_->revisions().Source() != requested.rev.source) return false;
+            self->syncInt3Context();
+            if (!self || !self->target_) return false;
+            self->int3KeptByLeaveGuard_ = WorkbenchShared::Instance().Int3().HasUnrestoredForCurrentTarget();
+            const auto capture = self->target_->capture();
+            if (!self || !self->hexPane_ || self->hexPane_->overlay().HasPendingPatches()
+                || capture.rev.source != requested.rev.source
+                || !ksword::memwb::SameTarget(capture.session, requested.session)) return false;
+            self->quitCapture_ = capture;
+            return true;
+        };
+        const auto status = runLeaveSequence(QStringLiteral("退出程序"), Int3LeaveScenario::MainWindowClose,
+            [self, rememberKeep, completion = std::move(completion)](bool allowed) mutable {
+                if (!self) return;
+                const bool prepared = rememberKeep(allowed);
+                if (self && completion) completion(prepared);
+            });
+        if (status == LeaveEntryStatus::Completed && !rememberKeep(true)) return LeaveEntryStatus::Rejected;
+        return status;
     }
 
     void MemoryWorkbenchView::cancelQuitPreparation()
     {
         int3KeptByLeaveGuard_ = false;
+        quitCapture_.reset();
+        ++leaveSequenceTicket_;
+    }
+
+    bool MemoryWorkbenchView::quitPreparationCurrent()
+    {
+        if (!quitCapture_ || !target_ || !hexPane_ || hexPane_->overlay().HasPendingPatches()) return false;
+        const QPointer<MemoryWorkbenchView> self(this);
+        const auto expected = *quitCapture_;
+        const auto current = target_->capture();
+        return self && current.rev == expected.rev
+            && ksword::memwb::SameTarget(current.session, expected.session);
     }
 
     // runLeaveSequence：离开守卫与 confirmQuit 共用的三阶段原子逻辑。
     // 传入：reasonText 拼进"有未提交修改"确认框正文的原因短句；scenario 传给 int3 退出提示的场景。
     // 传出：true=可以离开/退出（暂存已应用或丢弃、int3 已还原或用户选择保留）；
     //       false=用户取消或应用失败，此时暂存与 int3 都原封不动（应用失败时暂存保留）。
-    bool MemoryWorkbenchView::runLeaveSequence(const QString& reasonText, const Int3LeaveScenario scenario)
+    LeaveEntryStatus MemoryWorkbenchView::runLeaveSequence(const QString& reasonText, const Int3LeaveScenario scenario, LeaveCompletion completion)
     {
         // 外层写确认仍在运行时不能嵌套丢弃、换目标或关闭其事务宿主。
-        if (writeController_ != nullptr && writeController_->isCommitting())
+        if (leaveSequencePending_ || (writeController_ != nullptr && writeController_->isCommitting()))
         {
-            return false;
+            return LeaveEntryStatus::Busy;
         }
         // 第二轮复核 B3：守卫必须"原子"——整件事被取消时，用户的未提交编辑不能
         // 已经被丢弃/写入。所以分三个阶段：
@@ -831,6 +864,8 @@ namespace ks::ui
         // 两个询问框都是嵌套事件循环，期间视图可能被外部同步销毁，每个框之后
         // 先判 self 再碰任何成员（与 WorkbenchTarget::requestIdentity 的 N3 同理）。
         const QPointer<MemoryWorkbenchView> self(this);
+        leaveSequencePending_ = true;
+        auto pendingReset = qScopeGuard([self]() { if (self) self->leaveSequencePending_ = false; });
 
         // int3 阶段按"账本当前目标"判断有无未还原补丁：先把它声明回本视图的目标，
         // 否则内嵌进程详情窗口改过它之后，本视图的补丁会被漏问。
@@ -841,12 +876,12 @@ namespace ks::ui
 
         if (!self || target_ == nullptr)
         {
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         const auto leaveCapture = target_->capture();
         if (!self)
         {
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         // 两次询问都只授权开始时的目标与暂存内容，嵌套事件循环里的变更不能继承授权。
         const auto stillCurrent = [self, rev = leaveCapture.rev]() {
@@ -867,6 +902,8 @@ namespace ks::ui
             return !stale;
         };
 
+        if (hexPane_ && hexPane_->overlay().HasPendingPatches() && !confirmations_)
+            return LeaveEntryStatus::Rejected;
         auto pendingDecision = ksword::memwb::ModeSwitchDecision::Cancel;
         bool hasPendingDecision = false;
         if (hexPane_ != nullptr && hexPane_->overlay().HasPendingPatches() && confirmations_)
@@ -886,12 +923,12 @@ namespace ks::ui
                 reasonText);
             if (!stillCurrent())
             {
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
             if (pendingDecision != ksword::memwb::ModeSwitchDecision::ApplyThenSwitch &&
                 pendingDecision != ksword::memwb::ModeSwitchDecision::DiscardThenSwitch)
             {
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
             hasPendingDecision = true;
         }
@@ -903,33 +940,50 @@ namespace ks::ui
         }
         if (!self)
         {
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
 
-        // 阶段二：int3 账本里当前目标还有未还原补丁时弹三选一（没有则直接放行，不弹框）。
-        const bool int3Allowed = memoryDebugMode_
-            || WorkbenchShared::Instance().Int3().RequestLeave(this, scenario);
-        if (!self || !int3Allowed || !stillCurrent())
-        {
-            return false;
-        }
-
-        // 阶段三：两个都同意之后才执行暂存的应用/丢弃。
+        // Gather the int3 decision without restoring bytes. Both decisions must be
+        // accepted before either staged writes or int3 restoration can begin.
+        const auto int3Plan = memoryDebugMode_
+            ? Int3Controller::LeavePlan{} : WorkbenchShared::Instance().Int3().PrepareLeave(this, scenario);
+        if (!self || !int3Plan.allowed() || !stillCurrent())
+            return LeaveEntryStatus::Rejected;
+        const auto finishInt3 = [self, int3Plan]() {
+            return self && (self->memoryDebugMode_
+                || WorkbenchShared::Instance().Int3().ApplyPreparedLeave(int3Plan));
+        };
         if (!hasPendingDecision)
-        {
-            return true;
-        }
+            return finishInt3() && stillCurrent() ? LeaveEntryStatus::Completed : LeaveEntryStatus::Rejected;
         if (pendingDecision == ksword::memwb::ModeSwitchDecision::ApplyThenSwitch)
         {
-            const auto attempt = writeController_->commitPendingNow();
-            if (self.isNull())
+            const auto ticket = ++leaveSequenceTicket_;
+            leaveSequencePending_ = true;
+            const auto source = leaveCapture.rev.source;
+            const auto attempt = writeController_->commitPendingNow(
+                [self, ticket, source, finishInt3, completion = std::move(completion)](const auto& report) mutable {
+                    if (!self || !self->leaveSequencePending_) return;
+                    self->leaveSequencePending_ = false;
+                    const bool succeeded = report.outcome == ksword::memwb::CommitOutcome::Committed
+                        || report.outcome == ksword::memwb::CommitOutcome::NoChange;
+                    const bool allowed = ticket == self->leaveSequenceTicket_ && succeeded
+                        && self->writeController_ && self->writeController_->lastCommitProjectionMatched() && self->target_
+                        && self->target_->revisions().Source() == source
+                        && self->hexPane_ && !self->hexPane_->overlay().HasPendingPatches()
+                        && finishInt3() && self && self->target_
+                        && self->target_->revisions().Source() == source;
+                    if (self && completion) completion(allowed);
+                });
+            if (!self) return LeaveEntryStatus::Rejected;
+            if (attempt.status == CommitEntryStatus::Pending)
             {
-                return false;
+                pendingReset.dismiss();
+                return LeaveEntryStatus::Pending;
             }
-            return attempt.status != CommitEntryStatus::Busy &&
-                (attempt.report.outcome == ksword::memwb::CommitOutcome::Committed ||
-                 attempt.report.outcome == ksword::memwb::CommitOutcome::NoChange);
+            leaveSequencePending_ = false;
+            return attempt.status == CommitEntryStatus::Busy ? LeaveEntryStatus::Busy : LeaveEntryStatus::Rejected;
         }
+        if (!finishInt3() || !self || !stillCurrent()) return LeaveEntryStatus::Rejected;
         // 丢弃并离开：叠加层清空后画布要重绘，会话条的"N 字节待写入"也要同步清掉
         // （第二轮复核 B4：旧实现漏了后一步，芯片残留）。
         const bool hadPendingPatches = hexPane_->overlay().HasPendingPatches();
@@ -944,7 +998,7 @@ namespace ks::ui
             hexPane_->canvas()->notifyOverlayChanged();
         }
         refreshPendingPatchesDisplay();
-        return true;
+        return LeaveEntryStatus::Completed;
     }
 
     // wireActions：对 WorkbenchActionId 的每一项挂快捷键；Redo 同时挂主键与候补
@@ -952,13 +1006,13 @@ namespace ks::ui
     void MemoryWorkbenchView::wireActions()
     {
         const auto bindUndo = [this]() {
-            if (writeController_)
+            if (writeController_ && !leaveSequencePending_)
             {
                 writeController_->undo();
             }
         };
         const auto bindRedo = [this]() {
-            if (writeController_)
+            if (writeController_ && !leaveSequencePending_)
             {
                 writeController_->redo();
             }

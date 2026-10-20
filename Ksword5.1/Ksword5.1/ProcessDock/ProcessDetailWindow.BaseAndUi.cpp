@@ -1872,38 +1872,68 @@ void ProcessDetailWindow::rebuildActionAffinityCoreButtons()
 // closeEvent：只处理已创建的工作台，不为关闭而懒加载；确认时拒绝重入与全局退出中的重复关闭。
 void ProcessDetailWindow::closeEvent(QCloseEvent* event)
 {
-    // 全局退出已经统一询问所有工作台，模态循环里迟到的详情窗关闭请求不得再弹一轮确认。
-    if ((qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
-        || property("ksword_memory_detail_close_guard_active").toBool())
+    if (m_workbenchCloseApproved)
     {
-        if (event != nullptr)
+        m_workbenchCloseApproved = false;
+        setProperty("ksword_memory_detail_close_guard_active", false);
+        if (m_embeddedMemoryDock && !m_embeddedMemoryDock->workbenchQuitPreparationCurrent())
         {
-            event->ignore();
-        }
-        return;
-    }
-
-    if (m_embeddedMemoryDock != nullptr)
-    {
-        // self：确认框的嵌套事件循环可能销毁详情窗，返回后必须先探活再改属性或访问成员。
-        const QPointer<ProcessDetailWindow> self(this);
-        setProperty("ksword_memory_detail_close_guard_active", true);
-        const bool allowed = m_embeddedMemoryDock->confirmWorkbenchQuit();
-        if (!self)
-        {
-            if (event != nullptr)
-            {
-                event->ignore();
-            }
+            m_embeddedMemoryDock->cancelWorkbenchQuit();
+            if (event) event->ignore();
             return;
         }
-        setProperty("ksword_memory_detail_close_guard_active", false);
-        if (!allowed)
-        {
-            if (event != nullptr)
+        QWidget::closeEvent(event);
+        return;
+    }
+    if ((qApp && qApp->property("ksword_memory_quit_guard_active").toBool())
+        || property("ksword_memory_detail_close_guard_active").toBool())
+    {
+        if (event) event->ignore();
+        return;
+    }
+    if (m_embeddedMemoryDock)
+    {
+        const QPointer<ProcessDetailWindow> self(this);
+        const QPointer<MemoryDock> dock(m_embeddedMemoryDock);
+        const auto ticket = ++m_workbenchCloseTicket;
+        setProperty("ksword_memory_detail_close_guard_active", true);
+        m_workbenchClosePending = true;
+        const auto status = dock->confirmWorkbenchQuit([self, dock, ticket](bool allowed) {
+            if (!self || !self->m_workbenchClosePending || ticket != self->m_workbenchCloseTicket) return;
+            self->m_workbenchClosePending = false;
+            if (!allowed || !dock || self->m_embeddedMemoryDock != dock || !dock->workbenchQuitPreparationCurrent())
             {
-                event->ignore();
+                if (!self) return;
+                self->setProperty("ksword_memory_detail_close_guard_active", false);
+                if (dock) dock->cancelWorkbenchQuit();
+                return;
             }
+            if (!self) return;
+            self->m_workbenchCloseApproved = true;
+            QTimer::singleShot(0, self, [self, ticket]() {
+                if (self && ticket == self->m_workbenchCloseTicket && self->m_workbenchCloseApproved) self->close();
+            });
+        });
+        if (!self) { if (event) event->ignore(); return; }
+        if (status == ks::ui::LeaveEntryStatus::Pending)
+        {
+            QObject::connect(dock, &QObject::destroyed, self, [self, ticket, dockAddress = dock.data()]() {
+                if (self && ticket == self->m_workbenchCloseTicket)
+                {
+                    ++self->m_workbenchCloseTicket;
+                    self->m_workbenchClosePending = false;
+                    if (self->m_embeddedMemoryDock == dockAddress) self->m_embeddedMemoryDock = nullptr;
+                    self->setProperty("ksword_memory_detail_close_guard_active", false);
+                }
+            });
+            if (event) event->ignore();
+            return;
+        }
+        m_workbenchClosePending = false;
+        setProperty("ksword_memory_detail_close_guard_active", false);
+        if (status != ks::ui::LeaveEntryStatus::Completed)
+        {
+            if (event) event->ignore();
             return;
         }
     }

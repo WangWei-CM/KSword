@@ -331,18 +331,25 @@ void MemoryDock::initializeConnections()
         });
 
     connect(m_detachButton, &QPushButton::clicked, this, [this]() {
-        if (!workbenchAllowsProcessChange())
-        {
-            return;
-        }
-        kLogEvent detachClickEvent;
-        info << detachClickEvent
-            << "[MemoryDock] 点击分离按钮, currentPid="
-            << m_attachedPid
-            << eol;
-        detachProcess();
-        QMessageBox::information(this, "分离进程", "已分离当前进程。");
+        if (m_workbenchProcessChangePending) return;
+        const QPointer<MemoryDock> self(this);
+        const auto attachment = m_processAttachmentGeneration.load();
+        const auto finishDetach = [self, attachment]() {
+            if (!self || self->m_processAttachmentGeneration.load() != attachment) return;
+            kLogEvent detachClickEvent;
+            info << detachClickEvent << "[MemoryDock] 点击分离按钮, currentPid=" << self->m_attachedPid << eol;
+            self->detachProcess();
+            if (self) QMessageBox::information(self, "分离进程", "已分离当前进程。");
+        };
+        const auto status = workbenchAllowsProcessChange([self, finishDetach](bool allowed) {
+            if (!self) return;
+            self->m_workbenchProcessChangePending = false;
+            if (allowed) finishDetach();
         });
+        if (!self) return;
+        if (status == ks::ui::LeaveEntryStatus::Pending) m_workbenchProcessChangePending = true;
+        else if (status == ks::ui::LeaveEntryStatus::Completed) finishDetach();
+    });
 
     connect(m_settingsButton, &QPushButton::clicked, this, [this]() {
         kLogEvent settingsOpenEvent;

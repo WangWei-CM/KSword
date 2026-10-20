@@ -36,6 +36,7 @@
 // ============================================================
 
 #include "WorkbenchNavigation.h"
+#include "WorkbenchContinuation.h"
 #include "WorkbenchServices.h"
 
 #include "../../../../shared/evidence/memory_workbench/MemoryModuleDirectory.h"
@@ -265,8 +266,8 @@ namespace ks::ui
         bool identityAnchored() const noexcept;
 
         // clearMemoryDebugTarget：仅供独立模式关闭会话；先问离开守卫再释放锚点。
-        // 返回 false 时保留目标与代次；成功清缓存但不操作目标进程或回到 Dock。
-        bool clearMemoryDebugTarget();
+        // Rejected/Busy 保留目标；Pending 保留原关闭请求，成功完成后才清目标。
+        LeaveEntryStatus clearMemoryDebugTarget(LeaveCompletion completion = {});
         // livenessState：返回最后一次锚点探测状态，供独立模式阻止退出后的 I/O。
         LivenessState livenessState() const noexcept;
 
@@ -284,15 +285,16 @@ namespace ks::ui
         void onDockDetached();
 
         // setLeaveGuard：视图注册一个"是否允许离开当前编辑状态"的回调；
-        // 不注册（传 nullptr）时按"无视图=放行"处理，requestLeave 恒返回 true。
-        void setLeaveGuard(std::function<bool(LeaveReason)> guard);
+        // 未注册时 requestLeave 返回 Completed；只有 Pending 才异步调用 completion。
+        using LeaveGuard = std::function<LeaveEntryStatus(LeaveReason, LeaveCompletion)>;
+        void setLeaveGuard(LeaveGuard guard);
 
         // requestLeave：直接问一次离开守卫。confirmDiscardMemoryEditsForProcessChange
         // 之类的旧集成点会直接调用它；requestIdentity 内部身份确实要变时也调用它。
         // **可疑点 #1 修复**：内部先把 leaveGuard_ 拷贝一份再调用——如果守卫本身
         // 弹出模态框（嵌套事件循环）期间视图被销毁并调用 setLeaveGuard(nullptr)，
         // 正在执行的那个 std::function 不会被自身的重新赋值破坏。
-        bool requestLeave(LeaveReason reason);
+        LeaveEntryStatus requestLeave(LeaveReason reason, LeaveCompletion completion = {});
 
         // requestIdentity：一次性请求范围/钉住(或跟随)/通道的组合变更，身份确实
         // 会变时只问一次离开守卫（见文件顶部说明）。
@@ -301,16 +303,17 @@ namespace ks::ui
         //     tracker 拒绝）、policy 禁止其中某一项（不问守卫）、钉住目标已不存在
         //     或创建时间与 expectCreateTime 不符（D6 修复：在问守卫之前就失败，
         //     不弹"要不要离开"再告诉用户目标根本不对）、守卫否决，以上任一都返回
-        //     false，tracker 完全不变；
-        //   - 否则按范围→钉住/跟随→通道的顺序依次应用并返回 true（哪怕某一步
+        //     Rejected，tracker 完全不变；
+        //   - 否则按范围→钉住/跟随→通道的顺序依次应用并返回 Completed（哪怕某一步
         //     实际没有变化也算成功）；tracker 另外因为自身规则拒绝了某一步
         //     （返回掩码含 Rejected，理论上不会发生，因为上面已经前置校验过枚举
-        //     合法性）也返回 false（D7 续）。
+        //     合法性）也返回 Rejected（D7 续）。
         //   具体失败原因可随后调用 lastIdentityFailure() 取得。
-        bool requestIdentity(const IdentityRequest& request, LeaveReason reason);
+        // Pending owns the desired request/anchor until one final GUI continuation; Busy never queues a retry.
+        LeaveEntryStatus requestIdentity(const IdentityRequest& request, LeaveReason reason, LeaveCompletion completion = {});
 
         // lastIdentityFailure（D6/D7 新增）：requestIdentity（含下面四个薄包装）
-        // 最近一次返回 false 时的原因；返回 true 时恒为 NavStatus::Ok。供 Dock 侧
+        // 最近一次拒绝时的原因；Completed 时恒为 NavStatus::Ok。供 Dock 侧
         // 区分"策略拒绝"/"守卫否决"/"目标不存在或已被复用"，不需要靠猜。
         NavStatus lastIdentityFailure() const noexcept;
 
@@ -320,10 +323,10 @@ namespace ks::ui
         // 通道时内部自己向 services_ 要当前代次，调用方不需要也不能再传。
         // **D6 新增**：requestPin 多了一个可选的 expectCreateTime 参数，语义见
         // IdentityRequest::expectCreateTime；缺省 0 表示不校验，兼容旧调用点。
-        bool requestScope(ksword::memwb::Scope scope);
-        bool requestChannel(ksword::memwb::Channel channel);
-        bool requestPin(std::uint32_t pid, std::uint64_t expectCreateTime = 0);
-        bool requestFollowDock();
+        LeaveEntryStatus requestScope(ksword::memwb::Scope scope, LeaveCompletion completion = {});
+        LeaveEntryStatus requestChannel(ksword::memwb::Channel channel, LeaveCompletion completion = {});
+        LeaveEntryStatus requestPin(std::uint32_t pid, std::uint64_t expectCreateTime = 0, LeaveCompletion completion = {});
+        LeaveEntryStatus requestFollowDock(LeaveCompletion completion = {});
 
         // requestReload：用户按了重读/F5，或整窗需要重读。不经过离开守卫
         // （不改变身份，只是来源代次 +1），恒成功。
@@ -388,6 +391,8 @@ namespace ks::ui
         void checkLiveness();
 
     signals:
+        // Immediate authority invalidation; a worker observes only the atomic epoch.
+        void writeAuthorityChanged();
         // sessionChanged：tracker 产生了非 None、非 Rejected 的变更掩码时发出，
         // changeMask 是 ksword::memwb::TargetChange 的位组合（转成 quint32 以便
         // 跨 Q_OBJECT 信号槅传递，不强制依赖该枚举的头文件）。
@@ -470,7 +475,11 @@ namespace ks::ui
         ksword::memwb::MemoryModuleDirectory processDirectory_;
         ksword::memwb::MemoryModuleDirectory kernelDirectory_;
         // leaveGuard_：视图注册的离开守卫；为空表示放行。
-        std::function<bool(LeaveReason)> leaveGuard_;
+        LeaveGuard leaveGuard_;
+        bool identityPending_ = false;
+        std::uint64_t identityTicket_ = 0;
+        bool applyIdentity(const IdentityRequest& request, AnchorInfo& pinAnchor);
+        bool clearMemoryDebugTargetAfterLeave();
         // policy_：当前策略（默认完全自由）。
         Policy policy_;
         // dockAnchorHandle_：复制自 Dock 句柄的降权句柄（仅查询权限），Dock 未附加

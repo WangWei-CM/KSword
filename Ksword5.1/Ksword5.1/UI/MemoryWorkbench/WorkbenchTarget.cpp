@@ -201,7 +201,10 @@ namespace ks::ui
 
     void WorkbenchTarget::setPolicy(const Policy& policy)
     {
+        if (policy_.lockToDock == policy.lockToDock && policy_.allowKernelPhysical == policy.allowKernelPhysical
+            && policy_.allowFollowDock == policy.allowFollowDock) return;
         policy_ = policy;
+        emit writeAuthorityChanged();
     }
 
     ksword::memwb::MemoryTargetTracker::Follow WorkbenchTarget::followMode() const noexcept
@@ -225,30 +228,43 @@ namespace ks::ui
             && current.processCreateTime100ns != 0;
     }
 
-    bool WorkbenchTarget::clearMemoryDebugTarget()
+    LeaveEntryStatus WorkbenchTarget::clearMemoryDebugTarget(LeaveCompletion completion)
     {
-        if (policy_.allowFollowDock)
-        {
-            return false;
-        }
-        // 守卫可能进入模态事件循环并销毁宿主；允许之后才能清目标。
+        if (policy_.allowFollowDock) return LeaveEntryStatus::Rejected;
+        if (identityPending_) return LeaveEntryStatus::Busy;
         const QPointer<WorkbenchTarget> self(this);
-        if (!requestLeave(LeaveReason::PinChange) || !self)
-        {
-            return false;
-        }
+        const auto source = tracker_.Revisions().Source();
+        identityPending_ = true;
+        const auto ticket = ++identityTicket_;
+        const auto status = requestLeave(LeaveReason::PinChange,
+            [self, source, ticket, completion = std::move(completion)](bool allowed) mutable {
+                if (!self || !self->identityPending_ || self->identityTicket_ != ticket) return;
+                self->identityPending_ = false;
+                const bool current = self->tracker_.Revisions().Source() == source
+                    && !self->policy_.allowFollowDock;
+                const bool cleared = allowed && current && self->clearMemoryDebugTargetAfterLeave();
+                if (self && completion) completion(cleared);
+            });
+        if (!self) return LeaveEntryStatus::Rejected;
+        if (status == LeaveEntryStatus::Pending) return status;
+        identityPending_ = false;
+        return status == LeaveEntryStatus::Completed && clearMemoryDebugTargetAfterLeave()
+            ? LeaveEntryStatus::Completed : status == LeaveEntryStatus::Busy
+            ? LeaveEntryStatus::Busy : LeaveEntryStatus::Rejected;
+    }
+
+    bool WorkbenchTarget::clearMemoryDebugTargetAfterLeave()
+    {
+        const QPointer<WorkbenchTarget> self(this);
         ReleaseAnchorHandle(pinnedAnchorHandle_);
         ReleaseAnchorHandle(dockAnchorHandle_);
         pinnedAnchorHandle_ = nullptr;
         dockAnchorHandle_ = nullptr;
         const auto mask = tracker_.ClearPinnedTarget();
         updateLiveness(LivenessState::Unknown);
-        if (!self)
-        {
-            return false;
-        }
+        if (!self) return false;
         applyMaskSideEffects(mask);
-        return true;
+        return !self.isNull();
     }
 
     LivenessState WorkbenchTarget::livenessState() const noexcept
@@ -345,24 +361,24 @@ namespace ks::ui
     // 离开守卫
     // ------------------------------------------------------------
 
-    void WorkbenchTarget::setLeaveGuard(std::function<bool(LeaveReason)> guard)
+    void WorkbenchTarget::setLeaveGuard(LeaveGuard guard)
     {
         leaveGuard_ = std::move(guard);
     }
 
-    bool WorkbenchTarget::requestLeave(LeaveReason reason)
+    LeaveEntryStatus WorkbenchTarget::requestLeave(LeaveReason reason, LeaveCompletion completion)
     {
         if (!leaveGuard_)
         {
-            return true; // 无视图注册=放行
+            return LeaveEntryStatus::Completed; // No registered view has pending decisions.
         }
         // 可疑点 #1 修复：先拷贝一份再调用。如果守卫内部弹出模态框（嵌套事件
         // 循环）期间视图被销毁并调用 setLeaveGuard(nullptr)，被我们正在执行的
         // 这个 std::function 对象不会因为 leaveGuard_ 本体被重新赋值而出问题——
         // 拷贝之后两者是独立对象，leaveGuard_ 可以被安全替换，这份本地拷贝仍然
         // 持有原始可调用对象直到调用返回。
-        const std::function<bool(LeaveReason)> guard = leaveGuard_;
-        return guard(reason);
+        const LeaveGuard guard = leaveGuard_;
+        return guard(reason, std::move(completion));
     }
 
     // ------------------------------------------------------------
@@ -442,7 +458,7 @@ namespace ks::ui
         return ksword::memwb::IsIdentityChange(mask);
     }
 
-    bool WorkbenchTarget::requestIdentity(const IdentityRequest& request, LeaveReason reason)
+    LeaveEntryStatus WorkbenchTarget::requestIdentity(const IdentityRequest& request, LeaveReason reason, LeaveCompletion completion)
     {
         // N3 修复：requestLeave 可能在守卫内部弹出模态框（嵌套事件循环），这段
         // 时间里本对象可能被外部同步销毁（例如内嵌详情窗口被程序性关闭）。用
@@ -451,6 +467,7 @@ namespace ks::ui
         // 写）；pinAnchor 的句柄是局部变量，被销毁时仍可以安全释放，不会泄漏。
         const QPointer<WorkbenchTarget> self(this);
 
+        if (identityPending_) return LeaveEntryStatus::Busy;
         lastIdentityFailure_ = NavStatus::Ok;
 
         // D7 修复：入口先校验枚举合法性，非法值直接拒绝——不问离开守卫、不碰
@@ -459,12 +476,12 @@ namespace ks::ui
         if (request.scope && !IsLegalScope(*request.scope))
         {
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         if (request.channel && !IsLegalChannel(*request.channel))
         {
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
 
         // 策略门：内嵌实例锁定跟随 Dock 时不允许钉住；不允许内核/物理范围时拒绝。
@@ -472,20 +489,20 @@ namespace ks::ui
         if (policy_.lockToDock && request.pinPid.has_value() && *request.pinPid != 0)
         {
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         // pinPid=0 的公开语义是回到 Dock；独立页只能选择明确的进程实例。
         if (!policy_.allowFollowDock && request.pinPid.has_value() && *request.pinPid == 0)
         {
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         if (!policy_.allowKernelPhysical && request.scope
             && (*request.scope == ksword::memwb::Scope::KernelVirtual
                 || *request.scope == ksword::memwb::Scope::Physical))
         {
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
 
         // D6 修复：钉住一个 pid 前先验证它仍然存在、且（给出了期望创建时间时）
@@ -500,7 +517,7 @@ namespace ks::ui
             if (pinAnchor.targetGone)
             {
                 lastIdentityFailure_ = NavStatus::TargetGone;
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
             // 独立内存调试不能把选择器捕获的强身份降成仅 PID；旧工作台保留弱锚规则。
             if (!policy_.allowFollowDock
@@ -508,7 +525,7 @@ namespace ks::ui
             {
                 ReleaseAnchorHandle(pinAnchor.handle);
                 lastIdentityFailure_ = NavStatus::TargetMismatch;
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
             // 已明确退出的独立目标在离开守卫前拒绝，不接入一个已失效身份。
             if (!policy_.allowFollowDock
@@ -516,40 +533,79 @@ namespace ks::ui
             {
                 ReleaseAnchorHandle(pinAnchor.handle);
                 lastIdentityFailure_ = NavStatus::TargetGone;
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
             if (!pinAnchor.identityWeak && request.expectCreateTime != 0
                 && pinAnchor.createTime100ns != request.expectCreateTime)
             {
                 ReleaseAnchorHandle(pinAnchor.handle);
                 lastIdentityFailure_ = NavStatus::TargetMismatch;
-                return false;
+                return LeaveEntryStatus::Rejected;
             }
         }
 
-        if (predictsIdentityChange(request, havePinAnchor ? &pinAnchor : nullptr))
+        struct RetainedAnchor
         {
-            const bool leaveApproved = requestLeave(reason);
-            // N3 修复：守卫返回之后立刻判空，禁止在宿主关闭后继续改目标。
-            if (!self)
+            AnchorInfo info;
+            ~RetainedAnchor() { ReleaseAnchorHandle(info.handle); }
+        };
+        auto retained = std::make_shared<RetainedAnchor>();
+        retained->info = pinAnchor;
+        pinAnchor.handle = nullptr;
+        if (predictsIdentityChange(request, havePinAnchor ? &retained->info : nullptr))
+        {
+            const auto source = tracker_.Revisions().Source();
+            const Policy capturedPolicy = policy_;
+            const auto ticket = ++identityTicket_;
+            identityPending_ = true;
+            const auto status = requestLeave(reason,
+                [self, request, retained, source, capturedPolicy, ticket,
+                    completion = std::move(completion)](bool allowed) mutable {
+                    if (!self || !self->identityPending_ || self->identityTicket_ != ticket)
+                    {
+                        ReleaseAnchorHandle(std::exchange(retained->info.handle, nullptr));
+                        return;
+                    }
+                    self->identityPending_ = false;
+                    (void)self->session(); // Observe the latest DDMA source before resuming.
+                    if (!self) return;
+                    const bool current = self->tracker_.Revisions().Source() == source
+                        && self->policy_.lockToDock == capturedPolicy.lockToDock
+                        && self->policy_.allowKernelPhysical == capturedPolicy.allowKernelPhysical
+                        && self->policy_.allowFollowDock == capturedPolicy.allowFollowDock;
+                    bool applied = false;
+                    if (allowed && current)
+                    {
+                        const auto alive = retained->info.handle
+                            ? QueryAnchorAlive(retained->info.handle) : std::optional<bool>();
+                        if (alive != std::optional<bool>(false))
+                            applied = self->applyIdentity(request, retained->info);
+                        else self->lastIdentityFailure_ = NavStatus::TargetGone;
+                    }
+                    else self->lastIdentityFailure_ = allowed ? NavStatus::TargetMismatch : NavStatus::LeaveRefused;
+                    ReleaseAnchorHandle(std::exchange(retained->info.handle, nullptr));
+                    if (self && completion) completion(applied);
+                });
+            if (!self) return LeaveEntryStatus::Rejected;
+            if (status == LeaveEntryStatus::Pending) return status;
+            identityPending_ = false;
+            if (status != LeaveEntryStatus::Completed)
             {
-                if (havePinAnchor)
-                {
-                    ReleaseAnchorHandle(pinAnchor.handle); // 局部变量，销毁后仍可安全释放。
-                }
-                return false; // this 已失效，不能再写 lastIdentityFailure_ 等任何成员。
-            }
-            if (!leaveApproved)
-            {
-                if (havePinAnchor)
-                {
-                    ReleaseAnchorHandle(pinAnchor.handle); // 被否决：完全不调用 tracker 的任何改动函数，句柄也不留。
-                }
                 lastIdentityFailure_ = NavStatus::LeaveRefused;
-                return false;
+                return status;
+            }
+            if (tracker_.Revisions().Source() != source)
+            {
+                lastIdentityFailure_ = NavStatus::TargetMismatch;
+                return LeaveEntryStatus::Rejected;
             }
         }
+        return applyIdentity(request, retained->info) ? LeaveEntryStatus::Completed : LeaveEntryStatus::Rejected;
+    }
 
+    bool WorkbenchTarget::applyIdentity(const IdentityRequest& request, AnchorInfo& pinAnchor)
+    {
+        const QPointer<WorkbenchTarget> self(this);
         // 应用顺序固定为 范围 → 钉住/跟随 → 通道，与 target.md 导航表的顺序一致。
         ksword::memwb::TargetChange mask = ksword::memwb::TargetChange::None;
         if (request.scope)
@@ -570,6 +626,7 @@ namespace ks::ui
                 // 复用上面验证阶段已经拿到的锚点句柄，不重复 OpenProcess。
                 ReleaseAnchorHandle(pinnedAnchorHandle_);
                 pinnedAnchorHandle_ = pinAnchor.handle;
+                pinAnchor.handle = nullptr;
                 pinMask = tracker_.Pin(*request.pinPid, pinAnchor.createTime100ns, pinAnchor.addressBits);
             }
             mask |= pinMask;
@@ -611,7 +668,7 @@ namespace ks::ui
         }
 
         applyMaskSideEffects(mask);
-        return true;
+        return !self.isNull();
     }
 
     NavStatus WorkbenchTarget::lastIdentityFailure() const noexcept
@@ -619,23 +676,23 @@ namespace ks::ui
         return lastIdentityFailure_;
     }
 
-    bool WorkbenchTarget::requestScope(ksword::memwb::Scope scope)
+    LeaveEntryStatus WorkbenchTarget::requestScope(ksword::memwb::Scope scope, LeaveCompletion completion)
     {
         IdentityRequest request;
         request.scope = scope;
-        return requestIdentity(request, LeaveReason::ScopeChange);
+        return requestIdentity(request, LeaveReason::ScopeChange, std::move(completion));
     }
 
-    bool WorkbenchTarget::requestChannel(ksword::memwb::Channel channel)
+    LeaveEntryStatus WorkbenchTarget::requestChannel(ksword::memwb::Channel channel, LeaveCompletion completion)
     {
         // D5 修复：不再接受/转发 ddmaGeneration 参数——通道为 Ddma 时
         // requestIdentity 内部自己向 services_ 要当前代次。
         IdentityRequest request;
         request.channel = channel;
-        return requestIdentity(request, LeaveReason::ChannelChange);
+        return requestIdentity(request, LeaveReason::ChannelChange, std::move(completion));
     }
 
-    bool WorkbenchTarget::requestPin(std::uint32_t pid, std::uint64_t expectCreateTime)
+    LeaveEntryStatus WorkbenchTarget::requestPin(std::uint32_t pid, std::uint64_t expectCreateTime, LeaveCompletion completion)
     {
         // N1 修复：复位提到函数开头，覆盖"pid==0"这条早返回路径——旧写法只有
         // 走到 requestIdentity 内部才会重置 lastIdentityFailure_，pid==0 直接
@@ -646,19 +703,19 @@ namespace ks::ui
         {
             // 0 不是合法 PID；调用方想回到跟随应调用 requestFollowDock()，不是传 0。
             lastIdentityFailure_ = NavStatus::Unavailable;
-            return false;
+            return LeaveEntryStatus::Rejected;
         }
         IdentityRequest request;
         request.pinPid = pid;
         request.expectCreateTime = expectCreateTime; // D6：0 表示不校验，兼容旧调用点。
-        return requestIdentity(request, LeaveReason::PinChange);
+        return requestIdentity(request, LeaveReason::PinChange, std::move(completion));
     }
 
-    bool WorkbenchTarget::requestFollowDock()
+    LeaveEntryStatus WorkbenchTarget::requestFollowDock(LeaveCompletion completion)
     {
         IdentityRequest request;
         request.pinPid = 0;
-        return requestIdentity(request, LeaveReason::PinChange);
+        return requestIdentity(request, LeaveReason::PinChange, std::move(completion));
     }
 
     void WorkbenchTarget::requestReload()
@@ -671,6 +728,7 @@ namespace ks::ui
     void WorkbenchTarget::noteContentChanged()
     {
         tracker_.NoteContentChanged();
+        emit writeAuthorityChanged();
     }
 
     void WorkbenchTarget::applyMaskSideEffects(ksword::memwb::TargetChange mask)
@@ -691,6 +749,9 @@ namespace ks::ui
             return;
         }
 
+        const QPointer<WorkbenchTarget> self(this);
+        emit writeAuthorityChanged();
+        if (!self) return;
         // 可疑点 #3 修复（顺序）：先做"身份变了就同步 BeginLoad 新所有者"这一步，
         // 再发 sessionChanged。旧顺序是先发信号、再 BeginLoad；如果订阅者在
         // sessionChanged 的槅里同步调用 evaluate()，会看到模块目录仍然挂着上一个
@@ -792,6 +853,8 @@ namespace ks::ui
         {
             tracker_.Reload();
         }
-        emit livenessChanged(static_cast<int>(state));
+        const QPointer<WorkbenchTarget> self(this);
+        emit writeAuthorityChanged();
+        if (self) emit livenessChanged(static_cast<int>(state));
     }
 }

@@ -13,6 +13,7 @@
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../UI/KernelDisassemblyDialog.h" // ks::ui::DisassemblyRow：驱动读写页反汇编视图的行缓存需要完整类型。
 #include "../UI/WindowPickerButton.h" // ks::ui::WindowPickerButton：十字准星拾取按钮，按值出现在成员指针里。
+#include "../UI/MemoryWorkbench/WorkbenchContinuation.h"
 #include "MemoryAccessBackend.h" // 访问后端枚举与 DDMA 会话：按值出现在成员与返回类型里。
 #include "TamperDetectionPage.h" // ksword::memory_dock::TamperDetectionPage：按值出现在成员指针与模块同步调用里。
 
@@ -101,7 +102,7 @@ public:
     // focusProcessForOperations：
     // - 作用：从进程页跳转到内存页后自动定位并附加目标 PID；
     // - 调用方式：MainWindow::focusMemoryDockByPid 调用。
-    void focusProcessForOperations(std::uint32_t pid, bool showMessage = false);
+    void focusProcessForOperations(std::uint32_t pid, bool showMessage = false, ks::ui::LeaveCompletion completion = {});
 
     // focusProcessForSearch：
     // - 作用：附加指定 PID 后切换到“内存搜索”页；
@@ -121,11 +122,12 @@ public:
     // confirmWorkbenchQuit：
     // - 作用：主窗口关闭前问一次内存工作台（暂存的未提交补丁、未还原的 int3 补丁）；
     // - 调用方式：MainWindow::closeEvent 最前调用（其后半段会停 R0 驱动，晚了 int3 还原必失败）；
-    // - 返回：true=可以继续退出（工作台未创建时恒为 true）；false=用户取消，应放弃本次关闭。
-    bool confirmWorkbenchQuit();
+    // - Completed 才允许退出；Pending 保留原关闭请求并异步回报许可；Rejected/Busy 放弃本次关闭。
+    ks::ui::LeaveEntryStatus confirmWorkbenchQuit(ks::ui::LeaveCompletion completion = {});
     // 全局退出拆成许可和释放两阶段；详情窗仍使用上面的单宿主兼容包装。
-    bool prepareWorkbenchQuit();
+    ks::ui::LeaveEntryStatus prepareWorkbenchQuit(ks::ui::LeaveCompletion completion = {});
     bool releaseWorkbenchExecutionForQuit();
+    bool workbenchQuitPreparationCurrent();
     // 全局退出被取消时，撤销这次退出专用的保留补丁许可。
     void cancelWorkbenchQuit();
 
@@ -520,7 +522,9 @@ private:
     // - 参数 processName：目标进程名（用于状态栏展示）。
     // - 参数 showMessage：是否弹出提示框反馈结果。
     // - 返回：true 附加成功；false 附加失败。
-    bool attachToProcess(std::uint32_t pid, const QString& processName, bool showMessage);
+    ks::ui::LeaveEntryStatus attachToProcess(std::uint32_t pid, const QString& processName, bool showMessage, ks::ui::LeaveCompletion completion = {});
+    bool attachToProcessAfterLeave(std::uint32_t pid, const QString& processName, bool showMessage, std::uint64_t expectedCreateTime);
+    bool m_workbenchProcessChangePending = false;
 
     // detachProcess：
     // - 作用：分离当前进程并清理依赖该句柄的数据。
@@ -1100,7 +1104,8 @@ private:
     bool navigateWorkbench(const ks::ui::NavRequest& request);
     // workbenchAllowsProcessChange：附加/分离目标进程之前问一次工作台的离开守卫；
     // 视图尚未创建返回 true，守卫被用户否决返回 false。
-    bool workbenchAllowsProcessChange();
+    ks::ui::LeaveEntryStatus workbenchAllowsProcessChange(ks::ui::LeaveCompletion completion = {});
+    ks::ui::LeaveEntryStatus prepareMemoryDebugQuit(ks::ui::LeaveCompletion completion);
     // shutdownWorkbench：析构路径上先于子对象销毁调用：权威视图把设置落盘，并断开对视图的引用。
     void shutdownWorkbench();
     // applyProcessDetailTabVisibility：按"内嵌进程详情窗口"的规则重新设置各页签的显隐

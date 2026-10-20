@@ -1447,10 +1447,11 @@ void MemoryDock::pollModuleRefresh()
     commitModuleSnapshot();
 }
 
-bool MemoryDock::attachToProcess(
+ks::ui::LeaveEntryStatus MemoryDock::attachToProcess(
     const std::uint32_t pid,
     const QString& processName,
-    const bool showMessage)
+    const bool showMessage,
+    ks::ui::LeaveCompletion completion)
 {
     // 附加入口日志：记录目标 PID 与是否弹窗反馈。
     kLogEvent attachStartEvent;
@@ -1463,11 +1464,38 @@ bool MemoryDock::attachToProcess(
         << (showMessage ? "true" : "false")
         << eol;
 
-    // 暂存补丁与 int3 的目标变更确认统一交给工作台离开守卫。
-    if (!workbenchAllowsProcessChange())
+    if (m_workbenchProcessChangePending) return ks::ui::LeaveEntryStatus::Busy;
+    const QPointer<MemoryDock> self(this);
+    const auto attachment = m_processAttachmentGeneration.load();
+    const auto anchor = std::shared_ptr<ks::ui::AnchorInfo>(new ks::ui::AnchorInfo(ks::ui::AcquireAnchorForPid(pid)),
+        [](ks::ui::AnchorInfo* value) { ks::ui::ReleaseAnchorHandle(value->handle); delete value; });
+    if (anchor->targetGone) return ks::ui::LeaveEntryStatus::Rejected;
+    const auto expectedCreateTime = anchor->identityWeak ? 0 : anchor->createTime100ns;
+    const auto leave = workbenchAllowsProcessChange(
+        [self, attachment, anchor, expectedCreateTime, pid, processName, showMessage, completion](bool allowed) mutable {
+            if (!self) return;
+            self->m_workbenchProcessChangePending = false;
+            const bool current = self->m_processAttachmentGeneration.load() == attachment;
+            const bool alive = !anchor->handle || ks::ui::QueryAnchorAlive(anchor->handle) != std::optional<bool>(false);
+            const bool attached = allowed && current && alive
+                && self->attachToProcessAfterLeave(pid, processName, showMessage, expectedCreateTime);
+            if (self && completion) completion(attached);
+        });
+    if (!self) return ks::ui::LeaveEntryStatus::Rejected;
+    if (leave == ks::ui::LeaveEntryStatus::Pending)
     {
-        return false;
+        m_workbenchProcessChangePending = true;
+        return leave;
     }
+    if (leave != ks::ui::LeaveEntryStatus::Completed) return leave;
+    if (m_processAttachmentGeneration.load() != attachment) return ks::ui::LeaveEntryStatus::Rejected;
+    return attachToProcessAfterLeave(pid, processName, showMessage, expectedCreateTime)
+        ? ks::ui::LeaveEntryStatus::Completed : ks::ui::LeaveEntryStatus::Rejected;
+}
+
+bool MemoryDock::attachToProcessAfterLeave(const std::uint32_t pid, const QString& processName,
+    const bool showMessage, const std::uint64_t expectedCreateTime)
+{
     // 附加前先清理旧进程上下文，避免残留句柄。
     detachProcess();
 
@@ -1529,6 +1557,19 @@ bool MemoryDock::attachToProcess(
             << eol;
     }
 
+    if (expectedCreateTime != 0)
+    {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const bool queried = ::GetProcessTimes(processHandle, &created, &exited, &kernel, &user) != FALSE;
+        const std::uint64_t actual = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32U) | created.dwLowDateTime;
+        if (!queried || actual != expectedCreateTime)
+        {
+            ::CloseHandle(processHandle);
+            m_canReadWriteMemory = false;
+            updateStatusBarText();
+            return false;
+        }
+    }
     m_attachedProcessHandle = processHandle;
     m_attachedPid = pid;
     m_attachedProcessName = processName;
@@ -1569,7 +1610,7 @@ bool MemoryDock::attachToProcess(
     return true;
 }
 
-void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool showMessage)
+void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool showMessage, ks::ui::LeaveCompletion completion)
 {
     // 从进程 Dock 跳转：刷新进程列表，定位目标行并切换到“进程与模块/内存区域”操作上下文。
     if (pid == 0)
@@ -1605,18 +1646,25 @@ void MemoryDock::focusProcessForOperations(const std::uint32_t pid, const bool s
     // 当前表里已经存在该进程时立即定位，不必等异步结果回来。
     (void)selectProcessRowByPid(m_processTable, m_processCombo, pid);
 
-    attachToProcess(pid, processName, showMessage);
-    if (m_tabWidget != nullptr && m_tabRegions != nullptr)
-    {
+    const QPointer<MemoryDock> self(this);
+    const auto status = attachToProcess(pid, processName, showMessage, [self, completion](bool allowed) mutable {
+        if (!self) return;
+        if (allowed && self->m_tabWidget && self->m_tabRegions) self->m_tabWidget->setCurrentWidget(self->m_tabRegions);
+        if (self && completion) completion(allowed);
+    });
+    if (self && status == ks::ui::LeaveEntryStatus::Completed && m_tabWidget && m_tabRegions)
         m_tabWidget->setCurrentWidget(m_tabRegions);
-    }
 }
 
 void MemoryDock::focusProcessForSearch(const std::uint32_t pid, const bool showMessage)
 {
     // 搜索页需要有效进程句柄和最新区域缓存，先复用标准附加流程，再切到搜索页。
-    focusProcessForOperations(pid, showMessage);
-    if (m_attachedPid == pid && m_tabWidget != nullptr && m_tabSearch != nullptr)
+    const QPointer<MemoryDock> self(this);
+    focusProcessForOperations(pid, showMessage, [self, pid](bool allowed) {
+        if (self && allowed && self->m_attachedPid == pid && self->m_tabWidget && self->m_tabSearch)
+            self->m_tabWidget->setCurrentWidget(self->m_tabSearch);
+    });
+    if (self && m_attachedPid == pid && m_tabWidget != nullptr && m_tabSearch != nullptr)
     {
         m_tabWidget->setCurrentWidget(m_tabSearch);
     }

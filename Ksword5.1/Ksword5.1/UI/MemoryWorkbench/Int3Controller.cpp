@@ -326,13 +326,19 @@ namespace ks::ui
     // 任何框，直接放行；其它已离开目标遗留的条目既不拦这次退出，也不计入这次的"还有 %1
     // 处"（2026 年审核报告缺陷 1）。默认按钮是"全部还原后继续"（规格要求），Esc 的结果是
     // "取消"（2026 年审核报告缺陷 2：曾经两者都是"取消"，与规格相反）。
-    bool Int3Controller::RequestLeave(QWidget* parentWidget, const Int3LeaveScenario scenario)
+    Int3Controller::LeavePlan Int3Controller::PrepareLeave(QWidget* parentWidget, const Int3LeaveScenario scenario)
     {
         const ContextSnapshot context = SnapshotContext();
+        LeavePlan plan;
+        plan.target = context.target;
+        plan.scope = context.scope;
+        plan.channel = context.channel;
+        for (const auto& entry : m_ledger.Entries())
+            if (IsTarget(entry, context.target)) plan.ids.push_back(entry.id);
         const bool hasUnrestoredForTarget = HasUnrestoredForTarget(context.target);
         if (!NeedsLeavePrompt(hasUnrestoredForTarget, scenario))
         {
-            return true;
+            return plan;
         }
 
         const int patchCount = CountForCurrentTarget();
@@ -359,7 +365,8 @@ namespace ks::ui
         if (!self || !box)
         {
             delete box.data();
-            return false;
+            plan.choice = Int3LeaveChoice::Cancel;
+            return plan;
         }
 
         const QAbstractButton* clicked = box->clickedButton();
@@ -375,6 +382,23 @@ namespace ks::ui
         // 其余情形（包括 Esc 关闭、点了取消）都落在默认值 Cancel。
 
         delete box.data();
-        return self && self->ApplyLeaveChoiceForContext(choice, context);
+        plan.choice = choice;
+        return plan;
     }
+    bool Int3Controller::ApplyPreparedLeave(const LeavePlan& plan)
+    {
+        std::vector<std::uint64_t> currentIds;
+        for (const auto& entry : m_ledger.Entries())
+            if (IsTarget(entry, plan.target)) currentIds.push_back(entry.id);
+        if (currentIds != plan.ids) return false;
+        return ApplyLeaveChoiceForContext(plan.choice, {plan.target, plan.scope, plan.channel});
+    }
+
+    bool Int3Controller::RequestLeave(QWidget* parentWidget, const Int3LeaveScenario scenario)
+    {
+        const QPointer<Int3Controller> self(this);
+        const auto plan = PrepareLeave(parentWidget, scenario);
+        return self && ApplyPreparedLeave(plan);
+    }
+
 }

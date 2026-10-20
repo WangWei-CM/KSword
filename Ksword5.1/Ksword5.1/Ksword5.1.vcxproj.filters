@@ -926,6 +926,9 @@
     <ClCompile Include="OtherDock\OtherDock.WindowProtection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\MemoryWorkbench\WorkbenchWriteOperationRunner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="OtherDock\OtherDock.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2284,6 +2287,9 @@
     <ClInclude Include="MemoryDock\HyperVMemoryEvidence.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteOperationRunner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -2455,6 +2461,9 @@
     <QtMoc Include="OtherDock\OtherDock.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchContinuation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="OtherDock\WindowListInteraction.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -2655,6 +2664,9 @@
     </QtMoc>
     <ClInclude Include="UI\MemoryWorkbench\HexCanvasFormat.h">
       <Filter>Header Files\MemoryWorkbench</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWriteDiagnostics.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\MemoryWorkbench\HexExport.h">
       <Filter>Header Files\MemoryWorkbench</Filter>

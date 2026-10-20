@@ -5521,6 +5521,172 @@ void MainWindow::reportStartupProgress(
         textKey);
 }
 
+// GUI-only preparation state; callbacks own values and weak widgets, never a close-event stack.
+struct MainWindowMemoryQuitState
+{
+    std::vector<QPointer<MemoryDock>> docks;
+    std::size_t index = 0;
+    std::uint64_t ticket = 0;
+    bool active = true;
+    bool waiting = false;
+    bool ready = false;
+    bool closeQueued = false;
+};
+
+static void CancelMemoryQuitState(const std::shared_ptr<MainWindowMemoryQuitState>& state)
+{
+    if (!state || !state->active) return;
+    state->active = false;
+    state->waiting = false;
+    ++state->ticket;
+    const auto docks = state->docks;
+    for (const auto& dock : docks) if (dock) dock->cancelWorkbenchQuit();
+    if (qApp) qApp->setProperty("ksword_memory_quit_guard_active", false);
+}
+
+void MainWindow::cancelMemoryWorkbenchPreparation(const std::shared_ptr<MainWindowMemoryQuitState>& state)
+{
+    if (m_memoryQuitState != state) return;
+    const QPointer<MainWindow> self(this);
+    m_memoryQuitState.reset();
+    CancelMemoryQuitState(state);
+    if (self) m_shutdownRestart.cancel();
+}
+
+ks::ui::LeaveEntryStatus MainWindow::prepareMemoryWorkbenchesForShutdown()
+{
+    using Status = ks::ui::LeaveEntryStatus;
+    const QPointer<MainWindow> self(this);
+    auto state = m_memoryQuitState;
+    if (state && state->ready)
+    {
+        // The async approval may have queued close for a later event turn.
+        // Validate that turn's actual identities and Dock inventory without
+        // repeating the already completed execution-control release.
+        bool current = true;
+        for (const auto& prepared : state->docks)
+        {
+            if (prepared && !prepared->workbenchQuitPreparationCurrent()) current = false;
+            if (!self || m_memoryQuitState != state || !state->active) return Status::Rejected;
+            if (!current) break;
+        }
+        if (current)
+        {
+            for (QWidget* widget : QApplication::allWidgets())
+            {
+                auto* dock = qobject_cast<MemoryDock*>(widget);
+                if (dock && std::none_of(state->docks.cbegin(), state->docks.cend(),
+                    [dock](const auto& known) { return known.data() == dock; }))
+                { current = false; break; }
+            }
+        }
+        if (current) return Status::Completed;
+        // Authority refresh is not a user cancellation: preserve an already
+        // authorized restart intent while collecting the new Dock approvals.
+        m_memoryQuitState.reset();
+        CancelMemoryQuitState(state);
+        if (!self) return Status::Rejected;
+        if (m_memoryQuitState) return Status::Busy;
+        state.reset(); // This close request must prepare the new authority set.
+    }
+    if (state && state->waiting) return Status::Pending;
+    if (!state)
+    {
+        if (qApp && qApp->property("ksword_memory_quit_guard_active").toBool()) return Status::Busy;
+        state = std::make_shared<MainWindowMemoryQuitState>();
+        m_memoryQuitState = state;
+        if (qApp)
+        {
+            qApp->setProperty("ksword_memory_quit_guard_active", true);
+            QObject::connect(this, &QObject::destroyed, qApp, [state]() { CancelMemoryQuitState(state); });
+        }
+    }
+    const auto appendDocks = [state]() {
+        for (QWidget* widget : QApplication::allWidgets())
+        {
+            if (auto* dock = qobject_cast<MemoryDock*>(widget))
+            {
+                if (std::none_of(state->docks.cbegin(), state->docks.cend(),
+                    [dock](const auto& known) { return known.data() == dock; })) state->docks.emplace_back(dock);
+            }
+        }
+    };
+    appendDocks();
+    while (state->index < state->docks.size())
+    {
+        const auto index = state->index;
+        const QPointer<MemoryDock> dock = state->docks[index];
+        if (!dock) { ++state->index; continue; }
+        const auto ticket = ++state->ticket;
+        state->waiting = true;
+        QObject::connect(dock, &QObject::destroyed, this, [self, state, ticket, index]() {
+            if (self && state->active && state->waiting && state->ticket == ticket && state->index == index)
+                self->cancelMemoryWorkbenchPreparation(state);
+        });
+        const auto status = dock->prepareWorkbenchQuit([self, state, dock, ticket, index](bool allowed) {
+            if (!self || !state->active || self->m_memoryQuitState != state || !state->waiting
+                || state->ticket != ticket || state->index != index) return;
+            state->waiting = false;
+            if (!allowed || !dock || state->docks[index] != dock || !dock->workbenchQuitPreparationCurrent())
+            {
+                if (self) self->cancelMemoryWorkbenchPreparation(state);
+                return;
+            }
+            if (!self) return;
+            state->index = index + 1;
+            const auto next = self->prepareMemoryWorkbenchesForShutdown();
+            if (!self || next != Status::Completed || state->closeQueued) return;
+            state->closeQueued = true;
+            QTimer::singleShot(0, self, [self, state]() {
+                if (self && self->m_memoryQuitState == state && state->ready) self->close();
+            });
+        });
+        if (!self) return Status::Rejected;
+        if (m_memoryQuitState != state || !state->active) return Status::Rejected;
+        if (status == Status::Pending) return status;
+        state->waiting = false;
+        if (!dock || status != Status::Completed || !dock->workbenchQuitPreparationCurrent())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+        ++state->index;
+        appendDocks();
+    }
+    // Every approval is rechecked before any execution control is released.
+    for (const auto& prepared : state->docks)
+    {
+        if (prepared && !prepared->workbenchQuitPreparationCurrent())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+    }
+    for (std::size_t index = 0; index < state->docks.size(); ++index)
+    {
+        const QPointer<MemoryDock> dock = state->docks[index];
+        if (dock && !dock->releaseWorkbenchExecutionForQuit())
+        {
+            if (self) cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+        if (!self) return Status::Rejected;
+        const auto count = state->docks.size();
+        appendDocks();
+        if (state->docks.size() != count)
+        {
+            cancelMemoryWorkbenchPreparation(state);
+            return Status::Rejected;
+        }
+    }
+    m_shutdownPreparedMemoryDocks = state->docks;
+    state->ready = true;
+    if (qApp) qApp->setProperty("ksword_memory_quit_guard_active", false);
+    return Status::Completed;
+}
+
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     if (m_shutdownWaiting || m_shutdownFinalizing)
@@ -5534,110 +5700,16 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
     if (!m_shutdownCleanupReady)
     {
-        // 全局退出守卫覆盖主 Dock 与无父窗口的进程详情内嵌 Dock，并且在任何停驱/救援退出动作之前执行。
-        // 模态确认期间拒绝重复关闭；否则同一批暂存/int3 会被再次询问，甚至重入执行。
-        if (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool())
+        const QPointer<MainWindow> memoryGuardSelf(this);
+        const auto memoryStatus = prepareMemoryWorkbenchesForShutdown();
+        if (!memoryGuardSelf || memoryStatus != ks::ui::LeaveEntryStatus::Completed)
         {
-            if (event != nullptr)
-            {
-                event->ignore();
-            }
+            if (event) event->ignore();
             return;
         }
-        // closeGuardSelf：每个确认框都可能同步销毁主窗口，返回后不得继续保存布局或停止驱动。
-        const QPointer<MainWindow> closeGuardSelf(this);
-        if (qApp != nullptr)
-        {
-            qApp->setProperty("ksword_memory_quit_guard_active", true);
-        }
-        // workbenchDocks：UI 线程上一次性取得弱指针快照，避免后续模态事件循环销毁其它详情窗导致悬空。
-        std::vector<QPointer<MemoryDock>> workbenchDocks;
-        // appendNewWorkbenchDocks：模态期间已排队的详情页构建仍会执行，把晚到 Dock 也纳入同一次退出。
-        const auto appendNewWorkbenchDocks = [&workbenchDocks]() {
-            for (QWidget* widget : QApplication::allWidgets())
-            {
-                if (auto* memoryDock = qobject_cast<MemoryDock*>(widget))
-                {
-                    const bool alreadyKnown = std::any_of(
-                        workbenchDocks.cbegin(), workbenchDocks.cend(),
-                        [memoryDock](const auto& knownDock) { return knownDock.data() == memoryDock; });
-                    if (!alreadyKnown)
-                    {
-                        workbenchDocks.emplace_back(memoryDock);
-                    }
-                }
-            }
-        };
-        appendNewWorkbenchDocks();
-        bool memoryQuitAllowed = true;
-        for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
-        {
-            // memoryDock：当前迭代独立的弱指针副本，追加晚到 Dock 时不依赖 vector 中可能失效的引用。
-            const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-            if (memoryDock && !memoryDock->prepareWorkbenchQuit())
-            {
-                memoryQuitAllowed = false;
-                break;
-            }
-            if (!closeGuardSelf)
-            {
-                break;
-            }
-            appendNewWorkbenchDocks();
-        }
-        // 所有 Dock 的暂存许可都通过后才归还执行控制，取消后续确认不会提前放行前一目标。
-        // 第二阶段不重复 confirmQuit；部分释放失败时保留实际状态及恢复入口，统一撤销许可。
-        if (closeGuardSelf && memoryQuitAllowed)
-        {
-            for (std::size_t dockIndex = 0; dockIndex < workbenchDocks.size(); ++dockIndex)
-            {
-                const QPointer<MemoryDock> memoryDock = workbenchDocks[dockIndex];
-                if (memoryDock && !memoryDock->releaseWorkbenchExecutionForQuit())
-                {
-                    memoryQuitAllowed = false;
-                    break;
-                }
-                if (!closeGuardSelf)
-                {
-                    break;
-                }
-                // HVM 释放会处理事件；若此时才创建新 Dock，本轮中止，下一次退出重新统一确认。
-                const std::size_t preparedCount = workbenchDocks.size();
-                appendNewWorkbenchDocks();
-                if (workbenchDocks.size() != preparedCount)
-                {
-                    memoryQuitAllowed = false;
-                    break;
-                }
-            }
-        }
-        if (!closeGuardSelf || !memoryQuitAllowed)
-        {
-            if (closeGuardSelf) m_shutdownRestart.cancel();
-            // 本次全局退出取消：清掉之前视图批准的 Keep 许可，禁止它误跳过下一次未经提示的分离安全网。
-            // 已明确批准并执行的应用/丢弃保留其结果；这不是对已执行编辑的回滚。
-            for (const auto& memoryDock : workbenchDocks)
-            {
-                if (memoryDock)
-                {
-                    memoryDock->cancelWorkbenchQuit();
-                }
-            }
-        }
-        if (qApp != nullptr)
-        {
-            qApp->setProperty("ksword_memory_quit_guard_active", false);
-        }
-        if (!closeGuardSelf || !memoryQuitAllowed)
-        {
-            if (event != nullptr)
-            {
-                event->ignore();
-            }
-            return;
-        }
-
-        m_shutdownPreparedMemoryDocks = workbenchDocks;
+        // Consume Ready exactly once; a queued continuation never repeats a dock's approval.
+        if (m_memoryQuitState) m_memoryQuitState->active = false;
+        m_memoryQuitState.reset();
         ks::ui::AsyncCleanupRegistry::global().beginShutdown();
         if (ks::ui::AsyncCleanupRegistry::global().pending() != 0 ||
             g_r0ServiceOperationInFlight.load(std::memory_order_acquire))

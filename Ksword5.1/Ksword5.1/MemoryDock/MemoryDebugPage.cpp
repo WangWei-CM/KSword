@@ -190,7 +190,7 @@ namespace ks::ui
         workbench_dock::ConfigureShared();
         view_ = new MemoryWorkbenchView(this);
         // 显示或加载旧范围设置前先锁定独立模式，避免初始 show/sessionChanged 接管共享 int3。
-        if (!view_->setMemoryDebugMode(true))
+        if (view_->setMemoryDebugMode(true) != LeaveEntryStatus::Completed)
         {
             delete view_;
             view_ = nullptr;
@@ -338,7 +338,7 @@ namespace ks::ui
 
     void MemoryDebugPage::selectProcess()
     {
-        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        if (transitionPending_ || quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
         {
             return;
         }
@@ -380,29 +380,43 @@ namespace ks::ui
             status_->setText(Text("无法核验该进程身份，请刷新列表或检查访问权限。"));
             return;
         }
-        // 先询问原有暂存离开守卫；用户取消时不能先恢复仍由本页暂停的线程。
-        const QPointer<MemoryDebugPage> self(this); // 守卫和 HVM 退出都可能处理嵌套事件循环。
-        if (!view_->target().requestLeave(LeaveReason::PinChange) || !self)
+        const QPointer<MemoryDebugPage> self(this);
+        const auto source = view_->target().revisions().Source();
+        const auto leave = view_->target().requestLeave(LeaveReason::PinChange,
+            [self, candidate, source](bool allowed) {
+                if (!self) return;
+                self->transitionPending_ = false;
+                if (allowed) self->resumeSelectProcess(candidate, source);
+            });
+        if (!self) return;
+        if (leave == LeaveEntryStatus::Pending) { transitionPending_ = true; return; }
+        if (leave == LeaveEntryStatus::Completed) resumeSelectProcess(candidate, source);
+    }
+
+    void MemoryDebugPage::resumeSelectProcess(MemoryDebugProcessCandidate candidate, std::uint64_t source)
+    {
+        const QPointer<MemoryDebugPage> self(this);
+        if (!view_ || view_->target().revisions().Source() != source) return;
+        if (!releaseExecutionControl() || !self || !view_ || view_->target().revisions().Source() != source) return;
+        const auto status = view_->target().requestPin(candidate.pid, candidate.createTime100ns,
+            [self, candidate](bool allowed) {
+                if (!self) return;
+                self->transitionPending_ = false;
+                if (allowed) self->finishSelectProcess(candidate);
+                else self->status_->setText(Text("未切换目标：进程已变化、不可访问或操作已取消。"));
+            });
+        if (!self) return;
+        if (status == LeaveEntryStatus::Pending) { transitionPending_ = true; return; }
+        if (status != LeaveEntryStatus::Completed)
         {
+            status_->setText(Text("未切换目标：进程已变化、不可访问或操作已取消。"));
             return;
         }
-        // 真正更换目标之前归还运行控制；失败时仍保留旧目标与恢复入口。
-        if (!releaseExecutionControl() || !self)
-        {
-            return;
-        }
-        if (!view_->target().requestPin(candidate.pid, candidate.createTime100ns))
-        {
-            if (self)
-            {
-                status_->setText(Text("未切换目标：进程已变化、不可访问或操作已取消。"));
-            }
-            return;
-        }
-        if (!self)
-        {
-            return;
-        }
+        finishSelectProcess(candidate);
+    }
+
+    void MemoryDebugPage::finishSelectProcess(const MemoryDebugProcessCandidate& candidate)
+    {
         processName_ = QString::fromStdWString(candidate.name);
         selectedProcess_ = candidate;
         execution_->setTarget(candidate.pid, candidate.createTime100ns);
@@ -452,23 +466,41 @@ namespace ks::ui
 
     void MemoryDebugPage::closeSession()
     {
-        if (quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
+        if (transitionPending_ || quitPrepared_ || (qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool()))
         {
             return;
         }
-        const QPointer<MemoryDebugPage> self(this); // 离开守卫可嵌套事件循环并关闭宿主。
-        if (view_ == nullptr || !view_->target().requestLeave(LeaveReason::PinChange) || !self)
-        {
-            return;
-        }
-        if (!releaseExecutionControl() || !self)
-        {
-            return;
-        }
-        if (view_ == nullptr || !view_->clearMemoryDebugTarget() || !self)
-        {
-            return;
-        }
+        const QPointer<MemoryDebugPage> self(this);
+        if (!view_) return;
+        const auto source = view_->target().revisions().Source();
+        const auto leave = view_->target().requestLeave(LeaveReason::PinChange,
+            [self, source](bool allowed) {
+                if (!self) return;
+                self->transitionPending_ = false;
+                if (allowed) self->resumeCloseSession(source);
+            });
+        if (!self) return;
+        if (leave == LeaveEntryStatus::Pending) { transitionPending_ = true; return; }
+        if (leave == LeaveEntryStatus::Completed) resumeCloseSession(source);
+    }
+
+    void MemoryDebugPage::resumeCloseSession(std::uint64_t source)
+    {
+        const QPointer<MemoryDebugPage> self(this);
+        if (!view_ || view_->target().revisions().Source() != source) return;
+        if (!releaseExecutionControl() || !self || !view_ || view_->target().revisions().Source() != source) return;
+        const auto cleared = view_->clearMemoryDebugTarget([self](bool allowed) {
+            if (!self) return;
+            self->transitionPending_ = false;
+            if (allowed) self->finishClosedSession();
+        });
+        if (!self) return;
+        if (cleared == LeaveEntryStatus::Pending) { transitionPending_ = true; return; }
+        if (cleared == LeaveEntryStatus::Completed) finishClosedSession();
+    }
+
+    void MemoryDebugPage::finishClosedSession()
+    {
         initialModulePending_ = false;
         processName_.clear();
         selectedProcess_ = {};
@@ -479,24 +511,37 @@ namespace ks::ui
         status_->setText(Text("内存会话已关闭，已释放本会话的运行控制。"));
     }
 
-    bool MemoryDebugPage::confirmQuit()
+    LeaveEntryStatus MemoryDebugPage::confirmQuit(LeaveCompletion completion)
     {
-        const QPointer<MemoryDebugPage> self(this); // 取消暂存提示时保留已有运行控制。
-        if (view_ != nullptr && !view_->confirmQuit())
+        const QPointer<MemoryDebugPage> self(this);
+        if (transitionPending_) return LeaveEntryStatus::Busy;
+        if (view_ != nullptr)
         {
-            return false;
+            const auto status = view_->confirmQuit([self, completion = std::move(completion)](bool allowed) mutable {
+                if (!self) return;
+                const bool prepared = allowed && self->finishQuitPreparation();
+                if (self && completion) completion(prepared);
+            });
+            if (!self) return LeaveEntryStatus::Rejected;
+            if (status != LeaveEntryStatus::Completed) return status;
         }
-        if (!self)
-        {
-            return false;
-        }
+        return finishQuitPreparation() ? LeaveEntryStatus::Completed : LeaveEntryStatus::Rejected;
+    }
+
+    bool MemoryDebugPage::finishQuitPreparation()
+    {
         if (!quitPrepared_)
         {
             enabledBeforeQuit_ = !testAttribute(Qt::WA_ForceDisabled);
             quitPrepared_ = true;
-            setEnabled(false); // 同时冻结目标、运行控制和专业编辑，后台计时器继续工作。
+            setEnabled(false);
         }
         return true;
+    }
+
+    bool MemoryDebugPage::quitPreparationCurrent()
+    {
+        return quitPrepared_ && (view_ == nullptr || view_->quitPreparationCurrent());
     }
 
     bool MemoryDebugPage::releaseExecutionForQuit()
