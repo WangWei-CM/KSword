@@ -12,7 +12,9 @@
 #include "UI/SecondaryPageLayout.h"
 #include "UI/AsyncCleanupRegistry.h"
 #include "UI/AsyncOperation.h"
+#include "UI/RetainedCleanupJob.h"
 #include <QFileSystemWatcher>
+#include <QElapsedTimer>
 
 #include "theme.h"
 #include "Internationalization/LanguageManager.h"
@@ -74,6 +76,9 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -2222,7 +2227,8 @@ namespace
         const MarketplacePlugin& plugin,
         const QString& pluginRoot,
         const QString& stagingDirectory,
-        QString* errorOut)
+        QString* errorOut,
+        QStringList* cleanupRoots = nullptr)
     {
         if (errorOut == nullptr)
         {
@@ -2290,9 +2296,93 @@ namespace
         {
             // 新版本已经就位后，清理失败不应把一次成功安装报告为失败；
             // 遗留备份不会被发现为有效插件（名称不符合插件 ID 规则）。
-            QDir(rootDirectory.filePath(backupName)).removeRecursively();
+            if (cleanupRoots) cleanupRoots->append(rootDirectory.filePath(backupName));
+            else QDir(rootDirectory.filePath(backupName)).removeRecursively();
         }
         return true;
+    }
+
+    struct PluginDownloadValue
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::deque<QByteArray> chunks;
+        qint64 queued = 0;
+        bool eof = false;
+        QString networkError;
+        std::atomic_bool physicallyFinished{true};
+        QString archivePath, stagingPath; // Generated paths only, published by physicallyFinished.
+        QStringList backupPaths;
+    };
+    struct PluginInstallResult { bool installed = false; QString root, error; };
+    PluginInstallResult installDownloadedPlugin(const MarketplacePlugin& plugin,
+        const std::shared_ptr<PluginDownloadValue>& value)
+    {
+        PluginInstallResult result;
+        result.root = resolvePluginInstallRoot();
+        if (!QDir().mkpath(result.root))
+        { result.error = QStringLiteral("无法创建插件目录：%1").arg(result.root); return result; }
+        value->archivePath = QDir(result.root).filePath(QStringLiteral(".ksword-plugin-download-%1.zip")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        QSaveFile output(value->archivePath); output.setDirectWriteFallback(false);
+        if (!output.open(QIODevice::WriteOnly))
+        { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        qint64 total = 0;
+        for (;;)
+        {
+            QByteArray chunk; QString error; bool eof = false;
+            {
+                std::unique_lock lock(value->mutex);
+                value->changed.wait(lock, [&] { return value->eof || !value->chunks.empty(); });
+                if (!value->chunks.empty())
+                { chunk = std::move(value->chunks.front()); value->chunks.pop_front(); value->queued -= chunk.size(); }
+                else { eof = value->eof; error = value->networkError; }
+            }
+            if (eof)
+            {
+                if (!error.isEmpty()) { result.error = error; return result; }
+                break;
+            }
+            total += chunk.size();
+            if (total > kMaxMarketplaceArchiveBytes)
+            { result.error = QStringLiteral("插件包为空或超过 256 MiB 限制。"); return result; }
+            hash.addData(chunk);
+            qint64 at = 0;
+            while (at < chunk.size())
+            {
+                const auto written = output.write(chunk.constData() + at, chunk.size() - at);
+                if (written <= 0) { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+                at += written;
+            }
+        }
+        if (total == 0) { result.error = QStringLiteral("插件包为空或超过 256 MiB 限制。"); return result; }
+        if (QString::fromLatin1(hash.result().toHex()).compare(plugin.sha256, Qt::CaseInsensitive) != 0)
+        { result.error = QStringLiteral("SHA-256 校验失败，已拒绝安装插件。"); return result; }
+        if (!output.commit())
+        { result.error = QStringLiteral("无法准备已验证的插件包：%1").arg(output.errorString()); return result; }
+        value->stagingPath = QDir(result.root).filePath(QStringLiteral(".ksword-plugin-stage-%1-%2")
+            .arg(plugin.installDirectory, QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        if (!QDir().mkpath(value->stagingPath))
+        { result.error = QStringLiteral("无法创建插件安装暂存目录。"); return result; }
+        const auto powerShell = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+        if (powerShell.isEmpty())
+        { result.error = QStringLiteral("未找到 Windows PowerShell，无法解压插件包。"); return result; }
+        const auto command = ks::plugin_host::buildArchiveExtractionScript(value->archivePath, value->stagingPath,
+            ks::plugin_host::ArchiveLayout{plugin.installDirectory, true});
+        if (command.isEmpty()) { result.error = QStringLiteral("archive_policy_invalid"); return result; }
+        QProcess extractor;
+        extractor.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) { args->flags |= CREATE_NO_WINDOW; });
+        extractor.start(powerShell, {QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"),
+            QStringLiteral("-NonInteractive"), QStringLiteral("-Command"), command});
+        if (!extractor.waitForStarted(-1))
+        { result.error = QStringLiteral("无法启动插件解压器：%1").arg(extractor.errorString()); return result; }
+        while (extractor.state() != QProcess::NotRunning) extractor.waitForFinished(50);
+        if (extractor.exitStatus() != QProcess::NormalExit || extractor.exitCode() != 0)
+        { result.error = QStringLiteral("插件包解压失败（退出码 %1）。").arg(extractor.exitCode())
+            + QString::fromLocal8Bit(extractor.readAllStandardError()); return result; }
+        result.installed = promoteExtractedPlugin(plugin, result.root, value->stagingPath, &result.error, &value->backupPaths);
+        return result;
     }
 
     class PluginManagerDialog final : public QDialog
@@ -3063,51 +3153,116 @@ namespace
             }
         }
 
+        ~PluginManagerDialog() override { if (m_archiveOperation) m_archiveOperation->close(); }
+
         void downloadMarketplaceArchive(
             const MarketplacePlugin& plugin,
             InstallCompletion completion = {})
         {
-            if (plugin.upstreamAssets)
-            {
-                installUpstreamAssets(plugin, completion);
-                return;
-            }
+            if (m_archiveOperation && m_archiveOperation->isBusy())
+            { completeMarketplaceInstall(completion, false, QStringLiteral("上游插件安装已在进行。")); return; }
+            if (plugin.upstreamAssets) { installUpstreamAssets(plugin, completion); return; }
+            if (!m_archiveOperation) m_archiveOperation = new ks::ui::AsyncOperation(this);
+            if (m_archiveOperation->isBusy())
+            { completeMarketplaceInstall(completion, false, QStringLiteral("上游插件安装已在进行。")); return; }
+            const auto value = std::make_shared<PluginDownloadValue>();
+            auto cleanup = ks::ui::RetainedCleanupJob::create([value]() {
+                bool clean = true;
+                if (!value->archivePath.isEmpty() && QFileInfo::exists(value->archivePath))
+                    clean = QFile::remove(value->archivePath) && clean;
+                if (!value->stagingPath.isEmpty() && QFileInfo::exists(value->stagingPath))
+                    clean = QDir(value->stagingPath).removeRecursively() && clean;
+                for (const auto& path : value->backupPaths)
+                    if (QFileInfo::exists(path)) clean = QDir(path).removeRecursively() && clean;
+                return clean;
+            }, 0, [value]() {
+                { std::lock_guard lock(value->mutex);
+                  if (!value->eof) { value->networkError = QStringLiteral("操作已取消"); value->eof = true; } }
+                value->changed.notify_all();
+            }, [value]() { return value->physicallyFinished.load(std::memory_order_acquire); });
+            if (!cleanup) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            bool closing = false;
+            { std::lock_guard lock(value->mutex); closing = value->eof;
+              if (!closing) value->physicallyFinished.store(false, std::memory_order_release); }
+            if (closing) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            struct Request { MarketplacePlugin plugin; std::shared_ptr<PluginDownloadValue> value;
+                std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup; };
+            const auto accepted = m_archiveOperation->submitTransaction<Request, PluginInstallResult>(
+                {plugin, value, cleanup}, [](const Request& request) {
+                    struct Finished { const Request& request; ~Finished() {
+                        request.value->physicallyFinished.store(true, std::memory_order_release);
+                        request.cleanup->notifyReadyToAttempt();
+                    }} finished{request};
+                    return installDownloadedPlugin(request.plugin, request.value);
+                }, [this, plugin, completion](const PluginInstallResult& result, std::uint64_t) {
+                    QTimer::singleShot(0, this, [this, plugin, completion, result]() {
+                        if (!result.installed) { completeMarketplaceInstall(completion, false, result.error); return; }
+                        refreshPlugins(true);
+                        const auto message = QStringLiteral("已一键安装并验证 %1 到 %2。")
+                            .arg(plugin.name, QDir::toNativeSeparators(QDir(result.root).filePath(plugin.installDirectory)));
+                        m_status->setText(message);
+                        updateInstallProgress(QStringLiteral("%1 安装完成").arg(plugin.name), 100);
+                        const QPointer<PluginManagerDialog> self(this);
+                        if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"),
+                            QStringLiteral("%1 已安装，可立即从“插件”菜单调用。").arg(plugin.name));
+                        if (self) completeMarketplaceInstall(completion, true, message);
+                    });
+                    return true;
+                }, [this, completion](std::exception_ptr) {
+                    QTimer::singleShot(0, this, [this, completion]() {
+                        completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。"));
+                    });
+                }, [value, cleanup](ks::ui::AsyncOperationOutcome outcome) {
+                    if (outcome == ks::ui::AsyncOperationOutcome::BusyRejected) {
+                        value->physicallyFinished.store(true, std::memory_order_release);
+                        cleanup->notifyReadyToAttempt();
+                    }
+                });
+            if (!accepted) { value->physicallyFinished.store(true, std::memory_order_release);
+                cleanup->notifyReadyToAttempt(); completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
             m_status->setText(QStringLiteral("正在下载 %1；将校验 SHA-256 后一键安装。").arg(plugin.name));
             updateInstallProgress(QStringLiteral("正在下载 %1").arg(plugin.name), 0);
             QNetworkRequest request(plugin.archiveUrl);
             request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("KSword-PluginMarketplace/1"));
             QNetworkReply* reply = m_networkManager->get(request);
+            reply->setReadBufferSize(4 * 1024 * 1024);
+            auto* pumpTimer = new QTimer(reply); pumpTimer->setInterval(20);
+            const auto sourceDone = std::make_shared<bool>(false);
+            const auto sourceError = std::make_shared<QString>();
+            const auto pump = [reply, pumpTimer, value, sourceDone, sourceError]() {
+                if (value->physicallyFinished.load(std::memory_order_acquire)) {
+                    pumpTimer->stop(); reply->abort(); reply->deleteLater(); return;
+                }
+                QElapsedTimer budget; budget.start();
+                while (reply->bytesAvailable() > 0 && budget.elapsed() < 4) {
+                    { std::lock_guard lock(value->mutex); if (value->queued >= 4 * 1024 * 1024) break; }
+                    auto bytes = reply->read(64 * 1024);
+                    if (bytes.isEmpty()) break;
+                    { std::lock_guard lock(value->mutex); value->queued += bytes.size(); value->chunks.push_back(std::move(bytes)); }
+                    value->changed.notify_one();
+                }
+                if (*sourceDone && reply->bytesAvailable() == 0) {
+                    { std::lock_guard lock(value->mutex); value->eof = true; value->networkError = *sourceError; }
+                    value->changed.notify_all(); pumpTimer->stop(); reply->deleteLater();
+                }
+            };
             connect(reply, &QNetworkReply::downloadProgress, this,
-                [this, plugin](const qint64 received, const qint64 total) {
-                    updateDownloadProgress(plugin, received, total);
-                });
-            connect(reply, &QNetworkReply::finished, this, [this, reply, plugin, completion]() {
-                const QByteArray archiveBytes = reply->readAll();
-                const bool networkOk = reply->error() == QNetworkReply::NoError;
-                const QString networkError = networkOk ? QString() : networkReplyErrorText(reply);
-                reply->deleteLater();
-                if (!networkOk)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("插件下载失败：%1").arg(networkError));
-                    return;
-                }
-                if (archiveBytes.isEmpty() || archiveBytes.size() > kMaxMarketplaceArchiveBytes)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("插件包为空或超过 256 MiB 限制。"));
-                    return;
-                }
-                updateInstallProgress(QStringLiteral("正在校验 %1 的 SHA-256").arg(plugin.name), 75);
-                const QString actualSha256 = QString::fromLatin1(QCryptographicHash::hash(archiveBytes, QCryptographicHash::Sha256).toHex());
-                if (actualSha256.compare(plugin.sha256, Qt::CaseInsensitive) != 0)
-                {
-                    completeMarketplaceInstall(completion, false, QStringLiteral("SHA-256 校验失败，已拒绝安装插件。"));
-                    return;
-                }
-                updateInstallProgress(QStringLiteral("SHA-256 校验通过"), 80);
-                installMarketplaceArchive(plugin, archiveBytes, completion);
+                [this, plugin](qint64 received, qint64 total) { updateDownloadProgress(plugin, received, total); });
+            connect(reply, &QIODevice::readyRead, reply, pump);
+            connect(pumpTimer, &QTimer::timeout, reply, pump);
+            connect(reply, &QNetworkReply::finished, reply, [reply, sourceDone, sourceError, pump]() {
+                *sourceDone = true;
+                if (reply->error() != QNetworkReply::NoError)
+                    *sourceError = QStringLiteral("插件下载失败：%1").arg(networkReplyErrorText(reply));
+                pump();
             });
+            connect(reply, &QObject::destroyed, QCoreApplication::instance(), [value]() {
+                { std::lock_guard lock(value->mutex); if (!value->eof) {
+                    value->eof = true; value->networkError = QStringLiteral("操作已取消"); } }
+                value->changed.notify_all();
+            });
+            pumpTimer->start();
         }
-
         void installUpstreamAssets(const MarketplacePlugin& plugin, const InstallCompletion& completion)
         {
             if (m_upstreamInstaller)
@@ -3138,164 +3293,68 @@ namespace
                         completeMarketplaceInstall(completion, false, error);
                         return;
                     }
-                    QString installError;
-                    const bool promoted = promoteExtractedPlugin(plugin, pluginRoot, stage, &installError);
-                    // Stage is a generated sibling below this exact plugin root;
-                    // successful root-layout promotion has already renamed it.
-                    if (QFileInfo::exists(stage))
-                    {
-                        const auto canonicalRoot = QFileInfo(pluginRoot).canonicalFilePath();
-                        const auto canonicalStage = QFileInfo(stage).canonicalFilePath();
-                        if (!canonicalRoot.isEmpty() && canonicalStage.startsWith(canonicalRoot + QLatin1Char('/'), Qt::CaseInsensitive) &&
-                            QFileInfo(stage).fileName().startsWith(QStringLiteral(".ksword-plugin-stage-%1-").arg(plugin.id)) && !QFileInfo(stage).isSymLink())
-                            QDir(canonicalStage).removeRecursively();
-                    }
-                    if (!promoted)
-                    {
-                        completeMarketplaceInstall(completion, false, installError);
-                        return;
-                    }
-                    refreshPlugins(true);
-                    populateMarketplaceTable();
-                    selectMarketplaceEntry();
-                    const auto message = QStringLiteral("上游插件 %1 已安装到：%2").arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
-                    m_status->setText(message);
-                    updateInstallProgress(QStringLiteral("上游插件安装完成"), 100);
-                    const QPointer<PluginManagerDialog> self(this);
-                    if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"), message);
-                    if (!self) return;
-                    completeMarketplaceInstall(completion, true, message);
-                });
+                    promoteUpstreamStage(plugin, pluginRoot, stage, completion);                });
         }
 
-        void installMarketplaceArchive(
-            const MarketplacePlugin& plugin,
-            const QByteArray& archiveBytes,
-            const InstallCompletion& completion)
+        void promoteUpstreamStage(const MarketplacePlugin& plugin, const QString& root,
+            const QString& stage, const InstallCompletion& completion)
         {
-            const QString pluginRoot = resolvePluginInstallRoot();
-            if (!QDir().mkpath(pluginRoot))
-            {
-                completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件目录：%1")
-                    .arg(QDir::toNativeSeparators(pluginRoot)));
-                return;
-            }
-
-            {
-                updateInstallProgress(QStringLiteral("正在准备 %1 的已验证安装包").arg(plugin.name), 84);
-                const QString archivePath = QDir(pluginRoot).filePath(
-                    QStringLiteral(".ksword-plugin-download-%1.zip")
-                        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
-                QSaveFile archiveFile(archivePath);
-                if (!archiveFile.open(QIODevice::WriteOnly) ||
-                    archiveFile.write(archiveBytes) != archiveBytes.size() ||
-                    !archiveFile.commit())
-                {
-                    QFile::remove(archivePath);
-                    completeMarketplaceInstall(completion, false,
-                        QStringLiteral("无法准备已验证的插件包：%1").arg(archiveFile.errorString()));
-                    return;
+            if (!m_archiveOperation) m_archiveOperation = new ks::ui::AsyncOperation(this);
+            const auto value = std::make_shared<PluginDownloadValue>();
+            value->stagingPath = stage;
+            const auto cleanup = ks::ui::RetainedCleanupJob::create([value, root, plugin]() {
+                bool clean = true;
+                if (QFileInfo::exists(value->stagingPath)) {
+                    const auto canonicalRoot = QFileInfo(root).canonicalFilePath();
+                    const auto canonicalStage = QFileInfo(value->stagingPath).canonicalFilePath();
+                    if (canonicalRoot.isEmpty() || !canonicalStage.startsWith(canonicalRoot + QLatin1Char('/'), Qt::CaseInsensitive) ||
+                        !QFileInfo(value->stagingPath).fileName().startsWith(QStringLiteral(".ksword-plugin-stage-%1-").arg(plugin.id)) ||
+                        QFileInfo(value->stagingPath).isSymLink()) return false;
+                    clean = QDir(canonicalStage).removeRecursively();
                 }
-                installVerifiedMarketplaceArchive(plugin, pluginRoot, archivePath, completion);
-            }
-        }
-
-        void installVerifiedMarketplaceArchive(
-            const MarketplacePlugin& plugin,
-            const QString& pluginRoot,
-            const QString& archivePath,
-            const InstallCompletion& completion)
-        {
-            const QString stagingName = QStringLiteral(".ksword-plugin-stage-%1-%2")
-                .arg(plugin.installDirectory, QUuid::createUuid().toString(QUuid::WithoutBraces));
-            const QString stagingPath = QDir(pluginRoot).filePath(stagingName);
-            if (!QDir().mkpath(stagingPath))
-            {
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。"));
-                return;
-            }
-
-            const QString powerShell = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
-            if (powerShell.isEmpty())
-            {
-                QDir(stagingPath).removeRecursively();
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false, QStringLiteral("未找到 Windows PowerShell，无法解压插件包。"));
-                return;
-            }
-
-            // 普通 ZIP 与官方资产采用同一预检/有界提取；promotion 仍验证真实清单。
-            const ks::plugin_host::ArchiveLayout layout{plugin.installDirectory, true};
-            const QString command = ks::plugin_host::buildArchiveExtractionScript(archivePath, stagingPath, layout);
-            if (command.isEmpty())
-            {
-                QDir(stagingPath).removeRecursively();
-                QFile::remove(archivePath);
-                completeMarketplaceInstall(completion, false,
-                    QStringLiteral("插件包已验证，但安装被拒绝：%1").arg(QStringLiteral("archive_policy_invalid")));
-                return;
-            }
-            auto* extractor = new QProcess(this);
-            extractor->setProcessChannelMode(QProcess::SeparateChannels);
-            extractor->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* arguments)
-            {
-                arguments->flags |= CREATE_NO_WINDOW;
-            });
-            extractor->setProgram(powerShell);
-            extractor->setArguments(QStringList{
-                QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"),
-                QStringLiteral("-Command"), command });
-            m_status->setText(QStringLiteral("已验证 %1，正在安全解压并安装…").arg(plugin.name));
-            updateInstallProgress(QStringLiteral("正在安全解压 %1").arg(plugin.name), 90);
-            connect(extractor, &QProcess::errorOccurred, this,
-                [this, extractor, archivePath, stagingPath, completion](const QProcess::ProcessError error) {
-                    if (error != QProcess::FailedToStart) return;
-                    QDir(stagingPath).removeRecursively();
-                    QFile::remove(archivePath);
-                    completeMarketplaceInstall(completion, false, QStringLiteral("无法启动插件解压器：%1")
-                        .arg(extractor->errorString()));
-                    extractor->deleteLater();
+                for (const auto& path : value->backupPaths)
+                    if (QFileInfo::exists(path)) clean = QDir(path).removeRecursively() && clean;
+                return clean;
+            }, 0, [value]() { std::lock_guard lock(value->mutex); value->eof = true; },
+                [value]() { return value->physicallyFinished.load(std::memory_order_acquire); });
+            if (!cleanup) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            bool closing = false;
+            { std::lock_guard lock(value->mutex); closing = value->eof;
+              if (!closing) value->physicallyFinished.store(false, std::memory_order_release); }
+            if (closing) { completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); return; }
+            struct Request { MarketplacePlugin plugin; QString root; std::shared_ptr<PluginDownloadValue> value;
+                std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup; };
+            const auto accepted = m_archiveOperation->submitTransaction<Request, PluginInstallResult>(
+                {plugin, root, value, cleanup}, [](const Request& request) {
+                    struct Finished { const Request& request; ~Finished() {
+                        request.value->physicallyFinished.store(true, std::memory_order_release);
+                        request.cleanup->notifyReadyToAttempt();
+                    }} finished{request};
+                    PluginInstallResult result; result.root = request.root;
+                    result.installed = promoteExtractedPlugin(request.plugin, request.root,
+                        request.value->stagingPath, &result.error, &request.value->backupPaths);
+                    return result;
+                }, [this, plugin, completion](const PluginInstallResult& result, std::uint64_t) {
+                    QTimer::singleShot(0, this, [this, plugin, completion, result]() {
+                        if (!result.installed) { completeMarketplaceInstall(completion, false, result.error); return; }
+                        refreshPlugins(true); populateMarketplaceTable(); selectMarketplaceEntry();
+                        const auto message = QStringLiteral("上游插件 %1 已安装到：%2").arg(plugin.name,
+                            QDir::toNativeSeparators(QDir(result.root).filePath(plugin.installDirectory)));
+                        m_status->setText(message); updateInstallProgress(QStringLiteral("上游插件安装完成"), 100);
+                        const QPointer<PluginManagerDialog> self(this);
+                        if (!completion) QMessageBox::information(this, QStringLiteral("插件商城"), message);
+                        if (self) completeMarketplaceInstall(completion, true, message);
+                    }); return true;
+                }, [this, completion](std::exception_ptr) {
+                    QTimer::singleShot(0, this, [this, completion]() {
+                        completeMarketplaceInstall(completion, false, QStringLiteral("无法创建插件安装暂存目录。")); });
+                }, [value, cleanup](ks::ui::AsyncOperationOutcome outcome) {
+                    if (outcome == ks::ui::AsyncOperationOutcome::BusyRejected) {
+                        value->physicallyFinished.store(true, std::memory_order_release); cleanup->notifyReadyToAttempt(); }
                 });
-            connect(extractor, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-                [this, extractor, archivePath, plugin, pluginRoot, stagingPath, completion](const int exitCode, const QProcess::ExitStatus exitStatus) {
-                    const QString details = QString::fromLocal8Bit(extractor->readAllStandardError()).trimmed();
-                    extractor->deleteLater();
-                    QFile::remove(archivePath);
-                    if (exitStatus != QProcess::NormalExit || exitCode != 0)
-                    {
-                        QDir(stagingPath).removeRecursively();
-                        QString message = QStringLiteral("插件包解压失败（退出码 %1）。").arg(exitCode);
-                        if (!details.isEmpty()) message += QStringLiteral("\n%1").arg(details);
-                        completeMarketplaceInstall(completion, false, message);
-                        return;
-                    }
-
-                    updateInstallProgress(QStringLiteral("正在验证并替换 %1").arg(plugin.name), 95);
-                    QString installError;
-                    const bool installed = promoteExtractedPlugin(plugin, pluginRoot, stagingPath, &installError);
-                    QDir(stagingPath).removeRecursively();
-                    if (!installed)
-                    {
-                        completeMarketplaceInstall(completion, false,
-                            QStringLiteral("插件包已验证，但安装被拒绝：%1").arg(installError));
-                        return;
-                    }
-                    refreshPlugins(true);
-                    const QString message = QStringLiteral("已一键安装并验证 %1 到 %2。")
-                        .arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
-                    m_status->setText(message);
-                    updateInstallProgress(QStringLiteral("%1 安装完成").arg(plugin.name), 100);
-                    if (!completion)
-                    {
-                        QMessageBox::information(this, QStringLiteral("插件商城"), QStringLiteral("%1 已安装，可立即从“插件”菜单调用。")
-                            .arg(plugin.name));
-                    }
-                    completeMarketplaceInstall(completion, true, message);
-                });
-            extractor->start();
+            if (!accepted) { value->physicallyFinished.store(true, std::memory_order_release); cleanup->notifyReadyToAttempt();
+                completeMarketplaceInstall(completion, false, QStringLiteral("操作已取消")); }
         }
-
         QTableWidget* m_table = nullptr;
         QTabWidget* m_mainTabs = nullptr;
         QTableWidget* m_marketplaceTable = nullptr;
@@ -3303,6 +3362,7 @@ namespace
         QProgressBar* m_installProgress = nullptr;
         QCheckBox* m_autoUpdateCheck = nullptr;
         QPushButton* m_openFolderButton = nullptr;
+        ks::ui::AsyncOperation* m_archiveOperation = nullptr;
         QNetworkAccessManager* m_networkManager = nullptr;
         QPointer<ks::plugin_host::UpstreamAssetInstaller> m_upstreamInstaller;
         QList<PluginDescriptor> m_plugins;
