@@ -453,17 +453,23 @@ namespace ks::winapi_monitor
         ::CloseHandle(process);
         return true;
     }
-    inline bool injectAgent(DWORD pid, const std::wstring& path, std::wstring* error)
+    inline bool injectAgent(DWORD pid, const std::wstring& path, std::wstring* error,
+        HANDLE cancelEvent = nullptr, std::uint64_t expectedCreation = 0)
     {
         if (error) error->clear();
         HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
         if (!process) return platformFailure(error, L"OpenProcess Agent target", ::GetLastError());
         USHORT machine = 0, image = 0;
         const auto creation = processCreationIdentity(process);
+        if (expectedCreation && creation != expectedCreation)
+        {
+            ::CloseHandle(process);
+            return platformFailure(error, L"target process identity changed", ERROR_INVALID_HANDLE);
+        }
         const bool valid = creation && queryProcessMachine(process, &machine, error) && queryImageMachine(path, &image, error);
         const DWORD saved = ::GetLastError(); ::CloseHandle(process);
         if (!valid) { ::SetLastError(saved); return false; }
         if (image != machine) return platformFailure(error, L"Agent DLL does not match target architecture", ERROR_BAD_EXE_FORMAT);
-        return injectAgentNative(pid, path, error, creation);
+        return injectAgentNative(pid, path, error, creation, cancelEvent);
     }
 }

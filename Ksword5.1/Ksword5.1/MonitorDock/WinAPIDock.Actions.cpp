@@ -948,72 +948,6 @@ void WinAPIDock::browseAgentDllPath()
     }
 }
 
-bool WinAPIDock::prepareSessionArtifacts(const std::uint32_t pidValue, QString* errorTextOut)
-{
-    if (errorTextOut != nullptr)
-    {
-        errorTextOut->clear();
-    }
-
-    std::wstring sessionError;
-    if (!ks::winapi_monitor::addSessionDirectoryReader(pidValue, &sessionError))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法准备跨账户会话目录：%1").arg(QString::fromStdWString(sessionError));
-        }
-        return false;
-    }
-
-    m_currentSessionPid = pidValue;
-    m_currentPipeName = QString::fromStdWString(ks::winapi_monitor::buildPipeNameForPid(pidValue));
-    m_currentConfigPath = QString::fromStdWString(ks::winapi_monitor::buildConfigPathForPid(pidValue));
-    m_currentStopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pidValue));
-    m_currentSessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    return true;
-}
-
-bool WinAPIDock::hasResidentAgentForProcess(const std::uint32_t pidValue)
-{
-    // hasResidentAgentForProcess：
-    // - 输入：pidValue 为准备启动会话的目标 PID；
-    // - 处理：用 PID 和进程创建时间确认同一实例仍保留此前已注入的常驻 Agent；
-    // - 返回：确认可复用时为 true，身份无法确认或 PID 已复用时清除缓存并返回 false。
-    if (pidValue == 0 || pidValue != m_residentAgentPid || m_residentAgentCreationTime100ns == 0)
-    {
-        return false;
-    }
-
-    std::uint64_t observedCreationTime100ns = 0;
-    if (!ks::process::QueryProcessCreationTimeByPid(pidValue, &observedCreationTime100ns, nullptr)
-        || observedCreationTime100ns != m_residentAgentCreationTime100ns)
-    {
-        m_residentAgentPid = 0;
-        m_residentAgentCreationTime100ns = 0;
-        return false;
-    }
-    return true;
-}
-
-void WinAPIDock::rememberResidentAgentForProcess(const std::uint32_t pidValue)
-{
-    // rememberResidentAgentForProcess：
-    // - 输入：pidValue 为刚刚完成 DLL 注入的目标 PID；
-    // - 处理：记录 PID 和创建时间，后续同一进程实例的 start-stop-start 复用正在等待的 Agent worker；
-    // - 返回：无返回值，无法读取身份时主动放弃缓存，下一会话将保守地重新执行注入。
-    std::uint64_t creationTime100ns = 0;
-    if (!ks::process::QueryProcessCreationTimeByPid(pidValue, &creationTime100ns, nullptr)
-        || creationTime100ns == 0)
-    {
-        m_residentAgentPid = 0;
-        m_residentAgentCreationTime100ns = 0;
-        return;
-    }
-
-    m_residentAgentPid = pidValue;
-    m_residentAgentCreationTime100ns = creationTime100ns;
-}
-
 QString WinAPIDock::fakeSuccessRulesIniText() const
 {
     // fakeSuccessRulesIniText:
@@ -1289,48 +1223,10 @@ void WinAPIDock::removeSelectedFakeSuccessRule()
     updateActionState();
 }
 
-bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
+QString WinAPIDock::freezeSessionOptions() const
 {
-    if (errorTextOut != nullptr)
-    {
-        errorTextOut->clear();
-    }
-    if (!validateFakeSuccessRules(errorTextOut))
-    {
-        return false;
-    }
-
-    QSaveFile configFile(m_currentConfigPath);
-    if (!configFile.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法写入会话配置：%1").arg(m_currentConfigPath);
-        }
-        return false;
-    }
-
-    QTextStream outputStream(&configFile);
-    outputStream.setEncoding(QStringConverter::Utf16LE);
-    outputStream.setGenerateByteOrderMark(true);
-    outputStream << "[monitor]\n";
-    outputStream << "pipe_name=" << m_currentPipeName << '\n';
-    outputStream << "root_stop_flag_path=" << m_currentStopFlagPath << '\n';
-    outputStream << "stop_flag_path=" << m_currentStopFlagPath << '\n';
-    outputStream << "session_id=" << m_currentSessionId << '\n';
-    std::wstring controllerSid;
-    if (!ks::winapi_monitor::currentProcessUserSidString(&controllerSid))
-    {
-        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法读取当前控制端 SID。");
-        return false;
-    }
-    outputStream << "controller_sid=" << QString::fromStdWString(controllerSid) << '\n';
-    const auto endpoint = m_injectionBroker ? m_injectionBroker->endpoint() : ks::winapi_monitor::InjectionEndpoint{};
-    outputStream << "injection_broker_pipe=" << QString::fromStdWString(endpoint.pipeName) << '\n';
-    outputStream << "injection_broker_token=" << QString::fromStdWString(endpoint.token) << '\n';
-    outputStream << "injection_broker_pid=" << endpoint.hostPid << '\n';
-    outputStream << "injection_broker_creation=" << endpoint.hostCreation << '\n';
-    outputStream << "agent_dll_path=" << (m_agentDllPathEdit != nullptr ? QDir::cleanPath(m_agentDllPathEdit->text().trimmed()) : QString()) << '\n';
+    QString options;
+    QTextStream outputStream(&options);
     outputStream << "enable_file=" << ((m_hookFileCheck != nullptr && m_hookFileCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_registry=" << ((m_hookRegistryCheck != nullptr && m_hookRegistryCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "enable_network=" << ((m_hookNetworkCheck != nullptr && m_hookNetworkCheck->isChecked()) ? 1 : 0) << '\n';
@@ -1348,32 +1244,7 @@ bool WinAPIDock::writeSessionConfigFile(QString* errorTextOut) const
     outputStream << "fake_success_raw_fallback=" << ((m_fakeRawFallbackCheck != nullptr && m_fakeRawFallbackCheck->isChecked()) ? 1 : 0) << '\n';
     outputStream << "fake_success_rules=" << fakeSuccessRulesIniText() << '\n';
     outputStream << "detail_limit=" << static_cast<int>(ks::winapi_monitor::kMaxDetailChars - 1) << '\n';
-    outputStream.flush();
-    if (outputStream.status() != QTextStream::Ok || !configFile.commit())
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("无法原子提交会话配置：%1").arg(m_currentConfigPath);
-        }
-        return false;
-    }
-    std::wstring aclError;
-    if (!ks::winapi_monitor::grantSessionFileRead(m_currentConfigPath.toStdWString(), m_currentSessionPid, &aclError))
-    {
-        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法授予目标进程读取会话配置的权限：%1").arg(QString::fromStdWString(aclError));
-        return false;
-    }
-
-    // 只有完整新配置已经可见后才撤销停止标记，避免常驻 Agent 在半写入 INI 上启动下一会话。
-    if (QFile::exists(m_currentStopFlagPath) && !QFile::remove(m_currentStopFlagPath))
-    {
-        if (errorTextOut != nullptr)
-        {
-            *errorTextOut = QStringLiteral("会话配置已写入，但无法撤销停止标记：%1").arg(m_currentStopFlagPath);
-        }
-        return false;
-    }
-    return true;
+    return options;
 }
 
 void WinAPIDock::appendInternalEvent(const QString& categoryText, const QString& apiText, const QString& detailText)
@@ -1441,277 +1312,111 @@ void WinAPIDock::showEventDetailDialog(const int rowValue)
 
 void WinAPIDock::startMonitoring()
 {
-    if (m_pipeRunning.load())
-    {
-        return;
-    }
-
-    std::uint32_t pidValue = 0;
-    if (!currentSelectedPid(&pidValue))
+    if (m_pipeRunning.load() || (m_sessionCleanup && !m_sessionCleanup->isComplete())
+        || (m_sessionOperation && m_sessionOperation->isBusy())) return;
+    std::uint32_t pid = 0;
+    if (!currentSelectedPid(&pid))
     {
         QMessageBox::information(this, QStringLiteral("WinAPI 监控"), QStringLiteral("请先选择目标进程或手动输入 PID。"));
         return;
     }
-
-    if (m_agentDllPathEdit == nullptr)
+    if (!m_agentDllPathEdit) return;
+    QString error;
+    if (!validateFakeSuccessRules(&error))
+    { QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), error); return; }
+    WinAPISessionConfig config;
+    config.pid = pid;
+    config.generation = m_sessionGeneration.load() + 1;
+    config.requestedAgentPath = m_agentDllPathEdit->text().trimmed();
+    config.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    config.options = freezeSessionOptions(); // Last GUI access; workers receive only values.
+    config.residentPid = m_residentAgentPid;
+    config.residentCreation = m_residentAgentCreationTime100ns;
+    config.autoInjectChildren = m_autoInjectChildCheck && m_autoInjectChildCheck->isChecked();
+    auto backend = std::make_shared<WinAPISessionBackend>(std::move(config));
+    auto cleanup = ks::ui::RetainedCleanupJob::create([backend]() { return backend->cleanup(); }, 0,
+        [backend]() { backend->requestStop(); });
+    if (!cleanup || cleanup->isCleanupRequested()) return; // An old shutdown epoch is never reopened.
+    m_sessionBackend = backend; m_sessionCleanup = cleanup;
+    m_currentSessionPid = pid; m_currentSessionId = backend->config.sessionId;
+    m_sessionGeneration.store(backend->config.generation);
+    m_startupReported = false; m_stopReported = false; m_stopping = false; m_reportedCleanupAttempt = 0;
+    if (m_eventTable)
+    { m_eventTable->clearContents(); m_eventTable->setRowCount(0); m_visibleEventCount = 0; }
     {
-        return;
+        const std::lock_guard<std::mutex> lock(m_pendingMutex);
+        m_pendingRows.clear(); m_pendingDroppedRows = 0; m_agentDroppedRows.clear(); m_evictedRows = 0;
     }
-
-    std::wstring selectedDllPath, platformError;
-    if (!ks::winapi_monitor::resolveAgentPath(pidValue, m_agentDllPathEdit->text().trimmed().toStdWString(),
-            &selectedDllPath, &platformError))
-    {
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-            QStringLiteral("无法选择匹配目标进程位数的 Agent DLL：%1").arg(QString::fromStdWString(platformError)));
-        return;
-    }
-    const QString dllPathText = QDir::cleanPath(QString::fromStdWString(selectedDllPath));
-    m_agentDllPathEdit->setText(dllPathText);
-
-    if (m_pipeThread != nullptr) stopMonitoringInternal(true);
-    DWORD leaseError = 0;
-    if (!m_sessionLease.acquire(pidValue, &leaseError))
-    {
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-            QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。").arg(pidValue).arg(leaseError));
-        return;
-    }
-    QString errorText;
-    if (!prepareSessionArtifacts(pidValue, &errorText))
-    {
-        m_sessionLease.reset();
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), errorText);
-        return;
-    }
-    m_injectionBroker.reset();
-    if (m_autoInjectChildCheck != nullptr && m_autoInjectChildCheck->isChecked())
-    {
-        auto broker = std::make_unique<ks::winapi_monitor::InjectionBroker>();
-        std::wstring brokerError;
-        if (!broker->start(pidValue, selectedDllPath, m_currentSessionId.toStdWString(),
-                m_currentStopFlagPath.toStdWString(), &brokerError))
-        {
-            m_sessionLease.reset();
-            QMessageBox::warning(this, QStringLiteral("WinAPI 监控"),
-                QStringLiteral("DLL 注入失败：%1").arg(QString::fromStdWString(brokerError)));
-            return;
-        }
-        m_injectionBroker = std::move(broker);
-    }
-    if (!writeSessionConfigFile(&errorText))
-    {
-        m_injectionBroker.reset();
-        m_sessionLease.reset();
-        QMessageBox::warning(this, QStringLiteral("WinAPI 监控"), errorText);
-        return;
-    }
-
-    // 同一进程实例停止后 Agent worker 会驻留等待下一份配置；复用它避免重复 LoadLibraryW 增加模块引用计数。
-    const bool reuseResidentAgent = hasResidentAgentForProcess(pidValue);
-
-    if (m_eventTable != nullptr)
-    {
-        m_eventTable->clearContents();
-        m_eventTable->setRowCount(0);
-        m_visibleEventCount = 0;
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.clear();
-        m_pendingDroppedRows = 0;
-        m_agentDroppedRows.clear();
-        m_evictedRows = 0;
-    }
-
-    m_hookState = HookState::Waiting;
-    m_definitionMismatch = false;
-    ++m_sessionGeneration;
-    resetCoverageView();
-    m_pipeStopFlag.store(false);
-    m_pipeRunning.store(true);
-    m_pipeConnected.store(false);
-    m_pipeReconnectAttempts.store(0);
-    {
-        std::lock_guard<std::mutex> lock(m_childPipeMutex);
-        m_childSessionLeases.clear();
-        m_childSessionPids.clear();
-        m_childPipeHandleValues.clear();
-    }
-
-    if (m_sessionProgressPid == 0)
-    {
-        m_sessionProgressPid = kPro.addReusable(this, "WinAPI", "准备会话");
-    }
+    m_hookState = HookState::Waiting; m_definitionMismatch = false;
+    resetCoverageView(); m_pipeRunning.store(true); m_pipeConnected.store(false);
+    if (!m_sessionProgressPid) m_sessionProgressPid = kPro.addReusable(this, "WinAPI", "准备会话");
     kPro.set(m_sessionProgressPid, "准备命名管道连接", 0, 20.0f);
-
-    startPipeReadThread();
-
-    std::wstring injectionDetail;
-    const bool injectOk = reuseResidentAgent
-        || ks::winapi_monitor::injectAgent(pidValue, selectedDllPath, &injectionDetail);
-    const std::string detailText = QString::fromStdWString(injectionDetail).toUtf8().toStdString();
-    if (!injectOk)
-    {
-        const QString injectErrorText = QString::fromStdString(detailText);
-        // privilegePromptHandled：权限恢复提示已处理时只保留内部日志与会话清理。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("注入 API 监控 DLL"),
-            injectErrorText);
-        appendInternalEvent(QStringLiteral("内部"), QStringLiteral("InjectDllByPath"), QString::fromStdString(detailText));
-        stopMonitoringInternal(false);
-        if (!privilegePromptHandled)
+    updateActionState(); updateStatusLabel();
+    // Accepted startup is never latest-only. The retained backend serializes its
+    // terminal result with STOP, even if delivery or the page disappears.
+    const auto ticket = m_sessionOperation->submitTransaction<std::shared_ptr<WinAPISessionBackend>, bool>(backend,
+        [cleanup](const auto& value)
         {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("WinAPI 监控"),
-                QStringLiteral("DLL 注入失败：%1").arg(injectErrorText));
-        }
-        return;
-    }
-
-    if (!reuseResidentAgent)
-    {
-        rememberResidentAgentForProcess(pidValue);
-    }
-
-    appendInternalEvent(
-        QStringLiteral("内部"),
-        QStringLiteral("会话已启动"),
-        reuseResidentAgent
-            ? QStringLiteral("已原子写入配置并复用常驻 Agent，等待其重新创建命名管道。")
-            : QStringLiteral("已原子写入配置并完成 DLL 注入，等待 Agent 创建命名管道。"));
-
-    kPro.set(
-        m_sessionProgressPid,
-        reuseResidentAgent ? "复用常驻 Agent，等待握手" : "DLL 已注入，等待 Agent 握手",
-        0,
-        45.0f);
-    updateActionState();
-    updateStatusLabel();
+            const bool started = value->start();
+            if (!started && !cleanup->isCleanupRequested()) cleanup->requestCleanup();
+            return started;
+        },
+        [this](const bool&, std::uint64_t) { pollSessionBackend(); return true; },
+        [this](std::exception_ptr)
+        {
+            m_stopping = true;
+            if (m_sessionBackend) m_sessionBackend->requestStop();
+            if (m_sessionCleanup && !m_sessionCleanup->isCleanupRequested()) m_sessionCleanup->requestCleanup();
+            updateActionState(); updateStatusLabel();
+        },
+        [backend, cleanup](ks::ui::AsyncOperationOutcome outcome)
+        {
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied)
+            { backend->requestStop(); if (!cleanup->isCleanupRequested()) cleanup->requestCleanup(); }
+        });
+    if (!ticket) { backend->requestStop(); if (!cleanup->isCleanupRequested()) cleanup->requestCleanup(); m_stopping = true; }
 }
 
-void WinAPIDock::stopMonitoring()
+void WinAPIDock::stopMonitoring() { stopMonitoringInternal(false); }
+
+void WinAPIDock::stopMonitoringInternal(const bool ownerClosing)
 {
-    stopMonitoringInternal(false);
-}
-
-void WinAPIDock::stopMonitoringInternal(const bool waitForThread)
-{
-    if (!m_pipeRunning.load() && (m_pipeThread == nullptr || !m_pipeThread->joinable()))
-    {
-        m_injectionBroker.reset();
-        return;
-    }
-
-    ++m_sessionGeneration;
-    m_pipeStopFlag.store(true);
-
-    if (!m_currentStopFlagPath.trimmed().isEmpty())
-    {
-        QFile stopFile(m_currentStopFlagPath);
-        if (stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        {
-            stopFile.write("stop");
-            stopFile.close();
-            std::wstring aclError;
-            (void)ks::winapi_monitor::grantSessionFileRead(
-                m_currentStopFlagPath.toStdWString(), m_currentSessionPid, &aclError);
-        }
-    }
-    writeChildStopFlags();
-
-    m_injectionBroker.reset();
-
-    if (m_pipeThread != nullptr && m_pipeThread->joinable())
-    {
-        // The reader owns a synchronous ReadFile, so cancel it before joining.
-        (void)::CancelSynchronousIo(m_pipeThread->native_handle());
-        m_pipeThread->join();
-    }
-    m_pipeThread.reset();
-
-    const std::uintptr_t pipeHandleValue = m_pipeHandleValue.exchange(0);
-    if (pipeHandleValue != 0)
-    {
-        ::CloseHandle(reinterpret_cast<HANDLE>(pipeHandleValue));
-    }
-    joinChildPipeThreads();
-    closeChildPipeHandles();
-    { std::lock_guard<std::mutex> lock(m_childPipeMutex); m_childSessionLeases.clear(); }
-    m_sessionLease.reset();
-
-    m_pipeRunning.store(false);
-    m_pipeConnected.store(false);
-    markCoverageStale();
-    m_hookState = HookState::Waiting;
-    m_definitionMismatch = false;
-    kPro.set(m_sessionProgressPid, "WinAPI 监控已停止", 0, 100.0f);
-
-    if (!waitForThread)
-    {
-        appendInternalEvent(QStringLiteral("内部"), QStringLiteral("停止监控"), QStringLiteral("已发出停止标记并回收本地管道线程。"));
-    }
-
-    updateActionState();
-    updateStatusLabel();
+    if (!m_sessionBackend || !m_sessionCleanup) return;
+    m_sessionBackend->requestStop(); // No file IO, broker destruction or join on GUI.
+    m_stopping = true;
+    if (!m_sessionCleanup->isCleanupRequested() || !ownerClosing)
+        m_sessionCleanup->requestCleanup(); // Only an explicit Stop/Retry retries a failed attempt.
+    if (!ownerClosing) { updateActionState(); updateStatusLabel(); }
 }
 
 void WinAPIDock::terminateHooksForSelectedProcess()
 {
-    std::uint32_t pidValue = 0;
-    if (!currentSelectedPid(&pidValue))
+    std::uint32_t pid = 0;
+    if (!currentSelectedPid(&pid))
     {
         QMessageBox::information(this, QStringLiteral("终止 Hook"), QStringLiteral("请先选择目标进程或手动输入 PID。"));
         return;
     }
-
-    ks::winapi_monitor::SessionLease temporaryLease;
-    DWORD leaseError = 0;
-    if (m_sessionLease.pid() != pidValue && !temporaryLease.acquire(pidValue, &leaseError))
+    if (m_sessionCleanup && !m_sessionCleanup->isComplete())
     {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"),
-            QStringLiteral("无法占用 PID=%1 的 Agent 会话（错误码 %2）；该进程可能已由 API 监控或剪贴板保护占用。").arg(pidValue).arg(leaseError));
+        if (m_currentSessionPid == pid) stopMonitoringInternal(false);
         return;
     }
-
-    std::wstring sessionError;
-    if (!ks::winapi_monitor::addSessionDirectoryReader(pidValue, &sessionError))
-    {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法准备会话目录：%1").arg(QString::fromStdWString(sessionError)));
-        return;
-    }
-
-    const QString stopFlagPath = QString::fromStdWString(ks::winapi_monitor::buildStopFlagPathForPid(pidValue));
-    QFile stopFile(stopFlagPath);
-    if (!stopFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法写入停止标记：%1").arg(stopFlagPath));
-        return;
-    }
-    stopFile.write("stop");
-    stopFile.close();
-    std::wstring aclError;
-    if (!ks::winapi_monitor::grantSessionFileRead(stopFlagPath.toStdWString(), pidValue, &aclError))
-    {
-        QMessageBox::warning(this, QStringLiteral("终止 Hook"), QStringLiteral("无法授予目标进程读取停止标记的权限：%1").arg(QString::fromStdWString(aclError)));
-        return;
-    }
-
-    if (m_pipeRunning.load() && m_currentSessionPid == pidValue)
-    {
-        stopMonitoringInternal(false);
-    }
-    else
-    {
-        appendInternalEvent(
-            QStringLiteral("内部"),
-            QStringLiteral("手动终止 Hook"),
-            QStringLiteral("已为 PID=%1 写入停止标记。").arg(pidValue));
-        updateActionState();
-        updateStatusLabel();
-    }
+    if (m_sessionOperation && m_sessionOperation->isBusy()) return;
+    pollSessionBackend(); // Preserve the prior session's final accepted inbox before replacing its owner.
+    WinAPISessionConfig config;
+    config.pid = pid; config.stopOnly = true;
+    config.generation = m_sessionGeneration.load() + 1;
+    auto backend = std::make_shared<WinAPISessionBackend>(std::move(config));
+    auto cleanup = ks::ui::RetainedCleanupJob::create([backend]() { return backend->cleanup(); }, 0,
+        [backend]() { backend->requestStop(); });
+    if (!cleanup) return;
+    m_sessionBackend = backend; m_sessionCleanup = cleanup;
+    m_currentSessionPid = pid; m_sessionGeneration.store(backend->config.generation);
+    m_startupReported = true; m_stopReported = false; m_stopping = true; m_reportedCleanupAttempt = 0;
+    m_pipeRunning.store(true); m_pipeConnected.store(false);
+    cleanup->requestCleanup();
+    updateActionState(); updateStatusLabel();
 }
 
 void WinAPIDock::applyEventFilter()

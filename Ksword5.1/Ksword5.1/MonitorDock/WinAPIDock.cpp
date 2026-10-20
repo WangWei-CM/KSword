@@ -36,6 +36,7 @@ WinAPIDock::WinAPIDock(QWidget* parent)
     kLogEvent initEvent;
     info << initEvent << "[WinAPIDock] 开始初始化 WinAPI 监控页。" << eol;
 
+    m_sessionOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
     initializeConnections();
     updateActionState();
@@ -62,6 +63,7 @@ void WinAPIDock::changeEvent(QEvent* event)
 
 WinAPIDock::~WinAPIDock()
 {
+    if (m_sessionOperation) m_sessionOperation->close();
     if (m_coverageDispatcher) m_coverageDispatcher->close();
     ++m_coverageFilterTicket;
     stopMonitoringInternal(true);
@@ -225,7 +227,7 @@ void WinAPIDock::updateActionState()
 {
     std::uint32_t currentPidValue = 0;
     const bool hasPid = currentSelectedPid(&currentPidValue);
-    const bool running = m_pipeRunning.load();
+    const bool running = m_pipeRunning.load() || (m_sessionOperation && m_sessionOperation->isBusy());
     for (QCheckBox* check : {m_hookFileCheck, m_hookRegistryCheck, m_hookNetworkCheck,
             m_hookProcessCheck, m_hookLoaderCheck, m_hookClipboardCheck, m_autoInjectChildCheck})
         if (check) check->setEnabled(!running);
@@ -337,7 +339,7 @@ void WinAPIDock::updateActionState()
     }
     if (m_terminateHookButton != nullptr)
     {
-        m_terminateHookButton->setEnabled(hasPid);
+        m_terminateHookButton->setEnabled(hasPid && (!running || currentPidValue == m_currentSessionPid));
     }
     if (m_exportButton != nullptr)
     {
@@ -363,7 +365,12 @@ void WinAPIDock::updateStatusLabel()
 
     if (m_pipeRunning.load())
     {
-        if (m_pipeConnected.load())
+        if (m_stopping)
+        {
+            m_sessionStatusLabel->setText(QStringLiteral("停止监控"));
+            ks::ui::ApplyStatusRole(m_sessionStatusLabel, ks::ui::StatusRole::Warning);
+        }
+        else if (m_pipeConnected.load())
         {
             QString text;
             ks::ui::StatusRole role = ks::ui::StatusRole::Warning;

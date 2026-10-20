@@ -111,7 +111,7 @@ namespace
     }
 }
 
-void WinAPIDock::queueCoverageSnapshot(std::uint32_t pid, std::uint64_t session, std::uint64_t revision,
+void WinAPISessionBackend::queueCoverageSnapshot(std::uint32_t pid, std::uint64_t session, std::uint64_t revision,
     std::vector<ks::winapi_monitor::ApiMonitorEventPacket> rows, bool stale, std::uint64_t generation)
 {
     std::shared_ptr<const std::vector<CoverageDisplayRow>> displayRows;
@@ -131,9 +131,9 @@ void WinAPIDock::queueCoverageSnapshot(std::uint32_t pid, std::uint64_t session,
         }
         displayRows = std::move(prepared);
     }
-    const std::lock_guard<std::mutex> lock(m_pendingMutex);
-    if (generation != m_sessionGeneration.load()) return;
-    auto& pending = m_pendingCoverage[pid];
+    const std::lock_guard<std::mutex> lock(pendingMutex);
+    if (generation != config.generation) return;
+    auto& pending = pendingCoverage[pid];
     if (pending.session && (pending.session != session || pending.revision > revision)) return;
     pending.session = session;
     pending.revision = revision;

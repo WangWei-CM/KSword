@@ -14,6 +14,9 @@
 #include "../../../shared/ApiMonitorInjectionBroker.h"
 
 #include "../UI/AsyncUiDispatcher.h"
+#include "WinAPISessionBackend.h"
+#include "../UI/AsyncOperation.h"
+#include "UI/RetainedCleanupJob.h"
 #include <QByteArray>
 #include <QStringList>
 #include <QString>  // QString：事件文本、样式文本与会话路径缓存。
@@ -99,25 +102,8 @@ public:
     // - internalEvent：是否是 UI/Agent 自己生成的内部状态事件。
     enum class HookState { Waiting, Installing, Active, Partial, Failed, Removed };
 
-    struct EventRow
-    {
-        QString time100nsText;
-        QString categoryText;
-        QString apiText;
-        QString resultText;
-        QString pidTidText;
-        QString detailText;
-        QString agentStatus;
-        std::uint32_t sourcePid = 0;
-        bool resultKnown = true;
-        bool internalEvent = false;
-    };
-
-    struct CoverageDisplayRow
-    {
-        QStringList columns;
-        QString searchText;
-    };
+    using EventRow = WinAPIEventRow;
+    using CoverageDisplayRow = WinAPICoverageDisplayRow;
 
 protected:
     // changeEvent 将主题重着色排队，不启动监控或改变任何会话状态。
@@ -140,38 +126,16 @@ private:
     void stopMonitoring();
     void stopMonitoringInternal(bool waitForThread);
     void terminateHooksForSelectedProcess();
-    bool prepareSessionArtifacts(std::uint32_t pidValue, QString* errorTextOut);
-    bool writeSessionConfigFile(QString* errorTextOut) const;
+    QString freezeSessionOptions() const;
+    void pollSessionBackend();
 
-    // hasResidentAgentForProcess：
-    // - 作用：通过 PID 与创建时间确认同一进程实例是否仍可复用已加载 Agent。
-    // - 返回：可复用时为 true；身份不匹配时会清除缓存。
-    bool hasResidentAgentForProcess(std::uint32_t pidValue);
-
-    // rememberResidentAgentForProcess：
-    // - 作用：在成功注入后记录目标进程身份，供同一 Dock 内下一会话避免重复 LoadLibraryW。
-    void rememberResidentAgentForProcess(std::uint32_t pidValue);
     void appendInternalEvent(const QString& categoryText, const QString& apiText, const QString& detailText);
     QString fakeSuccessRulesIniText() const;
     bool validateFakeSuccessRules(QString* errorTextOut) const;
     void addFakeSuccessRuleFromInputs();
     void removeSelectedFakeSuccessRule();
 
-    void startPipeReadThread();
-    void startChildPipeReadThread(std::uint32_t childPidValue);
-    void closeChildPipeHandles();
-    void joinChildPipeThreads();
-    void writeChildStopFlags();
-    void enqueuePendingRow(EventRow rowValue, std::uint64_t generation);
-    struct CoverageViewState
-    {
-        std::uint64_t session = 0, revision = 0;
-        bool stale = true, complete = false;
-        std::vector<ks::winapi_monitor::ApiMonitorEventPacket> rows;
-        std::shared_ptr<const std::vector<CoverageDisplayRow>> displayRows;
-    };
-    void queueCoverageSnapshot(std::uint32_t pid, std::uint64_t session, std::uint64_t revision,
-        std::vector<ks::winapi_monitor::ApiMonitorEventPacket> rows, bool stale, std::uint64_t generation);
+    using CoverageViewState = WinAPICoverageViewState;
     void flushCoverageUpdates();
     void initializeCoverageTable();
     void refreshCoverageDefinitionHash();
@@ -279,31 +243,23 @@ private:
     std::unordered_map<std::uint32_t, std::uint64_t> m_agentDroppedRows;
     std::size_t m_evictedRows = 0;
     std::size_t m_pendingDroppedRows = 0;                   // m_pendingDroppedRows：因队列或渲染预算丢弃的事件数。
-    std::unique_ptr<std::thread> m_pipeThread;             // m_pipeThread：命名管道读取线程。
-    std::vector<std::unique_ptr<std::thread>> m_childPipeThreads; // m_childPipeThreads：自动注入子进程后的子管道读取线程。
-    std::vector<std::uintptr_t> m_childPipeHandleValues;   // m_childPipeHandleValues：子管道句柄快照，用于停止时打断阻塞 ReadFile。
-    std::vector<ks::winapi_monitor::SessionLease> m_childSessionLeases;
-    std::vector<std::uint32_t> m_childSessionPids;          // m_childSessionPids：已发现的自动注入子进程 PID，用于写停止标记。
-    std::mutex m_childPipeMutex;                           // m_childPipeMutex：保护子管道线程/句柄/PID 容器。
+    std::shared_ptr<WinAPISessionBackend> m_sessionBackend;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_sessionCleanup;
+    ks::ui::AsyncOperation* m_sessionOperation = nullptr;
+    bool m_startupReported = false, m_stopReported = false;
+    bool m_stopping = false;
+    std::uint64_t m_reportedCleanupAttempt = 0;
     std::atomic_bool m_processRefreshPending{ false };     // m_processRefreshPending：进程刷新是否进行中。
     HookState m_hookState = HookState::Waiting;
     bool m_definitionMismatch = false;
     std::atomic_uint64_t m_sessionGeneration{ 0 };
     std::atomic_bool m_pipeRunning{ false };               // m_pipeRunning：当前监控会话是否在运行。
     std::atomic_bool m_pipeConnected{ false };             // m_pipeConnected：是否已成功连上 Agent 管道。
-    std::atomic_bool m_pipeStopFlag{ false };              // m_pipeStopFlag：命名管道线程停止信号。
-    std::atomic_uintptr_t m_pipeHandleValue{ 0 };          // m_pipeHandleValue：后台线程持有的管道句柄数值。
-    std::atomic_uint32_t m_pipeReconnectAttempts{ 0 };     // m_pipeReconnectAttempts：当前会话已使用的读端短暂断线重连次数。
     QTimer* m_uiFlushTimer = nullptr;                      // m_uiFlushTimer：批量刷新事件表的定时器。
     int m_sessionProgressPid = 0;                          // m_sessionProgressPid：kPro 任务卡片 ID。
     std::uint32_t m_currentSessionPid = 0;                 // m_currentSessionPid：当前监控中的目标 PID。
     std::uint32_t m_residentAgentPid = 0;                  // m_residentAgentPid：已成功注入且仍可能常驻 Agent 的 PID。
     std::uint64_t m_residentAgentCreationTime100ns = 0;    // m_residentAgentCreationTime100ns：常驻 Agent 所属进程实例的创建时间，防 PID 复用。
-    QString m_currentPipeName;                             // m_currentPipeName：当前命名管道名。
-    QString m_currentConfigPath;                           // m_currentConfigPath：当前会话配置文件路径。
-    QString m_currentStopFlagPath;                         // m_currentStopFlagPath：当前停止标记文件路径。
-    ks::winapi_monitor::SessionLease m_sessionLease;
-    std::unique_ptr<ks::winapi_monitor::InjectionBroker> m_injectionBroker;
     QString m_currentSessionId;                            // m_currentSessionId：每次启动唯一标识，防 stop/start 过快时遗漏停止标记。
     qint64 m_lastProcessRefreshMs = 0;                     // m_lastProcessRefreshMs：上次完成进程快照的时间戳（ms）。
     QString m_eventFilterKeyword; // Existing rows are immutable; rescan only when the keyword changes.
