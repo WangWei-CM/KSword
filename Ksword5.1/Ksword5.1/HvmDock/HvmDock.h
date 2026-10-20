@@ -23,6 +23,7 @@
 
 #include <QString>
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <functional>
 
@@ -45,6 +46,9 @@ namespace ksword::hvm
 class HvmDock final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const HvmDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // Action：这一页能发出的全部请求，一条不落地对应右键菜单里的一项。
     enum class Action
     {
@@ -97,6 +101,8 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     void initializeUi();
     void applyState(const ksword::hvm::HvmState& state);
     void updateLifecycleView();
