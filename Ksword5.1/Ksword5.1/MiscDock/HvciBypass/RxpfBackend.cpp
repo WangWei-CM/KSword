@@ -620,8 +620,10 @@ namespace ks::misc::rxpf
         // 拷贝写入数据到请求体。
         std::memcpy(request.bytes, bytes.constData(), length);
 
-        // response：复用 PAGE_RESPONSE（记录在 ReleaseRecord 后的最终状态）。
-        KSWORD_ARK_RXPF_PAGE_RESPONSE response{};
+        // response：ATOMIC_COMMIT_RESPONSE 内嵌 PAGE_RESPONSE 子段 +
+        // 执行证明字段；本 GUI 路径不请求 EXECUTE_PROOF，只用 page 子段
+        // 调用 fillPageInfo 复用现有 UI 展示逻辑。
+        KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE response{};
 
         // client：通过 ArkDriverClient 发送 IOCTL。
         const ksword::ark::DriverClient client;
@@ -638,7 +640,7 @@ namespace ks::misc::rxpf
             return result;
         }
 
-        return fillPageInfo(response);
+        return fillPageInfo(response.page);
     }
 
     // ================================================================

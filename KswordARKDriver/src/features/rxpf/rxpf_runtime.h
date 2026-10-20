@@ -98,7 +98,7 @@ KswRxpfRuntimeQueryBackup(
 NTSTATUS
 KswRxpfRuntimeAtomicCommit(
     _In_ const KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST* Request,
-    _Out_ KSWORD_ARK_RXPF_PAGE_RESPONSE* Response
+    _Out_ KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE* Response
     );
 
 ULONGLONG

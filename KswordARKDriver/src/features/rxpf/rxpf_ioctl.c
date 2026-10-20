@@ -276,10 +276,11 @@ KswRxpfIoctlDispatchFixed(
             (KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE*)outputBuffer);
         break;
     case KswRxpfIoctlAtomicCommit:
-        /* 原子提交：Register→Change→Write→Unregister 在单个 handler 内完成 */
+        /* 原子提交：Register→Change→Write→Unregister 在单个 handler 内完成；
+         * 响应用 ATOMIC_COMMIT_RESPONSE（PAGE_RESPONSE + execution-proof 字段）。 */
         status = KswRxpfRuntimeAtomicCommit(
             &snapshot.AtomicCommit,
-            (KSWORD_ARK_RXPF_PAGE_RESPONSE*)outputBuffer);
+            (KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE*)outputBuffer);
         break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
@@ -403,7 +404,8 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswordARKRxpfIoctlAtomicCommit,
     KswRxpfIoctlAtomicCommit,
     KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST,
-    KSWORD_ARK_RXPF_PAGE_RESPONSE,
-    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+    KSWORD_ARK_RXPF_ATOMIC_COMMIT_RESPONSE,
+    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED |
+        KSWORD_ARK_RXPF_FLAG_EXECUTE_PROOF)
 
 #undef KSW_RXPF_DEFINE_IOCTL_HANDLER
