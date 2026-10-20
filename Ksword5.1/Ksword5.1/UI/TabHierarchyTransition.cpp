@@ -159,6 +159,17 @@ namespace
             clearOverlay();
         }
 
+        bool canAnimate() const
+        {
+            if (!m_tabs || !m_tabs->isVisible() || !ks::ui::AreUiAnimationsEnabled())
+            {
+                return false;
+            }
+            BOOL animationsEnabled = TRUE;
+            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
+            return animationsEnabled != FALSE;
+        }
+
         void switchPage(int index)
         {
             if (!m_tabs)
@@ -171,6 +182,12 @@ namespace
             {
                 return; // 拖动重排同一父 Tab 不触发页面切换动画。
             }
+            m_page = nextPage;
+            cancel();
+            if (!canAnimate())
+            {
+                return; // 关闭动画时不抓取旧栏、不计算方向，也不安排动画回调。
+            }
             const int oldIndex = m_tabs->indexOf(previousPage);
             const TabStripSnapshot outgoing = snapshot(previousPage);
             int direction = 1;
@@ -180,29 +197,21 @@ namespace
                 direction = m_tabs->tabBar()->tabRect(index).center().x()
                     > m_tabs->tabBar()->tabRect(oldIndex).center().x() ? 1 : -1;
             }
-            m_page = nextPage;
-            cancel();
-            BOOL animationsEnabled = TRUE;
-            SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
-            if (!animationsEnabled || !m_tabs->isVisible())
-            {
-                return;
-            }
             const quint64 generation = m_generation;
             const QPointer<QWidget> page(nextPage);
             // 等父页原有惰性构建和布局结束后获取新子栏，连续切换取消旧排队任务。
             QTimer::singleShot(0, this, [this, page, outgoing, direction, generation]()
             {
+                if (!page || generation != m_generation || !canAnimate() || m_tabs->currentWidget() != page)
+                {
+                    return;
+                }
                 // 再让出一轮，使父级在同一currentChanged后排队的构建先完成；均按值捕获。
                 QTimer::singleShot(0, this, [this, page, outgoing, direction, generation]()
                 {
-                    if (!m_tabs || !page || generation != m_generation || m_tabs->currentWidget() != page)
+                    if (!page || generation != m_generation || !canAnimate() || m_tabs->currentWidget() != page)
                     {
-                        return;
-                    }
-                    if (!ks::ui::AreUiAnimationsEnabled())
-                    {
-                        return; // 关闭界面动画时直接切页，不构建覆盖层与动画。
+                        return; // 排队期间关闭动画或隐藏父页时，也不抓取新栏。
                     }
                     const TabStripSnapshot incoming = snapshot(page);
                     if (outgoing.image.isNull() && incoming.image.isNull())
