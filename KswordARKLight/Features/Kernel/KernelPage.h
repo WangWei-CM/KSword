@@ -3,6 +3,7 @@
 #include "KernelFacade.h"
 #include "KernelCallbackEventReceiver.h"
 #include "KernelModel.h"
+#include "KernelDynamicProjection.h"
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
 
@@ -105,7 +106,7 @@ private:
     KernelRequest BuildCurrentRequest(KernelFeatureId featureId) const;
     KernelActionRequest BuildCurrentActionRequest(KernelActionId actionId) const;
     void RenderDescriptor(const KernelFeatureDescriptor& descriptor);
-    void RenderResult(const KernelOperationResult& result);
+    void RenderResult(const KernelOperationResult& result, KernelDynamicProjection* prepared = nullptr);
     void RebuildObjectNamespaceListFromCache(KernelFeatureId featureId);
     void ToggleObjectNamespaceListNode(int rowIndex);
     void RebuildObjectNamespaceTreeFromCurrentRows();
@@ -437,7 +438,7 @@ private:
     int sortColumn_ = -1;
     bool sortAscending_ = true;
     std::uint64_t queryRequestId_ = 0;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> queryTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> queryTask_;
     std::uint64_t actionRequestId_ = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
     KernelFeatureId pendingR0EvidenceFeatureId_ = KernelFeatureId::CpuHardwareSnapshot;

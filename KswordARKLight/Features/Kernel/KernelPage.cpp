@@ -1549,7 +1549,7 @@ LRESULT CALLBACK KernelPage::FilterEditSubclassProc(HWND hwnd, const UINT msg, c
 LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam, const LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
-        queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelQueryCompleted);
+        queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd, kMsgKernelQueryCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
         callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
@@ -4300,9 +4300,12 @@ void KernelPage::RefreshSelectedFeature() {
     queryTask_->request(
         [request] {
             KernelFacade facade;
-            return facade.QueryFeature(request);
+            KernelQuerySnapshot snapshot;
+            snapshot.result = facade.QueryFeature(request);
+            snapshot.projection = BuildKernelDynamicProjection(request.featureId, snapshot.result);
+            return snapshot;
         },
-        [this, featureId, requestId](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) {
+        [this, featureId, requestId](std::uint64_t, std::optional<KernelQuerySnapshot>&& result, std::exception_ptr error) {
             ::EnableWindow(refreshButton_, TRUE);
             const KernelFeatureDescriptor* current = CurrentDescriptor();
             if (error || !result.has_value()) {
@@ -4314,7 +4317,7 @@ void KernelPage::RefreshSelectedFeature() {
             if (requestId != queryRequestId_ || !current || current->id != featureId) {
                 return;
             }
-            RenderResult(*result);
+            RenderResult(result->result, &result->projection);
             InvalidateCurrentFeatureViewCache();
         });
 }
@@ -4862,11 +4865,14 @@ void KernelPage::RefreshKernelCpuIntegrityFromDriverPage() {
     ::SetWindowTextW(statusText_, L"状态：正在后台查询 CPU-only 完整性快照…");
     ::EnableWindow(refreshButton_, FALSE);
     queryTask_->request(
-        [request] {
+        [request, activeFeatureId] {
             KernelFacade facade;
-            return facade.QueryFeature(request);
+            KernelQuerySnapshot snapshot;
+            snapshot.result = facade.QueryFeature(request);
+            snapshot.projection = BuildKernelDynamicProjection(activeFeatureId, snapshot.result);
+            return snapshot;
         },
-        [this, activeFeatureId, requestId](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) {
+        [this, activeFeatureId, requestId](std::uint64_t, std::optional<KernelQuerySnapshot>&& result, std::exception_ptr error) {
             ::EnableWindow(refreshButton_, TRUE);
             if (error || !result.has_value() || requestId != queryRequestId_ || activeFeatureId_ != activeFeatureId) {
                 if (requestId == queryRequestId_ && activeFeatureId_ == activeFeatureId) {
@@ -4874,8 +4880,8 @@ void KernelPage::RefreshKernelCpuIntegrityFromDriverPage() {
                 }
                 return;
             }
-            RenderResult(*result);
-            ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result->message).c_str());
+            RenderResult(result->result, &result->projection);
+            ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result->result.message).c_str());
         });
 }
 
@@ -5342,13 +5348,13 @@ void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
     }
 }
 
-void KernelPage::RenderResult(const KernelOperationResult& result) {
+void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamicProjection* prepared) {
     Ksword::Ui::ScopedListViewRedrawLock resultListLock(resultList_);
     Ksword::Ui::ScopedListViewRedrawLock propertyListLock(propertyList_);
     Ksword::Ui::ScopedListViewRedrawLock summaryListLock(summaryList_);
     Ksword::Ui::ScopedWindowRedrawLock objectTreeLock(objectNamespaceTree_);
     std::vector<std::wstring> orderedColumns;
-    AddDynamicResultColumns(result, orderedColumns);
+    if (!prepared) AddDynamicResultColumns(result, orderedColumns);
     bool statusHandledBySpecializedRenderer = false;
     currentColumns_ = orderedColumns;
     currentRows_.clear();
@@ -5357,11 +5363,17 @@ void KernelPage::RenderResult(const KernelOperationResult& result) {
     sortColumn_ = -1;
     sortAscending_ = true;
 
-    for (std::size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex) {
-        AddDynamicResultRow(static_cast<int>(rowIndex), result.rows[rowIndex], orderedColumns);
+    if (prepared) {
+        currentColumns_ = std::move(prepared->columns);
+        currentRows_ = std::move(prepared->rows);
+        currentRawRows_ = std::move(prepared->rawRows);
+    } else {
+        for (std::size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex) {
+            AddDynamicResultRow(static_cast<int>(rowIndex), result.rows[rowIndex], orderedColumns);
+        }
+        currentRawRows_ = std::make_shared<const KernelRawRows>(currentRows_);
     }
     currentRawColumns_ = currentColumns_;
-    currentRawRows_ = std::make_shared<const KernelRawRows>(currentRows_);
     if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
         descriptor != nullptr && IsObjectNamespaceFeature(descriptor->id)) {
         RebuildObjectNamespaceListFromCache(descriptor->id);

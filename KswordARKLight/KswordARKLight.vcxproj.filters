@@ -863,6 +863,9 @@
     <ClInclude Include="Features\Kernel\KernelObjectTypeMatrixFeature.h">
       <Filter>Features\Kernel</Filter>
     </ClInclude>
+    <ClInclude Include="Features\Kernel\KernelDynamicProjection.h">
+      <Filter>Features\Kernel</Filter>
+    </ClInclude>
     <ClInclude Include="Features\Kernel\KernelPage.h">
       <Filter>Features\Kernel</Filter>
     </ClInclude>
