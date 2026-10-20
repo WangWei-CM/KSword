@@ -7,10 +7,18 @@
 #include "KernelDock.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QShowEvent>
+#include <QEvent>
+#include <QTimer>
+#include <QHash>
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
@@ -22,9 +30,10 @@
 #include <QMetaObject>
 #include <QModelIndex>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QPushButton>
 #include <QSet>
-#include <QTableWidget>
+#include <QTableView>
 #include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -49,13 +58,259 @@ namespace
             .arg(KswordTheme::TextPrimaryHex(), KswordTheme::SurfaceAltHex(), KswordTheme::BorderHex());
     }
 
-    QTableWidgetItem* readOnlyItem(const QString& text)
-    {
-        auto* item = new QTableWidgetItem(text);
-        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        return item;
-    }
+
 }
+
+class KernelIoctlAuditTab::AuditModel final : public QAbstractTableModel
+{
+public:
+    explicit AuditModel(int kind, QObject* parent) : QAbstractTableModel(parent), m_kind(kind) {}
+    void setHeaders(QStringList headers) { beginResetModel(); m_headers = std::move(headers); endResetModel(); }
+    void setSnapshot(std::shared_ptr<const Snapshot> snapshot)
+    {
+        beginResetModel();
+        m_snapshot = std::move(snapshot);
+        m_texts.clear();
+        endResetModel();
+    }
+    int rowCount(const QModelIndex& parent = {}) const override
+    {
+        if (parent.isValid() || !m_snapshot) return 0;
+        switch (m_kind)
+        {
+        case 0: return static_cast<int>(m_snapshot->driverRows.size());
+        case 1: return static_cast<int>(m_snapshot->deviceRows.size());
+        case 2: return static_cast<int>(m_snapshot->dispatchRows.size());
+        case 3: return static_cast<int>(m_snapshot->registryRows.size());
+        default: return 0;
+        }
+    }
+    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_headers.size(); }
+    QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+    {
+        if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return {};
+        return role == Qt::DisplayRole ? QVariant(m_headers.value(section)) : m_headerRoles.value(section).value(role);
+    }
+    bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role) override
+    {
+        if (orientation != Qt::Horizontal || section < 0 || section >= m_headers.size()) return false;
+        if (role == Qt::DisplayRole || role == Qt::EditRole) m_headers[section] = value.toString();
+        else m_headerRoles[section][role] = value;
+        emit headerDataChanged(orientation, section, section);
+        return true;
+    }
+    void clearFormattedRows()
+    {
+        m_texts.clear();
+        if (rowCount() > 0 && columnCount() > 0)
+            emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), {Qt::DisplayRole, Qt::ToolTipRole});
+    }
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+    {
+        if (!index.isValid() || index.row() < 0 || index.row() >= rowCount() || index.column() < 0 || index.column() >= columnCount()) return {};
+        if (role == Qt::UserRole) return index.row();
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+        return rowTexts(index.row()).value(index.column());
+    }
+    bool matches(int row, const QString& needle) const
+    {
+        if (needle.isEmpty()) return true;
+        for (const auto& value : rowTexts(row)) if (value.contains(needle, Qt::CaseInsensitive)) return true;
+        return false;
+    }
+private:
+    const QStringList& rowTexts(int sourceRow) const
+    {
+        auto found = m_texts.constFind(sourceRow);
+        if (found != m_texts.cend()) return found.value();
+        QStringList values;
+        switch (m_kind)
+        {
+        case 0:
+        {
+            const auto& row = m_snapshot->driverRows.at(static_cast<std::size_t>(sourceRow));
+QString statusText;
+
+        if (!row.status.isEmpty())
+
+        {
+
+            statusText = kernelText(
+
+                "kernel.ioctl_audit.query.failed",
+
+                QStringLiteral("查询失败：%1")).arg(row.status);
+
+        }
+
+        else if (row.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_PARTIAL)
+
+        {
+
+            statusText = kernelText("kernel.ioctl_audit.query.partial", QStringLiteral("部分结果"));
+
+        }
+
+        else if (row.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_OK)
+
+        {
+
+            statusText = kernelText("kernel.ioctl_audit.query.ok", QStringLiteral("正常"));
+
+        }
+
+        else
+
+        {
+
+            statusText = QStringLiteral("QueryStatus=%1").arg(row.queryStatus);
+
+        }
+            values = { row.driverName,
+                hex64(row.driverObjectAddress),
+                hex64(row.driverStart),
+                hex32(row.driverSize),
+                hex32(row.driverFlags),
+
+
+            QStringLiteral("%1/%2").arg(row.returnedDeviceCount).arg(row.totalDeviceCount),
+                QString::number(row.majorFunctionCount),
+                statusText,
+                hex32(static_cast<std::uint32_t>(row.lastStatus)) };
+            break;
+        }
+        case 1:
+        {
+            const auto& row = m_snapshot->deviceRows.at(static_cast<std::size_t>(sourceRow));
+const QString relation = row.relationDepth == 0
+
+            ? kernelText("kernel.ioctl_audit.device.root", QStringLiteral("根设备"))
+
+            : kernelText("kernel.ioctl_audit.device.attached", QStringLiteral("附加 +%1")).arg(row.relationDepth);
+            values = { row.driverName,
+                relation,
+                hex64(row.deviceObjectAddress),
+                row.deviceName.isEmpty()
+
+            ? kernelText("kernel.ioctl_audit.device.unnamed", QStringLiteral("（未命名）"))
+
+            : row.deviceName,
+                hex32(row.deviceType),
+                hex32(row.flags),
+                hex32(row.characteristics),
+                QString::number(row.stackSize),
+                hex64(row.rootDeviceObjectAddress),
+                hex64(row.nextDeviceObjectAddress),
+                hex64(row.attachedDeviceObjectAddress),
+                hex64(row.ownerDriverObjectAddress),
+                hex32(static_cast<std::uint32_t>(row.nameStatus)) };
+            break;
+        }
+        case 2:
+        {
+            const auto& row = m_snapshot->dispatchRows.at(static_cast<std::size_t>(sourceRow));
+QString dispatchStatus = (row.flags & KSWORD_ARK_DRIVER_DISPATCH_FLAG_OWN_IMAGE) != 0U
+
+            ? kernelText("kernel.ioctl_audit.dispatch.own_image", QStringLiteral("本驱动镜像"))
+
+            : ((row.flags & KSWORD_ARK_DRIVER_DISPATCH_FLAG_MODULE_RESOLVED) != 0U
+
+                ? kernelText("kernel.ioctl_audit.dispatch.external_module", QStringLiteral("外部模块"))
+
+                : kernelText("kernel.ioctl_audit.dispatch.unresolved", QStringLiteral("模块未解析")));
+
+        if (row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_NULL)
+
+        {
+
+            dispatchStatus = kernelText("kernel.ioctl_audit.dispatch.start_io_null", QStringLiteral("空值（未使用 StartIo）"));
+
+        }
+
+        else if (row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_READ_FAILED)
+
+        {
+
+            dispatchStatus = kernelText("kernel.ioctl_audit.dispatch.start_io_read_failed", QStringLiteral("读取失败"));
+
+        }
+
+        const bool hasStartIoAddress = row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_PRESENT;
+            values = { row.driverName,
+                hex64(row.driverObjectAddress),
+                row.isStartIo
+
+            ? QStringLiteral("DriverStartIo")
+
+            : majorFunctionName(row.majorFunction),
+                row.isStartIo
+
+            ? QStringLiteral("-")
+
+            : QString::number(row.majorFunction),
+                row.isStartIo && !hasStartIoAddress
+
+            ? QStringLiteral("-")
+
+            : hex64(row.dispatchAddress),
+                row.isStartIo && !hasStartIoAddress
+
+            ? QStringLiteral("-")
+
+            : hex64(row.moduleBase),
+                row.moduleName.isEmpty() ? QStringLiteral("-") : row.moduleName,
+                hex32(row.flags),
+                dispatchStatus };
+            break;
+        }
+        case 3:
+        {
+            const auto& row = m_snapshot->registryRows.at(static_cast<std::size_t>(sourceRow));
+
+            values = { hex32(row.ioControlCode),
+                QString::number(row.functionNumber),
+                QStringLiteral("%1 / %2").arg(row.method).arg(row.access),
+                hex64(row.requiredCapability),
+                hex64(row.handlerAddress),
+                QString::fromStdString(row.name),
+                hex32(row.flags) };
+            break;
+        }
+        }
+        return m_texts.insert(sourceRow, std::move(values)).value();
+    }
+    int m_kind = 0;
+    QStringList m_headers;
+    QHash<int, QHash<int, QVariant>> m_headerRoles;
+    std::shared_ptr<const Snapshot> m_snapshot;
+    mutable QHash<int, QStringList> m_texts;
+};
+
+class KernelIoctlAuditTab::AuditFilter final : public QSortFilterProxyModel
+{
+public:
+    explicit AuditFilter(AuditModel* source, QObject* parent) : QSortFilterProxyModel(parent), m_source(source)
+    {
+        // QTableWidgetItem text ordering is a case-sensitive locale comparison.
+        // Preserve its one-shot policy instead of re-sorting on each source edit.
+        setDynamicSortFilter(false);
+        setSortRole(Qt::DisplayRole);
+        setSortCaseSensitivity(Qt::CaseSensitive);
+        setSortLocaleAware(true);
+        setSourceModel(source);
+    }
+    void setNeedle(const QString& needle)
+    {
+        if (m_needle == needle) return;
+        m_needle = needle;
+        invalidateFilter();
+    }
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex&) const override { return m_source->matches(sourceRow, m_needle); }
+private:
+    AuditModel* m_source = nullptr;
+    QString m_needle;
+};
 
 KernelIoctlAuditTab::KernelIoctlAuditTab(QWidget* parent)
     : QWidget(parent)
@@ -117,32 +372,41 @@ void KernelIoctlAuditTab::initializeUi()
     m_devicePage = new QWidget(m_innerTabs);
     m_dispatchPage = new QWidget(m_innerTabs);
     m_registryPage = new QWidget(m_innerTabs);
-    m_driverTable = new ks::ui::VisibleTableWidget(m_driverPage);
+    m_driverTable = new ks::ui::TableActionTableView(m_driverPage);
     // 全局驱动对象清单需要留存新增和消失对象。
     ks::ui::SetTableActionBarMode(m_driverTable, ks::ui::TableActionBarMode::Full);
-    m_deviceTable = new ks::ui::VisibleTableWidget(m_devicePage);
+    m_deviceTable = new ks::ui::TableActionTableView(m_devicePage);
     // 全局设备链是现场枚举，保留完整快照比较。
     ks::ui::SetTableActionBarMode(m_deviceTable, ks::ui::TableActionBarMode::Full);
-    m_dispatchTable = new ks::ui::VisibleTableWidget(m_dispatchPage);
+    m_dispatchTable = new ks::ui::TableActionTableView(m_dispatchPage);
     // MajorFunction 地址变化是核心排查目标。
     ks::ui::SetTableActionBarMode(m_dispatchTable, ks::ui::TableActionBarMode::Full);
-    m_registryTable = new ks::ui::VisibleTableWidget(m_registryPage);
+    m_registryTable = new ks::ui::TableActionTableView(m_registryPage);
     // 自身 IOCTL 注册清单是静态协议映射，不需要快照对比。
     ks::ui::SetTableActionBarMode(m_registryTable, ks::ui::TableActionBarMode::None);
-    for (QTableWidget* table : {m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable})
+    const std::array<QTableView*, 4> tables{m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable};
+    for (std::size_t index = 0; index < tables.size(); ++index)
+    {
+        m_models[index] = new AuditModel(static_cast<int>(index), tables[index]);
+        m_filters[index] = new AuditFilter(m_models[index], tables[index]);
+        tables[index]->setModel(m_filters[index]);
+        ks::ui::InstallTableHeaderClickSorting(tables[index]);
+        ks::ui::SetTableRowFilterBusinessOwnership(tables[index], ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+        tables[index]->horizontalHeader()->setResizeContentsPrecision(100);
+    }
+    for (QTableView* table : {m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable})
     {
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
         table->setSelectionMode(QAbstractItemView::ExtendedSelection);
         table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         table->setAlternatingRowColors(true);
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        table->setStyleSheet(QStringLiteral("QTableWidget{background:transparent;color:%1;}" ).arg(KswordTheme::TextPrimaryHex()));
+        table->setStyleSheet(QStringLiteral("QTableView{background:transparent;color:%1;}" ).arg(KswordTheme::TextPrimaryHex()));
         table->horizontalHeader()->setStyleSheet(headerStyle());
         table->horizontalHeader()->setStretchLastSection(true);
         table->verticalHeader()->setVisible(false);
     }
-    m_driverTable->setColumnCount(9);
-    m_driverTable->setHorizontalHeaderLabels({
+    m_models[0]->setHeaders({
         kernelText("kernel.ioctl_audit.header.driver", QStringLiteral("DriverObject")),
         kernelText("kernel.ioctl_audit.header.object_address", QStringLiteral("对象地址")),
         QStringLiteral("DriverStart"),
@@ -152,8 +416,7 @@ void KernelIoctlAuditTab::initializeUi()
         kernelText("kernel.ioctl_audit.header.major_count", QStringLiteral("MajorFunction 数")),
         kernelText("kernel.ioctl_audit.header.query_status", QStringLiteral("查询状态")),
         QStringLiteral("NTSTATUS")});
-    m_deviceTable->setColumnCount(13);
-    m_deviceTable->setHorizontalHeaderLabels({
+    m_models[1]->setHeaders({
         kernelText("kernel.ioctl_audit.header.driver", QStringLiteral("DriverObject")),
         kernelText("kernel.ioctl_audit.header.relation", QStringLiteral("关系")),
         QStringLiteral("DeviceObject"),
@@ -167,8 +430,7 @@ void KernelIoctlAuditTab::initializeUi()
         QStringLiteral("AttachedDevice"),
         kernelText("kernel.ioctl_audit.header.owner_driver", QStringLiteral("归属 DriverObject")),
         QStringLiteral("NameStatus")});
-    m_dispatchTable->setColumnCount(9);
-    m_dispatchTable->setHorizontalHeaderLabels({
+    m_models[2]->setHeaders({
         kernelText("kernel.ioctl_audit.header.driver", QStringLiteral("DriverObject")),
         kernelText("kernel.ioctl_audit.header.object_address", QStringLiteral("对象地址")),
         kernelText("kernel.ioctl_audit.header.major", QStringLiteral("MajorFunction")),
@@ -178,8 +440,7 @@ void KernelIoctlAuditTab::initializeUi()
         kernelText("kernel.ioctl_audit.header.module", QStringLiteral("归属模块")),
         kernelText("kernel.ioctl_audit.header.flags", QStringLiteral("Flags")),
         kernelText("kernel.ioctl_audit.header.status", QStringLiteral("状态"))});
-    m_registryTable->setColumnCount(7);
-    m_registryTable->setHorizontalHeaderLabels({
+    m_models[3]->setHeaders({
         kernelText("kernel.ioctl_audit.header.code", QStringLiteral("控制码")),
         kernelText("kernel.ioctl_audit.header.function", QStringLiteral("Function")),
         kernelText("kernel.ioctl_audit.header.method_access", QStringLiteral("Method/Access")),
@@ -207,18 +468,23 @@ void KernelIoctlAuditTab::initializeUi()
     resultLayout->addWidget(m_innerTabs, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
-    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { applyFilter(); });
+    m_filterTimer = new QTimer(this);
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(120);
+    connect(m_filterTimer, &QTimer::timeout, this, [this]() { applyFilter(); });
+    connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { m_filterTimer->start(); });
+    connect(m_innerTabs, &QTabWidget::currentChanged, this, [this]() { applyFilter(); });
     connect(m_clearFilterButton, &QPushButton::clicked, m_filterEdit, &QLineEdit::clear);
-    connect(m_driverTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_driverTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showCopyMenu(m_driverTable, position);
     });
-    connect(m_deviceTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_deviceTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showCopyMenu(m_deviceTable, position);
     });
-    connect(m_dispatchTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_dispatchTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showCopyMenu(m_dispatchTable, position);
     });
-    connect(m_registryTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+    connect(m_registryTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         showCopyMenu(m_registryTable, position);
     });
 }
@@ -382,16 +648,13 @@ void KernelIoctlAuditTab::applySnapshot(Snapshot snapshot)
 
     m_refreshRunning = false;
     m_refreshButton->setEnabled(true);
-    m_driverRows = std::move(snapshot.driverRows);
-    m_deviceRows = std::move(snapshot.deviceRows);
-    m_dispatchRows = std::move(snapshot.dispatchRows);
-    m_registryRows = std::move(snapshot.registryRows);
     m_queryFailureCount = snapshot.queryFailureCount;
     m_partialDriverCount = snapshot.partialDriverCount;
     m_registryTotal = snapshot.registryTotal;
     m_registryDuplicate = snapshot.registryDuplicate;
     m_registryOk = snapshot.registryOk;
-    m_errorText = std::move(snapshot.errorText);
+    m_errorText = snapshot.errorText;
+    m_snapshot = std::make_shared<const Snapshot>(std::move(snapshot));
     populateTables();
 }
 
@@ -443,218 +706,120 @@ QString KernelIoctlAuditTab::majorFunctionName(const std::uint32_t value)
 
 void KernelIoctlAuditTab::populateTables()
 {
-    m_driverTable->setRowCount(0);
-    for (const DriverRow& row : m_driverRows)
-    {
-        const int tableRow = m_driverTable->rowCount();
-        m_driverTable->insertRow(tableRow);
-        QString statusText;
-        if (!row.status.isEmpty())
-        {
-            statusText = kernelText(
-                "kernel.ioctl_audit.query.failed",
-                QStringLiteral("查询失败：%1")).arg(row.status);
-        }
-        else if (row.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_PARTIAL)
-        {
-            statusText = kernelText("kernel.ioctl_audit.query.partial", QStringLiteral("部分结果"));
-        }
-        else if (row.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_OK)
-        {
-            statusText = kernelText("kernel.ioctl_audit.query.ok", QStringLiteral("正常"));
-        }
-        else
-        {
-            statusText = QStringLiteral("QueryStatus=%1").arg(row.queryStatus);
-        }
-        m_driverTable->setItem(tableRow, 0, readOnlyItem(row.driverName));
-        m_driverTable->setItem(tableRow, 1, readOnlyItem(hex64(row.driverObjectAddress)));
-        m_driverTable->setItem(tableRow, 2, readOnlyItem(hex64(row.driverStart)));
-        m_driverTable->setItem(tableRow, 3, readOnlyItem(hex32(row.driverSize)));
-        m_driverTable->setItem(tableRow, 4, readOnlyItem(hex32(row.driverFlags)));
-        m_driverTable->setItem(tableRow, 5, readOnlyItem(
-            QStringLiteral("%1/%2").arg(row.returnedDeviceCount).arg(row.totalDeviceCount)));
-        m_driverTable->setItem(tableRow, 6, readOnlyItem(QString::number(row.majorFunctionCount)));
-        m_driverTable->setItem(tableRow, 7, readOnlyItem(statusText));
-        m_driverTable->setItem(tableRow, 8, readOnlyItem(hex32(static_cast<std::uint32_t>(row.lastStatus))));
-    }
-
-    m_deviceTable->setRowCount(0);
-    for (const DeviceRow& row : m_deviceRows)
-    {
-        const int tableRow = m_deviceTable->rowCount();
-        m_deviceTable->insertRow(tableRow);
-        const QString relation = row.relationDepth == 0
-            ? kernelText("kernel.ioctl_audit.device.root", QStringLiteral("根设备"))
-            : kernelText("kernel.ioctl_audit.device.attached", QStringLiteral("附加 +%1")).arg(row.relationDepth);
-        m_deviceTable->setItem(tableRow, 0, readOnlyItem(row.driverName));
-        m_deviceTable->setItem(tableRow, 1, readOnlyItem(relation));
-        m_deviceTable->setItem(tableRow, 2, readOnlyItem(hex64(row.deviceObjectAddress)));
-        m_deviceTable->setItem(tableRow, 3, readOnlyItem(row.deviceName.isEmpty()
-            ? kernelText("kernel.ioctl_audit.device.unnamed", QStringLiteral("（未命名）"))
-            : row.deviceName));
-        m_deviceTable->setItem(tableRow, 4, readOnlyItem(hex32(row.deviceType)));
-        m_deviceTable->setItem(tableRow, 5, readOnlyItem(hex32(row.flags)));
-        m_deviceTable->setItem(tableRow, 6, readOnlyItem(hex32(row.characteristics)));
-        m_deviceTable->setItem(tableRow, 7, readOnlyItem(QString::number(row.stackSize)));
-        m_deviceTable->setItem(tableRow, 8, readOnlyItem(hex64(row.rootDeviceObjectAddress)));
-        m_deviceTable->setItem(tableRow, 9, readOnlyItem(hex64(row.nextDeviceObjectAddress)));
-        m_deviceTable->setItem(tableRow, 10, readOnlyItem(hex64(row.attachedDeviceObjectAddress)));
-        m_deviceTable->setItem(tableRow, 11, readOnlyItem(hex64(row.ownerDriverObjectAddress)));
-        m_deviceTable->setItem(tableRow, 12, readOnlyItem(hex32(static_cast<std::uint32_t>(row.nameStatus))));
-    }
-
-    m_dispatchTable->setRowCount(0);
-    for (const DispatchRow& row : m_dispatchRows)
-    {
-        const int tableRow = m_dispatchTable->rowCount();
-        m_dispatchTable->insertRow(tableRow);
-        QString dispatchStatus = (row.flags & KSWORD_ARK_DRIVER_DISPATCH_FLAG_OWN_IMAGE) != 0U
-            ? kernelText("kernel.ioctl_audit.dispatch.own_image", QStringLiteral("本驱动镜像"))
-            : ((row.flags & KSWORD_ARK_DRIVER_DISPATCH_FLAG_MODULE_RESOLVED) != 0U
-                ? kernelText("kernel.ioctl_audit.dispatch.external_module", QStringLiteral("外部模块"))
-                : kernelText("kernel.ioctl_audit.dispatch.unresolved", QStringLiteral("模块未解析")));
-        if (row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_NULL)
-        {
-            dispatchStatus = kernelText("kernel.ioctl_audit.dispatch.start_io_null", QStringLiteral("空值（未使用 StartIo）"));
-        }
-        else if (row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_READ_FAILED)
-        {
-            dispatchStatus = kernelText("kernel.ioctl_audit.dispatch.start_io_read_failed", QStringLiteral("读取失败"));
-        }
-        const bool hasStartIoAddress = row.isStartIo && row.startIoState == KSWORD_ARK_DRIVER_START_IO_STATE_PRESENT;
-        m_dispatchTable->setItem(tableRow, 0, readOnlyItem(row.driverName));
-        m_dispatchTable->setItem(tableRow, 1, readOnlyItem(hex64(row.driverObjectAddress)));
-        m_dispatchTable->setItem(tableRow, 2, readOnlyItem(row.isStartIo
-            ? QStringLiteral("DriverStartIo")
-            : majorFunctionName(row.majorFunction)));
-        m_dispatchTable->setItem(tableRow, 3, readOnlyItem(row.isStartIo
-            ? QStringLiteral("-")
-            : QString::number(row.majorFunction)));
-        m_dispatchTable->setItem(tableRow, 4, readOnlyItem(row.isStartIo && !hasStartIoAddress
-            ? QStringLiteral("-")
-            : hex64(row.dispatchAddress)));
-        m_dispatchTable->setItem(tableRow, 5, readOnlyItem(row.isStartIo && !hasStartIoAddress
-            ? QStringLiteral("-")
-            : hex64(row.moduleBase)));
-        m_dispatchTable->setItem(tableRow, 6, readOnlyItem(row.moduleName.isEmpty() ? QStringLiteral("-") : row.moduleName));
-        m_dispatchTable->setItem(tableRow, 7, readOnlyItem(hex32(row.flags)));
-        m_dispatchTable->setItem(tableRow, 8, readOnlyItem(dispatchStatus));
-    }
-
-    m_registryTable->setRowCount(0);
-    for (const ksword::ark::IoctlRegistryEntry& row : m_registryRows)
-    {
-        const int tableRow = m_registryTable->rowCount();
-        m_registryTable->insertRow(tableRow);
-        m_registryTable->setItem(tableRow, 0, readOnlyItem(hex32(row.ioControlCode)));
-        m_registryTable->setItem(tableRow, 1, readOnlyItem(QString::number(row.functionNumber)));
-        m_registryTable->setItem(tableRow, 2, readOnlyItem(QStringLiteral("%1 / %2").arg(row.method).arg(row.access)));
-        m_registryTable->setItem(tableRow, 3, readOnlyItem(hex64(row.requiredCapability)));
-        m_registryTable->setItem(tableRow, 4, readOnlyItem(hex64(row.handlerAddress)));
-        m_registryTable->setItem(tableRow, 5, readOnlyItem(QString::fromStdString(row.name)));
-        m_registryTable->setItem(tableRow, 6, readOnlyItem(hex32(row.flags)));
-    }
-    m_driverTable->resizeColumnsToContents();
-    m_deviceTable->resizeColumnsToContents();
-    m_dispatchTable->resizeColumnsToContents();
-    m_registryTable->resizeColumnsToContents();
+    for (auto* model : m_models) model->setSnapshot(m_snapshot);
     applyFilter();
     const QString summary = kernelText(
         "kernel.ioctl_audit.summary.detailed",
         QStringLiteral("驱动 %1 个（失败 %2，部分 %3），设备 %4 行，MajorFunction %5 行，KswordARK registry %6/%7 行，重复控制码 %8。"))
-        .arg(static_cast<qulonglong>(m_driverRows.size()))
+        .arg(static_cast<qulonglong>(m_snapshot->driverRows.size()))
         .arg(m_queryFailureCount)
         .arg(m_partialDriverCount)
-        .arg(static_cast<qulonglong>(m_deviceRows.size()))
-        // %5 标注的是 "MajorFunction 行"，m_dispatchRows 里还混着每个驱动一条的
+        .arg(static_cast<qulonglong>(m_snapshot->deviceRows.size()))
+        // %5 标注的是 "MajorFunction 行"，m_snapshot->dispatchRows 里还混着每个驱动一条的
         // DriverStartIo 行，直接用 size() 会把计数抬高，对不上 28×驱动数。
         .arg(static_cast<qulonglong>(std::count_if(
-            m_dispatchRows.begin(),
-            m_dispatchRows.end(),
+            m_snapshot->dispatchRows.begin(),
+            m_snapshot->dispatchRows.end(),
             [](const DispatchRow& row) { return !row.isStartIo; })))
-        .arg(static_cast<qulonglong>(m_registryRows.size()))
+        .arg(static_cast<qulonglong>(m_snapshot->registryRows.size()))
         .arg(m_registryTotal)
         .arg(m_registryDuplicate);
     m_statusLabel->setText(m_errorText.isEmpty() ? summary : summary + QStringLiteral(" ") + m_errorText);
 }
 
-void KernelIoctlAuditTab::applyFilter()
+void KernelIoctlAuditTab::changeEvent(QEvent* event)
 {
-    const QString filterText = m_filterEdit == nullptr ? QString() : m_filterEdit->text().trimmed();
-    const bool hasFilter = !filterText.isEmpty();
-    for (QTableWidget* table : {m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable})
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::LanguageChange)
     {
-        if (table == nullptr)
-        {
-            continue;
-        }
-        for (int row = 0; row < table->rowCount(); ++row)
-        {
-            bool matched = !hasFilter;
-            for (int column = 0; !matched && column < table->columnCount(); ++column)
-            {
-                const QTableWidgetItem* item = table->item(row, column);
-                matched = item != nullptr && item->text().contains(filterText, Qt::CaseInsensitive);
-            }
-            table->setRowHidden(row, !matched);
-        }
-    }
-    if (m_clearFilterButton != nullptr)
-    {
-        m_clearFilterButton->setEnabled(hasFilter);
+        for (auto* model : m_models) if (model != nullptr) model->clearFormattedRows();
     }
 }
 
-QString KernelIoctlAuditTab::tableRowText(QTableWidget* table, const int row, const bool includeHeader)
+void KernelIoctlAuditTab::showEvent(QShowEvent* event)
 {
-    if (table == nullptr || row < 0 || row >= table->rowCount())
+    QWidget::showEvent(event);
+    applyFilter();
+}
+
+void KernelIoctlAuditTab::applyFilter()
+{
+    const QPointer<KernelIoctlAuditTab> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-ioctl-audit-filter"),
+        {m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable},
+        [guard]() { if (guard) guard->applyFilter(); })) return;
+    const QString filterText = m_filterEdit == nullptr ? QString() : m_filterEdit->text().trimmed();
+    if (m_clearFilterButton != nullptr) m_clearFilterButton->setEnabled(!filterText.isEmpty());
+    if (!isVisible() || m_innerTabs == nullptr) return;
+    const int current = m_innerTabs->currentIndex();
+    if (current < 0 || current >= static_cast<int>(m_filters.size())) return;
+    m_filters[current]->setNeedle(filterText);
+    const std::array<QTableView*, 4> tables{m_driverTable, m_deviceTable, m_dispatchTable, m_registryTable};
+    if (!m_columnsSized[current] && m_models[current]->rowCount() > 0)
+    {
+        m_columnsSized[current] = true;
+        tables[current]->resizeColumnsToContents();
+    }
+}
+
+QString KernelIoctlAuditTab::tableRowText(QTableView* table, const int row, const bool includeHeader, const bool sourceRows)
+{
+    if (table == nullptr) return {};
+    auto* proxy = static_cast<AuditFilter*>(table->model());
+    QAbstractItemModel* model = sourceRows ? proxy->sourceModel() : table->model();
+    if (row < 0 || row >= model->rowCount())
     {
         return {};
     }
     QStringList values;
     if (includeHeader)
     {
-        for (int column = 0; column < table->columnCount(); ++column)
+        for (int column = 0; column < model->columnCount(); ++column)
         {
-            values << table->horizontalHeaderItem(column)->text();
+            values << model->headerData(column, Qt::Horizontal).toString();
         }
     }
     QStringList rowValues;
-    for (int column = 0; column < table->columnCount(); ++column)
+    for (int column = 0; column < model->columnCount(); ++column)
     {
-        rowValues << (table->item(row, column) == nullptr ? QString() : table->item(row, column)->text());
+        rowValues << model->data(model->index(row, column)).toString();
     }
     values << rowValues.join(QLatin1Char('\t'));
     return values.join(QLatin1Char('\n'));
 }
 
-void KernelIoctlAuditTab::showCopyMenu(QTableWidget* table, const QPoint& position)
+void KernelIoctlAuditTab::showCopyMenu(QTableView* table, const QPoint& position)
 {
     if (table == nullptr)
     {
         return;
     }
     const QModelIndex index = table->indexAt(position);
-    const int row = index.isValid() ? index.row() : -1;
+    const QPersistentModelIndex clickedIndex(index);
+    const QPointer<QTableView> tableGuard(table);
+    const QPointer<KernelIoctlAuditTab> ownerGuard(this);
     QMenu menu(this);
     QAction* copyRow = menu.addAction(kernelText("kernel.ioctl_audit.copy_row", QStringLiteral("复制当前行")));
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(kernelText("kernel.ioctl_audit.copy_all", QStringLiteral("复制全部行")));
-    copyRow->setEnabled(row >= 0);
-    copyAll->setEnabled(table->rowCount() > 0);
+    copyRow->setEnabled(clickedIndex.isValid());
+    auto* source = static_cast<AuditFilter*>(table->model())->sourceModel();
+    copyAll->setEnabled(source->rowCount() > 0);
+    const QPointer<QAbstractItemModel> sourceGuard(source);
     QAction* selected = menu.exec(table->viewport()->mapToGlobal(position));
-    if (selected == copyRow)
+    if (ownerGuard.isNull() || tableGuard.isNull() || sourceGuard.isNull()
+        || static_cast<AuditFilter*>(table->model())->sourceModel() != sourceGuard) return;
+    if (selected == copyRow && clickedIndex.isValid() && clickedIndex.model() == table->model())
     {
-        QApplication::clipboard()->setText(tableRowText(table, row, true));
+        QApplication::clipboard()->setText(tableRowText(table, clickedIndex.row(), true));
     }
     else if (selected == copyAll)
     {
         QStringList lines;
-        for (int rowIndex = 0; rowIndex < table->rowCount(); ++rowIndex)
+        for (int rowIndex = 0; rowIndex < source->rowCount(); ++rowIndex)
         {
-            lines << tableRowText(table, rowIndex, rowIndex == 0);
+            lines << tableRowText(table, rowIndex, rowIndex == 0, true);
         }
         QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
     }
