@@ -337,9 +337,25 @@ namespace ks::ui
         m_title->hide();
     }
 
+    void StructuredFieldView::setHiddenProjectionDeferred(const bool enabled)
+    {
+        if (m_deferHiddenProjection == enabled) return;
+        m_deferHiddenProjection = enabled;
+        if (!enabled)
+        {
+            // 恢复同步策略时立即补齐模型，不能把隐藏阶段的旧树暴露给 tree() 用户。
+            if (m_hiddenTreeDirty) rebuild();
+            else if (m_hiddenTreeLayoutDirty)
+            {
+                m_hiddenTreeLayoutDirty = false;
+                applyPresentation();
+            }
+        }
+    }
+
     void StructuredFieldView::setDocument(const FieldDocument& document)
     {
-        if (m_documentOnly && m_document.title == document.title
+        if (m_document.title == document.title
             && sameFieldNodes(m_document.nodes, document.nodes))
         {
             return;
@@ -697,7 +713,8 @@ namespace ks::ui
     bool StructuredFieldView::shouldDeferHiddenTree() const
     {
         // 切页Show后的业务currentChanged槽也可能提交新文档；排队fallback前仍不重建待淘汰树。
-        return !m_documentOnly && m_tree && (!isVisible() || m_treeShowPending) && belongsToSharedDetail();
+        return !m_documentOnly && m_tree && (!isVisible() || m_treeShowPending)
+            && (m_deferHiddenProjection || belongsToSharedDetail());
     }
 
     void StructuredFieldView::flushDeferredTree()
@@ -725,7 +742,7 @@ namespace ks::ui
         }
         if (!belongsToSharedDetail())
         {
-            flushDeferredTree(); // 普通视图和专业工作台保留原有同步显示语义。
+            flushDeferredTree(); // 显式普通页在首帧前同步消费最新快照；专业工作台仍按原契约。
             return;
         }
         if (m_treeShowPending)
