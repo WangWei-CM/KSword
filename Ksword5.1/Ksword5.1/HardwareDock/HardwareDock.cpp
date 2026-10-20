@@ -616,6 +616,8 @@ namespace
     QTableWidget* createDeviceAuditTable(QWidget* parentWidget)
     {
         QTableWidget* table = new ks::ui::VisibleTableWidget(parentWidget);
+        ks::ui::SetTableRowFilterBusinessOwnership(
+            table, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
         const QStringList headers = hardwareDeviceAuditTableHeaders();
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
