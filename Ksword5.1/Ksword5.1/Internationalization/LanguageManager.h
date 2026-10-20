@@ -89,6 +89,7 @@ namespace ks::i18n
             const QString& contextKey,
             const QString& sourceText,
             QStringList* visitedLanguageIds) const;
+        QString cachedSourceText(const QString& sourceText, bool preserveHistoricalChineseSource) const;
         QString resolveSourceText(
             const QString& languageId,
             const QString& sourceText,

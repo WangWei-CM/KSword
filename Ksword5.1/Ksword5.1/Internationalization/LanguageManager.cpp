@@ -6,6 +6,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QChildEvent>
+#include <QCache>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
@@ -57,6 +58,8 @@ namespace
     constexpr auto kSystemLanguagePreferenceId = "system";
     constexpr auto kEnglishFallbackLanguageId = "en-US";
     constexpr auto kProductFallbackLanguageId = "zh-CN";
+    constexpr int kSourceCacheBytes = 1024 * 1024;
+    constexpr qsizetype kMaximumCachedSourceCharacters = 4096;
     constexpr int kComboKeyRole = Qt::UserRole + 91;
     constexpr int kComboFallbackRole = Qt::UserRole + 92;
 
@@ -397,14 +400,24 @@ namespace
         quint32 valueLength = 0;
     };
 
-    // TemplateRef 说明：带占位符的中文源串（如“状态：%1”）的索引；
-    // 匹配时才按源串现拆字面量与占位符，不再为每条常驻一个已编译正则。
+    // Views refer to the immutable, squeezed LoadedPack::text buffer.
+    struct ParsedTemplate
+    {
+        std::vector<QStringView> literals;
+        std::vector<QStringView> placeholders;
+    };
+
+    ParsedTemplate parseTemplate(QStringView pattern);
+
+    // Template syntax is parsed once; captures remain local to each query.
+    // Template order still determines specificity and the first successful match.
     struct TemplateRef
     {
         quint32 entryIndex = 0;    // entryIndex：在 sourceTranslations 中的下标。
         quint32 literalLength = 0; // literalLength：字面量总长，越长越具体，先匹配。
         quint32 prefixLength = 0;  // prefixLength：首个占位符之前的字面量长度，用于快速排除。
         quint32 suffixLength = 0;  // suffixLength：最后一个占位符之后的字面量长度，用于快速排除。
+        ParsedTemplate parsed;
     };
 
     // LoadedPack 说明：
@@ -418,6 +431,8 @@ namespace
         std::vector<StringEntry> contextTranslations;
         std::vector<StringEntry> sourceTranslations;
         std::vector<TemplateRef> sourceTemplates;
+        QHash<ushort, std::vector<quint32>> templatesByPrefix;
+        std::vector<quint32> templatesWithoutPrefix;
         mutable std::once_flag renderedOnce;
         mutable std::vector<quint32> renderedIndex;
 
@@ -940,6 +955,7 @@ namespace
             }
             TemplateRef reference;
             reference.entryIndex = index;
+            reference.parsed = parseTemplate(key);
             reference.literalLength = static_cast<quint32>(key.size() - placeholderChars);
             reference.prefixLength = static_cast<quint32>(firstStart);
             reference.suffixLength = static_cast<quint32>(key.size() - lastEnd);
@@ -952,15 +968,20 @@ namespace
                 return left.literalLength > right.literalLength;
             });
         pack->sourceTemplates.shrink_to_fit();
+        for (quint32 index = 0; index < pack->sourceTemplates.size(); ++index)
+        {
+            const TemplateRef& reference = pack->sourceTemplates[index];
+            if (reference.prefixLength == 0)
+            {
+                pack->templatesWithoutPrefix.push_back(index);
+            }
+            else
+            {
+                const QChar first = pack->keyOf(pack->sourceTranslations[reference.entryIndex]).front();
+                pack->templatesByPrefix[first.unicode()].push_back(index);
+            }
+        }
     }
-
-    // ParsedTemplate 说明：一条源串拆成 n+1 段字面量与 n 个占位符；captures[k] 是第 k 个占位符匹配到的文本。
-    struct ParsedTemplate
-    {
-        std::vector<QStringView> literals;
-        std::vector<QStringView> placeholders;
-        std::vector<QStringView> captures;
-    };
 
     ParsedTemplate parseTemplate(const QStringView pattern)
     {
@@ -977,7 +998,6 @@ namespace
             cursor = previousEnd;
         }
         parsed.literals.push_back(pattern.sliced(previousEnd));
-        parsed.captures.resize(parsed.placeholders.size());
         return parsed;
     }
 
@@ -986,7 +1006,8 @@ namespace
     // - 末段的 $ 既可匹配文本结尾，也可匹配结尾换行之前，与 PCRE 默认行为一致。
     bool matchTemplateFrom(
         const QStringView text,
-        ParsedTemplate& parsed,
+        const ParsedTemplate& parsed,
+        std::vector<QStringView>& captures,
         const std::size_t index,
         const qsizetype position)
     {
@@ -1000,7 +1021,7 @@ namespace
                 const qsizetype literalStart = endings[choice] - next.size();
                 if (literalStart >= position && text.sliced(literalStart, next.size()) == next)
                 {
-                    parsed.captures[index] = text.sliced(position, literalStart - position);
+                    captures[index] = text.sliced(position, literalStart - position);
                     return true;
                 }
             }
@@ -1012,8 +1033,8 @@ namespace
             {
                 continue;
             }
-            parsed.captures[index] = text.sliced(position, candidate - position);
-            if (matchTemplateFrom(text, parsed, index + 1, candidate + next.size()))
+            captures[index] = text.sliced(position, candidate - position);
+            if (matchTemplateFrom(text, parsed, captures, index + 1, candidate + next.size()))
             {
                 return true;
             }
@@ -1021,13 +1042,16 @@ namespace
         return false;
     }
 
-    bool matchTemplate(const QStringView text, ParsedTemplate& parsed)
+    bool matchTemplate(
+        const QStringView text,
+        const ParsedTemplate& parsed,
+        std::vector<QStringView>& captures)
     {
         if (parsed.placeholders.empty() || !text.startsWith(parsed.literals[0]))
         {
             return false;
         }
-        return matchTemplateFrom(text, parsed, 0, parsed.literals[0].size());
+        return matchTemplateFrom(text, parsed, captures, 0, parsed.literals[0].size());
     }
 
     // parsePackBytes 作用：
@@ -1285,6 +1309,13 @@ struct ks::i18n::LanguageManager::State
 
     mutable QMutex mutex;
     std::vector<PackEntry> packs;
+    // Query result caches include exact, template and unchanged/miss results.
+    // Keep normal source-language semantics separate from forced pack lookups.
+    mutable QMutex sourceCacheMutex;
+    QCache<QString, QString> sourceResults{ kSourceCacheBytes };
+    QCache<QString, QString> packedSourceResults{ kSourceCacheBytes };
+    QString sourceLanguageId;
+    quint64 sourceGeneration = 0;
 };
 
 struct ks::i18n::LanguageManager::PackRef
@@ -1423,7 +1454,14 @@ bool ks::i18n::LanguageManager::setLanguage(
         }
     }
 
-    m_currentLanguageId = pack.languageId;
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        m_currentLanguageId = pack.languageId;
+        m_state->sourceLanguageId = pack.languageId;
+        ++m_state->sourceGeneration;
+        m_state->sourceResults.clear();
+        m_state->packedSourceResults.clear();
+    }
     ensureApplicationEventFilter();
     applyApplicationDirection();
     retranslateAll();
@@ -1558,32 +1596,63 @@ QString ks::i18n::LanguageManager::contextText(
 
 QString ks::i18n::LanguageManager::sourceText(const QString& sourceText) const
 {
-    if (sourceText.isEmpty() || isHistoricalChineseLanguage(m_currentLanguageId))
-    {
-        return sourceText;
-    }
-
-    QStringList visitedLanguageIds;
-    return resolveSourceText(
-        m_currentLanguageId,
-        sourceText,
-        &visitedLanguageIds,
-        true);
+    return cachedSourceText(sourceText, true);
 }
 
 QString ks::i18n::LanguageManager::packedSourceText(const QString& sourceText) const
+{
+    return cachedSourceText(sourceText, false);
+}
+
+QString ks::i18n::LanguageManager::cachedSourceText(
+    const QString& sourceText,
+    const bool preserveHistoricalChineseSource) const
 {
     if (sourceText.isEmpty())
     {
         return sourceText;
     }
 
+    QString languageId;
+    quint64 generation = 0;
+    const bool cacheable = sourceText.size() <= kMaximumCachedSourceCharacters;
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        languageId = m_state->sourceLanguageId;
+        generation = m_state->sourceGeneration;
+        if (preserveHistoricalChineseSource && isHistoricalChineseLanguage(languageId))
+        {
+            return sourceText;
+        }
+        QCache<QString, QString>& cache = preserveHistoricalChineseSource
+            ? m_state->sourceResults : m_state->packedSourceResults;
+        if (cacheable)
+        {
+            if (const QString* cached = cache.object(sourceText))
+            {
+                return *cached;
+            }
+        }
+    }
+
     QStringList visitedLanguageIds;
-    return resolveSourceText(
-        m_currentLanguageId,
-        sourceText,
-        &visitedLanguageIds,
-        false);
+    const QString result = resolveSourceText(
+        languageId, sourceText, &visitedLanguageIds, preserveHistoricalChineseSource);
+    const qint64 cacheCost = (static_cast<qint64>(sourceText.size()) + result.size()) * 2 + 128;
+    if (cacheable && cacheCost <= kSourceCacheBytes)
+    {
+        QMutexLocker cacheLocker(&m_state->sourceCacheMutex);
+        if (generation == m_state->sourceGeneration)
+        {
+            QCache<QString, QString>& cache = preserveHistoricalChineseSource
+                ? m_state->sourceResults : m_state->packedSourceResults;
+            // Callers may pass QString::fromRawData or a large-capacity string.
+            // Own exactly the budgeted characters rather than retaining borrowed storage.
+            const QString ownedKey(sourceText.constData(), sourceText.size());
+            cache.insert(ownedKey, new QString(result.constData(), result.size()), static_cast<int>(cacheCost));
+        }
+    }
+    return result;
 }
 
 QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& renderedText) const
@@ -2032,8 +2101,23 @@ QString ks::i18n::LanguageManager::resolveSourceText(
 
     if (containsHanCharacters(sourceText))
     {
-        for (const TemplateRef& reference : pack.data->sourceTemplates)
+        // Both lists contain the original specificity-order indices. Merge
+        // them rather than iterating one bucket before prefixless templates.
+        const auto bucket = pack.data->templatesByPrefix.constFind(sourceText.front().unicode());
+        const std::vector<quint32> emptyIndices;
+        const std::vector<quint32>& prefixIndices = bucket == pack.data->templatesByPrefix.cend()
+            ? emptyIndices : bucket.value();
+        const std::vector<quint32>& generalIndices = pack.data->templatesWithoutPrefix;
+        std::size_t prefixPosition = 0;
+        std::size_t generalPosition = 0;
+        while (prefixPosition < prefixIndices.size() || generalPosition < generalIndices.size())
         {
+            const bool takePrefix = generalPosition == generalIndices.size()
+                || (prefixPosition < prefixIndices.size()
+                    && prefixIndices[prefixPosition] < generalIndices[generalPosition]);
+            const quint32 referenceIndex = takePrefix
+                ? prefixIndices[prefixPosition++] : generalIndices[generalPosition++];
+            const TemplateRef& reference = pack.data->sourceTemplates[referenceIndex];
             const StringEntry& entry = pack.data->sourceTranslations[reference.entryIndex];
             const QStringView patternText = pack.data->keyOf(entry);
             if (reference.prefixLength > 0
@@ -2047,8 +2131,9 @@ QString ks::i18n::LanguageManager::resolveSourceText(
                 continue;
             }
 
-            ParsedTemplate parsedPattern = parseTemplate(patternText);
-            if (!matchTemplate(sourceText, parsedPattern))
+            const ParsedTemplate& parsedPattern = reference.parsed;
+            std::vector<QStringView> captures(parsedPattern.placeholders.size());
+            if (!matchTemplate(sourceText, parsedPattern, captures))
             {
                 continue;
             }
@@ -2083,7 +2168,7 @@ QString ks::i18n::LanguageManager::resolveSourceText(
                 const std::size_t captureIndex = static_cast<std::size_t>(
                     placeholderIterator - parsedPattern.placeholders.cbegin());
                 translatedText += this->sourceText(
-                    parsedPattern.captures[captureIndex].toString());
+                    captures[captureIndex].toString());
                 previousEnd = placeholderStart + placeholderLength;
             }
             if (!translatedText.isNull())
