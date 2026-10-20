@@ -5,6 +5,7 @@
 #include "../UI/ParameterWorkspace.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/ImmutableValueTable.h"
 #include "../UI/ThemeStatusRole.h"
 #include "../ksword/process/process_run_as.h"
 
@@ -53,6 +54,29 @@ namespace
     QString text(const char* key, const QString& source)
     {
         return ks::i18n::contextText(QString::fromLatin1(key), source);
+    }
+
+    thread_local const ks::i18n::SourceTextSnapshot* tokenTranslation = nullptr;
+    struct TokenTranslationScope
+    {
+        const ks::i18n::SourceTextSnapshot* previous;
+        explicit TokenTranslationScope(const ks::i18n::SourceTextSnapshot& value)
+            : previous(std::exchange(tokenTranslation, &value)) {}
+        ~TokenTranslationScope() { tokenTranslation = previous; }
+    };
+    QString workerText(const char* key, const QString& source)
+    { return tokenTranslation ? tokenTranslation->contextText(QString::fromLatin1(key), source) : source; }
+    QString valueSourceText(const QString& source)
+    { return tokenTranslation ? tokenTranslation->sourceText(source) : source; }
+
+    template<typename Value> void retireTokenValue(Value value) noexcept
+    {
+        try
+        {
+            auto task = std::unique_ptr<QRunnable>(QRunnable::create([value = std::move(value)] {}));
+            QThreadPool::globalInstance()->start(task.get()); task.release();
+        }
+        catch (...) {}
     }
 
     struct Handle final
@@ -473,20 +497,26 @@ namespace
     template<typename Work, typename Done> void async(QWidget* owner, Work work, Done done)
     {
         using Result = decltype(work());
-        auto* watcher = new QFutureWatcher<Result>(owner);
-        QObject::connect(watcher, &QFutureWatcher<Result>::finished, owner, [watcher, done]()
+        using SharedResult = std::shared_ptr<const Result>;
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        auto* watcher = new QFutureWatcher<SharedResult>(owner);
+        QObject::connect(watcher, &QFutureWatcher<SharedResult>::finished, owner, [watcher, done, alive = QPointer<QWidget>(owner)]()
         {
-            const Result result = watcher->result();
-            watcher->deleteLater();
-            done(result);
+            auto result = watcher->result();
+            const QPointer<QObject> watcherAlive(watcher);
+            watcher->setFuture({});
+            if (watcherAlive) watcher->deleteLater();
+            if (alive) done(*result);
+            retireTokenValue(std::move(result));
         });
         // A destroyed page disconnects delivery; worker captures contain values and never a UI pointer.
-        auto promise = std::make_shared<QPromise<Result>>();
+        auto promise = std::make_shared<QPromise<SharedResult>>();
         promise->start();
         watcher->setFuture(promise->future());
-        QThreadPool::globalInstance()->start(QRunnable::create([promise, work = std::move(work)]()
+        QThreadPool::globalInstance()->start(QRunnable::create([promise, work = std::move(work), translator]()
         {
-            promise->addResult(work());
+            const TokenTranslationScope scope(translator);
+            promise->addResult(std::make_shared<const Result>(work()));
             promise->finish();
         }));
     }
@@ -556,12 +586,12 @@ namespace
 
     QString unavailableText()
     {
-        return text("privilege.workbench.tokens.unreadable", QStringLiteral("不可读（不能推断为不存在）"));
+        return tokenTranslation ? workerText("privilege.workbench.tokens.unreadable", QStringLiteral("不可读（不能推断为不存在）")) : text("privilege.workbench.tokens.unreadable", QStringLiteral("不可读（不能推断为不存在）"));
     }
 
     QString absentText()
     {
-        return text("privilege.workbench.tokens.absent", QStringLiteral("不存在"));
+        return tokenTranslation ? workerText("privilege.workbench.tokens.absent", QStringLiteral("不存在")) : text("privilege.workbench.tokens.absent", QStringLiteral("不存在"));
     }
 
     QString identityChangedText()
@@ -594,9 +624,10 @@ namespace
         return entry.value(QStringLiteral("value")).toString();
     }
 
-    Rows comparisonRows(const QJsonObject& left, const QJsonObject& right, bool differences, const QString& query,
-        QList<QVariant>& sids)
+    ks::ui::ImmutableTableSource comparisonSource(const QJsonObject& left, const QJsonObject& right, bool differences,
+        const ks::i18n::SourceTextSnapshot& translator)
     {
+        const TokenTranslationScope scope(translator);
         QMap<QString, QJsonObject> a, b;
         for (const auto& value : left.value(QStringLiteral("entries")).toArray())
             a.insert(value.toObject().value(QStringLiteral("key")).toString(), value.toObject());
@@ -607,7 +638,7 @@ namespace
         for (auto it = b.cbegin(); it != b.cend(); ++it) keySet.insert(it.key());
         QStringList keys = keySet.values();
         std::sort(keys.begin(), keys.end());
-        Rows rows;
+        QVector<ks::ui::ImmutableTableRow> rows;
         for (const auto& key : keys)
         {
             const QString av = a.contains(key) ? displayValue(a.value(key)) : missingValue(left, key);
@@ -619,15 +650,33 @@ namespace
             if (differences && equal) continue;
             const QString sid = a.value(key).value(QStringLiteral("sid")).toString().isEmpty()
                 ? b.value(key).value(QStringLiteral("sid")).toString() : a.value(key).value(QStringLiteral("sid")).toString();
-            const QString state = !known ? text("privilege.workbench.tokens.unknown", QStringLiteral("无法确定"))
-                : equal ? text("privilege.workbench.tokens.equal", QStringLiteral("相同"))
-                : text("privilege.workbench.tokens.different", QStringLiteral("不同"));
+            const QString state = !known ? workerText("privilege.workbench.tokens.unknown", QStringLiteral("无法确定"))
+                : equal ? workerText("privilege.workbench.tokens.equal", QStringLiteral("相同"))
+                : workerText("privilege.workbench.tokens.different", QStringLiteral("不同"));
             const QStringList row{key, av, bv, state};
-            if (!query.isEmpty() && !row.join(QChar(' ')).contains(query, Qt::CaseInsensitive)) continue;
-            rows.append(row);
-            sids.append(sid);
+            ks::ui::ImmutableTableRow value;
+            value.key = key;
+            value.cells = row;
+            value.searchText = row.join(QChar(' '));
+            value.roles.insert(Qt::UserRole, sid);
+            value.rolesInAllColumns = true;
+            rows.push_back(std::move(value));
         }
-        return rows;
+        return ks::ui::MakeImmutableTableSource(std::move(rows));
+    }
+
+    using ValueTable = ks::ui::ImmutableValueTable;
+    using TableHeader = ks::ui::ImmutableTableHeader;
+    ValueTable* valueTable(QWidget* owner, QVector<TableHeader> headers)
+    {
+        auto* result = new ValueTable(owner, std::move(headers));
+        ks::ui::SetTableActionBarMode(result, ks::ui::TableActionBarMode::Compact);
+        return result;
+    }
+    void copySid(ValueTable* source, int column)
+    {
+        const QString sid = source->currentCell(column, Qt::UserRole).toString();
+        if (sid.startsWith(QStringLiteral("S-"))) QApplication::clipboard()->setText(sid);
     }
 
     void copySid(QTableWidget* source, int column)
@@ -728,9 +777,9 @@ namespace
             layout->addLayout(bar);
             auto* legend = new QLabel(text("privilege.workbench.tokens.legend", QStringLiteral("SID 和权限属性按原始值对比；布尔值 1=是、0=否。完整性 RID：4096=低、8192=中、12288=高、16384=SYSTEM。不可读字段保留为未知。")), this);
             legend->setWordWrap(true); layout->addWidget(legend);
-            m_table = table(this, { text("privilege.workbench.tokens.field", QStringLiteral("字段")),
-                text("privilege.workbench.tokens.value_a", QStringLiteral("A 值")), text("privilege.workbench.tokens.value_b", QStringLiteral("B 值")),
-                text("privilege.workbench.tokens.result", QStringLiteral("结果")) });
+            m_table = valueTable(this, { TableHeader(QStringLiteral("privilege.workbench.tokens.field"), QStringLiteral("字段")),
+                TableHeader(QStringLiteral("privilege.workbench.tokens.value_a"), QStringLiteral("A 值")), TableHeader(QStringLiteral("privilege.workbench.tokens.value_b"), QStringLiteral("B 值")),
+                TableHeader(QStringLiteral("privilege.workbench.tokens.result"), QStringLiteral("结果")) });
             m_table->setObjectName(QStringLiteral("privilege_token_comparison_table"));
             // 页面已经有令牌 A/B 比较，通用快照栏不应再重复一套比较动作。
             ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
@@ -741,7 +790,7 @@ namespace
             connect(m_refresh, &QPushButton::clicked, this, [this]() { compare(); });
             connect(m_processRefresh, &QPushButton::clicked, this, [this]() { refreshProcesses(); });
             connect(m_differences, &QCheckBox::toggled, this, [this]() { render(); });
-            connect(m_search, &QLineEdit::textChanged, this, [this]() { render(); });
+            connect(m_search, &QLineEdit::textChanged, this, [this]() { m_table->setQuery(m_search->text().trimmed()); });
             connect(copy, &QPushButton::clicked, this, [this]() { copySid(m_table, 0); });
         }
 
@@ -854,9 +903,14 @@ namespace
 
         void render()
         {
-            QList<QVariant> sids;
-            const Rows rows = comparisonRows(m_snapshots[0], m_snapshots[1], m_differences->isChecked(), m_search->text().trimmed(), sids);
-            fill(m_table, rows, sids);
+            const auto left = m_snapshots[0], right = m_snapshots[1];
+            const bool differences = m_differences->isChecked();
+            const QPointer<QWidget> alive(this);
+            m_table->setSourceFactory([left, right, differences](const auto& translator) {
+                return comparisonSource(left, right, differences, translator);
+            });
+            if (!alive) return;
+            m_table->setQuery(m_search->text().trimmed());
         }
         QComboBox* m_process[2]{};
         QLabel* m_identity[2]{};
@@ -865,7 +919,7 @@ namespace
         QPushButton *m_refresh = nullptr, *m_processRefresh = nullptr;
         QCheckBox* m_differences = nullptr;
         QLineEdit* m_search = nullptr;
-        QTableWidget* m_table = nullptr;
+        ValueTable* m_table = nullptr;
         QLabel* m_status = nullptr;
         bool m_loaded = false, m_busy = false, m_listBusy = false;
     };
@@ -1234,10 +1288,10 @@ namespace
             m_identity = new QLabel(this); m_identity->setWordWrap(true);
             m_identity->setTextInteractionFlags(Qt::TextSelectableByMouse);
             workspace->results()->addWidget(m_identity);
-            m_table = table(this, { text("privilege.workbench.tokens.field", QStringLiteral("字段")),
-                text("privilege.workbench.launch.actual", QStringLiteral("所选身份实例的实际令牌")),
-                text("privilege.workbench.launch.ordinary_actual", QStringLiteral("普通用户实例的实际令牌")),
-                text("privilege.workbench.tokens.result", QStringLiteral("结果")) });
+            m_table = valueTable(this, { TableHeader(QStringLiteral("privilege.workbench.tokens.field"), QStringLiteral("字段")),
+                TableHeader(QStringLiteral("privilege.workbench.launch.actual"), QStringLiteral("所选身份实例的实际令牌")),
+                TableHeader(QStringLiteral("privilege.workbench.launch.ordinary_actual"), QStringLiteral("普通用户实例的实际令牌")),
+                TableHeader(QStringLiteral("privilege.workbench.tokens.result"), QStringLiteral("结果")) });
             m_table->setObjectName(QStringLiteral("privilege_launch_token_table"));
             // 启动后的令牌对比已由页面处理，通用操作栏只需紧凑导出。
             ks::ui::StyleSearchField(m_search);
@@ -1264,12 +1318,18 @@ namespace
             connect(m_baseline, &QPushButton::clicked, this, [this]() { launch(true); });
             connect(m_availability, &QPushButton::clicked, this, [this]() { checkAvailability(); });
             connect(m_refresh, &QPushButton::clicked, this, [this]() { refreshTokens(); });
-            connect(m_search, &QLineEdit::textChanged, this, [this]() { render(); });
+            connect(m_search, &QLineEdit::textChanged, this, [this]() { m_table->setQuery(m_search->text().trimmed()); });
             connect(m_differences, &QCheckBox::toggled, this, [this]() { render(); });
             connect(copy, &QPushButton::clicked, this, [this]() { copySid(m_table, 0); });
         }
 
     protected:
+        void changeEvent(QEvent* event) override
+        {
+            const QPointer<QWidget> alive(this);
+            QWidget::changeEvent(event);
+            if (alive && event->type() == QEvent::LanguageChange) updateIdentitySummary();
+        }
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
@@ -1427,10 +1487,24 @@ namespace
 
         void render()
         {
-            QList<QVariant> sids;
             const auto left = m_results[0].value(QStringLiteral("snapshot")).toObject();
             const auto right = m_results[1].value(QStringLiteral("snapshot")).toObject();
-            fill(m_table, comparisonRows(left, right, m_differences->isChecked(), m_search->text().trimmed(), sids), sids);
+            const bool differences = m_differences->isChecked();
+            const QPointer<QWidget> alive(this);
+            m_table->setSourceFactory([left, right, differences](const auto& translator) {
+                return comparisonSource(left, right, differences, translator);
+            });
+            if (!alive) return;
+            m_table->setQuery(m_search->text().trimmed());
+            if (!alive) return;
+            updateIdentitySummary();
+        }
+        void updateIdentitySummary()
+        {
+            const quint64 revision = ++m_summaryRevision;
+            const QJsonObject results[2]{m_results[0], m_results[1]};
+            async(this, [a = results[0], b = results[1]] {
+            const QJsonObject m_results[2]{a, b};
             QStringList identities;
             for (int side = 0; side < 2; ++side)
             {
@@ -1445,20 +1519,24 @@ namespace
                     else if (key == QStringLiteral("elevated")) elevated = displayValue(entry);
                     else if (key == QStringLiteral("integrity/rid")) integrity = displayValue(entry);
                 }
-                identities.append(text("privilege.workbench.launch.actual_identity", QStringLiteral("%1：PID %2；账号 %3；SID %4；提升 %5；完整性 RID %6"))
-                    .arg(side == 0 ? text("privilege.workbench.launch.selected_instance", QStringLiteral("所选身份实例"))
-                        : text("privilege.workbench.launch.standard_instance", QStringLiteral("普通用户实例")))
+                identities.append(workerText("privilege.workbench.launch.actual_identity", QStringLiteral("%1：PID %2；账号 %3；SID %4；提升 %5；完整性 RID %6"))
+                    .arg(side == 0 ? workerText("privilege.workbench.launch.selected_instance", QStringLiteral("所选身份实例"))
+                        : workerText("privilege.workbench.launch.standard_instance", QStringLiteral("普通用户实例")))
                     .arg(m_results[side].value(QStringLiteral("pid")).toInt())
                     .arg(account.isEmpty() ? unavailableText() : account, sid.isEmpty() ? unavailableText() : sid,
                         elevated.isEmpty() ? unavailableText() : elevated, integrity.isEmpty() ? unavailableText() : integrity));
             }
-            m_identity->setText(identities.join(QChar('\n')));
+            return identities.join(QChar('\n'));
+            }, [this, revision](const QString& summary) {
+                if (revision == m_summaryRevision) m_identity->setText(summary);
+            });
         }
+        quint64 m_summaryRevision = 0;
         QLineEdit *m_image = nullptr, *m_arguments = nullptr, *m_directory = nullptr, *m_search = nullptr;
         QComboBox* m_mode = nullptr;
         QPushButton *m_launch = nullptr, *m_availability = nullptr, *m_baseline = nullptr, *m_refresh = nullptr;
         QCheckBox* m_differences = nullptr;
-        QTableWidget* m_table = nullptr;
+        ValueTable* m_table = nullptr;
         QLabel *m_status = nullptr, *m_identity = nullptr;
         QJsonObject m_results[2];
         QString m_lastImage, m_lastArguments;
