@@ -437,6 +437,7 @@ void MinidumpDock::renderCurrentRawMemoryPage()
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
     auto* metadata = new ks::ui::StructuredFieldView(page);
+    metadata->setValueModelProjection();
     metadata->setHiddenProjectionDeferred();
     metadata->setMaximumHeight(145);
     metadata->setDocument(metadataDocument);

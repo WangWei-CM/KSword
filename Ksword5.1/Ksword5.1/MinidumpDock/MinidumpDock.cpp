@@ -330,6 +330,7 @@ void MinidumpDock::buildUi()
     ks::ui::StylePageTabs(m_rawMemoryTabs);
     m_memoryView = new DumpMemoryView(m_resultTabs);
     m_reportEditor = new ks::ui::StructuredFieldView(m_resultTabs);
+    m_reportEditor->setValueModelProjection();
     m_reportEditor->setHiddenProjectionDeferred();
 
 
