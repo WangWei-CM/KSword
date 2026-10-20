@@ -37,12 +37,24 @@ namespace ks::ui
         ReportRole reportRole = ReportRole::Content; // 生产者明确区分目录、类型、字段及已投影到列的元数据。
         int reportedCount = -1; // 原始资料声明的字段数，不能用属性子项数冒充。
         bool preferredScope = false; // 当前业务对象默认进入的报告范围。
+        bool operator==(const FieldNode& other) const
+        {
+            if (kind != other.kind || name != other.name || value != other.value
+                || translateValue != other.translateValue || initiallyExpanded != other.initiallyExpanded
+                || translateName != other.translateName || status != other.status || summaryLabel != other.summaryLabel
+                || reportRole != other.reportRole || reportedCount != other.reportedCount
+                || preferredScope != other.preferredScope || children.size() != other.children.size()) return false;
+            for (qsizetype index = 0; index < children.size(); ++index)
+                if (!(children.at(index) == other.children.at(index))) return false;
+            return true;
+        }
     };
 
     struct FieldDocument
     {
         QString title;
         QVector<FieldNode> nodes;
+        bool operator==(const FieldDocument&) const = default;
 
         // Fields and notes append to the most recently started section, or to
         // the document root before the first section. Nested data can be built
