@@ -363,11 +363,15 @@ bool FileExistsInDir(const std::wstring& dir, const std::wstring& rel) {
 // Input is mutable log text and one line; processing appends CRLF; no return.
 void AppendLog(std::wstring* log, const std::wstring& line) {
     if (!log) return;
-    *log += line;
-    *log += L"\r\n";
+    const bool firstLine = log->empty();
+    const std::wstring addition = line + L"\r\n";
+    *log += addition;
     if (g_status) {
-        const std::string utf8 = WideToUtf8(*log);
-        g_status->set_text(utf8.c_str());
+        // A new transaction replaces the preparatory status once; subsequent
+        // lines only encode and insert the newly accepted diagnostic text.
+        if (firstLine) g_status->set_text("");
+        const std::string utf8 = WideToUtf8(addition);
+        g_status->append_text(utf8.c_str());
         Fl::check();
     }
 }

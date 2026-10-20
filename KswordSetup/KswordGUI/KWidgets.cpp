@@ -622,6 +622,18 @@ void KTextDisplay::set_text(const char* text) {
     buffer_.text(text ? text : "");
 }
 
+void KTextDisplay::append_text(const char* text) {
+    if (!text || !*text) return;
+    const int top = scroll_row();
+    const int horizontal = scroll_col();
+    const bool follow = top + mNVisibleLines > mNBufferLines;
+    buffer_.append(text);
+    // Buffer append preserves existing selection. Do not move the insertion
+    // cursor to follow, which would disturb a reader's selected history.
+    scroll(follow ? std::max(1, mNBufferLines - mNVisibleLines + 2) : top,
+        horizontal);
+}
+
 KImageView::KImageView(int x, int y, int w, int h, const char* label)
     : Fl_Widget(x, y, w, h, label),
     image_(nullptr),
