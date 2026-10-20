@@ -3,6 +3,8 @@
 #include <QDialog>
 
 class QCheckBox;
+class QHideEvent;
+class QShowEvent;
 class QLabel;
 class QPushButton;
 class QSpinBox;
@@ -18,6 +20,10 @@ class TaskbarSettingsDialog : public QDialog
 public:
     // 构造函数：传入全局通知服务；建立设置控件并订阅其状态变化信号。
     explicit TaskbarSettingsDialog(TaskbarNotificationService* notificationService, QWidget* parent = nullptr);
+
+protected:
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private slots:
     // applyClipboardSetting：把复选框状态同步至全局通知服务。
@@ -37,6 +43,7 @@ private slots:
 
     // refreshSourceDiagnostics：刷新多源连接状态文字。
     void refreshSourceDiagnostics();
+    void scheduleSourceDiagnostics();
 
     // restartTaskbar：启动等待当前 PID 的接替实例，并退出本进程释放 AppBar。
     void restartTaskbar();
@@ -63,4 +70,6 @@ private:
 
     // m_refreshTimer 在窗口显示期间周期刷新连接诊断，不修改业务状态。
     QTimer* m_refreshTimer;
+    bool m_sourceDiagnosticsDirty = true;
+    bool m_sourceDiagnosticsPending = false;
 };
