@@ -671,9 +671,10 @@ void WindowGuiHandleTab::refreshAsync()
         },
         [this](std::exception_ptr) {
             const QPointer<WindowGuiHandleTab> alive(this);
+            const auto failedGeneration = m_refreshOperation->generation();
             m_refreshing = false;
             m_refreshButton->setEnabled(true);
-            if (alive && !m_refreshOperation->isBusy() && !m_refreshOperation->isInFlight()) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+            if (alive && m_refreshOperation->isCurrent(failedGeneration)) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
         });
 }
 
