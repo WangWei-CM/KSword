@@ -12,6 +12,7 @@
 #include "StructuredFieldView.h"
 
 #include <QList>
+#include <QHash>
 #include <QMetaObject>
 #include <QObject>
 #include <QPersistentModelIndex>
@@ -82,7 +83,7 @@ namespace ks::ui
         // applyScheme：切换当前页面布局；会清理旧模式的临时行内视图/窗口状态。
         void applyScheme(ks::settings::DetailDisplayScheme scheme);
 
-        // clearEmbeddedDetails：移除所有行内详情并恢复源行图标。
+        // clearEmbeddedDetails：移除所有行内详情并恢复原行高及delegate。
         void clearEmbeddedDetails();
 
         // prepareDataRebuild：页面重建表格数据前调用；取消旧排队点击并清理行内详情。
@@ -149,7 +150,7 @@ namespace ks::ui
         void insertTreeEmbeddedDetail(const QPersistentModelIndex& sourceIndex, const QString& detailText);
 
         // installEmbeddedRowDelegate / restoreEmbeddedRowDelegate：
-        // 仅在存在展开行时安装绘制包装器，并在最后一行收起时恢复页面原 delegate。
+        // Embedded模式按需绘制指示器；退出模式/模型生命周期时恢复原delegate。
         void installEmbeddedRowDelegate();
         void restoreEmbeddedRowDelegate();
 
@@ -159,16 +160,12 @@ namespace ks::ui
         // removeEmbeddedEntry：移除指定源行的行内详情；返回 true 表示已找到并移除。
         bool removeEmbeddedEntry(const QPersistentModelIndex& sourceIndex);
 
-        // 行内详情布局与指示器均在视图层维护，批量节点按事件循环分片处理。
+        // 指示器只由delegate绘制，业务模型DecorationRole始终保持原值。
         void updateEmbeddedEditorGeometries();
         void restoreEmbeddedEntryLayout(const EmbeddedEntry& entry);
         void refreshEmbeddedIndicators();
         void scheduleEmbeddedIndicatorRefresh();
-        void queueEmbeddedIndicatorRows(const QModelIndex& parentIndex, int firstRow, int lastRow);
-        void processEmbeddedIndicatorBatch(quint64 generation);
-        void restoreEmbeddedIndicators();
         void setSourceExpandedIndicator(const QPersistentModelIndex& sourceIndex, bool expanded);
-        void installEmbeddedIndicator(const QPersistentModelIndex& sourceIndex, bool expanded);
 
         // showFloatingWindow / destroyFloatingWindow：管理当前页面唯一的非模态详情窗口。
         void showFloatingWindow();
@@ -196,6 +193,12 @@ namespace ks::ui
         QPointer<CodeEditorWidget> m_floatingEditor;    // m_floatingEditor：独立窗口中的只读镜像编辑器。
         QPointer<QAbstractItemDelegate> m_embeddedSourceDelegate; // m_embeddedSourceDelegate：行内展开前页面正在使用的 delegate。
         QPointer<EmbeddedRowDelegate> m_embeddedRowDelegate; // m_embeddedRowDelegate：限制展开行源单元格绘制区域的包装 delegate。
+        struct EmbeddedDelegateBinding
+        {
+            QPointer<QAbstractItemDelegate> source;
+            QPointer<EmbeddedRowDelegate> wrapper;
+        };
+        QHash<int, EmbeddedDelegateBinding> m_embeddedColumnDelegates;
         QList<EmbeddedEntry> m_embeddedEntries;         // m_embeddedEntries：当前已展开的多行详情。
         QList<EmbeddedEntry> m_layoutRestorations;       // 排序后再按重映射索引还原逻辑行高。
         ks::settings::DetailDisplayScheme m_scheme =
@@ -207,10 +210,7 @@ namespace ks::ui
         bool m_explicitBinding = false;                 // 是否启用页面显式布局契约。
         quint64 m_bindingGeneration = 0;                // 取消换布局/模型前 queued 点击。
         bool m_hostUiInitializationScheduled = false;   // m_hostUiInitializationScheduled：页面构造结束后的延迟初始化是否已排队。
-        bool m_indicatorBatchScheduled = false;         // m_indicatorBatchScheduled：节点图标分片任务是否已排队。
-        bool m_indicatorRefreshScheduled = false;       // m_indicatorRefreshScheduled：批量数据更新后的图标刷新是否已合并。
-        quint64 m_indicatorGeneration = 0;              // m_indicatorGeneration：取消过期图标遍历的代次。
-        QList<QPersistentModelIndex> m_indicatorIndexes; // m_indicatorIndexes：已保存原始图标的源项。
-        QList<QPersistentModelIndex> m_pendingIndicatorIndexes; // m_pendingIndicatorIndexes：待分片处理的源项。
+        bool m_indicatorRefreshScheduled = false;       // 合并当前可见视口的指示器刷新。
+        bool m_embeddedIndicatorsDirty = true;          // 隐藏视图只记录脏状态，Show首帧前安装delegate。
     };
 }

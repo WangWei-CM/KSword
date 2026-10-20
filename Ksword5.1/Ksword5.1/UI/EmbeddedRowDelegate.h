@@ -5,7 +5,7 @@
 // 作用：
 // - 在行内详情展开时，把源单元格的绘制区域限制在展开前的原始行高内；
 // - 保留页面原有 item delegate 的绘制、编辑和提示行为；
-// - 不修改业务模型，只修正视图层的源行绘制几何。
+// - 不修改业务模型，按需绘制展开指示器并修正源行几何。
 // ============================================================
 
 #include <QAbstractItemDelegate>
@@ -24,7 +24,7 @@ class QWidget;
 namespace ks::ui
 {
     // EmbeddedRowDelegate：包装页面原有 delegate，并裁剪已展开源行的绘制区域。
-    // 调用方式：由 DetailLayoutHost 在首次展开行内详情时创建并安装到数据视图。
+    // 调用方式：由 DetailLayoutHost 在Embedded模式可见时创建并安装到数据视图。
     // sourceDelegate：页面原有 delegate，包装器只借用不负责释放。
     // originalHeightProvider：按模型索引返回展开前原始行高，非详情行返回 <= 0。
     class EmbeddedRowDelegate final : public QAbstractItemDelegate
@@ -83,5 +83,6 @@ namespace ks::ui
 
         // originalHeightProvider：查询当前索引是否属于已展开行以及其原始行高。
         OriginalHeightProvider m_originalHeightProvider;
+        QStyleOptionViewItem sourceOption(const QStyleOptionViewItem& option, const QModelIndex& index) const;
     };
 }

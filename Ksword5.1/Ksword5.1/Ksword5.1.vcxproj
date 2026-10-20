@@ -985,6 +985,7 @@
     <ClInclude Include="UI\HvmControl.h" />
     <ClInclude Include="UI\HvmWatchPanel.h" />
     <ClInclude Include="UI\HvmWatchEventDialog.h" />
+    <ClInclude Include="UI\EmbeddedCellLayout.h" />
     <ClInclude Include="UI\EmbeddedRowDelegate.h" />
     <ClInclude Include="UI\CodeTextEdit.h" />
     <ClInclude Include="UI\CodeEditorFileSession.h" />

@@ -31,17 +31,6 @@
 
 namespace
 {
-    // 专用角色避开页面普遍使用的 Qt::UserRole 缓存索引。
-    constexpr int OriginalDecorationRole = Qt::UserRole + 411;
-    constexpr int OriginalDecorationCapturedRole = Qt::UserRole + 412;
-
-    QIcon embeddedIndicatorIcon(const bool expanded)
-    {
-        return QIcon(expanded
-            ? QStringLiteral(":/Icon/detail_node_expanded.svg")
-            : QStringLiteral(":/Icon/detail_node_collapsed.svg"));
-    }
-
     // This branch serves actual text documents and logs only.
     void setMirrorText(CodeEditorWidget* target, CodeEditorWidget*, const QString& text)
     {
@@ -463,10 +452,6 @@ bool ks::ui::DetailLayoutHost::removeEmbeddedEntry(
             delete entry.editorWidget.data();
         }
         m_embeddedEntries.removeAt(entryIndex);
-        if (m_embeddedEntries.isEmpty())
-        {
-            restoreEmbeddedRowDelegate();
-        }
         updateEmbeddedEditorGeometries();
         return true;
     }
@@ -483,7 +468,7 @@ void ks::ui::DetailLayoutHost::clearEmbeddedDetails()
         return;
     }
 
-    m_indicatorRefreshScheduled = false;
+    m_embeddedIndicatorsDirty = true;
     // 先分离本轮记录，行高/编辑器清理同步触发的回调不能重复遍历同一容器。
     const auto entries = std::move(m_embeddedEntries);
     m_embeddedEntries.clear();
@@ -509,13 +494,6 @@ void ks::ui::DetailLayoutHost::clearEmbeddedDetails()
     {
         return;
     }
-    m_pendingIndicatorIndexes.clear();
-    ++m_indicatorGeneration;
-    restoreEmbeddedIndicators();
-    if (self.isNull())
-    {
-        return;
-    }
     updateEmbeddedEditorGeometries();
 }
 
@@ -529,62 +507,60 @@ void ks::ui::DetailLayoutHost::prepareDataRebuild()
 
 void ks::ui::DetailLayoutHost::installEmbeddedRowDelegate()
 {
-    if (m_tableView.isNull() ||
-        (!m_embeddedRowDelegate.isNull() &&
-         m_tableView->itemDelegate() == m_embeddedRowDelegate.data()))
+    if (m_tableView.isNull() || m_tableView->model() == nullptr) return;
+    if (!m_embeddedRowDelegate.isNull()
+        && m_tableView->itemDelegate() != m_embeddedRowDelegate.data())
+        restoreEmbeddedRowDelegate(); // an external replacement remains authoritative
+    if (m_embeddedRowDelegate.isNull())
     {
-        return;
+        QAbstractItemDelegate* source = m_tableView->itemDelegate();
+        if (!source) return;
+        m_embeddedSourceDelegate = source;
+        m_embeddedRowDelegate = new EmbeddedRowDelegate(source,
+            [this](const QModelIndex& index) { return embeddedOriginalRowHeight(index); }, this);
+        m_tableView->setItemDelegate(m_embeddedRowDelegate.data());
     }
-
-    // 当前视图未设置 delegate 时由 Qt 保证回退默认绘制；无需安装无源包装器。
-    QAbstractItemDelegate* sourceDelegate = m_tableView->itemDelegate();
-    if (sourceDelegate == nullptr)
+    // Per-column delegates override the default in Qt. Wrap only explicitly
+    // registered columns, preserving their paint/editor/help implementations.
+    const int columns = m_tableView->model()->columnCount(m_tableView->rootIndex());
+    for (int column = 0; column < columns; ++column)
     {
-        return;
-    }
-
-    // 源 delegate 仅借用，所有权仍由页面视图保持；包装器随详情宿主销毁。
-    m_embeddedSourceDelegate = sourceDelegate;
-    m_embeddedRowDelegate = new EmbeddedRowDelegate(
-        sourceDelegate,
-        [this](const QModelIndex& modelIndex)
+        QAbstractItemDelegate* source = m_tableView->itemDelegateForColumn(column);
+        auto found = m_embeddedColumnDelegates.find(column);
+        if (found != m_embeddedColumnDelegates.end() && source == found->wrapper) continue;
+        if (found != m_embeddedColumnDelegates.end())
         {
-            return embeddedOriginalRowHeight(modelIndex);
-        },
-        this);
-    m_tableView->setItemDelegate(m_embeddedRowDelegate.data());
-    if (m_tableView->viewport() != nullptr)
-    {
-        m_tableView->viewport()->update();
+            if (found->wrapper) found->wrapper->deleteLater();
+            m_embeddedColumnDelegates.erase(found);
+        }
+        if (!source) continue;
+        auto* wrapper = new EmbeddedRowDelegate(source,
+            [this](const QModelIndex& index) { return embeddedOriginalRowHeight(index); }, this);
+        m_embeddedColumnDelegates.insert(column, {source,wrapper});
+        m_tableView->setItemDelegateForColumn(column, wrapper);
     }
 }
 
 void ks::ui::DetailLayoutHost::restoreEmbeddedRowDelegate()
 {
     const QPointer<DetailLayoutHost> self(this);
-    if (!m_tableView.isNull() && !m_embeddedRowDelegate.isNull() &&
-        m_tableView->itemDelegate() == m_embeddedRowDelegate.data() &&
-        !m_embeddedSourceDelegate.isNull())
+    const auto columns = std::move(m_embeddedColumnDelegates);
+    m_embeddedColumnDelegates.clear();
+    for (auto it = columns.cbegin(); it != columns.cend(); ++it)
     {
-        // 只在当前 delegate 仍是本包装器时恢复，避免覆盖页面运行期替换的 delegate。
+        if (m_tableView && it->wrapper && m_tableView->itemDelegateForColumn(it.key()) == it->wrapper)
+            m_tableView->setItemDelegateForColumn(it.key(), it->source.data());
+        if (!self) return;
+        if (it->wrapper) it->wrapper->deleteLater();
+    }
+    if (m_tableView && m_embeddedRowDelegate && m_embeddedSourceDelegate
+        && m_tableView->itemDelegate() == m_embeddedRowDelegate)
         m_tableView->setItemDelegate(m_embeddedSourceDelegate.data());
-        if (self.isNull())
-        {
-            return;
-        }
-        if (m_tableView->viewport() != nullptr)
-        {
-            m_tableView->viewport()->update();
-        }
-    }
-
-    // deleteLater 保证 Qt 不会在当前绘制调用栈内销毁仍可能被访问的 delegate。
-    if (!m_embeddedRowDelegate.isNull())
-    {
-        m_embeddedRowDelegate->deleteLater();
-    }
+    if (!self) return;
+    if (m_embeddedRowDelegate) m_embeddedRowDelegate->deleteLater();
     m_embeddedRowDelegate.clear();
     m_embeddedSourceDelegate.clear();
+    if (m_tableView && m_tableView->viewport()) m_tableView->viewport()->update();
 }
 
 int ks::ui::DetailLayoutHost::embeddedOriginalRowHeight(const QModelIndex& modelIndex) const
@@ -704,191 +680,31 @@ void ks::ui::DetailLayoutHost::updateEmbeddedEditorGeometries()
 
 void ks::ui::DetailLayoutHost::refreshEmbeddedIndicators()
 {
-    if (m_tableView.isNull() || m_scheme != ks::settings::DetailDisplayScheme::Embedded)
-    {
-        return;
-    }
-    const int rowCount = m_tableView->model() != nullptr
-        ? m_tableView->model()->rowCount()
-        : 0;
-    queueEmbeddedIndicatorRows(QModelIndex(), 0, rowCount - 1);
+    if (m_tableView.isNull() || m_scheme != ks::settings::DetailDisplayScheme::Embedded) return;
+    m_embeddedIndicatorsDirty = true;
+    if (!m_tableView->isVisible()) return;
+    installEmbeddedRowDelegate();
+    m_embeddedIndicatorsDirty = false;
+    if (m_tableView && m_tableView->viewport()) m_tableView->viewport()->update();
 }
 
 void ks::ui::DetailLayoutHost::scheduleEmbeddedIndicatorRefresh()
 {
-    if (m_indicatorRefreshScheduled)
-    {
-        return;
-    }
+    if (m_scheme != ks::settings::DetailDisplayScheme::Embedded || !m_tableView) return;
+    m_embeddedIndicatorsDirty = true;
+    if (m_indicatorRefreshScheduled || !m_tableView->isVisible()) return;
     m_indicatorRefreshScheduled = true;
-    QTimer::singleShot(0, this,
-        [this]()
-        {
-            m_indicatorRefreshScheduled = false;
-            refreshEmbeddedIndicators();
-        });
-}
-
-void ks::ui::DetailLayoutHost::queueEmbeddedIndicatorRows(
-    const QModelIndex& parentIndex,
-    const int firstRow,
-    const int lastRow)
-{
-    if (m_tableView.isNull() || m_tableView->model() == nullptr || firstRow > lastRow)
-    {
-        return;
-    }
-    ++m_indicatorGeneration;
-    m_pendingIndicatorIndexes.clear();
-    const int boundedFirst = qMax(0, firstRow);
-    const int boundedLast = qMin(lastRow, m_tableView->model()->rowCount(parentIndex) - 1);
-    for (int row = boundedFirst; row <= boundedLast; ++row)
-    {
-        const QModelIndex index = m_tableView->model()->index(row, 0, parentIndex);
-        if (index.isValid())
-        {
-            m_pendingIndicatorIndexes.append(QPersistentModelIndex(index));
-        }
-    }
-    if (!m_indicatorBatchScheduled)
-    {
-        m_indicatorBatchScheduled = true;
-        const quint64 generation = m_indicatorGeneration;
-        QTimer::singleShot(0, this, [this, generation]() { processEmbeddedIndicatorBatch(generation); });
-    }
-}
-
-void ks::ui::DetailLayoutHost::processEmbeddedIndicatorBatch(const quint64 generation)
-{
-    if (generation != m_indicatorGeneration || m_scheme != ks::settings::DetailDisplayScheme::Embedded ||
-        m_tableView.isNull() || m_tableView->model() == nullptr)
-    {
-        m_indicatorBatchScheduled = false;
-        if (generation != m_indicatorGeneration && !m_pendingIndicatorIndexes.isEmpty() &&
-            m_scheme == ks::settings::DetailDisplayScheme::Embedded)
-        {
-            m_indicatorBatchScheduled = true;
-            const quint64 currentGeneration = m_indicatorGeneration;
-            QTimer::singleShot(0, this,
-                [this, currentGeneration]() { processEmbeddedIndicatorBatch(currentGeneration); });
-        }
-        return;
-    }
-    int processed = 0;
-    while (!m_pendingIndicatorIndexes.isEmpty() && processed < 128)
-    {
-        const QPersistentModelIndex index = m_pendingIndicatorIndexes.takeLast();
-        if (!index.isValid())
-        {
-            continue;
-        }
-        installEmbeddedIndicator(index, false);
-        if (qobject_cast<QTreeWidget*>(m_tableView.data()) != nullptr)
-        {
-            const int childCount = m_tableView->model()->rowCount(index);
-            for (int child = 0; child < childCount; ++child)
-            {
-                const QModelIndex childIndex = m_tableView->model()->index(child, 0, index);
-                if (childIndex.isValid())
-                {
-                    m_pendingIndicatorIndexes.append(QPersistentModelIndex(childIndex));
-                }
-            }
-        }
-        ++processed;
-    }
-    if (!m_pendingIndicatorIndexes.isEmpty())
-    {
-        QTimer::singleShot(0, this, [this, generation]() { processEmbeddedIndicatorBatch(generation); });
-        return;
-    }
-    m_indicatorBatchScheduled = false;
-    for (const EmbeddedEntry& entry : std::as_const(m_embeddedEntries))
-    {
-        if (entry.sourceIndex.isValid())
-        {
-            setSourceExpandedIndicator(entry.sourceIndex, true);
-        }
-    }
-}
-
-void ks::ui::DetailLayoutHost::installEmbeddedIndicator(
-    const QPersistentModelIndex& sourceIndex,
-    const bool expanded)
-{
-    if (m_tableView.isNull() || !sourceIndex.isValid())
-    {
-        return;
-    }
-    if (QTableWidget* tableWidget = qobject_cast<QTableWidget*>(m_tableView.data()))
-    {
-        QTableWidgetItem* firstItem = tableWidget->item(sourceIndex.row(), 0);
-        if (firstItem == nullptr)
-        {
-            return;
-        }
-        if (!firstItem->data(OriginalDecorationCapturedRole).toBool())
-        {
-            firstItem->setData(OriginalDecorationRole, firstItem->data(Qt::DecorationRole));
-            firstItem->setData(OriginalDecorationCapturedRole, true);
-            m_indicatorIndexes.append(sourceIndex);
-        }
-        firstItem->setIcon(embeddedIndicatorIcon(expanded));
-    }
-    else if (QTreeWidget* treeWidget = qobject_cast<QTreeWidget*>(m_tableView.data()))
-    {
-        QTreeWidgetItem* item = treeWidget->itemFromIndex(sourceIndex);
-        if (item == nullptr)
-        {
-            return;
-        }
-        if (!item->data(0, OriginalDecorationCapturedRole).toBool())
-        {
-            item->setData(0, OriginalDecorationRole, item->data(0, Qt::DecorationRole));
-            item->setData(0, OriginalDecorationCapturedRole, true);
-            m_indicatorIndexes.append(sourceIndex);
-        }
-        item->setIcon(0, embeddedIndicatorIcon(expanded));
-    }
-}
-
-void ks::ui::DetailLayoutHost::restoreEmbeddedIndicators()
-{
-    for (const QPersistentModelIndex& sourceIndex : std::as_const(m_indicatorIndexes))
-    {
-        if (!sourceIndex.isValid())
-        {
-            continue;
-        }
-        if (QTableWidget* tableWidget = qobject_cast<QTableWidget*>(m_tableView.data()))
-        {
-            QTableWidgetItem* firstItem = tableWidget->item(sourceIndex.row(), 0);
-            if (firstItem != nullptr && firstItem->data(OriginalDecorationCapturedRole).toBool())
-            {
-                firstItem->setData(Qt::DecorationRole, firstItem->data(OriginalDecorationRole));
-                firstItem->setData(OriginalDecorationRole, QVariant());
-                firstItem->setData(OriginalDecorationCapturedRole, false);
-            }
-        }
-        else if (QTreeWidget* treeWidget = qobject_cast<QTreeWidget*>(m_tableView.data()))
-        {
-            QTreeWidgetItem* item = treeWidget->itemFromIndex(sourceIndex);
-            if (item != nullptr && item->data(0, OriginalDecorationCapturedRole).toBool())
-            {
-                item->setData(0, Qt::DecorationRole, item->data(0, OriginalDecorationRole));
-                item->setData(0, OriginalDecorationRole, QVariant());
-                item->setData(0, OriginalDecorationCapturedRole, false);
-            }
-        }
-    }
-    m_indicatorIndexes.clear();
+    QTimer::singleShot(0, this, [this]() {
+        m_indicatorRefreshScheduled = false;
+        if (m_embeddedIndicatorsDirty) refreshEmbeddedIndicators();
+    });
 }
 
 void ks::ui::DetailLayoutHost::setSourceExpandedIndicator(
-    const QPersistentModelIndex& sourceIndex,
-    const bool expanded)
+    const QPersistentModelIndex& sourceIndex, bool)
 {
-    installEmbeddedIndicator(sourceIndex, expanded);
+    if (m_tableView && m_tableView->viewport() && sourceIndex.isValid())
+        m_tableView->viewport()->update(m_tableView->visualRect(sourceIndex));
 }
 
 void ks::ui::DetailLayoutHost::showFloatingWindow()
@@ -1026,6 +842,8 @@ bool ks::ui::DetailLayoutHost::eventFilter(QObject* watchedObject, QEvent* event
             if (eventObject->type() == QEvent::Show || eventObject->type() == QEvent::LayoutRequest)
             {
                 observeModel();
+                if (!self.isNull() && m_scheme == ks::settings::DetailDisplayScheme::Embedded)
+                    refreshEmbeddedIndicators();
                 if (self.isNull())
                 {
                     return true;

@@ -3000,6 +3000,9 @@
     <ClInclude Include="UI\DetailLayoutHost.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\EmbeddedCellLayout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\EmbeddedRowDelegate.h">
       <Filter>Header Files</Filter>
     </ClInclude>
