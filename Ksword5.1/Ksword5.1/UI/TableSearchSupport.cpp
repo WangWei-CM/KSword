@@ -12,10 +12,13 @@
 #include <QComboBox>
 
 #include <QEvent>
+#include <QDynamicPropertyChangeEvent>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHash>
+#include <QSet>
 #include <QIcon>
 #include <QItemSelectionModel>
 #include <QLineEdit>
@@ -34,6 +37,7 @@
 #include <QVariant>
 
 #include <algorithm>
+#include <functional>
 
 namespace
 {
@@ -81,43 +85,49 @@ namespace
         return fallbackRoot;
     }
 
-    // hasDedicatedSearchControl：检查同页且位于表格上方/同组的专属搜索输入框。
-    bool hasDedicatedSearchControl(QTableView* tableView)
+    // One discovery cache per page; table geometry refreshes do not rediscover the
+    // entire QObject tree. Structural changes rebuild once and share the result.
+    class DedicatedSearchPageCache final : public QObject
     {
-        if (tableView == nullptr)
-        {
-            return false;
-        }
+    public:
+        explicit DedicatedSearchPageCache(QWidget* page) : QObject(page), m_page(page) {}
 
-        QWidget* pageRoot = nearestPageRoot(tableView);
-        if (pageRoot == nullptr)
+        bool hasDedicatedSearchControl(QTableView* table)
         {
-            return false;
-        }
-        const QPoint tableTopLeft = tableView->mapTo(pageRoot, QPoint(0, 0));
-        const QList<QLineEdit*> lineEditList = pageRoot->findChildren<QLineEdit*>();
-        bool dedicatedSearchFound = false; // 同页可有多张表和多个专用搜索框，不能首个即退出。
-        for (QLineEdit* lineEdit : lineEditList)
-        {
-            if (lineEdit == nullptr
-                || lineEdit->property(kGenericSearchControlPropertyName).toBool()
-                || lineEdit->property(kGlobalSearchInputPropertyName).toBool())
+            if (m_page.isNull() || table == nullptr) return false;
+            if (m_structureDirty) rebuildCandidates();
+            observeGeometryPath(table);
+
+            // Placeholder/accessibility setters have no shared Qt notify signal.
+            // Compare only known input metadata to catch these changes exactly.
+            for (Candidate& candidate : m_candidates)
             {
-                continue;
+                QLineEdit* edit = candidate.edit.data();
+                if (edit == nullptr) continue;
+                const QString metadata = edit->objectName() + QLatin1Char(' ')
+                    + edit->placeholderText() + QLatin1Char(' ') + edit->toolTip()
+                    + QLatin1Char(' ') + edit->accessibleName();
+                const bool excluded = edit->property(kGenericSearchControlPropertyName).toBool()
+                    || edit->property(kGlobalSearchInputPropertyName).toBool();
+                if (candidate.metadata != metadata || candidate.excluded != excluded)
+                {
+                    candidate.metadata = metadata;
+                    candidate.excluded = excluded;
+                    candidate.isSearch = !excluded && textLooksLikeSearchControl(metadata);
+                    m_decisions.clear();
+                }
             }
+            const auto known = m_decisions.constFind(table);
+            if (known != m_decisions.cend()) return known.value();
 
-            const QString searchMetadata = lineEdit->objectName()
-                + QLatin1Char(' ')
-                + lineEdit->placeholderText()
-                + QLatin1Char(' ')
-                + lineEdit->toolTip()
-                + QLatin1Char(' ')
-                + lineEdit->accessibleName();
-            if (!textLooksLikeSearchControl(searchMetadata))
+            QWidget* pageRoot = m_page.data();
+            QTableView* tableView = table;
+            const QPoint tableTopLeft = table->mapTo(pageRoot, QPoint(0, 0));
+            bool dedicatedSearchFound = false;
+            for (const Candidate& candidate : m_candidates)
             {
-                continue;
-            }
-
+                QLineEdit* lineEdit = candidate.edit.data();
+                if (lineEdit == nullptr || !candidate.isSearch) continue;
             const QPoint editTopLeft = lineEdit->mapTo(pageRoot, QPoint(0, 0));
             const bool directlyAboveTable = editTopLeft.y() <= tableTopLeft.y()
                 && tableTopLeft.y() - editTopLeft.y() <= 180;
@@ -158,7 +168,181 @@ namespace
                 }
             }
         }
-        return dedicatedSearchFound;
+            m_decisions.insert(table, dedicatedSearchFound);
+            if (!m_tables.contains(table))
+            {
+                m_tables.insert(table);
+                connect(table, &QObject::destroyed, this, [this, table]() {
+                    m_decisions.remove(table);
+                    m_tables.remove(table);
+                    m_refreshCallbacks.remove(table);
+                });
+            }
+            return dedicatedSearchFound;
+        }
+
+        void observeTable(QTableView* table, QObject* receiver, std::function<void()> refresh)
+        {
+            // QPointer protects a replaced/deleted search host until the next refresh.
+            m_refreshCallbacks.insert(table, [guard = QPointer<QObject>(receiver), refresh]() {
+                if (!guard.isNull()) refresh();
+            });
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event == nullptr) return QObject::eventFilter(watched, event);
+            if ((event->type() == QEvent::Move || event->type() == QEvent::Resize)
+                && !m_geometryNodes.contains(watched))
+            {
+                return QObject::eventFilter(watched, event);
+            }
+            if (event->type() == QEvent::DynamicPropertyChange)
+            {
+                const QByteArray name = static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName();
+                if (qobject_cast<QLineEdit*>(watched) == nullptr
+                    || (name != kGenericSearchControlPropertyName && name != kGlobalSearchInputPropertyName))
+                {
+                    return QObject::eventFilter(watched, event);
+                }
+            }
+            if (event->type() == QEvent::ToolTipChange && qobject_cast<QLineEdit*>(watched) == nullptr)
+            {
+                return QObject::eventFilter(watched, event);
+            }
+            switch (event->type())
+            {
+            case QEvent::ChildAdded:
+            case QEvent::ChildRemoved:
+            case QEvent::ParentChange:
+                m_structureDirty = true;
+                [[fallthrough]];
+            case QEvent::Move:
+            case QEvent::Resize:
+            case QEvent::LanguageChange:
+            case QEvent::DynamicPropertyChange:
+            case QEvent::ToolTipChange:
+                m_decisions.clear();
+                scheduleRefresh();
+                break;
+            default:
+                break;
+            }
+            return QObject::eventFilter(watched, event);
+        }
+
+    private:
+        struct Candidate
+        {
+            QPointer<QLineEdit> edit;
+            QString metadata;
+            bool isSearch = false;
+            bool excluded = false;
+        };
+
+        void observeGeometryPath(QWidget* widget)
+        {
+            for (QWidget* cursor = widget; cursor != nullptr; cursor = cursor->parentWidget())
+            {
+                m_geometryNodes.insert(cursor);
+                if (cursor == m_page.data()) break;
+            }
+        }
+
+        void rebuildCandidates()
+        {
+            m_structureDirty = false;
+            m_candidates.clear();
+            m_decisions.clear();
+            const auto widgets = m_page->findChildren<QWidget*>();
+            QSet<QObject*> current;
+            current.insert(m_page.data());
+            for (QWidget* widget : widgets) current.insert(widget);
+            for (auto it = m_observed.begin(); it != m_observed.end();)
+            {
+                if (!current.contains(*it))
+                {
+                    (*it)->removeEventFilter(this);
+                    it = m_observed.erase(it);
+                }
+                else ++it;
+            }
+            m_geometryNodes.clear();
+            for (auto it = m_tables.begin(); it != m_tables.end();)
+            {
+                QTableView* table = *it;
+                if (nearestPageRoot(table) != m_page.data())
+                {
+                    m_decisions.remove(table);
+                    m_refreshCallbacks.remove(table);
+                    it = m_tables.erase(it);
+                }
+                else { observeGeometryPath(table); ++it; }
+            }
+            auto observe = [this](QWidget* widget) {
+                if (widget == nullptr || m_observed.contains(widget)) return;
+                m_observed.insert(widget);
+                widget->installEventFilter(this);
+                connect(widget, &QObject::destroyed, this, [this, widget]() {
+                    m_observed.remove(widget);
+                    m_geometryNodes.remove(widget);
+                });
+            };
+            observe(m_page.data());
+            for (QWidget* widget : widgets)
+            {
+                observe(widget);
+                if (auto* edit = qobject_cast<QLineEdit*>(widget))
+                {
+                    Candidate candidate;
+                    candidate.edit = edit;
+                    m_candidates.push_back(candidate);
+                    observeGeometryPath(edit);
+                }
+            }
+        }
+
+        void scheduleRefresh()
+        {
+            if (m_refreshPending) return;
+            m_refreshPending = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_refreshPending = false;
+                const auto callbacks = m_refreshCallbacks;
+                for (auto it = callbacks.cbegin(); it != callbacks.cend(); ++it) it.value()();
+            });
+        }
+
+        QPointer<QWidget> m_page;
+        QVector<Candidate> m_candidates;
+        QSet<QObject*> m_observed;
+        QSet<QObject*> m_geometryNodes;
+        QSet<QTableView*> m_tables;
+        QHash<QTableView*, bool> m_decisions;
+        QHash<QTableView*, std::function<void()>> m_refreshCallbacks;
+        bool m_structureDirty = true;
+        bool m_refreshPending = false;
+    };
+
+    DedicatedSearchPageCache* dedicatedSearchCache(QTableView* tableView)
+    {
+        QWidget* page = nearestPageRoot(tableView);
+        if (page == nullptr) return nullptr;
+        constexpr const char* property = "_ksword_dedicated_search_page_cache";
+        auto* cache = dynamic_cast<DedicatedSearchPageCache*>(page->property(property).value<QObject*>());
+        if (cache == nullptr)
+        {
+            cache = new DedicatedSearchPageCache(page);
+            page->setProperty(property, QVariant::fromValue<QObject*>(cache));
+        }
+        return cache;
+    }
+
+    bool hasDedicatedSearchControl(QTableView* tableView)
+    {
+        auto* cache = dedicatedSearchCache(tableView);
+        return cache != nullptr && cache->hasDedicatedSearchControl(tableView);
     }
 
     // tableNeedsSearchAccess：只有模型内容实际超过当前垂直可视页时才需要入口。
@@ -354,6 +538,10 @@ namespace
             }
 
             QTableView* tableView = m_tableView.data();
+            if (auto* cache = dedicatedSearchCache(tableView))
+            {
+                cache->observeTable(tableView, this, [this]() { scheduleRefresh(); });
+            }
             const QString tableName = ks::ui::ResolveTableSearchDisplayName(tableView);
             m_searchButton->setToolTip(
                 ks::i18n::sourceText(QStringLiteral("搜索当前表格：%1")).arg(tableName));
@@ -685,7 +873,7 @@ namespace
                 controlTop,
                 requestedWidth,
                 kSearchControlHeight);
-            setStyleSheet(QStringLiteral(
+            const QString presentationStyle = QStringLiteral(
                 "QFrame#KSWORD_TABLE_SEARCH_SUPPORT{background:transparent;}"
                 "QLineEdit{background:%1;color:%2;border:1px solid %3;border-radius:3px;padding:0 6px;}"
                 "QLineEdit:focus{border-color:%4;}"
@@ -693,7 +881,8 @@ namespace
                 "QToolButton{border-radius:3px;}" )
                 .arg(KswordTheme::SurfaceHex(), KswordTheme::TextPrimaryHex(),
                     KswordTheme::BorderStrongHex(), KswordTheme::PrimaryBlueHex)
-                + ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral));
+                + ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral);
+            if (styleSheet() != presentationStyle) setStyleSheet(presentationStyle);
             show();
             raise();
         }
