@@ -9912,18 +9912,30 @@ void MonitorDock::startWmiSubscription()
         m_wmiUiUpdateTimer->start();
     }
     {
-        // 启动新一轮订阅前清空待刷队列，避免残留事件混入新会话。
         std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+        m_wmiMirrorSkippedRows.fetch_add(m_wmiPendingRows.size());
         m_wmiPendingRows.clear();
+        m_wmiArchivePath.clear();
+        m_wmiArchiveError.clear();
     }
+    const quint64 generation = ++m_wmiCaptureGeneration;
+    auto archive = std::make_shared<ks::monitor::WmiEventArchive>();
+    m_wmiEventArchive = archive;
+    m_wmiEventArchives.push_back(archive);
+    m_wmiProgressPosted.store(false);
 
     QPointer<MonitorDock> guardThis(this);
-    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause]() {
+    m_wmiSubscribeThread = std::make_unique<std::thread>([guardThis, classList, whereClause, generation, archive]() {
+        struct ArchiveSeal final
+        {
+            std::shared_ptr<ks::monitor::WmiEventArchive> archive;
+            ~ArchiveSeal() { archive->finish(); }
+        } seal{archive};
         QString errorText;
         if (!initCom(&errorText))
         {
-            QMetaObject::invokeMethod(qApp, [guardThis, errorText]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, errorText, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -9939,8 +9951,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -9951,8 +9963,8 @@ void MonitorDock::startWmiSubscription()
         if (!connectWmi(&service, &errorText) || service == nullptr)
         {
             ::CoUninitialize();
-            QMetaObject::invokeMethod(qApp, [guardThis, errorText]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, errorText, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -9968,8 +9980,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -9995,8 +10007,8 @@ void MonitorDock::startWmiSubscription()
                 + (classList.empty()
                     ? 0.0f
                     : (static_cast<float>(classIndex + 1) * 15.0f / static_cast<float>(classList.size())));
-            QMetaObject::invokeMethod(qApp, [guardThis, setupProgressValue, className]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, setupProgressValue, className, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -10042,8 +10054,8 @@ void MonitorDock::startWmiSubscription()
         if (enums.empty())
         {
             ::CoUninitialize();
-            QMetaObject::invokeMethod(qApp, [guardThis]() {
-                if (guardThis == nullptr)
+            QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+                if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
                 {
                     return;
                 }
@@ -10059,8 +10071,8 @@ void MonitorDock::startWmiSubscription()
             return;
         }
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
@@ -10181,32 +10193,40 @@ void MonitorDock::startWmiSubscription()
             if (guardThis != nullptr && eventCount % 20 == 0)
             {
                 const float progressValue = 45.0f + static_cast<float>(std::min<std::size_t>(eventCount, 200)) * 0.25f;
-                QMetaObject::invokeMethod(qApp, [guardThis, progressValue]() {
-                    if (guardThis == nullptr)
-                    {
-                        return;
-                    }
-                    kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI事件接收中", 0, std::min(progressValue, 95.0f));
-                }, Qt::QueuedConnection);
+                guardThis->m_wmiLatestProgress.store(std::min(progressValue, 95.0f));
+                if (!guardThis->m_wmiProgressPosted.exchange(true))
+                    QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+                        if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation) return;
+                        guardThis->m_wmiProgressPosted.store(false);
+                        kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI事件接收中", 0, guardThis->m_wmiLatestProgress.load());
+                    }, Qt::QueuedConnection);
             }
         }
 
+        QString finalArchiveError;
+        archive->finish(&finalArchiveError);
+        if (!finalArchiveError.isEmpty() && guardThis != nullptr)
+        {
+            std::lock_guard<std::mutex> lock(guardThis->m_wmiPendingMutex);
+            guardThis->m_wmiArchiveError = finalArchiveError;
+        }
         ::CoUninitialize();
 
-        QMetaObject::invokeMethod(qApp, [guardThis]() {
-            if (guardThis == nullptr)
+        QMetaObject::invokeMethod(qApp, [guardThis, generation]() {
+            if (guardThis == nullptr || guardThis->m_wmiCaptureGeneration.load() != generation)
             {
                 return;
             }
-            guardThis->flushWmiPendingRows();
-            if (guardThis->m_wmiUiUpdateTimer != nullptr)
-            {
-                guardThis->m_wmiUiUpdateTimer->stop();
-            }
             guardThis->m_wmiSubscribeRunning.store(false);
+            // Keep the timer alive until every accepted mirror row has drained.
+            guardThis->flushWmiPendingRows();
             guardThis->m_wmiSubscribePaused.store(false);
-            guardThis->m_wmiSubscribeStatusLabel->setText(QStringLiteral("● 已停止"));
-            ks::ui::ApplyStatusRole(guardThis->m_wmiSubscribeStatusLabel, ks::ui::StatusRole::Idle);
+            QString archiveError;
+            { const std::lock_guard<std::mutex> lock(guardThis->m_wmiPendingMutex); archiveError = guardThis->m_wmiArchiveError; }
+            guardThis->m_wmiSubscribeStatusLabel->setText(archiveError.isEmpty() ? QStringLiteral("● 已停止")
+                : ks::i18n::contextText(QStringLiteral("monitor.wmi.archive_failed"), QStringLiteral("● 归档失败: %1")).arg(archiveError));
+            ks::ui::ApplyStatusRole(guardThis->m_wmiSubscribeStatusLabel,
+                archiveError.isEmpty() ? ks::ui::StatusRole::Idle : ks::ui::StatusRole::Error);
             if (guardThis->m_wmiSubscribeProgressPid != 0)
             {
                 kPro.set(guardThis->m_wmiSubscribeProgressPid, "WMI订阅结束", 0, 100.0f);
@@ -10336,12 +10356,28 @@ void MonitorDock::enqueueWmiEventRow(
     snapshot.pidAndName = pidAndName;
     snapshot.document = document;
 
-    std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+    snapshot.sequence = m_wmiArchivedRows.load() + 1;
+    QString archiveError;
+    if (!m_wmiEventArchive || !m_wmiEventArchive->append(snapshot, &archiveError))
+    {
+        { const std::lock_guard<std::mutex> lock(m_wmiPendingMutex); m_wmiArchiveError = archiveError; }
+        m_wmiSubscribeStopFlag.store(true);
+        return;
+    }
+    m_wmiArchivedRows.fetch_add(1);
+    const std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+    m_wmiArchivePath = m_wmiEventArchive->path();
     m_wmiPendingRows.push_back(std::move(snapshot));
+    while (m_wmiPendingRows.size() > kWmiMirrorCapacity)
+    {
+        m_wmiPendingRows.pop_front();
+        m_wmiMirrorSkippedRows.fetch_add(1);
+    }
 }
 
 void MonitorDock::flushWmiPendingRows()
 {
+    if (!m_wmiEventTable || !m_wmiEventTable->isVisible()) return;
     // 先进入菜单提交门，再从共享队列移走事件；latest-wins 仅合并 timeout，
     // 不会覆盖已经取出的 WMI 数据。
     const QPointer<MonitorDock> guardThis(this);
@@ -10366,6 +10402,7 @@ void MonitorDock::flushWmiPendingRows()
         std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
         if (m_wmiPendingRows.empty())
         {
+            if (!m_wmiSubscribeRunning.load() && m_wmiUiUpdateTimer) m_wmiUiUpdateTimer->stop();
             return;
         }
 
@@ -10374,14 +10411,16 @@ void MonitorDock::flushWmiPendingRows()
         rowsToFlush.reserve(flushCount);
         for (std::size_t rowIndex = 0; rowIndex < flushCount; ++rowIndex)
         {
-            rowsToFlush.push_back(std::move(m_wmiPendingRows[rowIndex]));
+            rowsToFlush.push_back(std::move(m_wmiPendingRows.front()));
+            m_wmiPendingRows.pop_front();
         }
-        using DiffType = std::vector<WmiEventSnapshot>::difference_type;
-        m_wmiPendingRows.erase(
-            m_wmiPendingRows.begin(),
-            m_wmiPendingRows.begin() + static_cast<DiffType>(flushCount));
     }
 
+    QElapsedTimer budget;
+    budget.start();
+    std::size_t renderedCount = 0;
+    const bool updatesEnabled = m_wmiEventTable->updatesEnabled();
+    m_wmiEventTable->setUpdatesEnabled(false);
     for (const WmiEventSnapshot& snapshot : rowsToFlush)
     {
         appendWmiEventRow(snapshot.provider, snapshot.className, snapshot.pidAndName, snapshot.document);
@@ -10390,7 +10429,30 @@ void MonitorDock::flushWmiPendingRows()
             timestamp->setText(snapshot.timestamp);
             timestamp->setToolTip(snapshot.timestamp);
         }
+        ++renderedCount;
+        if (budget.elapsed() >= 4) break;
     }
+    const int removeCount = std::max(0, m_wmiEventTable->rowCount() - 6000);
+    if (removeCount > 0) m_wmiEventTable->model()->removeRows(0, removeCount);
+    m_wmiEventTable->setUpdatesEnabled(updatesEnabled);
+    std::size_t pending = 0;
+    QString archivePath;
+    {
+        const std::lock_guard<std::mutex> lock(m_wmiPendingMutex);
+        for (std::size_t i = rowsToFlush.size(); i > renderedCount; --i)
+            m_wmiPendingRows.push_front(std::move(rowsToFlush[i - 1]));
+        while (m_wmiPendingRows.size() > kWmiMirrorCapacity)
+        {
+            m_wmiPendingRows.pop_front();
+            m_wmiMirrorSkippedRows.fetch_add(1);
+        }
+        pending = m_wmiPendingRows.size();
+        archivePath = m_wmiArchivePath;
+    }
+    if (m_wmiSubscribeStatusLabel)
+        m_wmiSubscribeStatusLabel->setToolTip(ks::i18n::contextText(QStringLiteral("monitor.wmi.archive_stats"),
+            QStringLiteral("WMI：归档 %1，显示跳过 %2，待显示 %3"))
+            .arg(m_wmiArchivedRows.load()).arg(m_wmiMirrorSkippedRows.load()).arg(pending) + QChar('\n') + archivePath);
 
     // 每批次刷入完成后统一应用筛选，避免逐行重算造成 UI 抖动。
     applyWmiEventFilter();
@@ -10435,10 +10497,7 @@ void MonitorDock::appendWmiEventRow(
     m_wmiEventTable->setItem(row, 3, pidItem);
     m_wmiEventTable->setItem(row, 4, detailItem);
 
-    while (m_wmiEventTable->rowCount() > 6000)
-    {
-        m_wmiEventTable->removeRow(0);
-    }
+
 }
 
 void MonitorDock::exportWmiRowsToTsv()

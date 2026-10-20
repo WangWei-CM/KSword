@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "monitor.wmi.archive_failed": "● Archive failed: %1",
+    "monitor.wmi.archive_stats": "WMI: archived %1, skipped in display %2, pending display %3",
     "misc.async.receipt_missing": "The background task returned no valid receipt. Refresh the system status.",
     "shared.fields.loading": "Preparing fields...",
     "main.shutdown.wait.title": "Waiting for background operations",
@@ -6955,6 +6957,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "● 归档失败: %1": "● Archive failed: %1",
+    "WMI：归档 %1，显示跳过 %2，待显示 %3": "WMI: archived %1, skipped in display %2, pending display %3",
     "DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.": "DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.",
     "DDMA write receipt: %1 bytes, partial=%2, scratchDirty=%3, lostUpdateWindow=%4.": "DDMA write receipt: %1 bytes, partial=%2, scratchDirty=%3, lostUpdateWindow=%4.",
     "Sharing check incomplete (%1 driver queries, %2 ms); sharing remains unknown for %3.": "Sharing check incomplete (%1 driver queries, %2 ms); sharing remains unknown for %3.",

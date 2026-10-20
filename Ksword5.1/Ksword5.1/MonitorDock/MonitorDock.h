@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "ProcessTraceTimelineWidget.h"
+#include "WmiEventArchive.h"
 #include "../Framework.h"
 
 // F-05：ARK 风险中心的每行进程身份都要带一份采集结果（成功 / 权限不足 / 其它失败
@@ -682,6 +683,7 @@ private:
     void stopWmiSubscription();
     void setWmiSubscriptionPaused(bool paused);
     struct WmiEventSnapshot {
+        quint64 sequence = 0;
         QString timestamp;
         QString provider;
         QString className;
@@ -969,8 +971,15 @@ private:
     std::unique_ptr<std::thread> m_wmiSubscribeThread; // WMI 后台订阅线程。
     int m_wmiProviderRefreshProgressPid = 0;          // WMI Provider 刷新进度 PID。
     int m_wmiSubscribeProgressPid = 0;                // WMI 订阅进度 PID。
-    std::vector<WmiEventSnapshot> m_wmiPendingRows;        // WMI 待刷入 UI 的事件缓存。
+    std::deque<WmiEventSnapshot> m_wmiPendingRows;        // WMI 待刷入 UI 的事件缓存。
     std::mutex m_wmiPendingMutex;                     // WMI 事件缓存互斥锁。
+    static constexpr std::size_t kWmiMirrorCapacity = 12000;
+    std::shared_ptr<ks::monitor::WmiEventArchive> m_wmiEventArchive;
+    std::vector<std::shared_ptr<ks::monitor::WmiEventArchive>> m_wmiEventArchives;
+    std::atomic<quint64> m_wmiArchivedRows{0}, m_wmiMirrorSkippedRows{0}, m_wmiCaptureGeneration{0};
+    std::atomic_bool m_wmiProgressPosted{false};
+    std::atomic<float> m_wmiLatestProgress{0};
+    QString m_wmiArchivePath, m_wmiArchiveError;
     QTimer* m_wmiUiUpdateTimer = nullptr;             // WMI UI 节流刷新定时器。
 
     // ========================= ETW 页 ===========================

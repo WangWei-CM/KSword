@@ -70,6 +70,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="MonitorDock\WmiEventArchive.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
