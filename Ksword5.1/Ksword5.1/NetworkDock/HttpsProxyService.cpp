@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <deque>
+#include <QtCore/QElapsedTimer>
 
 #include <QtCore/QMetaObject>
 #include <QtCore/QCryptographicHash>
@@ -37,16 +39,26 @@
 
 namespace ks::network
 {
-    // close 与 post 使用同一把锁，接收器析构后晚线程只看到关闭状态。
-    class HttpsProxyUiDispatcher final
+    // Accepted parsed entries have one FIFO owner; only its wakeup is coalesced.
+    // close and publication share the lock, so late session threads never borrow
+    // a destroyed QObject. A queued drain owns only this value bridge.
+    class HttpsProxyUiDispatcher final : public std::enable_shared_from_this<HttpsProxyUiDispatcher>
     {
     public:
-        explicit HttpsProxyUiDispatcher(QObject* receiver) : m_receiver(receiver) {}
+        using ParsedDelivery = std::function<void(const HttpsProxyParsedEntry&)>;
+        explicit HttpsProxyUiDispatcher(QObject* receiver, ParsedDelivery parsedDelivery)
+            : m_receiver(receiver), m_parsedDelivery(std::move(parsedDelivery)) {}
 
         void close()
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_receiver = nullptr;
+            std::deque<HttpsProxyParsedEntry> retired;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_receiver = nullptr;
+                m_parsedDelivery = {};
+                retired.swap(m_parsedEntries);
+            }
+            // Release complete raw/header/certificate values outside the producer lock.
         }
 
         void post(std::function<void()> callback)
@@ -54,13 +66,67 @@ namespace ks::network
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_receiver != nullptr)
             {
+                if (m_parsedWake.expired()) scheduleParsedDrainLocked();
                 QMetaObject::invokeMethod(m_receiver, std::move(callback), Qt::QueuedConnection);
             }
         }
 
+        void postParsed(const HttpsProxyParsedEntry& parsedEntry)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_receiver == nullptr) return;
+            m_parsedEntries.push_back(parsedEntry);
+            if (m_parsedWake.expired()) scheduleParsedDrainLocked();
+        }
+
     private:
+        void scheduleParsedDrainLocked()
+        {
+            if (m_receiver == nullptr || m_parsedEntries.empty()) return;
+            // Only the queued/running functor owns this ticket. If Qt discards
+            // it, the weak ticket expires without locking/posting from a destructor;
+            // the next producer/status wake can safely schedule the retained FIFO.
+            const auto wake = std::make_shared<char>();
+            m_parsedWake = wake;
+            const auto bridge = shared_from_this();
+            try { QMetaObject::invokeMethod(m_receiver, [bridge, wake]() { bridge->drainParsed(); }, Qt::QueuedConnection); }
+            catch (...) { m_parsedWake.reset(); }
+        }
+
+        void drainParsed()
+        {
+            QElapsedTimer elapsed;
+            elapsed.start();
+            for (int count = 0; count < 64; ++count)
+            {
+                HttpsProxyParsedEntry entry;
+                ParsedDelivery delivery;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_receiver == nullptr || m_parsedEntries.empty())
+                    {
+                        m_parsedWake.reset();
+                        return;
+                    }
+                    entry = std::move(m_parsedEntries.front());
+                    m_parsedEntries.pop_front();
+                    delivery = m_parsedDelivery;
+                }
+                // No lock across callbacks: a callback can publish, stop or destroy
+                // the service. The next iteration revalidates the same bridge.
+                if (delivery) delivery(entry);
+                if (elapsed.elapsed() >= 4) break;
+            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_parsedWake.reset();
+            scheduleParsedDrainLocked();
+        }
+
         std::mutex m_mutex;
         QObject* m_receiver;
+        ParsedDelivery m_parsedDelivery;
+        std::deque<HttpsProxyParsedEntry> m_parsedEntries;
+        std::weak_ptr<char> m_parsedWake;
     };
 
     // 会话证书工作不依赖 QObject；慢任务可以安全地晚于服务退出。
@@ -1197,7 +1263,8 @@ namespace ks::network
     HttpsMitmProxyService::HttpsMitmProxyService()
         : QObject(nullptr)
         , m_certificateStore(std::make_shared<HttpsProxyCertificateStore>())
-        , m_uiDispatcher(std::make_shared<HttpsProxyUiDispatcher>(this))
+        , m_uiDispatcher(std::make_shared<HttpsProxyUiDispatcher>(this,
+            [this](const HttpsProxyParsedEntry& entry) { emitParsedEntry(entry); }))
     {
     }
 
@@ -1245,15 +1312,9 @@ namespace ks::network
             {
                 return certificateStore->loadHostCertificateBundle(hostName, certificateOut, privateKeyOut, certErrorOut);
             };
-        auto parsedEmitter = [safeThis, dispatcher = m_uiDispatcher](const HttpsProxyParsedEntry& parsedEntry)
+        auto parsedEmitter = [dispatcher = m_uiDispatcher](const HttpsProxyParsedEntry& parsedEntry)
             {
-                dispatcher->post([safeThis, parsedEntry]()
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->emitParsedEntry(parsedEntry);
-                    }
-                });
+                dispatcher->postParsed(parsedEntry);
             };
         auto statusEmitter = [safeThis, dispatcher = m_uiDispatcher](const QString& statusText)
             {
