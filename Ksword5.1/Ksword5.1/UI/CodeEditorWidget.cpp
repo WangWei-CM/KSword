@@ -26,6 +26,7 @@
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QMenu>
+#include <QMetaMethod>
 #include <QAction>
 #include <QGridLayout>
 #include <QPointer>
@@ -1056,6 +1057,9 @@ void CodeEditorWidget::initializeConnections()
                 m_contentNotificationPending = true;
                 QTimer::singleShot(0, this, [this]() {
                     m_contentNotificationPending = false;
+                    // Logs normally have no detail mirror. Keep the queued
+                    // lifetime boundary, but only serialize for live consumers.
+                    if (!isSignalConnected(QMetaMethod::fromSignal(&CodeEditorWidget::contentChanged))) return;
                     const QString contents = text();
                     emit contentChanged(contents);
                 });
