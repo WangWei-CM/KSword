@@ -64,6 +64,7 @@ namespace ks::misc
         std::uint32_t m_maximumTransfer = 0U;
         std::uint64_t m_capacity = 0ULL;
         std::uint64_t m_sessionId = 0ULL;
+        std::uint64_t m_hexRevision = 0ULL; // GUI document version captured before parsing.
         std::uint64_t m_snapshotOffset = 0ULL;
         std::uint32_t m_snapshotLength = 0U;
         std::uint64_t m_rollbackOffset = 0ULL;

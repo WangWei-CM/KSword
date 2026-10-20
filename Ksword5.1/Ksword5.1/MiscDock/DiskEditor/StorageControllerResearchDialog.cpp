@@ -18,6 +18,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QTextDocument>
 #include "../../UI/CodeTextEdit.h"
 #include <QPushButton>
 #include <QPointer>
@@ -68,8 +69,9 @@ namespace ks::misc
                 const auto result = watcher->result();
                 watcher->deleteLater();
                 m_busy = false;
+                const QPointer<StorageControllerResearchDialog> alive(this);
                 apply(result);
-                updateActionState();
+                if (alive) alive->updateActionState();
             });
         // 后台只捕获 client 租约和参数快照，不访问 QWidget 或 LanguageManager。
         watcher->setFuture(QtConcurrent::run(
@@ -157,7 +159,8 @@ namespace ks::misc
         static_cast<CodeTextEdit*>(m_hexEdit)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
         m_hexEdit->setPlaceholderText(
             QStringLiteral("读取结果或待写入 HEX，例如：00 11 22 FF"));
-        m_hexEdit->setMaximumBlockCount(8192);
+        m_hexEdit->setMaximumBlockCount(0); // Preserve the complete editable document, including valid whitespace.
+        m_hexEdit->setLineWrapMode(QPlainTextEdit::NoWrap);
         m_hexEdit->setMinimumHeight(160);
         transferLayout->addWidget(m_hexEdit, 1);
         QVBoxLayout* transferButtons = new QVBoxLayout();
@@ -213,6 +216,7 @@ namespace ks::misc
         connect(m_writeButton, &QPushButton::clicked, this, [this]() { writeRange(); });
         connect(m_rollbackButton, &QPushButton::clicked, this, [this]() { rollbackRange(); });
         connect(m_auditButton, &QPushButton::clicked, this, [this]() { refreshAudit(); });
+        connect(m_hexEdit, &QPlainTextEdit::textChanged, this, [this]() { ++m_hexRevision; });
         connect(m_offsetEdit, &QLineEdit::textChanged, this, [this]() { updateActionState(); });
         connect(m_lengthEdit, &QLineEdit::textChanged, this, [this]() { updateActionState(); });
         updateActionState();
@@ -447,11 +451,23 @@ namespace ks::misc
             return;
         }
         clearSnapshot();
+        struct FormattedRead : ksword::ark::StorageControllerTransferResult
+        {
+            QString hexText;
+        };
         runOperation([generation = m_generation, session = m_sessionId, offset, length]
             (ksword::ark::ArkStorageControllerClient& client)
             {
-                return client.read(generation, session, offset, length);
-            }, [this, offset, length](const ksword::ark::StorageControllerTransferResult& result)
+                FormattedRead result;
+                static_cast<ksword::ark::StorageControllerTransferResult&>(result) =
+                    client.read(generation, session, offset, length);
+                if (result.io.ok && result.response.status == KSWORD_ARK_STORAGE_CONTROLLER_STATUS_OK
+                    && result.bytes.size() == length)
+                {
+                    result.hexText = QString::fromStdWString(detail::formatControllerHex(result.bytes));
+                }
+                return result;
+            }, [this, offset, length](const FormattedRead& result)
             {
                 if (!result.io.ok || result.response.status != KSWORD_ARK_STORAGE_CONTROLLER_STATUS_OK ||
                     result.bytes.size() != length)
@@ -461,9 +477,7 @@ namespace ks::misc
                     refreshState();
                     return;
                 }
-                const QByteArray bytes(reinterpret_cast<const char*>(result.bytes.data()),
-                    static_cast<qsizetype>(result.bytes.size()));
-                m_hexEdit->setPlainText(QString::fromLatin1(bytes.toHex(' ')).toUpper());
+                m_hexEdit->setPlainText(result.hexText);
                 m_snapshotOffset = offset;
                 m_snapshotLength = length;
                 m_snapshotHash.assign(result.response.afterHash,
@@ -484,66 +498,99 @@ namespace ks::misc
             QMessageBox::warning(this, QStringLiteral("控制器研究"), QStringLiteral("偏移或长度无效。"));
             return;
         }
-        std::vector<std::uint8_t> bytes;
-        if (!detail::parseControllerHex(m_hexEdit->toPlainText().toStdWString(), length, bytes) ||
-            m_snapshotOffset != offset ||
-            m_snapshotLength != length ||
-            m_snapshotHash.size() != KSWORD_ARK_STORAGE_CONTROLLER_HASH_BYTES)
+        if (m_snapshotOffset != offset || m_snapshotLength != length
+            || m_snapshotHash.size() != KSWORD_ARK_STORAGE_CONTROLLER_HASH_BYTES
+            || m_hexEdit->document()->characterCount() - 1 > static_cast<qint64>(length) * 4 + 1024)
         {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("控制器研究"),
+            QMessageBox::warning(this, QStringLiteral("控制器研究"),
                 QStringLiteral("写入字节必须与长度一致，并先对完全相同的范围建立条件写快照。"));
             return;
         }
-        if (!confirmDangerousOperation(
-                QStringLiteral("直接控制器写入"),
-                QStringLiteral(
-                    "即将绕过 Windows 存储栈写入专用控制器。操作会执行原数据哈希比较、"
-                    "写入、flush 和复读验证，但仍可能永久损坏介质内容。")))
+        const auto generation = m_generation;
+        const auto session = m_sessionId;
+        const auto hash = m_snapshotHash;
+        const auto revision = m_hexRevision;
+        const auto capabilities = m_capabilities;
+        const QString text = m_hexEdit->toPlainText();
+        struct ParsedHex
         {
-            return;
-        }
-        std::uint32_t writeFlags =
-            KSWORD_ARK_STORAGE_CONTROLLER_TRANSFER_FLAG_FLUSH;
-        if ((m_capabilities &
-             KSWORD_ARK_STORAGE_CONTROLLER_CAP_FUA) != 0U)
-        {
-            writeFlags |= KSWORD_ARK_STORAGE_CONTROLLER_TRANSFER_FLAG_FUA;
-        }
-        runOperation([generation = m_generation, session = m_sessionId, offset,
-            bytes = std::move(bytes), hash = m_snapshotHash, writeFlags]
-            (ksword::ark::ArkStorageControllerClient& client)
+            ksword::ark::StorageControllerIoResult io;
+            bool valid = false;
+            std::vector<std::uint8_t> bytes;
+        };
+        runOperation([text, length](ksword::ark::ArkStorageControllerClient&) {
+            ParsedHex parsed;
+            parsed.valid = detail::parseControllerHex(text.toStdWString(), length, parsed.bytes);
+            return parsed;
+        }, [this, offset, length, generation, session, hash, revision, capabilities](const ParsedHex& parsed) {
+            const auto stillCurrent = [this, offset, length, generation, session, hash, revision]() {
+                std::uint64_t currentOffset = 0;
+                std::uint32_t currentLength = 0;
+                return m_hexRevision == revision && m_generation == generation && m_sessionId == session
+                    && m_snapshotHash == hash && m_snapshotOffset == offset && m_snapshotLength == length
+                    && parseRange(currentOffset, currentLength) && currentOffset == offset && currentLength == length;
+            };
+            if (!parsed.valid || !stillCurrent())
             {
-                return client.write(generation, session, offset, bytes, hash, writeFlags);
-            }, [this, offset, length, generation = m_generation, session = m_sessionId]
-            (const ksword::ark::StorageControllerTransferResult& result)
+            QMessageBox::warning(this, QStringLiteral("控制器研究"),
+                QStringLiteral("写入字节必须与长度一致，并先对完全相同的范围建立条件写快照。"));
+                return;
+            }
+            if (!confirmDangerousOperation(
+                    QStringLiteral("直接控制器写入"),
+                    QStringLiteral(
+                        "即将绕过 Windows 存储栈写入专用控制器。操作会执行原数据哈希比较、"
+                        "写入、flush 和复读验证，但仍可能永久损坏介质内容。")))
             {
-                appendLog(QStringLiteral("写入结果：Win32=%1 status=%2 bytes=%3 before=%4 after=%5 risk=%6")
-                    .arg(result.io.win32Error).arg(result.response.status)
-                    .arg(result.response.bytesTransferred).arg(hashText(result.response.beforeHash))
-                    .arg(hashText(result.response.afterHash)).arg(riskText(result.response.riskFlags)));
-                clearSnapshot();
-                const std::uint32_t attemptedGeneration = generation ==
-                    std::numeric_limits<std::uint32_t>::max() ? 1U : generation + 1U;
-                if (result.io.ok && result.response.generation == attemptedGeneration &&
-                    result.response.sessionId == session)
+                return;
+            }
+            if (!stillCurrent())
+            {
+                QMessageBox::warning(this, QStringLiteral("控制器研究"),
+                    QStringLiteral("写入字节必须与长度一致，并先对完全相同的范围建立条件写快照。"));
+                return;
+            }
+            std::uint32_t writeFlags =
+                KSWORD_ARK_STORAGE_CONTROLLER_TRANSFER_FLAG_FLUSH;
+            if ((capabilities &
+                 KSWORD_ARK_STORAGE_CONTROLLER_CAP_FUA) != 0U)
+            {
+                writeFlags |= KSWORD_ARK_STORAGE_CONTROLLER_TRANSFER_FLAG_FUA;
+            }
+            runOperation([generation, session, offset,
+                bytes = parsed.bytes, hash, writeFlags]
+                (ksword::ark::ArkStorageControllerClient& client)
                 {
-                    // 风险位也可能来自写前拒绝；代次增加才是实际尝试介质 I/O 的回执。
-                    m_rollbackValid = true;
-                    m_rollbackOffset = offset;
-                    m_rollbackLength = length;
-                }
-                if (result.io.ok && result.response.sessionId == session &&
-                    (result.response.generation == generation ||
-                     result.response.generation == attemptedGeneration))
+                    return client.write(generation, session, offset, bytes, hash, writeFlags);
+                }, [this, offset, length, generation, session]
+                (const ksword::ark::StorageControllerTransferResult& result)
                 {
-                    m_generation = result.response.generation;
-                    m_sessionId = result.response.sessionId;
-                }
-                else invalidateQueryState();
-                refreshState();
-            });
+                    appendLog(QStringLiteral("写入结果：Win32=%1 status=%2 bytes=%3 before=%4 after=%5 risk=%6")
+                        .arg(result.io.win32Error).arg(result.response.status)
+                        .arg(result.response.bytesTransferred).arg(hashText(result.response.beforeHash))
+                        .arg(hashText(result.response.afterHash)).arg(riskText(result.response.riskFlags)));
+                    clearSnapshot();
+                    const std::uint32_t attemptedGeneration = generation ==
+                        std::numeric_limits<std::uint32_t>::max() ? 1U : generation + 1U;
+                    if (result.io.ok && result.response.generation == attemptedGeneration &&
+                        result.response.sessionId == session)
+                    {
+                        // 风险位也可能来自写前拒绝；代次增加才是实际尝试介质 I/O 的回执。
+                        m_rollbackValid = true;
+                        m_rollbackOffset = offset;
+                        m_rollbackLength = length;
+                    }
+                    if (result.io.ok && result.response.sessionId == session &&
+                        (result.response.generation == generation ||
+                         result.response.generation == attemptedGeneration))
+                    {
+                        m_generation = result.response.generation;
+                        m_sessionId = result.response.sessionId;
+                    }
+                    else invalidateQueryState();
+                    refreshState();
+                });
+        });
     }
 
     // 仅对最近一次写入的相同范围执行条件回滚并回读。
