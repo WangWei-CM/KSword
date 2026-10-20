@@ -19,12 +19,13 @@
 
 namespace ks::window
 {
-    inline void configureWindowListColumnSizing(QTreeWidget* tree)
+    inline void configureWindowListColumnSizing(QTreeView* tree)
     {
         // The shared fitter samples and compresses fields. Keep HWNDs and
         // process names at their native delegate widths, including icons/fonts.
         ks::ui::SetTableColumnAutoFitEnabled(tree, false);
         tree->header()->setStretchLastSection(false);
+        tree->header()->setResizeContentsPrecision(100);
         tree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
         tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     }
@@ -92,6 +93,41 @@ namespace ks::window
                 || hwnd == 0 || seen.contains(hwnd)) continue;
             seen.insert(hwnd);
             handles.push_back(hwnd);
+        }
+        return handles;
+    }
+
+    inline QString windowItemIdentity(const QModelIndex& index)
+    {
+        return windowIdentityKey(index.data(Qt::UserRole).toULongLong(),
+            index.data(Qt::UserRole + 2).toULongLong(), index.data(Qt::UserRole + 3).toULongLong(),
+            index.data(Qt::UserRole + 4).toULongLong());
+    }
+    inline WindowTreeSelection captureWindowSelection(const QTreeView* tree)
+    {
+        WindowTreeSelection selection;
+        if (!tree->selectionModel()) return selection;
+        for (const auto& index : tree->selectionModel()->selectedRows())
+            if (!index.data(Qt::UserRole + 1).toBool()) selection.identities.insert(windowItemIdentity(index));
+        const auto current = tree->currentIndex();
+        if (current.isValid() && !current.data(Qt::UserRole + 1).toBool()) selection.current = windowItemIdentity(current);
+        return selection;
+    }
+    inline void selectContextWindow(QTreeView* tree, const QModelIndex& index)
+    {
+        const bool selected = tree->selectionModel()->isRowSelected(index.row(), index.parent());
+        tree->selectionModel()->setCurrentIndex(index, selected ? QItemSelectionModel::NoUpdate
+            : QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    }
+    inline QList<quint64> selectedWindowHandles(const QTreeView* tree)
+    {
+        QList<quint64> handles;
+        QSet<quint64> seen;
+        for (const auto& index : tree->selectionModel()->selectedRows())
+        {
+            const quint64 hwnd = index.data(Qt::UserRole).toULongLong();
+            if (index.data(Qt::UserRole + 1).toBool() || tree->isRowHidden(index.row(), index.parent()) || !hwnd || seen.contains(hwnd)) continue;
+            seen.insert(hwnd); handles.push_back(hwnd);
         }
         return handles;
     }

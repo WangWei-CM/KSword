@@ -53,8 +53,8 @@
 #include <QImage>
 #include <QFile>
 #include <QFileDialog>
-#include <QFileIconProvider>
 #include <QFileInfo>
+#include <QDir>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QGridLayout>
@@ -113,6 +113,8 @@
 #endif
 #include <Windows.h>
 #include <Psapi.h>
+#include <Shellapi.h>
+#include <Objbase.h>
 #include <TlHelp32.h>
 
 namespace
@@ -569,23 +571,6 @@ namespace
 
         const int slashPos = std::max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
         return slashPos >= 0 ? fullPath.mid(slashPos + 1) : fullPath;
-    }
-
-    // queryProcessLogoIconByPath：
-    // - 根据进程路径获取系统文件图标；
-    // - 若路径无效或无法提取图标，则回退默认进程图标。
-    QIcon queryProcessLogoIconByPath(const QString& imagePathText)
-    {
-        static QFileIconProvider iconProvider;
-        if (!imagePathText.trimmed().isEmpty())
-        {
-            const QIcon fileIcon = iconProvider.icon(QFileInfo(imagePathText));
-            if (!fileIcon.isNull())
-            {
-                return fileIcon;
-            }
-        }
-        return QIcon(":/Icon/process_main.svg");
     }
 
     // 快照状态文本：把最小化/最大化/正常映射到统一字符串。
@@ -1164,6 +1149,406 @@ static std::shared_ptr<Value> makeWindowBackgroundValue(Args&&... args)
     });
 }
 
+namespace ks::windowlist
+{
+    static QString fileIconIdentity(const QString& path)
+    {
+        if (path.isEmpty()) return {};
+        BY_HANDLE_FILE_INFORMATION information{};
+        HANDLE file = ::CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool known = file != INVALID_HANDLE_VALUE && ::GetFileInformationByHandle(file, &information);
+        if (file != INVALID_HANDLE_VALUE) ::CloseHandle(file);
+        return path.toCaseFolded() + QStringLiteral("/%1/%2/%3/%4/%5/%6/%7/%8")
+            .arg(known).arg(information.dwVolumeSerialNumber).arg(information.nFileIndexHigh).arg(information.nFileIndexLow)
+            .arg(information.ftLastWriteTime.dwHighDateTime).arg(information.ftLastWriteTime.dwLowDateTime)
+            .arg(information.nFileSizeHigh).arg(information.nFileSizeLow);
+    }
+    struct Snapshot
+    {
+        std::vector<OtherDock::WindowInfo> current;
+        std::vector<OtherDock::WindowInfo> records;
+        std::vector<QString> searchKeys;
+        std::vector<QString> iconKeys;
+        QHash<quint64, size_t> byHwnd;
+        QSet<QString> newIdentities;
+        int total = 0, visible = 0, system = 0;
+        quint64 revision = 0;
+    };
+    inline QString identity(const OtherDock::WindowInfo& value)
+    {
+        return ks::window::windowIdentityKey(value.hwndValue, value.processId,
+            value.threadId, value.processCreationTime100ns);
+    }
+    static std::shared_ptr<const Snapshot> mergeSnapshot(std::vector<OtherDock::WindowInfo> current,
+        const std::shared_ptr<const Snapshot>& previous)
+    {
+        auto next = makeWindowBackgroundValue<Snapshot>();
+        next->revision = previous ? previous->revision + 1 : 1;
+        QSet<QString> oldIdentities, currentIdentities;
+        if (previous)
+            for (const auto& value : previous->current)
+                if (value.valid) oldIdentities.insert(identity(value));
+        for (const auto& value : current)
+        {
+            const auto key = identity(value);
+            currentIdentities.insert(key);
+            if (!oldIdentities.contains(key)) next->newIdentities.insert(key);
+        }
+        next->current = std::move(current);
+        next->records = next->current;
+        if (previous)
+            for (const auto& old : previous->current)
+            {
+                if (!old.valid || currentIdentities.contains(identity(old))) continue;
+                auto exited = old;
+                exited.valid = exited.visible = exited.enabled = exited.topMost = exited.minimized = exited.maximized = false;
+                exited.titleText = QStringLiteral("[已退出] %1").arg(old.titleText);
+                next->records.push_back(std::move(exited));
+            }
+        next->searchKeys.reserve(next->records.size());
+        next->iconKeys.reserve(next->records.size());
+        QHash<QString, QString> iconIdentities;
+        for (size_t index = 0; index < next->records.size(); ++index)
+        {
+            const auto& value = next->records[index];
+            const QString imagePath = value.processImagePathText.trimmed().isEmpty() ? QString() : QDir::cleanPath(value.processImagePathText.trimmed());
+            const auto foundIdentity = iconIdentities.constFind(imagePath);
+            if (foundIdentity == iconIdentities.cend()) iconIdentities.insert(imagePath, fileIconIdentity(imagePath));
+            next->iconKeys.push_back(iconIdentities.value(imagePath));
+            // Current identity wins over the one-round exited row when HWND is reused.
+            if (!next->byHwnd.contains(value.hwndValue)) next->byHwnd.insert(value.hwndValue, index);
+            next->searchKeys.push_back(QStringLiteral("%1 %2 %3 %4 %5")
+                .arg(value.titleText, value.classNameText, value.processNameText)
+                .arg(value.processId).arg(hwndToText(value.hwndValue)).toLower());
+            if (!value.valid) continue;
+            ++next->total;
+            if (value.visible) ++next->visible;
+            if (value.processId <= 4 || value.processNameText.compare(QStringLiteral("System"), Qt::CaseInsensitive) == 0 ||
+                value.processNameText.compare(QStringLiteral("csrss.exe"), Qt::CaseInsensitive) == 0) ++next->system;
+        }
+        return next;
+    }
+    struct Projection;
+    struct ProjectionRequest
+    {
+        std::shared_ptr<const Snapshot> state;
+        std::shared_ptr<const Projection> previous;
+        QSet<quint32> processIds;
+        QString keyword;
+        int filter = 0;
+        int grouping = 0;
+        quint64 desktopHwnd = 0;
+        std::vector<std::pair<QRect, QString>> screens;
+        ks::i18n::SourceTextSnapshot language;
+    };
+    struct Node
+    {
+        std::array<QString, 13> cells;
+        std::vector<int> children;
+        QString key, iconKey, iconPath;
+        size_t record = 0;
+        int parent = -1, row = 0;
+        bool group = false, newRow = false;
+    };
+    struct Projection
+    {
+        std::shared_ptr<const Snapshot> state;
+        std::vector<Node> nodes;
+        std::vector<int> roots;
+        QHash<QString, int> byIdentity;
+        int grouping = 0;
+    };
+    static bool accepts(const ProjectionRequest& request, size_t index)
+    {
+        const auto& value = request.state->records[index];
+        if (!request.processIds.isEmpty() && !request.processIds.contains(value.processId)) return false;
+        switch (request.filter)
+        {
+        case 1: if (!value.visible || !value.valid) return false; break;
+        case 2: if (value.visible || !value.valid) return false; break;
+        case 3: if (value.isChildWindow || !value.valid) return false; break;
+        case 4: if (!value.isChildWindow || !value.valid) return false; break;
+        case 5: if (value.valid) return false; break;
+        default: break;
+        }
+        return request.keyword.isEmpty() || request.state->searchKeys[index].contains(request.keyword);
+    }
+    static std::shared_ptr<const Projection> prepareProjection(const ProjectionRequest& request,
+        const ks::ui::AsyncOperationToken* token)
+    {
+        auto projection = makeWindowBackgroundValue<Projection>();
+        projection->state = request.state;
+        projection->grouping = request.grouping;
+        if (!request.state) return projection;
+        std::vector<size_t> order;
+        order.reserve(request.state->records.size());
+        for (size_t index = 0; index < request.state->records.size(); ++index)
+            if (accepts(request, index)) order.push_back(index);
+        if (request.grouping == 1)
+            std::stable_sort(order.begin(), order.end(), [&request](size_t left, size_t right) {
+                return request.state->records[left].zOrder < request.state->records[right].zOrder;
+            });
+        QHash<QString, int> groups;
+        for (const auto record : order)
+        {
+            if (token && token->isCanceled()) return {};
+            const auto& value = request.state->records[record];
+            QString groupKey, groupTitle;
+            if (request.grouping == 0)
+            {
+                groupKey = QStringLiteral("pid/%1/%2").arg(value.processId).arg(value.processCreationTime100ns);
+                groupTitle = QStringLiteral("%1 (PID:%2)").arg(value.processNameText).arg(value.processId);
+            }
+            else if (request.grouping == 2)
+            {
+                groupKey = value.hwndValue == request.desktopHwnd ? QStringLiteral("桌面窗口") : value.isChildWindow ? QStringLiteral("子窗口") :
+                    (value.styleValue & WS_POPUP) ? QStringLiteral("弹出窗口") : (value.exStyleValue & WS_EX_TOOLWINDOW) ? QStringLiteral("工具窗口") : QStringLiteral("顶级窗口");
+                groupTitle = request.language.sourceText(groupKey);
+            }
+            else if (request.grouping != 1)
+            {
+                groupKey = QStringLiteral("unknown-monitor");
+                groupTitle = request.language.sourceText(QStringLiteral("未知显示器"));
+                for (size_t index = 0; index < request.screens.size(); ++index)
+                    if (request.screens[index].first.contains(value.windowRect.center()))
+                    {
+                        groupKey = QStringLiteral("monitor/%1/%2").arg(index).arg(request.screens[index].second);
+                        groupTitle = request.language.sourceText(QStringLiteral("显示器%1: %2")).arg(index + 1).arg(request.screens[index].second);
+                        break;
+                    }
+            }
+            const QString iconPath = value.processImagePathText.trimmed().isEmpty() ? QString() : QDir::cleanPath(value.processImagePathText.trimmed());
+            const QString iconKey = request.state->iconKeys[record];
+            int parent = -1;
+            if (!groupKey.isEmpty())
+            {
+                const auto found = groups.constFind(groupKey);
+                if (found == groups.cend())
+                {
+                    parent = static_cast<int>(projection->nodes.size());
+                    Node group;
+                    group.group = true; group.record = record;
+                    group.key = QStringLiteral("group/%1/%2").arg(request.grouping).arg(groupKey);
+                    group.cells[0] = groupTitle;
+                    group.row = static_cast<int>(projection->roots.size());
+                    if (request.grouping == 0) { group.iconKey = iconKey; group.iconPath = iconPath; }
+                    projection->nodes.push_back(std::move(group));
+                    projection->roots.push_back(parent);
+                    groups.insert(groupKey, parent);
+                    projection->byIdentity.insert(projection->nodes[parent].key, parent);
+                }
+                else parent = found.value();
+            }
+            Node node;
+            node.parent = parent; node.record = record;
+            node.key = identity(value); node.iconKey = iconKey; node.iconPath = iconPath;
+            node.newRow = request.state->newIdentities.contains(node.key);
+            node.cells = {value.titleText.isEmpty() ? request.language.sourceText(QStringLiteral("<无标题>")) : value.titleText,
+                hwndToText(value.hwndValue), value.enumApiName, value.classNameText, QString::number(value.processId), value.processNameText,
+                QString::number(value.threadId), QStringLiteral("%1 x %2").arg(value.windowRect.width()).arg(value.windowRect.height()),
+                request.language.sourceText(boolText(value.visible)), request.language.sourceText(boolText(value.enabled)),
+                request.language.sourceText(boolText(value.topMost)), request.language.sourceText(windowStateText(value.valid, value.minimized, value.maximized)),
+                QString::number(value.alphaValue)};
+            node.row = parent < 0 ? static_cast<int>(projection->roots.size()) : static_cast<int>(projection->nodes[parent].children.size());
+            const int index = static_cast<int>(projection->nodes.size());
+            projection->nodes.push_back(std::move(node));
+            projection->byIdentity.insert(projection->nodes.back().key, index);
+            if (parent < 0) projection->roots.push_back(index);
+            else projection->nodes[parent].children.push_back(index);
+        }
+        // An unchanged visible representation retains the exact model/selection
+        // and avoids any reset/layout/decoration requests on periodic samples.
+        if (request.previous && request.previous->grouping == projection->grouping &&
+            request.previous->roots == projection->roots && request.previous->nodes.size() == projection->nodes.size())
+        {
+            bool equal = true;
+            for (size_t index = 0; index < projection->nodes.size(); ++index)
+            {
+                const auto& left = request.previous->nodes[index]; const auto& right = projection->nodes[index];
+                if (left.cells != right.cells || left.children != right.children || left.key != right.key ||
+                    left.iconKey != right.iconKey || left.iconPath != right.iconPath || left.parent != right.parent || left.row != right.row ||
+                    left.group != right.group || left.newRow != right.newRow ||
+                    request.previous->state->records[left.record].valid != projection->state->records[right.record].valid)
+                { equal = false; break; }
+            }
+            if (equal) return request.previous;
+        }
+        return projection;
+    }
+    struct IconRequest { QString key, path; };
+    struct IconResult { QString key; QImage image; };
+    static std::vector<IconResult> prepareIcons(const std::vector<IconRequest>& requests,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        // Native icon pixels are prepared off GUI. Cache identity includes path,
+        // file size and write time, never PID alone or a lazy QIcon engine.
+        static std::mutex cacheMutex;
+        static QHash<QString, QImage> cache;
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::vector<IconResult> result;
+        for (const auto& request : requests)
+        {
+            if (token.isCanceled()) break;
+            const auto* path = reinterpret_cast<const wchar_t*>(request.path.utf16());
+            const QString identity = fileIconIdentity(request.path);
+            QImage image;
+            { std::lock_guard<std::mutex> lock(cacheMutex); image = cache.value(identity); }
+            if (image.isNull() && !request.path.isEmpty())
+            {
+                SHFILEINFOW info{};
+                if (::SHGetFileInfoW(path, 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON) && info.hIcon)
+                {
+                    image = QImage::fromHICON(info.hIcon);
+                    ::DestroyIcon(info.hIcon);
+                }
+                if (!image.isNull()) { std::lock_guard<std::mutex> lock(cacheMutex); cache.insert(identity, image); }
+            }
+            result.push_back({request.key, std::move(image)});
+        }
+        if (SUCCEEDED(initialized)) ::CoUninitialize();
+        return result;
+    }
+    class SnapshotModel final : public QAbstractItemModel
+    {
+    public:
+        explicit SnapshotModel(QObject* parent) : QAbstractItemModel(parent), m_iconOperation(new ks::ui::AsyncOperation(this))
+        {
+            m_iconOperation->setStateChangedCallback([this] { if (!m_iconOperation->isBusy()) startIconBatch(); });
+        }
+        ~SnapshotModel() override { m_iconOperation->close(); }
+        int columnCount(const QModelIndex& = {}) const override { return 13; }
+        int rowCount(const QModelIndex& parent = {}) const override
+        {
+            if (!snapshot || (parent.isValid() && parent.column() != 0)) return 0;
+            const auto* node = get(parent);
+            return static_cast<int>(node ? node->children.size() : snapshot->roots.size());
+        }
+        QModelIndex index(int row, int column, const QModelIndex& parent = {}) const override
+        {
+            if (!snapshot || row < 0 || column < 0 || column >= 13 || row >= rowCount(parent)) return {};
+            const auto* node = get(parent);
+            const int number = node ? node->children[row] : snapshot->roots[row];
+            return createIndex(row, column, static_cast<quintptr>(number + 1));
+        }
+        QModelIndex parent(const QModelIndex& child) const override
+        {
+            const auto* node = get(child);
+            return !node || node->parent < 0 ? QModelIndex() : nodeIndex(node->parent);
+        }
+        QModelIndex nodeIndex(int number, int column = 0) const
+        {
+            if (!snapshot || number < 0 || number >= static_cast<int>(snapshot->nodes.size())) return {};
+            return createIndex(snapshot->nodes[number].row, column, static_cast<quintptr>(number + 1));
+        }
+        QModelIndex indexForIdentity(const QString& key) const
+        {
+            if (!snapshot) return {};
+            const auto found = snapshot->byIdentity.constFind(key);
+            return found == snapshot->byIdentity.cend() ? QModelIndex() : nodeIndex(found.value());
+        }
+        QString key(const QModelIndex& index) const { const auto* node = get(index); return node ? node->key : QString(); }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            const auto* node = get(index);
+            if (!node || index.column() < 0 || index.column() >= 13) return {};
+            const auto& value = snapshot->state->records[node->record];
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return node->cells[index.column()];
+            if (role == Qt::UserRole) return node->group ? QVariant() : QVariant::fromValue(value.hwndValue);
+            if (role == Qt::UserRole + 1) return node->group;
+            if (role == Qt::UserRole + 2) return value.processId;
+            if (role == Qt::UserRole + 3) return value.threadId;
+            if (role == Qt::UserRole + 4) return QVariant::fromValue<qulonglong>(value.processCreationTime100ns);
+            if (!node->group && role == Qt::ForegroundRole && !value.valid) return QBrush(KswordTheme::ExitedRowForegroundColor());
+            if (!node->group && role == Qt::BackgroundRole)
+            {
+                if (!value.valid) return QBrush(KswordTheme::ExitedRowBackgroundColor());
+                if (node->newRow) return QBrush(KswordTheme::NewRowBackgroundColor());
+            }
+            if (role == Qt::DecorationRole && ((node->group && index.column() == 0) || (!node->group && index.column() == kWindowColumnProcessName)))
+            {
+                if (node->group && node->iconPath.isEmpty())
+                    return snapshot->grouping == 2 ? m_treeIcon : m_listIcon;
+                return logo(node->iconKey, node->iconPath);
+            }
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            if (orientation == Qt::Horizontal) return headerRoles.value(section).value(role);
+            return QAbstractItemModel::headerData(section, orientation, role);
+        }
+        bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
+        {
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size()) return false;
+            if (role != Qt::DisplayRole && role != Qt::EditRole) { headerRoles[section].insert(role, value); return true; }
+            if (headers[section] == value.toString()) return true;
+            headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
+        }
+        void publish(std::shared_ptr<const Projection> value)
+        {
+            const QPointer<SnapshotModel> alive(this);
+            beginResetModel();
+            if (!alive) return;
+            snapshot = std::move(value);
+            endResetModel();
+        }
+        QHash<int, QHash<int, QVariant>> headerRoles;
+        QStringList headers;
+        std::shared_ptr<const Projection> snapshot;
+        std::function<void()> iconsChanged;
+    private:
+        const Node* get(const QModelIndex& index) const
+        {
+            const auto number = index.internalId();
+            return snapshot && index.isValid() && number && number <= snapshot->nodes.size() ? &snapshot->nodes[number - 1] : nullptr;
+        }
+        QIcon logo(const QString& key, const QString& path) const
+        {
+            const auto found = m_icons.constFind(key);
+            if (found != m_icons.cend()) return found.value();
+            if (!path.isEmpty() && !m_requested.contains(key))
+            {
+                m_requested.insert(key);
+                m_pending.push_back({key, path});
+                if (!m_iconWakeQueued)
+                {
+                    m_iconWakeQueued = true;
+                    QTimer::singleShot(0, const_cast<SnapshotModel*>(this), [this] {
+                        m_iconWakeQueued = false;
+                        const_cast<SnapshotModel*>(this)->startIconBatch();
+                    });
+                }
+            }
+            return m_defaultIcon;
+        }
+        void startIconBatch()
+        {
+            if (m_pending.empty() || m_iconOperation->isBusy()) return;
+            std::vector<IconRequest> batch;
+            while (!m_pending.empty() && batch.size() < 16)
+            { batch.push_back(std::move(m_pending.front())); m_pending.pop_front(); }
+            m_iconOperation->submit<std::vector<IconRequest>, std::vector<IconResult>>(
+                std::move(batch), prepareIcons,
+                [this](const std::vector<IconResult>& values, std::uint64_t) {
+                    for (const auto& value : values)
+                        m_icons.insert(value.key, value.image.isNull() ? m_defaultIcon : QIcon(QPixmap::fromImage(value.image)));
+                    if (iconsChanged) iconsChanged();
+                    return true;
+                }, [](std::exception_ptr) {});
+        }
+        ks::ui::AsyncOperation* m_iconOperation;
+        mutable QHash<QString, QIcon> m_icons;
+        mutable QSet<QString> m_requested;
+        mutable std::deque<IconRequest> m_pending;
+        mutable bool m_iconWakeQueued = false;
+        QIcon m_defaultIcon{QStringLiteral(":/Icon/process_main.svg")};
+        QIcon m_treeIcon{QStringLiteral(":/Icon/process_tree.svg")};
+        QIcon m_listIcon{QStringLiteral(":/Icon/process_list.svg")};
+    };
+}
+
 namespace
 {
     struct WindowMessageRecord
@@ -1282,12 +1667,13 @@ namespace
         QVariant headerData(int section, Qt::Orientation orientation, int role) const override
         {
             if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size()) return headers[section];
+            if (orientation == Qt::Horizontal) return headerRoles.value(section).value(role);
             return QAbstractTableModel::headerData(section, orientation, role);
         }
         bool setHeaderData(int section, Qt::Orientation orientation, const QVariant& value, int role = Qt::EditRole) override
         {
-            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size() ||
-                (role != Qt::DisplayRole && role != Qt::EditRole)) return false;
+            if (orientation != Qt::Horizontal || section < 0 || section >= headers.size()) return false;
+            if (role != Qt::DisplayRole && role != Qt::EditRole) { headerRoles[section].insert(role, value); return true; }
             if (headers[section] == value.toString()) return true;
             headers[section] = value.toString(); emit headerDataChanged(orientation, section, section); return true;
         }
@@ -1307,6 +1693,7 @@ namespace
             const auto offset = sequence - snapshot->rows.front()->sequence;
             return offset < snapshot->rows.size() && snapshot->rows[static_cast<size_t>(offset)]->sequence == sequence ? static_cast<int>(offset) : -1;
         }
+        QHash<int, QHash<int, QVariant>> headerRoles;
         QStringList headers;
         std::shared_ptr<const WindowMessageSnapshot> snapshot;
     };
@@ -3163,6 +3550,13 @@ OtherDock::OtherDock(QWidget* parent)
     kLogEvent event;
     info << event << "[OtherDock] 构造开始，初始化窗口管理页。" << eol;
 
+    m_windowState = makeWindowBackgroundValue<ks::windowlist::Snapshot>();
+    m_windowRefreshOperation = new ks::ui::AsyncOperation(this);
+    m_windowProjectionOperation = new ks::ui::AsyncOperation(this);
+    m_windowFilterTimer = new QTimer(this);
+    m_windowFilterTimer->setSingleShot(true);
+    m_windowFilterTimer->setInterval(120);
+    connect(m_windowFilterTimer, &QTimer::timeout, this, [this] { rebuildWindowTreeFromSnapshot(); });
     initializeUi();
     initializeConnections();
     m_previewScaleOperation = new ks::ui::AsyncOperation(this);
@@ -3171,7 +3565,7 @@ OtherDock::OtherDock(QWidget* parent)
     m_previewTimer->setInterval(1000);
     connect(m_previewTimer, &QTimer::timeout, this, [this] {
         m_previewCaptureDue = true;
-        scheduleWindowSelectionUi();
+        if (m_previewWidget->isVisible()) scheduleWindowSelectionUi();
     });
     m_previewTimer->start();
     m_autoRefreshCheck->setChecked(true);
@@ -3182,6 +3576,8 @@ OtherDock::OtherDock(QWidget* parent)
 OtherDock::~OtherDock()
 {
     if (m_previewScaleOperation) m_previewScaleOperation->close();
+    if (m_windowRefreshOperation) m_windowRefreshOperation->close();
+    if (m_windowProjectionOperation) m_windowProjectionOperation->close();
     if (m_autoRefreshTimer != nullptr)
     {
         m_autoRefreshTimer->stop();
@@ -3435,7 +3831,12 @@ void OtherDock::initializeUi()
     m_mainSplitter = new QSplitter(Qt::Horizontal, m_windowListPage);
     m_windowListPageLayout->addWidget(m_mainSplitter, 1);
 
-    m_windowTree = new QTreeWidget(m_mainSplitter);
+    m_windowTree = new QTreeView(m_mainSplitter);
+    m_windowModel = new ks::windowlist::SnapshotModel(m_windowTree);
+    m_windowTree->setProperty("ks_i18n_preserve_model_data", true);
+    m_windowTree->setModel(m_windowModel);
+    m_windowModel->iconsChanged = [this] { m_windowTree->viewport()->update(); };
+    m_windowTree->installEventFilter(this);
     m_windowTree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_windowTree->setRootIsDecorated(true);
     m_windowTree->setAlternatingRowColors(true);
@@ -3444,8 +3845,7 @@ void OtherDock::initializeUi()
     m_windowTree->setUniformRowHeights(true);
     m_windowTree->setSortingEnabled(false);
     m_windowTree->header()->setStyleSheet(blueHeaderStyle());
-    m_windowTree->setColumnCount(13);
-    m_windowTree->setHeaderLabels({
+    m_windowModel->headers = {
         QStringLiteral("窗口标题"),
         QStringLiteral("句柄"),
         QStringLiteral("枚举API"),
@@ -3459,7 +3859,7 @@ void OtherDock::initializeUi()
         QStringLiteral("顶层"),
         QStringLiteral("状态"),
         QStringLiteral("透明度")
-        });
+        };
     ks::window::configureWindowListColumnSizing(m_windowTree);
 
     m_previewWidget = new QWidget(m_mainSplitter);
@@ -3658,7 +4058,8 @@ void OtherDock::initializeConnections()
             << "[OtherDock] 关键字过滤变更, keyword="
             << text.toStdString()
             << eol;
-        rebuildWindowTreeFromSnapshot();
+        m_windowProjectionDirty = true;
+        m_windowFilterTimer->start();
     });
     connect(m_filterModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
         kLogEvent event;
@@ -3712,7 +4113,7 @@ void OtherDock::initializeConnections()
     });
 
     // 右键菜单：窗口操作入口。
-    connect(m_windowTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+    connect(m_windowTree, &QTreeView::customContextMenuRequested, this, [this](const QPoint& pos) {
         showWindowContextMenu(pos);
     });
 
@@ -3725,14 +4126,14 @@ void OtherDock::initializeConnections()
     });
 
     // 双击行：直接打开窗口详细信息。
-    connect(m_windowTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
-        if (item == nullptr || item->data(0, Qt::UserRole + 1).toBool())
+    connect(m_windowTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& item) {
+        if (!item.isValid() || item.data(Qt::UserRole + 1).toBool())
         {
             return;
         }
-        const quint64 hwndValue = item->data(0, Qt::UserRole).toULongLong();
+        const quint64 hwndValue = item.data(Qt::UserRole).toULongLong();
         const WindowInfo* windowInfo = findInfoByHwnd(hwndValue);
-        if (windowInfo != nullptr)
+        if (windowInfo != nullptr && ks::windowlist::identity(*windowInfo) == ks::window::windowItemIdentity(item))
         {
             kLogEvent event;
             info << event
@@ -3746,15 +4147,15 @@ void OtherDock::initializeConnections()
     });
 
     // Preview follows the current selected leaf; the status counts the whole selection.
-    connect(m_windowTree, &QTreeWidget::currentItemChanged, this,
-        [this](QTreeWidgetItem*, QTreeWidgetItem*) { scheduleWindowSelectionUi(); });
-    connect(m_windowTree, &QTreeWidget::itemSelectionChanged, this,
-        [this] { scheduleWindowSelectionUi(); });
+    connect(m_windowTree->selectionModel(), &QItemSelectionModel::currentChanged, this,
+        [this](const QModelIndex&, const QModelIndex&) { scheduleWindowSelectionUi(); });
+    connect(m_windowTree->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+        [this](const QItemSelection&, const QItemSelection&) { scheduleWindowSelectionUi(); });
 
     // 截图按钮：把当前选中窗口抓图并保存到文件。
     connect(m_captureButton, &QPushButton::clicked, this, [this]() {
-        QTreeWidgetItem* item = m_windowTree->currentItem();
-        if (item == nullptr || item->data(0, Qt::UserRole + 1).toBool())
+        const auto item = m_windowTree->currentIndex();
+        if (!item.isValid() || item.data(Qt::UserRole + 1).toBool())
         {
             kLogEvent event;
             warn << event
@@ -3764,7 +4165,7 @@ void OtherDock::initializeConnections()
             return;
         }
 
-        const quint64 hwndValue = item->data(0, Qt::UserRole).toULongLong();
+        const quint64 hwndValue = item.data(Qt::UserRole).toULongLong();
         const QPixmap pixmap = grabWindowPreviewPixmap(hwndValue, QSize(900, 600));
         if (pixmap.isNull())
         {
@@ -3846,7 +4247,7 @@ void OtherDock::applyViewMode()
     if (mode == 0)
     {
         // 图标视图：保留关键列，降低信息密度。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             const bool keepVisible =
                 (col == kWindowColumnTitle
@@ -3859,7 +4260,7 @@ void OtherDock::applyViewMode()
     else if (mode == 1)
     {
         // 列表视图：比图标模式多保留 PID、状态、可见性。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             const bool keepVisible =
                 (col == kWindowColumnTitle
@@ -3874,7 +4275,7 @@ void OtherDock::applyViewMode()
     else
     {
         // 详细信息视图：显示所有列，满足审计场景。
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
+        for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
         {
             m_windowTree->setColumnHidden(col, false);
         }
@@ -3891,512 +4292,153 @@ void OtherDock::applyViewMode()
 
 void OtherDock::refreshWindowListAsync(const bool reportProgress)
 {
-    // 防并发刷新：上一轮未完成时直接忽略当前请求。
-    if (m_refreshRunning.exchange(true))
-    {
-        kLogEvent event;
-        dbg << event
-            << "[OtherDock] 跳过刷新：已有枚举任务在执行。"
-            << eol;
-        return;
-    }
-
-    // 异步刷新链路统一复用 refreshEvent，确保“开始/完成”日志可按同一 GUID 追踪。
-    kLogEvent refreshEvent;
-    const int enumMode = m_enumModeCombo != nullptr ? m_enumModeCombo->currentIndex() : 0;
-    info << refreshEvent
-        << "[OtherDock] 启动异步窗口枚举, filterMode="
-        << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
-        << ", groupMode="
-        << groupModeText(m_groupModeCombo->currentIndex()).toStdString()
-        << ", enumMode="
-        << enumModeText(enumMode).toStdString()
-        << ", keyword="
-        << m_filterEdit->text().toStdString()
-        << eol;
-
+    // Auto ticks never cancel an in-flight sample. Explicit mode/refresh requests
+    // merge as latest query; accepted side effects use their separate controller.
+    if (!reportProgress && m_windowRefreshOperation->isBusy()) return;
+    const int mode = m_enumModeCombo ? m_enumModeCombo->currentIndex() : 0;
     if (reportProgress)
     {
-        if (m_refreshProgressPid == 0)
-        {
-            m_refreshProgressPid = kPro.addReusable(this, "窗口", "窗口枚举");
-        }
+        if (!m_refreshProgressPid) m_refreshProgressPid = kPro.addReusable(this, "窗口", "窗口枚举");
         kPro.set(m_refreshProgressPid, "开始枚举窗口", 0, 5.0f);
     }
-
-    QPointer<OtherDock> guardThis(this);
-    std::thread([guardThis, refreshEvent, enumMode, reportProgress]() {
-        std::vector<WindowInfo> snapshot;
-        // collectWindowSnapshotByMode 用途：根据用户选择策略采集窗口并去重。
-        collectWindowSnapshotByMode(enumMode, snapshot);
-
-        if (guardThis == nullptr)
-        {
-            return;
-        }
-        QMetaObject::invokeMethod(qApp, [guardThis, snapshot = std::move(snapshot), refreshEvent, enumMode, reportProgress]() mutable {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            if (reportProgress)
-            {
-                kPro.set(guardThis->m_refreshProgressPid, "合并窗口快照", 0, 70.0f);
-            }
-
-            // 记录上一轮有效窗口，作为“新增/退出”对比基线。
-            std::vector<WindowInfo> previousValidList;
-            previousValidList.reserve(guardThis->m_windowSnapshot.size());
-            for (const WindowInfo& info : guardThis->m_windowSnapshot)
-            {
-                if (info.valid)
-                {
-                    previousValidList.push_back(info);
-                }
-            }
-
-            std::unordered_set<quint64> currentHandleSet;
-            currentHandleSet.reserve(snapshot.size());
-            for (const WindowInfo& info : snapshot)
-            {
-                currentHandleSet.insert(info.hwndValue);
-            }
-
-            std::unordered_set<quint64> previousHandleSet;
-            previousHandleSet.reserve(previousValidList.size());
-            for (const WindowInfo& info : previousValidList)
-            {
-                previousHandleSet.insert(info.hwndValue);
-            }
-
-            // 计算新增窗口，用于绿色高亮。
-            guardThis->m_newWindowHandles.clear();
-            for (const WindowInfo& info : snapshot)
-            {
-                if (previousHandleSet.find(info.hwndValue) == previousHandleSet.end())
-                {
-                    guardThis->m_newWindowHandles.push_back(info.hwndValue);
-                }
-            }
-
-            // 计算退出窗口：保留一轮并置灰显示。
-            guardThis->m_exitedOneRound.clear();
-            for (const WindowInfo& oldInfo : previousValidList)
-            {
-                if (currentHandleSet.find(oldInfo.hwndValue) != currentHandleSet.end())
-                {
-                    continue;
-                }
-
-                WindowInfo exitedInfo = oldInfo;
-                exitedInfo.valid = false;
-                exitedInfo.visible = false;
-                exitedInfo.enabled = false;
-                exitedInfo.topMost = false;
-                exitedInfo.minimized = false;
-                exitedInfo.maximized = false;
-                exitedInfo.titleText = QStringLiteral("[已退出] %1").arg(oldInfo.titleText);
-                guardThis->m_exitedOneRound.push_back(exitedInfo);
-            }
-
-            // 当前显示列表 = 当前快照 + 退出保留一轮。
-            guardThis->m_previousSnapshot = snapshot;
-            guardThis->m_windowSnapshot = snapshot;
-            guardThis->m_windowSnapshot.insert(
-                guardThis->m_windowSnapshot.end(),
-                guardThis->m_exitedOneRound.begin(),
-                guardThis->m_exitedOneRound.end());
-
-            guardThis->rebuildWindowTreeFromSnapshot();
-            guardThis->updateStatusBar();
-            guardThis->m_refreshRunning.store(false);
-            if (reportProgress)
-            {
-                kPro.set(guardThis->m_refreshProgressPid, "窗口枚举完成", 0, 100.0f);
-            }
-
-            info << refreshEvent
-                << "[OtherDock] 枚举完成，当前窗口="
-                << snapshot.size()
-                << ", enumMode="
-                << enumModeText(enumMode).toStdString()
-                << ", 退出保留="
-                << guardThis->m_exitedOneRound.size()
-                << eol;
-        }, Qt::QueuedConnection);
-    }).detach();
-}
-
-bool OtherDock::passFilter(const WindowInfo& info) const
-{
-    // 外部 PID 过滤（从进程页“查看窗口”跳过来时设置）只是一层额外收窄，
-    // 不能顶替下拉条件和关键字：此前这里直接 return，导致跳转过来之后
-    // “过滤模式”下拉和关键字输入框还亮着、还能改，却对结果毫无影响——
-    // 界面显示“可见窗口”，实际按“该 PID 的全部窗口”执行。
-    if (!m_externalProcessIdFilterSet.isEmpty() &&
-        !m_externalProcessIdFilterSet.contains(static_cast<quint32>(info.processId)))
-    {
-        return false;
-    }
-
-    // 条件过滤：先按下拉条件筛掉不符合的项。
-    const int mode = m_filterModeCombo->currentIndex();
-    switch (mode)
-    {
-    case 0:
-        break;
-    case 1:
-        if (!info.visible || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 2:
-        if (info.visible || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 3:
-        if (info.isChildWindow || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 4:
-        if (!info.isChildWindow || !info.valid)
-        {
-            return false;
-        }
-        break;
-    case 5:
-        if (info.valid)
-        {
-            return false;
-        }
-        break;
-    default:
-        break;
-    }
-
-    // 关键字过滤：支持标题、类名、进程名和句柄文本。
-    const QString keyword = m_filterEdit->text().trimmed();
-    if (keyword.isEmpty())
-    {
-        return true;
-    }
-
-    const QString keywordLower = keyword.toLower();
-    const QString joinedText = QStringLiteral("%1 %2 %3 %4 %5")
-        .arg(info.titleText)
-        .arg(info.classNameText)
-        .arg(info.processNameText)
-        .arg(info.processId)
-        .arg(hwndToText(info.hwndValue))
-        .toLower();
-    return joinedText.contains(keywordLower);
+    struct Request { int mode; std::shared_ptr<const ks::windowlist::Snapshot> previous; };
+    m_windowRefreshOperation->submit<Request, std::shared_ptr<const ks::windowlist::Snapshot>>(
+        {mode, m_windowState},
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) {
+            std::vector<WindowInfo> current;
+            collectWindowSnapshotByMode(value.mode, current);
+            if (token.isCanceled()) return std::shared_ptr<const ks::windowlist::Snapshot>();
+            return ks::windowlist::mergeSnapshot(std::move(current), value.previous);
+        },
+        [this, reportProgress](const std::shared_ptr<const ks::windowlist::Snapshot>& result, std::uint64_t) {
+            if (!result) return true;
+            m_windowState = result;
+            m_windowProjectionDirty = true;
+            updateStatusBar();
+            rebuildWindowTreeFromSnapshot();
+            if (reportProgress) kPro.set(m_refreshProgressPid, "窗口枚举完成", 0, 100.0f);
+            return true;
+        }, [](std::exception_ptr) {});
 }
 
 void OtherDock::rebuildWindowTreeFromSnapshot()
 {
-    // 重建树链路统一复用 rebuildEvent，确保“开始/完成”日志可按同一 GUID 追踪。
-    kLogEvent rebuildEvent;
-    dbg << rebuildEvent
-        << "[OtherDock] 重建窗口树开始, snapshotCount="
-        << m_windowSnapshot.size()
-        << ", filterMode="
-        << filterModeText(m_filterModeCombo->currentIndex()).toStdString()
-        << ", groupMode="
-        << groupModeText(m_groupModeCombo->currentIndex()).toStdString()
-        << eol;
-
-    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
-        QStringLiteral("window_tree_rebuild"), {m_windowTree},
-        [this] { rebuildWindowTreeFromSnapshot(); })) return;
-
-    // Items retain the identity captured when rendered, even after the snapshot
-    // has already been replaced. Do not restore selection onto a reused HWND.
-    const auto selection = ks::window::captureWindowSelection(m_windowTree);
-    const QSignalBlocker selectionBlocker(m_windowTree);
-    m_windowTree->clear();
-
-    // 进程图标缓存：
-    // - 以 PID 作为 key，避免同一进程重复提取图标；
-    // - 缓存命中可显著降低刷新时的图标查询开销。
-    std::unordered_map<std::uint32_t, QIcon> processLogoCache;
-    auto resolveProcessLogo = [&processLogoCache](const WindowInfo& info) -> QIcon {
-        const auto found = processLogoCache.find(info.processId);
-        if (found != processLogoCache.end())
-        {
-            return found->second;
-        }
-        const QIcon processLogo = queryProcessLogoIconByPath(info.processImagePathText);
-        processLogoCache.emplace(info.processId, processLogo);
-        return processLogo;
-    };
-
-    // 公共叶子节点生成函数：统一填充列与高亮规则。
-    auto appendLeafItem = [this, &resolveProcessLogo](QTreeWidgetItem* parent, const WindowInfo& info) {
-        QTreeWidgetItem* item = nullptr;
-        if (parent != nullptr)
-        {
-            item = new QTreeWidgetItem(parent);
-        }
-        else
-        {
-            item = new QTreeWidgetItem(m_windowTree);
-        }
-
-        const QString sizeText = QStringLiteral("%1 x %2")
-            .arg(info.windowRect.width())
-            .arg(info.windowRect.height());
-
-        item->setText(kWindowColumnTitle, info.titleText.isEmpty() ? QStringLiteral("<无标题>") : info.titleText);
-        item->setText(kWindowColumnHandle, hwndToText(info.hwndValue));
-        item->setText(kWindowColumnEnumApi, info.enumApiName);
-        item->setText(kWindowColumnClassName, info.classNameText);
-        item->setText(kWindowColumnPid, QString::number(info.processId));
-        item->setText(kWindowColumnProcessName, info.processNameText);
-        item->setText(kWindowColumnTid, QString::number(info.threadId));
-        item->setText(kWindowColumnSize, sizeText);
-        item->setText(kWindowColumnVisible, boolText(info.visible));
-        item->setText(kWindowColumnEnabled, boolText(info.enabled));
-        item->setText(kWindowColumnTopMost, boolText(info.topMost));
-        item->setText(kWindowColumnState, windowStateText(info.valid, info.minimized, info.maximized));
-        item->setText(kWindowColumnAlpha, QString::number(info.alphaValue));
-
-        item->setData(kWindowColumnTitle, Qt::UserRole, QVariant::fromValue(static_cast<qulonglong>(info.hwndValue)));
-        item->setData(kWindowColumnTitle, Qt::UserRole + 1, false);
-        item->setData(0, Qt::UserRole + 2, info.processId);
-        item->setData(0, Qt::UserRole + 3, info.threadId);
-        item->setData(0, Qt::UserRole + 4, QVariant::fromValue<qulonglong>(info.processCreationTime100ns));
-
-        // 叶子图标改为显示“进程 logo”，并放到进程列，避免标题列图标干扰阅读。
-        item->setIcon(kWindowColumnProcessName, resolveProcessLogo(info));
-
-        // 新增窗口高亮绿色，退出窗口置灰。
-        const bool isNew = std::find(
-            m_newWindowHandles.begin(),
-            m_newWindowHandles.end(),
-            info.hwndValue) != m_newWindowHandles.end();
-
-        if (!info.valid)
-        {
-            for (int col = 0; col < m_windowTree->columnCount(); ++col)
-            {
-                item->setForeground(col, QBrush(KswordTheme::ExitedRowForegroundColor()));
-                item->setBackground(col, QBrush(KswordTheme::ExitedRowBackgroundColor()));
-            }
-        }
-        else if (isNew)
-        {
-            for (int col = 0; col < m_windowTree->columnCount(); ++col)
-            {
-                item->setBackground(col, QBrush(KswordTheme::NewRowBackgroundColor()));
-            }
-        }
-    };
-
-    // 根据分组选项重建树结构。
-    const int groupMode = m_groupModeCombo->currentIndex();
-
-    if (groupMode == 0)
-    {
-        // 按进程分组：进程节点下挂对应窗口子节点。
-        std::map<QString, QTreeWidgetItem*> processMap;
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            const QString processKey = QStringLiteral("%1 (PID:%2)")
-                .arg(info.processNameText, QString::number(info.processId));
-            QTreeWidgetItem* groupItem = nullptr;
-            auto found = processMap.find(processKey);
-            if (found == processMap.end())
-            {
-                groupItem = new QTreeWidgetItem(m_windowTree);
-                groupItem->setText(0, processKey);
-                // 进程分组节点同样展示进程 logo，满足“所有进程都显示图标”的需求。
-                groupItem->setIcon(0, resolveProcessLogo(info));
-                groupItem->setData(0, Qt::UserRole + 1, true);
-                processMap.emplace(processKey, groupItem);
-            }
-            else
-            {
-                groupItem = found->second;
-            }
-            appendLeafItem(groupItem, info);
-        }
-    }
-    else if (groupMode == 1)
-    {
-        // 按 Z 序：平铺显示，按枚举顺序排序。
-        std::vector<WindowInfo> orderedList = m_windowSnapshot;
-        std::sort(
-            orderedList.begin(),
-            orderedList.end(),
-            [](const WindowInfo& left, const WindowInfo& right) {
-                return left.zOrder < right.zOrder;
-            });
-        for (const WindowInfo& info : orderedList)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-            appendLeafItem(nullptr, info);
-        }
-    }
-    else if (groupMode == 2)
-    {
-        // 按层级：桌面/顶层/子窗口/弹出窗口/工具窗口分类。
-        std::map<QString, QTreeWidgetItem*> levelGroupMap;
-        auto getLevelGroup = [this, &levelGroupMap](const QString& key) -> QTreeWidgetItem* {
-            auto found = levelGroupMap.find(key);
-            if (found != levelGroupMap.end())
-            {
-                return found->second;
-            }
-            QTreeWidgetItem* item = new QTreeWidgetItem(m_windowTree);
-            item->setText(0, key);
-            item->setIcon(0, QIcon(":/Icon/process_tree.svg"));
-            item->setData(0, Qt::UserRole + 1, true);
-            levelGroupMap.emplace(key, item);
-            return item;
-        };
-
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            QString groupKey = QStringLiteral("顶级窗口");
-            if (info.hwndValue == static_cast<quint64>(reinterpret_cast<quintptr>(::GetDesktopWindow())))
-            {
-                groupKey = QStringLiteral("桌面窗口");
-            }
-            else if (info.isChildWindow)
-            {
-                groupKey = QStringLiteral("子窗口");
-            }
-            else if ((info.styleValue & WS_POPUP) != 0)
-            {
-                groupKey = QStringLiteral("弹出窗口");
-            }
-            else if ((info.exStyleValue & WS_EX_TOOLWINDOW) != 0)
-            {
-                groupKey = QStringLiteral("工具窗口");
-            }
-
-            appendLeafItem(getLevelGroup(groupKey), info);
-        }
-    }
-    else
-    {
-        // 按显示器：依据窗口中心点所在屏幕分组。
-        std::map<QString, QTreeWidgetItem*> monitorGroupMap;
-        const QList<QScreen*> screenList = QGuiApplication::screens();
-
-        auto getMonitorGroup = [this, &monitorGroupMap](const QString& key) -> QTreeWidgetItem* {
-            auto found = monitorGroupMap.find(key);
-            if (found != monitorGroupMap.end())
-            {
-                return found->second;
-            }
-            QTreeWidgetItem* item = new QTreeWidgetItem(m_windowTree);
-            item->setText(0, key);
-            item->setIcon(0, QIcon(":/Icon/process_list.svg"));
-            item->setData(0, Qt::UserRole + 1, true);
-            monitorGroupMap.emplace(key, item);
-            return item;
-        };
-
-        for (const WindowInfo& info : m_windowSnapshot)
-        {
-            if (!passFilter(info))
-            {
-                continue;
-            }
-
-            QString groupKey = QStringLiteral("未知显示器");
-            const QPoint centerPoint = info.windowRect.center();
-            for (int i = 0; i < screenList.size(); ++i)
-            {
-                QScreen* screen = screenList.at(i);
-                if (screen != nullptr && screen->geometry().contains(centerPoint))
+    m_windowProjectionDirty = true;
+    if (!m_windowTree->isVisible()) return;
+    ks::windowlist::ProjectionRequest request;
+    request.state = m_windowState;
+    request.previous = m_windowModel->snapshot;
+    request.processIds = m_externalProcessIdFilterSet;
+    request.keyword = m_filterEdit->text().trimmed().toLower();
+    request.filter = m_filterModeCombo->currentIndex();
+    request.grouping = m_groupModeCombo->currentIndex();
+    request.desktopHwnd = static_cast<quint64>(reinterpret_cast<quintptr>(::GetDesktopWindow()));
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    for (const auto* screen : QGuiApplication::screens())
+        if (screen) request.screens.emplace_back(screen->geometry(), screen->name());
+    m_windowProjectionOperation->submit<ks::windowlist::ProjectionRequest, std::shared_ptr<const ks::windowlist::Projection>>(
+        std::move(request),
+        [](const ks::windowlist::ProjectionRequest& value, const ks::ui::AsyncOperationToken& token) {
+            return ks::windowlist::prepareProjection(value, &token);
+        },
+        [this, sourceState = m_windowState](const std::shared_ptr<const ks::windowlist::Projection>& result, std::uint64_t generation) {
+            const auto commit = [this, result, sourceState, generation] {
+                if (!m_windowProjectionOperation->isCurrent(generation)) return;
+                if (result && sourceState == m_windowState && m_windowTree->isVisible())
                 {
-                    groupKey = QStringLiteral("显示器%1: %2")
-                        .arg(i + 1)
-                        .arg(screen->name());
-                    break;
+                    if (result == m_windowModel->snapshot)
+                    {
+                        m_windowProjectionDirty = false;
+                        scheduleWindowSelectionUi();
+                        m_windowProjectionOperation->completeDeferred(generation);
+                        return;
+                    }
                 }
-            }
-            appendLeafItem(getMonitorGroup(groupKey), info);
-        }
-    }
-
-    // 统一展开第一层节点，便于用户直接看到数据。
-    for (int i = 0; i < m_windowTree->topLevelItemCount(); ++i)
-    {
-        QTreeWidgetItem* topItem = m_windowTree->topLevelItem(i);
-        if (topItem != nullptr && topItem->data(0, Qt::UserRole + 1).toBool())
-        {
-            topItem->setExpanded(true);
-        }
-    }
-
-    ks::window::restoreWindowSelection(m_windowTree, selection);
-    updateWindowSelectionUi();
-
-    dbg << rebuildEvent
-        << "[OtherDock] 重建窗口树完成, topLevelCount="
-        << m_windowTree->topLevelItemCount()
-        << eol;
+                if (result && sourceState == m_windowState && m_windowTree->isVisible())
+                {
+                    const auto selected = ks::window::captureWindowSelection(m_windowTree);
+                    QSet<QString> expanded;
+                    const bool sameGrouping = m_windowModel->snapshot && m_windowModel->snapshot->grouping == result->grouping;
+                    if (m_windowModel->snapshot)
+                        for (int root : m_windowModel->snapshot->roots)
+                        {
+                            const auto index = m_windowModel->nodeIndex(root);
+                            if (m_windowTree->isExpanded(index)) expanded.insert(m_windowModel->key(index));
+                        }
+                    const auto top = m_windowTree->indexAt(QPoint(0, 0));
+                    const QString topKey = m_windowModel->key(top);
+                    const int topOffset = top.isValid() ? m_windowTree->visualRect(top).top() : 0;
+                    const QPointer<OtherDock> alive(this);
+                    m_windowModel->publish(result);
+                    if (!alive) return;
+                    if (!sameGrouping) { m_windowTree->expandToDepth(0); if (!alive) return; }
+                    else
+                    {
+                        // One shared view expansion pass avoids requesting a full
+                        // layout after each of thousands of process-group roots.
+                        m_windowTree->expandToDepth(0);
+                        if (!alive) return;
+                        for (int root : result->roots)
+                        {
+                            const auto index = m_windowModel->nodeIndex(root);
+                            if (index.data(Qt::UserRole + 1).toBool() && !expanded.contains(m_windowModel->key(index)))
+                            {
+                                m_windowTree->setExpanded(index, false);
+                                if (!alive) return;
+                            }
+                        }
+                    }
+                    if (!alive) return;
+                    std::vector<int> selectedNodes;
+                    selectedNodes.reserve(selected.identities.size());
+                    for (const auto& key : selected.identities)
+                    {
+                        const auto found = result->byIdentity.constFind(key);
+                        if (found != result->byIdentity.cend()) selectedNodes.push_back(found.value());
+                    }
+                    std::sort(selectedNodes.begin(), selectedNodes.end(), [&result](int left, int right) {
+                        const auto& a = result->nodes[left]; const auto& b = result->nodes[right];
+                        return a.parent != b.parent ? a.parent < b.parent : a.row < b.row;
+                    });
+                    QItemSelection selection;
+                    for (size_t begin = 0; begin < selectedNodes.size();)
+                    {
+                        size_t end = begin;
+                        while (end + 1 < selectedNodes.size() &&
+                            result->nodes[selectedNodes[end + 1]].parent == result->nodes[selectedNodes[begin]].parent &&
+                            result->nodes[selectedNodes[end + 1]].row == result->nodes[selectedNodes[end]].row + 1) ++end;
+                        selection.select(m_windowModel->nodeIndex(selectedNodes[begin]), m_windowModel->nodeIndex(selectedNodes[end], 12));
+                        begin = end + 1;
+                    }
+                    m_windowTree->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                    if (!alive) return;
+                    const auto current = m_windowModel->indexForIdentity(selected.current);
+                    if (current.isValid()) m_windowTree->selectionModel()->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
+                    if (!alive) return;
+                    const auto anchor = m_windowModel->indexForIdentity(topKey);
+                    if (anchor.isValid())
+                    {
+                        m_windowTree->scrollTo(anchor, QAbstractItemView::PositionAtTop);
+                        if (m_windowTree->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+                            m_windowTree->verticalScrollBar()->setValue(m_windowTree->verticalScrollBar()->value() - topOffset);
+                    }
+                    if (!alive) return;
+                    m_windowProjectionDirty = false;
+                    scheduleWindowSelectionUi();
+                }
+                m_windowProjectionOperation->completeDeferred(generation);
+            };
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                QStringLiteral("window_tree_rebuild"), {m_windowTree}, commit)) return false;
+            commit(); return true;
+        }, [](std::exception_ptr) {});
 }
 
 void OtherDock::updateStatusBar()
 {
-    int totalCount = 0;
-    int visibleCount = 0;
-    int systemCount = 0;
-    for (const WindowInfo& info : m_windowSnapshot)
-    {
-        if (!info.valid)
-        {
-            continue;
-        }
-        ++totalCount;
-        if (info.visible)
-        {
-            ++visibleCount;
-        }
-        if (info.processId <= 4
-            || info.processNameText.compare(QStringLiteral("System"), Qt::CaseInsensitive) == 0
-            || info.processNameText.compare(QStringLiteral("csrss.exe"), Qt::CaseInsensitive) == 0)
-        {
-            ++systemCount;
-        }
-    }
-
-    m_totalLabel->setText(QStringLiteral("总数: %1").arg(totalCount));
-    m_visibleLabel->setText(QStringLiteral("可见: %1").arg(visibleCount));
-    m_systemLabel->setText(QStringLiteral("系统: %1").arg(systemCount));
-
-    kLogEvent event;
-    dbg << event
-        << "[OtherDock] 状态栏更新, total="
-        << totalCount
-        << ", visible="
-        << visibleCount
-        << ", system="
-        << systemCount
-        << eol;
+    m_totalLabel->setText(QStringLiteral("总数: %1").arg(m_windowState ? m_windowState->total : 0));
+    m_visibleLabel->setText(QStringLiteral("可见: %1").arg(m_windowState ? m_windowState->visible : 0));
+    m_systemLabel->setText(QStringLiteral("系统: %1").arg(m_windowState ? m_windowState->system : 0));
 }
 
 void OtherDock::updatePreviewPanel(const WindowInfo* info)
@@ -4471,8 +4513,8 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
                     return ScaleResult{std::move(scaled), value.size, value.dpr, value.identity};
                 },
                 [this](const ScaleResult& result, std::uint64_t) {
-                    const auto* current = m_windowTree->currentItem();
-                    if (!current || !current->isSelected() || ks::window::windowItemIdentity(current) != result.identity ||
+                    const auto current = m_windowTree->currentIndex();
+                    if (!current.isValid() || !m_windowTree->selectionModel()->isSelected(current) || ks::window::windowItemIdentity(current) != result.identity ||
                         result.identity != m_previewIdentity || !m_thumbnailLabel->isVisible() ||
                         result.size != m_thumbnailLabel->size() || result.dpr != m_thumbnailLabel->devicePixelRatioF())
                     {
@@ -4636,6 +4678,14 @@ std::vector<OtherDock::WindowInfo> OtherDock::selectedWindowSnapshots() const
 
 bool OtherDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_windowTree && event->type() == QEvent::LanguageChange)
+    {
+        m_windowProjectionDirty = true;
+        QTimer::singleShot(0, this, [this] { rebuildWindowTreeFromSnapshot(); });
+    }
+    if (watched == m_windowTree && event->type() == QEvent::Show && m_windowProjectionDirty)
+        QTimer::singleShot(0, this, [this] { if (m_windowProjectionDirty) rebuildWindowTreeFromSnapshot(); });
+
     if (watched == m_thumbnailLabel &&
         (event->type() == QEvent::Show || event->type() == QEvent::Resize ||
          event->type() == QEvent::DevicePixelRatioChange || event->type() == QEvent::PaletteChange))
@@ -4659,10 +4709,10 @@ void OtherDock::scheduleWindowSelectionUi()
 void OtherDock::updateWindowSelectionUi()
 {
     const auto windows = selectedWindowSnapshots();
-    const auto* current = m_windowTree->currentItem();
+    const auto current = m_windowTree->currentIndex();
     const auto previewIt = std::find_if(windows.begin(), windows.end(), [current](const WindowInfo& window) {
-        return current && !current->data(0, Qt::UserRole + 1).toBool()
-            && window.hwndValue == current->data(0, Qt::UserRole).toULongLong();
+        return current.isValid() && !current.data(Qt::UserRole + 1).toBool()
+            && window.hwndValue == current.data(Qt::UserRole).toULongLong();
     });
     const WindowInfo* preview = previewIt != windows.end() ? &*previewIt : nullptr;
     updatePreviewPanel(preview);
@@ -4679,8 +4729,8 @@ void OtherDock::updateWindowSelectionUi()
 
 void OtherDock::showWindowContextMenu(const QPoint& localPos)
 {
-    auto* item = m_windowTree->itemAt(localPos);
-    if (!item) return;
+    const auto item = m_windowTree->indexAt(localPos);
+    if (!item.isValid()) return;
     // Right-clicking within a selection must keep the other selected rows.
     ks::window::selectContextWindow(m_windowTree, item);
     // Copy before QMenu::exec: timers and asynchronous enumeration can replace
@@ -4852,38 +4902,26 @@ void OtherDock::exportVisibleRowsToTsv()
     QStringList lines;
 
     QStringList header;
-    for (int col = 0; col < m_windowTree->columnCount(); ++col)
+    for (int col = 0; col < m_windowTree->model()->columnCount(); ++col)
     {
         if (m_windowTree->isColumnHidden(col))
         {
             continue;
         }
-        header << m_windowTree->headerItem()->text(col);
+        header << m_windowModel->headerData(col, Qt::Horizontal, Qt::DisplayRole).toString();
     }
     lines << header.join('\t');
 
-    QTreeWidgetItemIterator iterator(m_windowTree);
-    while (*iterator != nullptr)
-    {
-        QTreeWidgetItem* item = *iterator;
-        ++iterator;
-
-        if (item->data(0, Qt::UserRole + 1).toBool())
+    const auto projection = m_windowModel->snapshot;
+    if (projection)
+        for (const auto& node : projection->nodes)
         {
-            continue;
+            if (node.group) continue;
+            QStringList values;
+            for (int column = 0; column < 13; ++column)
+                if (!m_windowTree->isColumnHidden(column)) values << QString(node.cells[column]).replace('\t', ' ');
+            lines << values.join('\t');
         }
-
-        QStringList rowValues;
-        for (int col = 0; col < m_windowTree->columnCount(); ++col)
-        {
-            if (m_windowTree->isColumnHidden(col))
-            {
-                continue;
-            }
-            rowValues << item->text(col).replace('\t', ' ');
-        }
-        lines << rowValues.join('\t');
-    }
 
     if (lines.size() <= 1)
     {
@@ -4960,27 +4998,7 @@ void OtherDock::openWindowDetailDialog(const WindowInfo& windowInfo, bool inputS
 
 const OtherDock::WindowInfo* OtherDock::findInfoByHwnd(const quint64 hwndValue) const
 {
-    const auto finder = [hwndValue](const WindowInfo& info) {
-        return info.hwndValue == hwndValue;
-    };
-
-    const auto currentIt = std::find_if(
-        m_windowSnapshot.begin(),
-        m_windowSnapshot.end(),
-        finder);
-    if (currentIt != m_windowSnapshot.end())
-    {
-        return &(*currentIt);
-    }
-
-    const auto exitIt = std::find_if(
-        m_exitedOneRound.begin(),
-        m_exitedOneRound.end(),
-        finder);
-    if (exitIt != m_exitedOneRound.end())
-    {
-        return &(*exitIt);
-    }
-
-    return nullptr;
+    if (!m_windowState) return nullptr;
+    const auto found = m_windowState->byHwnd.constFind(hwndValue);
+    return found == m_windowState->byHwnd.cend() ? nullptr : &m_windowState->records[found.value()];
 }

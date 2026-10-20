@@ -15,11 +15,14 @@
 #include <QSet>
 #include <QVector>
 
+#include <memory>
+
 #include <atomic>      // std::atomic_bool：控制后台枚举线程互斥刷新。
 #include <vector>      // std::vector：窗口快照容器。
 
 // Qt 前置声明：降低头文件编译耦合。
 namespace ks::ui { class AsyncOperation; }
+namespace ks::windowlist { struct Snapshot; class SnapshotModel; }
 class QEvent;
 class QCheckBox;
 class CodeEditorWidget;
@@ -33,7 +36,7 @@ class QTabWidget;
 class QStatusBar;
 class QTextEdit;
 class QTimer;
-class QTreeWidget;
+class QTreeView;
 class QTreeWidgetItem;
 class QLabel;
 class QVBoxLayout;
@@ -124,7 +127,6 @@ private:
     // ===================== 列表刷新 ======================
     void refreshWindowListAsync(bool reportProgress = true);
     void rebuildWindowTreeFromSnapshot();
-    bool passFilter(const WindowInfo& info) const;
     void updateStatusBar();
     void updatePreviewPanel(const WindowInfo* info);
     void scheduleWindowSelectionUi();
@@ -215,7 +217,7 @@ private:
 
     // 窗口列表页：左树右预览。
     QSplitter* m_mainSplitter = nullptr;          // 左右分割器。
-    QTreeWidget* m_windowTree = nullptr;          // 窗口树/列表。
+    QTreeView* m_windowTree = nullptr;          // 窗口树/列表。
     QWidget* m_previewWidget = nullptr;           // 右侧预览容器。
     QVBoxLayout* m_previewLayout = nullptr;       // 右侧预览布局。
     QLabel* m_thumbnailLabel = nullptr;           // 窗口缩略图。
@@ -254,10 +256,12 @@ private:
     QTimer* m_autoRefreshTimer = nullptr;         // 定时刷新控制。
 
     // 数据缓存。
-    std::vector<WindowInfo> m_windowSnapshot;     // 当前窗口快照。
-    std::vector<WindowInfo> m_previousSnapshot;   // 上一轮窗口快照。
-    std::vector<WindowInfo> m_exitedOneRound;     // 退出窗口保留一轮。
-    std::vector<quint64> m_newWindowHandles;      // 新增窗口句柄列表（用于高亮）。
+    std::shared_ptr<const ks::windowlist::Snapshot> m_windowState;
+    ks::windowlist::SnapshotModel* m_windowModel = nullptr;
+    ks::ui::AsyncOperation* m_windowRefreshOperation = nullptr;
+    ks::ui::AsyncOperation* m_windowProjectionOperation = nullptr;
+    QTimer* m_windowFilterTimer = nullptr;
+    bool m_windowProjectionDirty = true;
     QSet<quint32> m_externalProcessIdFilterSet;   // 进程页跨视图 PID 筛选。
     int m_refreshProgressPid = 0;                 // 刷新任务进度卡片 PID。
     std::atomic_bool m_refreshRunning{ false };   // 后台刷新进行中标志。
