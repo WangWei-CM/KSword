@@ -2,6 +2,7 @@
 #include "DriverDock.Internal.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncOperation.h"
 
 #include <Windows.h>
 #include <bcrypt.h>
@@ -418,8 +419,13 @@ namespace
     bool calculateCatalogHash(
         const HCATADMIN catalogAdmin,
         const HANDLE fileHandle,
-        std::vector<BYTE>& fileHash)
+        std::vector<BYTE>& fileHash,
+        const ks::ui::AsyncOperationToken& token)
     {
+        if (token.isCanceled())
+        {
+            return false;
+        }
         LARGE_INTEGER fileStart{};
         ::SetFilePointerEx(fileHandle, fileStart, nullptr, FILE_BEGIN);
         DWORD hashSize = 0U;
@@ -434,6 +440,10 @@ namespace
             return false;
         }
 
+        if (token.isCanceled())
+        {
+            return false;
+        }
         fileHash.resize(hashSize);
         ::SetFilePointerEx(fileHandle, fileStart, nullptr, FILE_BEGIN);
         const BOOL hashResult = ::CryptCATAdminCalcHashFromFileHandle2(
@@ -452,9 +462,14 @@ namespace
 
     CatalogSignatureVerification verifyCatalogSignature(
         const QString& normalizedPath,
-        const HANDLE fileHandle)
+        const HANDLE fileHandle,
+        const ks::ui::AsyncOperationToken& token)
     {
         CatalogSignatureVerification verification;
+        if (token.isCanceled())
+        {
+            return verification;
+        }
         CatalogAdminHandle catalogAdmin;
         GUID driverActionVerify = DRIVER_ACTION_VERIFY;
         if (!::CryptCATAdminAcquireContext2(
@@ -469,7 +484,7 @@ namespace
         }
 
         std::vector<BYTE> fileHash;
-        if (!calculateCatalogHash(catalogAdmin.value, fileHandle, fileHash))
+        if (!calculateCatalogHash(catalogAdmin.value, fileHandle, fileHash, token))
         {
             verification.lookupError = ::GetLastError();
             return verification;
@@ -487,6 +502,14 @@ namespace
         HCATINFO previousCatalog = nullptr;
         for (;;)
         {
+            if (token.isCanceled())
+            {
+                if (previousCatalog != nullptr)
+                {
+                    ::CryptCATAdminReleaseCatalogContext(catalogAdmin.value, previousCatalog, 0);
+                }
+                return verification;
+            }
             HCATINFO currentCatalog = ::CryptCATAdminEnumCatalogFromHash(
                 catalogAdmin.value,
                 fileHash.data(),
@@ -540,6 +563,11 @@ namespace
             // Catalog provider 读取同一只读句柄前回到文件起点，不依赖哈希 API 留下的游标。
             LARGE_INTEGER fileStart{};
             ::SetFilePointerEx(fileHandle, fileStart, nullptr, FILE_BEGIN);
+            if (token.isCanceled())
+            {
+                ::CryptCATAdminReleaseCatalogContext(catalogAdmin.value, currentCatalog, 0);
+                return verification;
+            }
             verification.trustStatus = runWinTrustAndClose(
                 trustData,
                 &verification.signerCertificateName);
@@ -563,9 +591,14 @@ namespace
 }
 
 DriverDock::LoadedModuleSignatureEvidence DriverDock::verifyLoadedModuleSignature(
-    const QString& rawImagePath)
+    const QString& rawImagePath,
+    const ks::ui::AsyncOperationToken& token)
 {
     LoadedModuleSignatureEvidence evidence;
+    if (token.isCanceled())
+    {
+        return evidence;
+    }
     const QString normalizedPath =
         ks::online_scan::normalizeKernelImagePathForUpload(rawImagePath).trimmed();
     evidence.verificationPath =
@@ -585,6 +618,10 @@ DriverDock::LoadedModuleSignatureEvidence DriverDock::verifyLoadedModuleSignatur
     initializeStrictTrustData(embeddedTrustData);
     embeddedTrustData.dwUnionChoice = WTD_CHOICE_FILE;
     embeddedTrustData.pFile = &fileInfo;
+    if (token.isCanceled())
+    {
+        return evidence;
+    }
     const LONG embeddedTrustStatus = runWinTrustAndClose(
         embeddedTrustData,
         &evidence.signerCertificateName);
@@ -593,6 +630,11 @@ DriverDock::LoadedModuleSignatureEvidence DriverDock::verifyLoadedModuleSignatur
     if (embeddedTrustStatus == ERROR_SUCCESS)
     {
         evidence.state = LoadedModuleSignatureState::TrustedEmbedded;
+        return evidence;
+    }
+
+    if (token.isCanceled())
+    {
         return evidence;
     }
 
@@ -607,7 +649,7 @@ DriverDock::LoadedModuleSignatureEvidence DriverDock::verifyLoadedModuleSignatur
     }
 
     const CatalogSignatureVerification catalogVerification =
-        verifyCatalogSignature(normalizedPath, fileHandle.value);
+        verifyCatalogSignature(normalizedPath, fileHandle.value, token);
     evidence.fileIdentifier = catalogVerification.fileIdentifier;
     evidence.catalogPath = catalogVerification.catalogPath;
     evidence.signerCertificateName =
@@ -802,7 +844,8 @@ QString DriverDock::localizedModuleEvidenceText(const QString& sourceText)
 bool DriverDock::queryDriverObjectForModuleEvidence(
     const LoadedKernelModuleRecord& moduleRecord,
     ksword::ark::DriverObjectQueryResult& resultOut,
-    QString& attemptedNamesTextOut)
+    QString& attemptedNamesTextOut,
+    const ks::ui::AsyncOperationToken& token)
 {
     // 输入：已加载模块行；处理：按常见 DriverObject 命名空间依次尝试查询；返回：是否解析成功。
     resultOut = ksword::ark::DriverObjectQueryResult{};
@@ -826,6 +869,10 @@ bool DriverDock::queryDriverObjectForModuleEvidence(
     const ksword::ark::DriverClient driverClient;
     for (const QString& candidateName : candidateNames)
     {
+        if (token.isCanceled())
+        {
+            return false;
+        }
         if (attemptedNames.contains(candidateName, Qt::CaseInsensitive))
         {
             continue;
@@ -855,7 +902,8 @@ bool DriverDock::queryDriverObjectForModuleEvidence(
 }
 
 std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceForLoadedModules(
-    const std::vector<LoadedKernelModuleRecord>& moduleRecords)
+    const std::vector<LoadedKernelModuleRecord>& moduleRecords,
+    const ks::ui::AsyncOperationToken& token)
 {
     // 输入：当前模块快照；处理：调用现有 DriverClient 能力聚合证据；返回：与输入等长的证据数组。
     // 后台线程只缓存源文本和语义字段；LanguageManager 只允许 GUI 渲染阶段访问。
@@ -864,24 +912,44 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
     evidenceRecords.reserve(moduleRecords.size());
 
     const ksword::ark::DriverClient driverClient;
+    if (token.isCanceled())
+    {
+        return {};
+    }
     const ksword::ark::KernelInlineHookScanResult inlineResult = driverClient.scanInlineHooks(
         0UL,
         KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES,
         std::wstring());
+    if (token.isCanceled())
+    {
+        return {};
+    }
     const ksword::ark::KernelIatEatHookScanResult iatEatResult = driverClient.enumerateIatEatHooks(
         KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_IMPORTS | KSWORD_ARK_KERNEL_SCAN_FLAG_INCLUDE_EXPORTS,
         KSWORD_ARK_KERNEL_HOOK_DEFAULT_MAX_ENTRIES,
         std::wstring());
+    if (token.isCanceled())
+    {
+        return {};
+    }
     const ksword::ark::CallbackEnumResult callbackResult = driverClient.enumerateCallbacks(
         KSWORD_ARK_ENUM_CALLBACK_FLAG_INCLUDE_ALL);
 
     for (const LoadedKernelModuleRecord& moduleRecord : moduleRecords)
     {
+        if (token.isCanceled())
+        {
+            return {};
+        }
         LoadedModuleEvidenceRecord evidence = buildPendingModuleEvidenceRecord(moduleRecord);
         evidence.queryAttempted = true;
         // signatureVerification 用途：把模块文件的 Windows 信任链结论纳入同一后台证据快照。
         evidence.signatureEvidence =
-            verifyLoadedModuleSignature(moduleRecord.imagePath);
+            verifyLoadedModuleSignature(moduleRecord.imagePath, token);
+        if (token.isCanceled())
+        {
+            return {};
+        }
 
         ks::ui::FieldDocument detailLines;
 
@@ -890,7 +958,11 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         evidence.driverObjectResolved = queryDriverObjectForModuleEvidence(
             moduleRecord,
             objectResult,
-            attemptedNamesText);
+            attemptedNamesText, token);
+        if (token.isCanceled())
+        {
+            return {};
+        }
         evidenceAppendIoSummary(
             detailLines,
             driverText("driver.evidence.detail.driver_object_query", QStringLiteral("DriverObject 查询")),
@@ -932,9 +1004,17 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         detailLines.section(QStringLiteral("IRP 通信控制"));
         if (communicationQueryEligible)
         {
+            if (token.isCanceled())
+            {
+                return {};
+            }
             communicationResult = driverClient.queryDriverCommunication(
                 moduleRecord.baseAddress,
                 evidence.driverObjectName.toStdWString());
+            if (token.isCanceled())
+            {
+                return {};
+            }
             const bool operationSucceeded =
                 communicationResult.io.ok &&
                 communicationResult.lastStatus >= 0;
@@ -1007,6 +1087,10 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         {
             for (const ksword::ark::DriverMajorFunctionEntry& entry : objectResult.majorFunctions)
             {
+                if (token.isCanceled())
+                {
+                    return {};
+                }
                 const bool outsideOwnImage = (entry.flags & 0x00000002U) == 0U;
                 const std::uint32_t communicationMask =
                     evidenceCommunicationMaskForMajor(entry.majorFunction);
@@ -1115,6 +1199,10 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         {
             for (const ksword::ark::KernelIatEatHookEntry& entry : iatEatResult.entries)
             {
+                if (token.isCanceled())
+                {
+                    return {};
+                }
                 const bool sameModule = entry.moduleBase == moduleRecord.baseAddress ||
                     evidenceModuleNameMatches(QString::fromStdWString(entry.moduleName), moduleRecord.moduleName);
                 if (!sameModule || entry.status != KSWORD_ARK_KERNEL_HOOK_STATUS_SUSPICIOUS)
@@ -1151,6 +1239,10 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         {
             for (const ksword::ark::KernelInlineHookEntry& entry : inlineResult.entries)
             {
+                if (token.isCanceled())
+                {
+                    return {};
+                }
                 const bool sameModule = entry.moduleBase == moduleRecord.baseAddress ||
                     evidenceModuleNameMatches(QString::fromStdWString(entry.moduleName), moduleRecord.moduleName);
                 if (!sameModule || entry.status != KSWORD_ARK_KERNEL_HOOK_STATUS_SUSPICIOUS)
@@ -1187,6 +1279,10 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
         {
             for (const ksword::ark::CallbackEnumEntry& entry : callbackResult.entries)
             {
+                if (token.isCanceled())
+                {
+                    return {};
+                }
                 const bool sameModule = entry.moduleBase == moduleRecord.baseAddress ||
                     evidenceAddressLooksInsideModule(entry.callbackAddress, moduleRecord.baseAddress, entry.moduleSize) ||
                     evidenceModuleNameMatches(QString::fromStdWString(entry.modulePath), moduleRecord.moduleName) ||
@@ -1230,19 +1326,21 @@ std::vector<DriverDock::LoadedModuleEvidenceRecord> DriverDock::collectEvidenceF
     return evidenceRecords;
 }
 
+void DriverDock::cancelLoadedModuleEvidenceQuery()
+{
+    ++m_moduleEvidenceQueryTicket;
+    if (m_moduleEvidenceOperation != nullptr)
+    {
+        m_moduleEvidenceOperation->cancel();
+    }
+}
+
 void DriverDock::refreshLoadedModuleEvidenceAsync()
 {
-    // 输入：当前已加载模块缓存；处理：后台聚合 R0 证据并回投 UI；返回：无。
-    if (m_moduleEvidenceQuerying)
-    {
-        return;
-    }
+    // 普通刷新仍保留完整自动证据；同一控制器仅运行一份只读采集，后续请求只保留最新快照。
     if (m_loadedModuleCache.empty())
     {
-        // 手动点击“证据刷新”但当前没有模块快照时，只提示用户先刷新模块：
-        // - 输入：空 m_loadedModuleCache；
-        // - 处理：不在这里反向调用 refreshLoadedKernelModuleRecords；
-        // - 返回：无；避免空列表环境下模块刷新和证据刷新互相递归。
+        cancelLoadedModuleEvidenceQuery();
         if (m_moduleEvidenceStatusLabel != nullptr)
         {
             m_moduleEvidenceStatusLabel->setText(driverText(
@@ -1252,89 +1350,93 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
         return;
     }
 
-    m_moduleEvidenceQuerying = true;
-    const std::uint64_t ticketValue = ++m_moduleEvidenceQueryTicket;
-    if (m_refreshModuleEvidenceButton != nullptr)
+    if (m_moduleEvidenceOperation == nullptr)
     {
-        m_refreshModuleEvidenceButton->setEnabled(false);
-    }
-    if (m_moduleEvidenceStatusLabel != nullptr)
-    {
-        m_moduleEvidenceStatusLabel->setText(driverText(
-            "driver.evidence.status.aggregating",
-            QStringLiteral("证据：正在刷新...")));
-    }
-
-    const std::vector<LoadedKernelModuleRecord> moduleSnapshot = m_loadedModuleCache;
-    QObject* const applicationContext = QCoreApplication::instance();
-    if (applicationContext == nullptr)
-    {
-        m_moduleEvidenceQuerying = false;
-        if (m_refreshModuleEvidenceButton != nullptr)
+        m_moduleEvidenceOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_moduleEvidenceOperation->setStateChangedCallback([this]()
         {
-            m_refreshModuleEvidenceButton->setEnabled(true);
-        }
-        return;
-    }
-
-    QPointer<DriverDock> guardThis(this);
-    auto* evidenceTask = QRunnable::create(
-        [applicationContext, guardThis, ticketValue, moduleSnapshot]()
-        {
-            auto resultRecords = DriverDock::collectEvidenceForLoadedModules(moduleSnapshot);
-
-            // 应用对象是稳定投递 context；QPointer 只在 GUI lambda 内检查并解引用。
-            QMetaObject::invokeMethod(
-                applicationContext,
-                [guardThis, ticketValue, resultRecords = std::move(resultRecords)]() mutable
-                {
-                    if (guardThis == nullptr)
-                    {
-                        return;
-                    }
-
-                    const auto deferredRecords =
-                        std::make_shared<std::vector<LoadedModuleEvidenceRecord>>(
-                            std::move(resultRecords));
-                    const auto commitEvidence = [guardThis, ticketValue, deferredRecords]()
-                    {
-                        if (guardThis == nullptr ||
-                            guardThis->m_moduleEvidenceQueryTicket != ticketValue)
-                        {
-                            return;
-                        }
-
-                        guardThis->m_moduleEvidenceQuerying = false;
-                        if (guardThis->m_refreshModuleEvidenceButton != nullptr)
-                        {
-                            guardThis->m_refreshModuleEvidenceButton->setEnabled(true);
-                        }
-
-                        guardThis->m_loadedModuleEvidenceCache = std::move(*deferredRecords);
-                        // 签名状态本身也是搜索字段，因此后台完成后必须重新应用共享过滤器。
-                        guardThis->rebuildLoadedModuleTable();
-                        guardThis->updateLoadedModuleEvidenceStatusText();
-                    };
-
-                    if (guardThis == nullptr ||
-                        guardThis->m_moduleEvidenceQueryTicket != ticketValue)
-                    {
-                        return;
-                    }
-                    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                        guardThis.data(),
-                        QStringLiteral("driver-loaded-module-evidence-apply"),
-                        { guardThis->m_moduleTable },
-                        commitEvidence))
-                    {
-                        return;
-                    }
-                    commitEvidence();
-                },
-                Qt::QueuedConnection);
+            m_moduleEvidenceQuerying = m_moduleEvidenceOperation->isBusy();
+            if (m_refreshModuleEvidenceButton != nullptr)
+            {
+                m_refreshModuleEvidenceButton->setEnabled(!m_moduleEvidenceQuerying);
+            }
+            if (m_moduleEvidenceQuerying)
+            {
+                updateLoadedModuleEvidenceStatusText();
+            }
         });
-    evidenceTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(evidenceTask);
+    }
+
+    const std::uint64_t ticketValue = ++m_moduleEvidenceQueryTicket;
+    const QPointer<DriverDock> guardThis(this);
+    using EvidenceRecords = std::vector<LoadedModuleEvidenceRecord>;
+    using EvidencePayload = std::shared_ptr<EvidenceRecords>;
+    m_moduleEvidenceOperation->submit<std::vector<LoadedKernelModuleRecord>, EvidencePayload>(
+        m_loadedModuleCache,
+        [](const std::vector<LoadedKernelModuleRecord>& moduleSnapshot,
+            const ks::ui::AsyncOperationToken& token)
+        {
+            // 结果只含独立值；过期或延期 payload 的最后释放同样不在 GUI 销毁整份字段文档。
+            return EvidencePayload(new EvidenceRecords(
+                DriverDock::collectEvidenceForLoadedModules(moduleSnapshot, token)),
+                [](EvidenceRecords* records)
+                {
+                    auto* releaseTask = QRunnable::create([records]() { delete records; });
+                    releaseTask->setAutoDelete(true);
+                    QThreadPool::globalInstance()->start(releaseTask, -1);
+                });
+        },
+        [guardThis, ticketValue](const EvidencePayload& resultRecords, const std::uint64_t generation)
+        {
+            if (guardThis.isNull())
+            {
+                return true;
+            }
+            const auto commitEvidence = [guardThis, ticketValue, generation, resultRecords]()
+            {
+                if (guardThis.isNull() || guardThis->m_moduleEvidenceOperation == nullptr ||
+                    !guardThis->m_moduleEvidenceOperation->isCurrent(generation) ||
+                    guardThis->m_moduleEvidenceQueryTicket != ticketValue)
+                {
+                    return;
+                }
+                // swap 让上一份完整证据随 worker-owned payload 后台释放。
+                guardThis->m_loadedModuleEvidenceCache.swap(*resultRecords);
+                guardThis->m_moduleEvidenceQuerying = false;
+                // 签名状态也是搜索字段；提交仍走现有规范表和共享过滤器。
+                guardThis->rebuildLoadedModuleTable();
+                if (!guardThis.isNull())
+                {
+                    guardThis->updateLoadedModuleEvidenceStatusText();
+                }
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                guardThis.data(),
+                QStringLiteral("driver-loaded-module-evidence-apply"),
+                { guardThis->m_moduleTable },
+                [guardThis, generation, commitEvidence]()
+                {
+                    commitEvidence();
+                    if (!guardThis.isNull() && guardThis->m_moduleEvidenceOperation != nullptr)
+                    {
+                        guardThis->m_moduleEvidenceOperation->completeDeferred(generation);
+                    }
+                }))
+            {
+                return false;
+            }
+            commitEvidence();
+            return true;
+        },
+        [guardThis, ticketValue](std::exception_ptr)
+        {
+            if (!guardThis.isNull() && guardThis->m_moduleEvidenceQueryTicket == ticketValue &&
+                guardThis->m_moduleEvidenceStatusLabel != nullptr)
+            {
+                guardThis->m_moduleEvidenceStatusLabel->setText(driverText(
+                    "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
+            }
+        }, {}, -1);
 }
 
 void DriverDock::updateLoadedModuleEvidenceStatusText()

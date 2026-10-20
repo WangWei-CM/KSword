@@ -29,6 +29,8 @@
 #include <thread>   // std::thread：后台调试输出捕获线程。
 #include <vector>   // std::vector：驱动服务与模块快照容器。
 
+namespace ks::ui { class AsyncOperation; class AsyncOperationToken; }
+
 // Qt 前置声明：减少头文件编译耦合。
 class QCheckBox;
 class QButtonGroup;
@@ -287,6 +289,9 @@ private:
     // - 返回：无；结果写入 m_loadedModuleEvidenceCache。
     void refreshLoadedModuleEvidenceAsync();
 
+    // 使旧只读采集失效，但由共享控制器等待实际 worker 退出后再启动最新请求。
+    void cancelLoadedModuleEvidenceQuery();
+
     // rebuildLoadedModuleEvidenceViews：
     // - 作用：把当前证据缓存回填到模块表格和详情区；
     // - 处理逻辑：逐行按源索引更新证据列，并刷新当前选中模块详情；
@@ -479,20 +484,23 @@ private:
     static bool queryDriverObjectForModuleEvidence(
         const LoadedKernelModuleRecord& moduleRecord,
         ksword::ark::DriverObjectQueryResult& resultOut,
-        QString& attemptedNamesTextOut);
+        QString& attemptedNamesTextOut,
+        const ks::ui::AsyncOperationToken& token);
 
     // collectEvidenceForLoadedModules：
     // - 作用：批量收集一轮模块证据；
     // - 处理逻辑：复用 ArkDriverClient 现有接口，不新增 R0 协议；
     // - 返回：每个模块对应一个 LoadedModuleEvidenceRecord。
     static std::vector<LoadedModuleEvidenceRecord> collectEvidenceForLoadedModules(
-        const std::vector<LoadedKernelModuleRecord>& moduleRecords);
+        const std::vector<LoadedKernelModuleRecord>& moduleRecords,
+        const ks::ui::AsyncOperationToken& token);
 
     // verifyLoadedModuleSignature：
     // - 先验证 embedded Authenticode，再用系统 Catalog 进行 catalog-only fallback；
     // - 仅完整链与 whole-chain revocation 都成功时标记可信，离线/未知均保持无效。
     static LoadedModuleSignatureEvidence verifyLoadedModuleSignature(
-        const QString& rawImagePath);
+        const QString& rawImagePath,
+        const ks::ui::AsyncOperationToken& token);
 
     // buildPendingModuleEvidenceRecord：
     // - 作用：构造尚未聚合证据时的占位记录；
@@ -665,7 +673,8 @@ private:
     QTableWidget* m_moduleTable = nullptr;            // 已加载模块表格。
     ks::ui::StructuredFieldView* m_moduleEvidenceDetailEditor = nullptr; // 模块证据详情编辑器。
     QLabel* m_moduleEvidenceStatusLabel = nullptr;   // 模块证据聚合状态标签。
-    bool m_moduleEvidenceQuerying = false;           // 模块证据后台查询中标记。
+    std::unique_ptr<ks::ui::AsyncOperation> m_moduleEvidenceOperation; // 单个活动采集和最新待处理快照。
+    bool m_moduleEvidenceQuerying = false;           // 仅为 UI 状态；实际单飞由控制器拥有。
     std::uint64_t m_moduleEvidenceQueryTicket = 0;   // 模块证据查询序号。
     std::uint64_t m_moduleSignatureQueryTicket = 0;  // 签名详情查询序号，拒绝过期回填。
     bool m_moduleDumpRunning = false;                // 模块 R0 Dump 后台任务运行标记。

@@ -1877,6 +1877,9 @@ void DriverDock::refreshLoadedKernelModuleRecords()
         << driverText("driver.log.refresh_modules_start", QStringLiteral("[DriverDock] 开始刷新已加载模块列表。"))
         << eol;
 
+    // 新模块请求立即取消旧证据的后续阶段；实际 worker 仍由控制器串行收尾。
+    cancelLoadedModuleEvidenceQuery();
+
     // 刷新票据：与服务列表同理，模块刷新按钮连点或操作后的连带刷新只保留最后一次结果。
     const quint64 requestTicket =
         allocateDriverDockRefreshTicket(this, kLoadedModuleRefreshTicketProperty);
@@ -1936,14 +1939,14 @@ void DriverDock::refreshLoadedKernelModuleRecords()
 
                     if (!collectSucceeded)
                     {
-                        ++guardThis->m_moduleEvidenceQueryTicket;
-                        guardThis->m_moduleEvidenceQuerying = false;
-                        if (guardThis->m_refreshModuleEvidenceButton != nullptr)
-                        {
-                            guardThis->m_refreshModuleEvidenceButton->setEnabled(true);
-                        }
+                        guardThis->cancelLoadedModuleEvidenceQuery();
                         guardThis->m_loadedModuleCache.clear();
                         guardThis->m_loadedModuleEvidenceCache.clear();
+                        if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
+                        {
+                            guardThis->m_moduleEvidenceStatusLabel->setText(driverText(
+                                "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
+                        }
                         guardThis->rebuildLoadedModuleTable();
                         guardThis->appendOperateLogLine(
                             driverText(
@@ -1966,12 +1969,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                         return;
                     }
 
-                    ++guardThis->m_moduleEvidenceQueryTicket;
-                    guardThis->m_moduleEvidenceQuerying = false;
-                    if (guardThis->m_refreshModuleEvidenceButton != nullptr)
-                    {
-                        guardThis->m_refreshModuleEvidenceButton->setEnabled(true);
-                    }
+                    guardThis->cancelLoadedModuleEvidenceQuery();
 
                     guardThis->m_loadedModuleCache = std::move(collectedModuleRecords);
                     guardThis->m_loadedModuleEvidenceCache.clear();

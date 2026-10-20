@@ -484,6 +484,8 @@ namespace ksword::driver_dock_internal
 }
 
 
+#include "../UI/AsyncOperation.h"
+
 using namespace ksword::driver_dock_internal;
 
 DriverDock::DriverDock(QWidget* parent)
@@ -533,8 +535,12 @@ void DriverDock::showEvent(QShowEvent* event)
 
 DriverDock::~DriverDock()
 {
-    // 派生类析构第一步关门，不能等 QObject 基类清空 QPointer 后才停止回投。
+    // Close capture and evidence delivery before derived state is released.
     m_debugCaptureDispatcher->close();
+    if (m_moduleEvidenceOperation != nullptr)
+    {
+        m_moduleEvidenceOperation->close();
+    }
     releaseDebugOutputCapture();
 
     // 自身驱动页的业务对象仍由 KernelDock 持有；独立销毁 DriverDock 时将页面接回，
