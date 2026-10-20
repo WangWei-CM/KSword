@@ -119,6 +119,7 @@ private:
     // - 作用：枚举 \Driver\Disk 设备并（在已填 LBA 时）逐块做一次 ATA DMA 读探测；
     // - 处理：结果写入磁盘表，同时刷新能力标志与会话可用性。
     void probeChannels();
+    void refreshOperationState();
 
     // ScratchDetection：一次候选侦测的完整结果，含可直接展示的证据文本。
     struct ScratchDetection
@@ -232,6 +233,7 @@ private:
 
     ksword::memory_backend::DdmaSession m_session;      // 当前会话配置。
     std::vector<ksword::ark::DdmaDiskEntry> m_diskCache; // 最近一次探测到的磁盘。
+    bool m_operationBusy = false;
     bool m_probeCompleted = false;                      // 是否至少成功探测过一次。
     bool m_kernelDebuggerEnabled = false;               // 探测到的内核调试状态。
     std::uint32_t m_transferBytes = 0;                  // R0 自报的一次传输长度。

@@ -15,6 +15,8 @@
 #include <QCheckBox>
 #include <QEvent>
 #include <QFile>
+#include <QFutureWatcher>
+#include <QPromise>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -31,6 +33,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
+#include <exception>
+#include <utility>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -79,6 +84,71 @@ namespace
     {
         return QStringLiteral("ddma:physical:%1:%2:%3")
             .arg(generation).arg(session.diskIndex).arg(session.scratchLba);
+    }
+
+    template<typename Value>
+    struct DdmaTaskResult
+    {
+        Value value;
+        QString failure;
+    };
+
+    // Values and ownership cross the worker boundary; no QWidget, model or
+    // document is accessed by the queued callable. The watcher dies with page.
+    template<typename Value, typename Work, typename Apply>
+    void submitPageTransaction(QObject* page, Work work, Apply apply)
+    {
+        using Result = DdmaTaskResult<Value>;
+        auto promise = std::make_shared<QPromise<Result>>();
+        auto* const watcher = new QFutureWatcher<Result>(page);
+        watcher->setFuture(promise->future());
+        QObject::connect(watcher, &QFutureWatcher<Result>::finished, page,
+            [watcher, apply = std::move(apply)]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            apply(result);
+        });
+        promise->start();
+        Result rejected;
+        bool accepted = false;
+        try
+        {
+            accepted = ksword::memory_backend::submitDdmaTransaction(
+            [promise, work = std::move(work)]() {
+            Result result;
+            try
+            {
+                result.value = work();
+            }
+            catch (const std::exception& error)
+            {
+                result.failure = QString::fromUtf8(error.what());
+            }
+            catch (...)
+            {
+                result.failure = QStringLiteral("DDMA transaction failed unexpectedly.");
+            }
+            promise->addResult(std::move(result));
+            promise->finish();
+        });
+        }
+        catch (const std::exception& error)
+        {
+            rejected.failure = QString::fromUtf8(error.what());
+        }
+        catch (...)
+        {
+            rejected.failure = QStringLiteral("DDMA transaction failed unexpectedly.");
+        }
+        if (!accepted)
+        {
+            if (rejected.failure.isEmpty())
+            {
+                rejected.failure = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+            }
+            promise->addResult(std::move(rejected));
+            promise->finish();
+        }
     }
 
     // formatNtStatus：把 NTSTATUS 渲染成 8 位大写十六进制。
@@ -315,12 +385,12 @@ QGroupBox* DdmaPage::buildChannelGroup()
         const bool hasRow = (m_diskTable->currentRow() >= 0);
         if (m_activateButton != nullptr)
         {
-            m_activateButton->setEnabled(hasRow);
+            m_activateButton->setEnabled(hasRow && !m_operationBusy);
         }
         // 侦测要读具体某一块盘的分区表，所以同样以选中行为前提。
         if (m_detectScratchButton != nullptr)
         {
-            m_detectScratchButton->setEnabled(hasRow);
+            m_detectScratchButton->setEnabled(hasRow && !m_operationBusy);
         }
         });
 
@@ -510,6 +580,10 @@ bool DdmaPage::parseScratchLbaFromUi(std::uint64_t& lbaOut, QString& errorTextOu
 
 void DdmaPage::probeChannels()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     std::uint64_t scratchLba = 0ULL;
     QString lbaError;
     const bool lbaValid = parseScratchLbaFromUi(scratchLba, lbaError);
@@ -535,122 +609,136 @@ void DdmaPage::probeChannels()
         }
     }
 
-    const ksword::ark::DriverClient client;
-    const ksword::ark::DdmaCapabilityResult result =
-        client.queryDdmaCapability(lbaValid, scratchLba, lbaValid);
+    m_operationBusy = true;
+    refreshOperationState();
+    submitPageTransaction<ksword::ark::DdmaCapabilityResult>(this,
+        [lbaValid, scratchLba]() {
+            const ksword::ark::DriverClient client;
+            return client.queryDdmaCapability(lbaValid, scratchLba, lbaValid);
+        },
+        [this, lbaValid, lbaError, previousDeviceIndex, hadSelection](const auto& completed) {
+        m_operationBusy = false;
+        refreshOperationState();
+        auto result = completed.value;
+        if (!completed.failure.isEmpty())
+        {
+            result.io.ok = false;
+            result.io.message = completed.failure.toStdString();
+        }
 
-    if (!result.io.ok)
-    {
-        m_probeCompleted = false;
-        m_diskCache.clear();
+        if (!result.io.ok)
+        {
+            m_probeCompleted = false;
+            m_diskCache.clear();
+            if (m_diskTable != nullptr)
+            {
+                m_diskTable->setRowCount(0);
+            }
+            if (m_capabilityLabel != nullptr)
+            {
+                m_capabilityLabel->setText(
+                    QStringLiteral("探测失败：%1").arg(QString::fromStdString(result.io.message)));
+            }
+            refreshSessionState();
+            return;
+        }
+
+        m_probeCompleted = true;
+        m_diskCache = result.disks;
+        m_kernelDebuggerEnabled = result.kernelDebuggerEnabled();
+        m_transferBytes = result.transferBytes;
+        m_scratchSectorCount = result.scratchSectorCount;
+
+        // 探测结果变了，之前启用的通道未必还成立，先把会话里的探测面收回。
+        m_session.kernelDebuggerEnabled = m_kernelDebuggerEnabled;
+        m_session.transferBytes = m_transferBytes;
+        m_session.scratchSectorCount = m_scratchSectorCount;
+
         if (m_diskTable != nullptr)
         {
-            m_diskTable->setRowCount(0);
-        }
-        if (m_capabilityLabel != nullptr)
-        {
-            m_capabilityLabel->setText(
-                QStringLiteral("探测失败：%1").arg(QString::fromStdString(result.io.message)));
-        }
-        refreshSessionState();
-        return;
-    }
-
-    m_probeCompleted = true;
-    m_diskCache = result.disks;
-    m_kernelDebuggerEnabled = result.kernelDebuggerEnabled();
-    m_transferBytes = result.transferBytes;
-    m_scratchSectorCount = result.scratchSectorCount;
-
-    // 探测结果变了，之前启用的通道未必还成立，先把会话里的探测面收回。
-    m_session.kernelDebuggerEnabled = m_kernelDebuggerEnabled;
-    m_session.transferBytes = m_transferBytes;
-    m_session.scratchSectorCount = m_scratchSectorCount;
-
-    if (m_diskTable != nullptr)
-    {
-        m_diskTable->setRowCount(static_cast<int>(m_diskCache.size()));
-        for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
-        {
-            const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
-
-            // 状态里写清楚"走哪条直通"：ATA 与 SCSI 是两条完全不同的路，
-            // 只说"可用"会让人无法判断这块盘到底是怎么通的。
-            QString stateText;
-            if (entry.ataReady() && entry.scsiReady())
-            {
-                stateText = QStringLiteral("可用（ATA 与 SCSI 均可）");
-            }
-            else if (entry.ataReady())
-            {
-                stateText = QStringLiteral("可用（ATA 直通）");
-            }
-            else if (entry.scsiReady())
-            {
-                stateText = QStringLiteral("可用（SCSI 直通，覆盖 NVMe）");
-            }
-            else if ((entry.diskFlags & KSWORD_ARK_DDMA_DISK_FLAG_PROBE_SKIPPED) != 0UL)
-            {
-                stateText = QStringLiteral("未探测（需先填写暂存 LBA）");
-            }
-            else
-            {
-                stateText = QStringLiteral("不可用（两条直通都被拒绝）");
-            }
-
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::Index),
-                new QTableWidgetItem(QString::number(entry.deviceIndex)));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::DeviceName),
-                new QTableWidgetItem(entry.deviceName.empty()
-                    ? QStringLiteral("(名称不可用)")
-                    : QString::fromStdWString(entry.deviceName)));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::State),
-                new QTableWidgetItem(stateText));
-            // 两条探测各自的状态都要看得见：只显示一个会让"哪条不行"变成猜。
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::ProbeStatus),
-                new QTableWidgetItem(QStringLiteral("ATA %1 / SCSI %2")
-                    .arg(formatNtStatus(entry.probeStatus))
-                    .arg(formatNtStatus(entry.scsiProbeStatus))));
-            m_diskTable->setItem(row, static_cast<int>(DiskColumn::SectorSize),
-                new QTableWidgetItem(QString::number(entry.sectorSize)));
-        }
-        m_diskTable->resizeColumnsToContents();
-
-        // 按 deviceIndex 还原选择，而不是按行号：枚举顺序在两次探测之间不保证不变。
-        if (hadSelection)
-        {
+            m_diskTable->setRowCount(static_cast<int>(m_diskCache.size()));
             for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
             {
-                if (m_diskCache[static_cast<std::size_t>(row)].deviceIndex == previousDeviceIndex)
+                const ksword::ark::DdmaDiskEntry& entry = m_diskCache[static_cast<std::size_t>(row)];
+
+                // 状态里写清楚"走哪条直通"：ATA 与 SCSI 是两条完全不同的路，
+                // 只说"可用"会让人无法判断这块盘到底是怎么通的。
+                QString stateText;
+                if (entry.ataReady() && entry.scsiReady())
                 {
-                    m_diskTable->selectRow(row);
-                    break;
+                    stateText = QStringLiteral("可用（ATA 与 SCSI 均可）");
+                }
+                else if (entry.ataReady())
+                {
+                    stateText = QStringLiteral("可用（ATA 直通）");
+                }
+                else if (entry.scsiReady())
+                {
+                    stateText = QStringLiteral("可用（SCSI 直通，覆盖 NVMe）");
+                }
+                else if ((entry.diskFlags & KSWORD_ARK_DDMA_DISK_FLAG_PROBE_SKIPPED) != 0UL)
+                {
+                    stateText = QStringLiteral("未探测（需先填写暂存 LBA）");
+                }
+                else
+                {
+                    stateText = QStringLiteral("不可用（两条直通都被拒绝）");
+                }
+
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::Index),
+                    new QTableWidgetItem(QString::number(entry.deviceIndex)));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::DeviceName),
+                    new QTableWidgetItem(entry.deviceName.empty()
+                        ? QStringLiteral("(名称不可用)")
+                        : QString::fromStdWString(entry.deviceName)));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::State),
+                    new QTableWidgetItem(stateText));
+                // 两条探测各自的状态都要看得见：只显示一个会让"哪条不行"变成猜。
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::ProbeStatus),
+                    new QTableWidgetItem(QStringLiteral("ATA %1 / SCSI %2")
+                        .arg(formatNtStatus(entry.probeStatus))
+                        .arg(formatNtStatus(entry.scsiProbeStatus))));
+                m_diskTable->setItem(row, static_cast<int>(DiskColumn::SectorSize),
+                    new QTableWidgetItem(QString::number(entry.sectorSize)));
+            }
+            m_diskTable->resizeColumnsToContents();
+
+            // 按 deviceIndex 还原选择，而不是按行号：枚举顺序在两次探测之间不保证不变。
+            if (hadSelection)
+            {
+                for (int row = 0; row < static_cast<int>(m_diskCache.size()); ++row)
+                {
+                    if (m_diskCache[static_cast<std::size_t>(row)].deviceIndex == previousDeviceIndex)
+                    {
+                        m_diskTable->selectRow(row);
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    QString capabilityText = QStringLiteral(
-        "枚举到 %1 块磁盘，其中 %2 块通过 DMA 探测。一次传输 %3 字节，占用 %4 个扇区。")
-        .arg(result.totalDisks)
-        .arg(result.readyDisks)
-        .arg(result.transferBytes)
-        .arg(result.scratchSectorCount);
-    if (!lbaValid)
-    {
-        capabilityText += QStringLiteral(" 本次未做传输探测：%1").arg(lbaError);
-    }
-    if (m_kernelDebuggerEnabled)
-    {
-        capabilityText += QStringLiteral(
-            " 本机启用了内核调试，DDMA 会命中 MiShowBadMapper 蓝屏，通道已被禁用。");
-    }
-    if (m_capabilityLabel != nullptr)
-    {
-        m_capabilityLabel->setText(capabilityText);
-    }
+        QString capabilityText = QStringLiteral(
+            "枚举到 %1 块磁盘，其中 %2 块通过 DMA 探测。一次传输 %3 字节，占用 %4 个扇区。")
+            .arg(result.totalDisks)
+            .arg(result.readyDisks)
+            .arg(result.transferBytes)
+            .arg(result.scratchSectorCount);
+        if (!lbaValid)
+        {
+            capabilityText += QStringLiteral(" 本次未做传输探测：%1").arg(lbaError);
+        }
+        if (m_kernelDebuggerEnabled)
+        {
+            capabilityText += QStringLiteral(
+                " 本机启用了内核调试，DDMA 会命中 MiShowBadMapper 蓝屏，通道已被禁用。");
+        }
+        if (m_capabilityLabel != nullptr)
+        {
+            m_capabilityLabel->setText(capabilityText);
+        }
 
-    refreshSessionState();
+        refreshSessionState();
+    });
 }
 
 bool DdmaPage::physicalDriveIndexFromDeviceName(
@@ -1318,6 +1406,10 @@ DdmaPage::ScratchContext DdmaPage::buildScratchContext(
 
 void DdmaPage::detectScratchFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_scratchDetectLabel != nullptr)
     {
         m_scratchDetectLabel->setText(QStringLiteral("正在侦测候选扇区..."));
@@ -1404,6 +1496,10 @@ void DdmaPage::detectScratchFromUi()
 
 void DdmaPage::activateSelectedDisk()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_diskTable == nullptr)
     {
         return;
@@ -1456,6 +1552,10 @@ void DdmaPage::activateSelectedDisk()
 
 void DdmaPage::clearSession()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     // 侦测会在磁盘上留下一个专属暂存文件。既然那是本页造成的副作用，就必须有
     // 一条撤销路径——否则用户只能自己去 D 盘找一个隐藏文件。删除放在"清除通道
     // 配置"里是因为这正是这个文件生命周期的终点：通道都不用了，它也没必要留着。
@@ -1594,20 +1694,28 @@ void DdmaPage::refreshSessionState()
         }
     }
 
-    if (m_accessReadButton != nullptr)
-    {
-        m_accessReadButton->setEnabled(usable);
-    }
-    refreshAccessEditorState();
-    if (m_compareButton != nullptr)
-    {
-        m_compareButton->setEnabled(usable);
-    }
+    refreshOperationState();
 
     if (m_sessionChangedCallback)
     {
         m_sessionChangedCallback();
     }
+}
+
+void DdmaPage::refreshOperationState()
+{
+    const bool usable = ksword::memory_backend::isDdmaUsable(m_session, nullptr);
+    const bool idle = !m_operationBusy;
+    const bool selected = m_diskTable != nullptr && m_diskTable->currentRow() >= 0;
+    if (m_probeButton != nullptr) { m_probeButton->setEnabled(idle); }
+    if (m_detectScratchButton != nullptr) { m_detectScratchButton->setEnabled(idle && selected); }
+    if (m_activateButton != nullptr) { m_activateButton->setEnabled(idle && selected); }
+    if (m_clearButton != nullptr) { m_clearButton->setEnabled(idle); }
+    if (m_scratchLbaEdit != nullptr) { m_scratchLbaEdit->setEnabled(idle); }
+    if (m_scratchAckCheck != nullptr) { m_scratchAckCheck->setEnabled(idle); }
+    if (m_accessReadButton != nullptr) { m_accessReadButton->setEnabled(idle && usable); }
+    if (m_compareButton != nullptr) { m_compareButton->setEnabled(idle && usable); }
+    refreshAccessEditorState();
 }
 
 void DdmaPage::resetAccessSnapshot()
@@ -1624,7 +1732,7 @@ void DdmaPage::resetAccessSnapshot()
 
 void DdmaPage::refreshAccessEditorState()
 {
-    const bool editable = m_hasSnapshot && sameDdmaSession(m_snapshotSession, m_session)
+    const bool editable = !m_operationBusy && m_hasSnapshot && sameDdmaSession(m_snapshotSession, m_session)
         && m_snapshotSessionGeneration == ksword::memory_backend::ddmaSessionGeneration()
         && ksword::memory_backend::isDdmaUsable(m_session, nullptr);
     if (m_accessMemoryEditor != nullptr)
@@ -1639,6 +1747,10 @@ void DdmaPage::refreshAccessEditorState()
 
 void DdmaPage::readPhysicalFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_accessAddressEdit == nullptr || m_accessLengthSpin == nullptr)
     {
         return;
@@ -1708,6 +1820,10 @@ void DdmaPage::readPhysicalFromUi()
 
 void DdmaPage::writePhysicalFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (!m_hasSnapshot || m_editedBytes == m_originalBytes)
     {
         return;
@@ -1894,6 +2010,10 @@ void DdmaPage::writePhysicalFromUi()
 
 void DdmaPage::compareBackendsFromUi()
 {
+    if (m_operationBusy)
+    {
+        return;
+    }
     if (m_compareAddressEdit == nullptr || m_compareTable == nullptr)
     {
         return;
