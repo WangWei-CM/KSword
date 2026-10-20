@@ -102,32 +102,71 @@ namespace
 // - 聚焦“执行动作 + 结果反馈 + 辅助格式化/查找”逻辑。
 // ============================================================
 
+void ProcessDetailWindow::submitDetailAction(const QString& title, const kLogEvent& actionEvent,
+    std::function<DetailActionResult()> action, const bool refreshModules)
+{
+    if (!m_detailActionOperation)
+    {
+        m_detailActionOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_detailActionOperation->setStateChangedCallback([this]
+        {
+            const bool busy = m_detailActionOperation->isBusy();
+            const QPointer<ProcessDetailWindow> alive(this);
+            const QList<QPointer<QPushButton>> buttons{m_executeTerminateActionButton, m_injectDllButton, m_injectShellcodeButton};
+            for (const auto& button : buttons)
+            {
+                if (button) button->setEnabled(!busy);
+                if (!alive) return;
+            }
+        });
+    }
+    if (m_detailActionOperation->isBusy()) return;
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const auto titleValue = title.toStdString();
+    const auto exceptionText = ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString();
+    m_detailActionOperation->submitTransaction<std::function<DetailActionResult()>, DetailActionResult>(std::move(action),
+        [actionEvent, titleValue, pid, exceptionText](const std::function<DetailActionResult()>& work)
+        {
+            DetailActionResult result;
+            try { result = work(); }
+            catch (const std::exception& error) { result.detail = error.what(); }
+            catch (...) { result.detail = exceptionText; }
+            // Accepted effects keep their complete receipt even if the window closes.
+            (result.ok ? info : err) << actionEvent << "[ProcessDetailWindow] action completed, pid=" << pid
+                << ", action=" << titleValue << ", ok=" << result.ok << ", detail=" << result.detail << eol;
+            return result;
+        },
+        [this, title, actionEvent, pid, creationTime, refreshModules](const DetailActionResult& result, std::uint64_t)
+        {
+            if (pid != m_baseRecord.pid || creationTime != m_baseRecord.creationTime100ns) return true;
+            const QPointer<ProcessDetailWindow> alive(this);
+            showActionResultMessage(title, result.ok, result.detail, actionEvent);
+            if (alive && refreshModules && result.ok) requestAsyncModuleRefresh(true);
+            return true;
+        },
+        [this, title, actionEvent, exceptionText](std::exception_ptr)
+        { showActionResultMessage(title, false, exceptionText, actionEvent); },
+        [actionEvent, titleValue](ks::ui::AsyncOperationOutcome outcome)
+        { info << actionEvent << "[ProcessDetailWindow] action cleanup, action=" << titleValue << ", outcome=" << static_cast<int>(outcome) << eol; });
+}
+
 void ProcessDetailWindow::executeSingleTerminateMethodAction(const std::size_t methodIndex)
 {
     const auto& methods = ks::process::TerminateMethodTable();
-    if (methodIndex >= methods.size())
+    if (methodIndex >= methods.size()) return;
+    const auto targetPid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const QString title = QString::fromUtf8(methods[methodIndex].methodName);
+    const kLogEvent actionEvent;
+    submitDetailAction(title, actionEvent, [targetPid, creationTime, methodIndex]
     {
-        return;
-    }
-
-    const auto& method = methods[methodIndex];
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    kLogEvent actionEvent;
-    std::string detailText;
-    const bool actionOk = invokeProcessActionForIdentity(
-        targetPid,
-        m_baseRecord.creationTime100ns,
-        [targetPid, methodIndex](std::string* detailOut)
-        {
-            return ks::process::TerminateMethodTable()[methodIndex].invokeMethod(targetPid, detailOut);
-        },
-        &detailText);
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] 逐方法结束进程, pid=" << targetPid
-        << ", method=" << method.methodName
-        << ", ok=" << (actionOk ? "true" : "false")
-        << ", detail=" << detailText << eol;
-    showActionResultMessage(QString::fromUtf8(method.methodName), actionOk, detailText, actionEvent);
+        DetailActionResult result;
+        result.ok = invokeProcessActionForIdentity(targetPid, creationTime,
+            [targetPid, methodIndex](std::string* detail)
+            { return ks::process::TerminateMethodTable()[methodIndex].invokeMethod(targetPid, detail); }, &result.detail);
+        return result;
+    });
 }
 
 void ProcessDetailWindow::executeR0SuspendSelectedThreadAction()

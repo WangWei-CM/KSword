@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 #include "../../../shared/driver/KswordArkKeyboardIoctl.h"
@@ -660,6 +661,9 @@ private:
     void terminateCurrentModuleThread();
 
     // ======== 操作页动作 ========
+    struct DetailActionResult { bool ok = false; std::string detail; };
+    void submitDetailAction(const QString& title, const kLogEvent& actionEvent,
+        std::function<DetailActionResult()> action, bool refreshModules = false);
     void executeSingleTerminateMethodAction(std::size_t methodIndex);
     // executeTerminateProcessComboAction：校验当前实例后执行有界共享方法链并复核退出。
     void executeTerminateProcessComboAction();
@@ -1004,6 +1008,7 @@ private:
     QPushButton* m_watchProtectionButton = nullptr;         // 谁改了 PPL 保护级别。
     QPushButton* m_watchImageNameButton = nullptr;          // 谁改了 EPROCESS 里的进程名。
     QPushButton* m_watchProcessPteButton = nullptr;         // 谁改了 EPROCESS 那一页的映射。
+    std::unique_ptr<ks::ui::AsyncOperation> m_detailActionOperation;
     std::unique_ptr<ks::ui::AsyncOperation> m_kernelFieldWatchOperation;
     QLabel* m_watchStatusLabel = nullptr;                   // 地址换算结果与失败原因。
     QLabel* m_sectionInfoStatusLabel = nullptr; // Section/ControlArea 查询状态。
