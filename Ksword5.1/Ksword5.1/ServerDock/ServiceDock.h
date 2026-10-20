@@ -41,6 +41,7 @@ class QTabWidget;
 class QVBoxLayout;
 class CodeEditorWidget;
 class QTimer;
+namespace ks::ui { class AsyncOperation; }
 
 class ServiceDock final : public QWidget
 {
@@ -218,6 +219,7 @@ private:
     void jumpToFileDockBinaryDetail();
     void jumpToFileDockServiceDllDetail();
     void exportCurrentListAsTsv();
+    void reconcileExportReceipt();
     void exportSelectedServiceAsJson();
     bool controlSelectedService(
         DWORD desiredAccess,
@@ -333,6 +335,8 @@ private:
     ks::ui::StructuredFieldView* m_auditEditor = nullptr;        // m_auditEditor：审计文本编辑器（只读）。
 
     // ===================== 数据与状态 =====================
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
     QHash<QString, int> m_serviceIndexByName;
     QTimer* m_filterDebounceTimer = nullptr;
     bool m_serviceRowsDirty = false;

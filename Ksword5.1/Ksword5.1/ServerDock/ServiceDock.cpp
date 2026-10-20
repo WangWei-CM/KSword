@@ -1,12 +1,16 @@
 #include "ServiceDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../Internationalization/LanguageManager.h"
 
 using namespace service_dock_detail;
 
 ServiceDock::ServiceDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
     initializeUi();
     initializeConnections();
     syncToolbarStateWithSelection();
@@ -17,6 +21,7 @@ ServiceDock::ServiceDock(QWidget* parent)
 
 ServiceDock::~ServiceDock()
 {
+    m_exportOperation->close();
     if (m_refreshThread != nullptr && m_refreshThread->joinable())
     {
         m_refreshThread->join();
@@ -24,6 +29,15 @@ ServiceDock::~ServiceDock()
 
     kLogEvent destroyEvent;
     info << destroyEvent << "[ServiceDock] 服务管理页面已析构。" << eol;
+}
+
+void ServiceDock::reconcileExportReceipt()
+{
+    if (m_exportPendingReceipt && !m_exportOperation->isInFlight())
+    {
+        m_exportPendingReceipt = false;
+        QMessageBox::warning(this, QStringLiteral("服务管理"), ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。")));
+    }
 }
 
 void ServiceDock::showEvent(QShowEvent* event)

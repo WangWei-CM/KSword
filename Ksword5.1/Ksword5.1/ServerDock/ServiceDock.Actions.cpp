@@ -1,3 +1,4 @@
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableRowFilterSupport.h"
 #include "ServiceDock.Internal.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
@@ -158,7 +159,7 @@ void ServiceDock::showServiceContextMenu(const QPoint& localPos)
     openBinaryPropertiesAction->setEnabled(!selectedServiceName().isEmpty());
     jumpFileDockBinaryAction->setEnabled(!selectedServiceName().isEmpty());
     jumpFileDockServiceDllAction->setEnabled(!selectedServiceName().isEmpty());
-    exportListAction->setEnabled(m_serviceTable != nullptr && m_visibleServiceCount > 0);
+    exportListAction->setEnabled(m_serviceTable != nullptr && m_visibleServiceCount > 0 && !m_exportOperation->isBusy());
     exportServiceJsonAction->setEnabled(!selectedServiceName().isEmpty());
 
     QAction* selectedAction = contextMenu.exec(m_serviceTable->viewport()->mapToGlobal(localPos));
@@ -861,61 +862,76 @@ void ServiceDock::jumpToSelectedHandleFilter()
 
 void ServiceDock::exportCurrentListAsTsv()
 {
+    const QPointer<ServiceDock> guarded(this);
+    reconcileExportReceipt();
+    if (!guarded || m_exportOperation->isInFlight()) return;
     const QString outputPath = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("导出服务列表"),
         QStringLiteral("ServiceList.tsv"),
         QStringLiteral("TSV Files (*.tsv);;All Files (*.*)"));
-    if (outputPath.trimmed().isEmpty())
+    if (!guarded || outputPath.trimmed().isEmpty())
     {
         return;
     }
 
-    QSaveFile outputFile(outputPath);
-    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开导出文件失败：\n%1").arg(outputFile.errorString()));
-        return;
-    }
-
-    QTextStream outputStream(&outputFile);
-    outputStream.setEncoding(QStringConverter::Utf8);
-    outputStream << "服务名\t显示名\t状态\t启动类型\tPID\t账户\tBinaryPath\tServiceDll\t来源\t风险\n";
-
-    for (int rowIndex = 0; rowIndex < m_serviceTable->rowCount(); ++rowIndex)
-    {
-        if (ks::ui::IsTableRowExcludedByFilter(m_serviceTable, rowIndex)) continue;
-        QTableWidgetItem* nameItem = m_serviceTable->item(rowIndex, toServiceColumn(ServiceColumn::Name));
-        if (nameItem == nullptr)
-        {
-            continue;
-        }
-
-        const QString serviceNameText = nameItem->data(kServiceNameRole).toString();
-        const int serviceIndex = findServiceIndexByName(serviceNameText);
-        if (serviceIndex < 0 || serviceIndex >= static_cast<int>(m_serviceList.size()))
-        {
-            continue;
-        }
-
-        const ServiceEntry& entry = m_serviceList[static_cast<std::size_t>(serviceIndex)];
-        outputStream
-            << entry.serviceNameText << '\t'
-            << entry.displayNameText << '\t'
-            << entry.stateText << '\t'
-            << entry.startTypeText << '\t'
-            << entry.processId << '\t'
-            << entry.accountText << '\t'
-            << entry.commandLineText << '\t'
-            << entry.serviceDllPathText << '\t'
-            << entry.sourceStatusText << '\t'
-            << entry.riskSummaryText << '\n';
-    }
-
-    if (!outputFile.commit())
+    reconcileExportReceipt();
+    if (!guarded) return;
+    if (m_exportOperation->isInFlight())
     {
         QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("写入导出文件失败。"));
         return;
+    }
+    struct Request { QString path; std::vector<ServiceEntry> entries; } request;
+    request.path = outputPath;
+    request.entries.reserve(static_cast<std::size_t>(m_visibleServiceCount));
+    for (int row = 0; row < m_serviceTable->rowCount(); ++row)
+    {
+        if (ks::ui::IsTableRowExcludedByFilter(m_serviceTable, row)) continue;
+        const auto* item = m_serviceTable->item(row, toServiceColumn(ServiceColumn::Name));
+        if (!item) continue;
+        const int index = findServiceIndexByName(item->data(kServiceNameRole).toString());
+        if (index >= 0 && index < static_cast<int>(m_serviceList.size()))
+            request.entries.push_back(m_serviceList[static_cast<std::size_t>(index)]);
+    }
+    struct Result { bool opened = false; bool committed = false; QString error; };
+    m_exportPendingReceipt = true;
+    const auto ticket = m_exportOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            QSaveFile file(input.path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) { result.error = file.errorString(); return result; }
+            result.opened = true;
+            QTextStream stream(&file);
+            stream.setEncoding(QStringConverter::Utf8);
+            stream << "服务名\t显示名\t状态\t启动类型\tPID\t账户\tBinaryPath\tServiceDll\t来源\t风险\n";
+            for (const auto& entry : input.entries)
+                stream << entry.serviceNameText << '\t' << entry.displayNameText << '\t'
+                    << entry.stateText << '\t' << entry.startTypeText << '\t' << entry.processId << '\t'
+                    << entry.accountText << '\t' << entry.commandLineText << '\t' << entry.serviceDllPathText << '\t'
+                    << entry.sourceStatusText << '\t' << entry.riskSummaryText << '\n';
+            stream.flush();
+            if (stream.status() != QTextStream::Ok) { result.error = file.errorString(); file.cancelWriting(); return result; }
+            result.committed = file.commit();
+            if (!result.committed) result.error = file.errorString();
+            return result;
+        },
+        [this](const Result& result, std::uint64_t) {
+            m_exportPendingReceipt = false;
+            if (!result.opened)
+                QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("打开导出文件失败：\n%1").arg(result.error));
+            else if (!result.committed)
+                QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("写入导出文件失败。"));
+            return true;
+        },
+        [this](std::exception_ptr) {
+            m_exportPendingReceipt = false;
+            QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("写入导出文件失败。"));
+        });
+    if (!ticket && guarded && m_exportPendingReceipt)
+    {
+        m_exportPendingReceipt = false;
+        QMessageBox::warning(this, QStringLiteral("服务管理"), QStringLiteral("写入导出文件失败。"));
     }
 }
 

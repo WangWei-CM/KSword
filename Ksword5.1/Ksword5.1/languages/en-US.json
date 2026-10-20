@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "service.export.receipt_missing": "The export returned no valid receipt. Check the destination file before trying again.",
+    "导出未返回有效回执，请检查目标文件后再重试。": "The export returned no valid receipt. Check the destination file before trying again.",
     "window.layer.status.z_order_exported_incomplete": "Z order was exported with an incomplete traversal; see the complete and walkLimit fields.",
     "window.layer.export.receipt_unknown": "The export outcome is unconfirmed; check the destination file and retain the receipt.",
     "hardware.power.status.receipt_missing": "Status: The power operation ended without a complete receipt. Refresh the current state; do not automatically resend it.",
@@ -6982,6 +6984,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "导出未返回有效回执，请检查目标文件后再重试。": "The export returned no valid receipt. Check the destination file before trying again.",
     "状态：电源操作已结束但未收到完整回执，请刷新当前状态，勿自动重发。": "Status: The power operation ended without a complete receipt. Refresh the current state; do not automatically resend it.",
     "状态：当前忙碌或正在退出，未接受新的电源操作。": "Status: Busy or exiting; the new power operation was not accepted.",
     "状态：正在应用电源操作并读取当前状态…": "Status: Applying the power operation and reading the current state…",
