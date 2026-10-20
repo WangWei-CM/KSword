@@ -9,6 +9,9 @@
 // ============================================================
 
 #include <QString>
+#include <QStringList>
+#include <QList>
+#include <QPair>
 #include <QStringConverter>
 #include <QPointer>
 #include <QWidget>
@@ -146,6 +149,14 @@ private:
     // initializeConnections：
     // - 连接按钮、快捷键与编辑器状态回调。
     void initializeConnections();
+
+    // Explicit UI producers retain source templates and raw argument identity;
+    // language changes refresh labels without rebuilding the source document.
+    void bindUiToolTip(QWidget* widget, const QString& source);
+    void refreshUiText();
+    void setOperationStatus(const QString& sourceTemplate, const QStringList& arguments = {},
+        quint32 translatedArgumentMask = 0, const QString& semanticKey = QString());
+    void refreshOperationStatus();
 
     // applyThemeStyle：
     // - 统一应用工具按钮/输入框样式。
@@ -320,6 +331,16 @@ private:
     // m_editor：核心代码编辑器（行号 + 括号高亮）。
     CodeTextEdit* m_editor = nullptr;
     QToolButton* m_moreButton = nullptr;
+    QMenu* m_syntaxMenu = nullptr;
+    QList<QPair<QPointer<QAction>, QPointer<QToolButton>>> m_toolActions;
+    QList<QPointer<QAction>> m_syntaxActions;
+    QLabel* m_gotoLabel = nullptr;
+    QList<QPair<QPointer<QWidget>, QString>> m_uiToolTips;
+    QString m_placeholderSource;
+    QString m_statusSourceTemplate;
+    QStringList m_statusArguments;
+    quint32 m_statusTranslatedArgumentMask = 0;
+    QString m_statusSemanticKey;
     QToolButton* m_matchCaseButton = nullptr;
     QToolButton* m_wholeWordButton = nullptr;
     QWidget* m_replaceRow = nullptr;
