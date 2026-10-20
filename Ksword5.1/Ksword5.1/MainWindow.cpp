@@ -8,6 +8,7 @@
 #include "UI/PerfTrace.h"
 #include "UI/UiAnimationGate.h"
 #include "UI/CoordinatedApplicationQuit.h"
+#include "UI/RetainedCleanupJob.h"
 #include "UI/McpLocalBridge.h"
 #include "UI/McpHexCanvasAdapter.h"
 #include "UI/UI_All.h"
@@ -5854,7 +5855,11 @@ void MainWindow::pollCoordinatedShutdown()
                 .arg(static_cast<qulonglong>(pending)),
             QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Cancel);
         if (!guard) return;
-        if (choice == QMessageBox::Retry) beginCoordinatedShutdownWait();
+        if (choice == QMessageBox::Retry)
+        {
+            ks::ui::RetryRetainedCleanupJobs();
+            beginCoordinatedShutdownWait();
+        }
         else cancelCoordinatedShutdown();
     }
 }
