@@ -58,7 +58,7 @@ ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
 {
     if (m_eventFilterProjection) m_eventFilterProjection->close();
     m_uiDispatcher->close();
-    // 析构阶段同步停止后台线程，避免对象释放后回调仍访问成员。
+    // Only signal and enqueue retained value cleanup; the GUI never joins capture workers.
     stopMonitoringInternal(true);
 
     if (m_uiUpdateTimer != nullptr)
@@ -302,8 +302,8 @@ QTableWidgetItem* ProcessTraceMonitorWidget::createReadOnlyItem(const QString& t
 void ProcessTraceMonitorWidget::updateActionState()
 {
     const bool hasTargets = !m_targetProcessList.empty();
-    const bool running = m_captureRunning.load();
-    const bool paused = m_capturePaused.load();
+    const bool running = m_capture->m_captureRunning.load();
+    const bool paused = m_capture->m_capturePaused.load();
 
     if (m_availableRefreshButton != nullptr)
     {
@@ -341,7 +341,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_stopButton != nullptr)
     {
-        m_stopButton->setEnabled(running);
+        m_stopButton->setEnabled(running || (m_captureCleanup && !m_captureCleanup->isComplete()));
     }
     if (m_pauseButton != nullptr)
     {
@@ -365,8 +365,8 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
 
     std::size_t trackedCount = 0;
     {
-        std::lock_guard<std::mutex> lock(m_runtimeMutex);
-        trackedCount = m_trackedProcessMap.size();
+        std::lock_guard<std::mutex> lock(m_capture->m_runtimeMutex);
+        trackedCount = m_capture->m_trackedProcessMap.size();
     }
 
     const int eventCount = (m_eventTable != nullptr) ? m_eventTable->rowCount() : 0;
@@ -375,9 +375,24 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
         .arg(static_cast<qulonglong>(trackedCount))
         .arg(eventCount);
 
-    if (m_captureRunning.load())
+    if (m_captureCleanup && m_captureCleanup->hasFailed())
     {
-        if (m_capturePaused.load())
+        m_statusLabel->setText(QStringLiteral("● 停止失败，可重试（错误码=%1）  %2").arg(m_capture->operationError.load()).arg(summaryText));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
+    }
+    else if (m_captureCleanup && m_captureCleanup->isCleanupRequested() && !m_captureCleanup->isComplete())
+    {
+        m_statusLabel->setText(QStringLiteral("● 正在停止  %1").arg(summaryText));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
+    }
+    else if (m_capture->m_captureRunning.load())
+    {
+        if (!m_capture->processStarted.load())
+        {
+            m_statusLabel->setText(QStringLiteral("● 准备中  %1").arg(summaryText));
+            ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
+        }
+        else if (m_capture->m_capturePaused.load())
         {
             m_statusLabel->setText(QStringLiteral("● 已暂停  %1").arg(summaryText));
             ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
@@ -387,6 +402,11 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
             m_statusLabel->setText(QStringLiteral("● 监听中  %1").arg(summaryText));
             ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Info);
         }
+    }
+    else if (const auto error = m_capture->startupError.load() ? m_capture->startupError.load() : m_capture->processStatus.load())
+    {
+        m_statusLabel->setText(QStringLiteral("ProcessTrace 结束，状态码=%1。").arg(error));
+        ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Warning);
     }
     else
     {

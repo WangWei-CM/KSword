@@ -1,38 +1,20 @@
 #include "ProcessTraceMonitorWidget.h"
-
-// ============================================================
-// ProcessTraceMonitorWidget.Runtime.cpp
-// 作用：
-// 1) 实现 ETW 会话控制、开始/停止/暂停状态切换；
-// 2) 维护目标进程树的播种与运行期快照同步；
-// 3) 把重型运行时控制逻辑从事件解码文件中拆出，控制单文件体积。
-// ============================================================
-
-#include <QApplication>
-#include <QDateTime>
 #include <QMessageBox>
-#include <QMetaObject>
-#include <QPointer>
 #include <QTableWidget>
 #include <QTimer>
-
+#include <QPushButton>
+#include <QLabel>
+#include <QThreadPool>
+#include <QRunnable>
+#include <QDateTime>
 #include <algorithm>
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <Windows.h>
 #include <evntrace.h>
 #include <evntcons.h>
 #include <tdh.h>
 
-#pragma comment(lib, "Tdh.lib")
-
 namespace
 {
-    // ProviderSelectionResolved：
-    // - 作用：保存“已解析出 GUID 且准备启用”的 Provider；
-    // - 调用：startMonitoring 的后台 ETW 线程内部使用。
     struct ProviderSelectionResolved
     {
         QString providerName;
@@ -40,7 +22,23 @@ namespace
         QString providerTypeText;
         GUID providerGuid{};
     };
-
+    std::atomic<std::uint64_t> captureSerial{ 0 };
+    std::vector<unsigned char> traceProperties(const QString& sessionName)
+    {
+        const auto name = sessionName.toStdWString();
+        std::vector<unsigned char> buffer(sizeof(EVENT_TRACE_PROPERTIES) + (name.size() + 1) * sizeof(wchar_t), 0);
+        auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
+        properties->Wnode.BufferSize = static_cast<ULONG>(buffer.size());
+        properties->Wnode.ClientContext = 2;
+        properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+        properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+        properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+        properties->BufferSize = 256;
+        properties->MinimumBuffers = 32;
+        properties->MaximumBuffers = 128;
+        ::wcscpy_s(reinterpret_cast<wchar_t*>(buffer.data() + properties->LoggerNameOffset), name.size() + 1, name.c_str());
+        return buffer;
+    }
     // defaultProviderNameList：
     // - 作用：定义“进程定向监控”固定启用的宽覆盖 Provider 名单；
     // - 调用：startMonitoring 的后台线程按名称解析 GUID 后统一启用。
@@ -63,108 +61,38 @@ namespace
         };
     }
 
-    void stopActiveKswordTraceSessionsByPrefix(const QStringList& sessionPrefixList)
-    {
-        constexpr ULONG kQuerySessionCapacity = 96;
-        constexpr ULONG kTraceNameChars = 1024;
-        constexpr ULONG kLogFileChars = 1024;
-        constexpr ULONG kPropertyBufferSize =
-            sizeof(EVENT_TRACE_PROPERTIES)
-            + (kTraceNameChars + kLogFileChars) * sizeof(wchar_t);
 
-        std::vector<std::vector<unsigned char>> propertyBufferList(
-            kQuerySessionCapacity,
-            std::vector<unsigned char>(kPropertyBufferSize, 0));
-        std::vector<EVENT_TRACE_PROPERTIES*> propertyPointerList(kQuerySessionCapacity, nullptr);
-
-        for (ULONG indexValue = 0; indexValue < kQuerySessionCapacity; ++indexValue)
-        {
-            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBufferList[indexValue].data());
-            properties->Wnode.BufferSize = kPropertyBufferSize;
-            properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-            properties->LogFileNameOffset =
-                sizeof(EVENT_TRACE_PROPERTIES) + kTraceNameChars * sizeof(wchar_t);
-            propertyPointerList[indexValue] = properties;
-        }
-
-        ULONG sessionCount = kQuerySessionCapacity;
-        const ULONG queryStatus = ::QueryAllTracesW(
-            propertyPointerList.data(),
-            kQuerySessionCapacity,
-            &sessionCount);
-        if (queryStatus != ERROR_SUCCESS && queryStatus != ERROR_MORE_DATA)
-        {
-            return;
-        }
-
-        for (ULONG indexValue = 0; indexValue < sessionCount && indexValue < kQuerySessionCapacity; ++indexValue)
-        {
-            const EVENT_TRACE_PROPERTIES* properties = propertyPointerList[indexValue];
-            if (properties == nullptr || properties->LoggerNameOffset == 0)
-            {
-                continue;
-            }
-
-            const wchar_t* loggerNamePointer = reinterpret_cast<const wchar_t*>(
-                propertyBufferList[indexValue].data() + properties->LoggerNameOffset);
-            const QString loggerNameText = QString::fromWCharArray(loggerNamePointer).trimmed();
-            if (loggerNameText.isEmpty())
-            {
-                continue;
-            }
-
-            const bool shouldStop = std::any_of(
-                sessionPrefixList.begin(),
-                sessionPrefixList.end(),
-                [&loggerNameText](const QString& prefixText) {
-                    return !prefixText.trimmed().isEmpty()
-                        && loggerNameText.startsWith(prefixText, Qt::CaseInsensitive);
-                });
-            if (!shouldStop)
-            {
-                continue;
-            }
-
-            const std::wstring loggerNameWide = loggerNameText.toStdWString();
-            std::vector<unsigned char> stopBuffer(
-                sizeof(EVENT_TRACE_PROPERTIES) + (loggerNameWide.size() + 1) * sizeof(wchar_t),
-                0);
-            auto* stopProperties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(stopBuffer.data());
-            stopProperties->Wnode.BufferSize = static_cast<ULONG>(stopBuffer.size());
-            stopProperties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-            wchar_t* stopLoggerNamePointer = reinterpret_cast<wchar_t*>(
-                stopBuffer.data() + stopProperties->LoggerNameOffset);
-            ::wcscpy_s(stopLoggerNamePointer, loggerNameWide.size() + 1, loggerNameWide.c_str());
-            ::ControlTraceW(0, stopLoggerNamePointer, stopProperties, EVENT_TRACE_CONTROL_STOP);
-        }
-    }
 }
 
 void ProcessTraceMonitorWidget::startMonitoring()
 {
-    if (m_captureRunning.load())
+    if (m_capture->m_captureRunning.load())
     {
-        if (m_capturePaused.load())
-        {
-            setMonitoringPaused(false);
-        }
+        if (m_capture->m_capturePaused.load()) setMonitoringPaused(false);
         return;
     }
-
+    if (m_captureCleanup && !m_captureCleanup->isComplete())
+    {
+        // Explicit Start while a failed cleanup is visible retries that epoch only.
+        m_captureCleanup->requestCleanup();
+        return;
+    }
     if (m_targetProcessList.empty())
     {
         QMessageBox::information(this, QStringLiteral("进程定向监控"), QStringLiteral("请先添加至少一个监控目标。"));
         return;
     }
-
-    if (m_captureThread != nullptr && m_captureThread->joinable())
-    {
-        m_captureThread->join();
-        m_captureThread.reset();
-    }
-
-    // 启动前先清空旧结果，避免不同批次事件混到一起。
-    if (m_eventTable != nullptr)
+    const auto state = std::make_shared<CaptureState>();
+    state->targets = m_targetProcessList;
+    state->m_sessionName = QStringLiteral("KswordProcessTrace-%1-%2").arg(::GetCurrentProcessId()).arg(++captureSerial);
+    auto cleanup = ks::ui::RetainedCleanupJob::create([state]() { return cleanupCapture(state); }, 0,
+        [state]() { state->m_captureStopFlag.store(true); });
+    if (!cleanup) return; // This owner is discarded; never reopen an epoch rejected during shutdown.
+    m_capture = state;
+    m_captureCleanup = cleanup;
+    m_captureCompletionApplied = false;
+    m_appliedTargetVersion = 0;
+    if (m_eventTable)
     {
         m_eventTable->clearContents();
         m_eventTable->setRowCount(0);
@@ -175,539 +103,248 @@ void ProcessTraceMonitorWidget::startMonitoring()
     m_timelineSelectionStart100ns = m_captureStartTime100ns;
     m_timelineSelectionEnd100ns = m_captureStartTime100ns;
     m_timelineUserSelectionActive = false;
-    if (m_eventTimelineWidget != nullptr)
-    {
-        m_eventTimelineWidget->resetTimeline(m_captureStartTime100ns);
-        m_timelineSelectionStart100ns = m_eventTimelineWidget->selectionStart100ns();
-        m_timelineSelectionEnd100ns = m_eventTimelineWidget->selectionEnd100ns();
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingRows.clear();
-        m_pendingDroppedRows = 0;
-    }
+    if (m_eventTimelineWidget) m_eventTimelineWidget->resetTimeline(m_captureStartTime100ns);
     m_lastTimelineRefreshMs = 0;
-
-    // 用一轮进程快照先播种目标进程树，确保已有子进程在 ETW 会话启动前也被纳入。
-    std::vector<ks::process::ProcessRecord> processList = ks::process::EnumerateProcesses(
-        ks::process::ProcessEnumStrategy::Auto);
-    seedTrackedProcessTree(processList);
-    refreshTargetTable();
-
-    m_captureRunning.store(true);
-    m_capturePaused.store(false);
-    m_captureStopFlag.store(false);
-    m_runtimeRefreshPending.store(false);
-    m_sessionHandle.store(0);
-    m_traceHandle.store(0);
-    stopActiveKswordTraceSessionsByPrefix(QStringList{ QStringLiteral("KswordProcessTrace") });
-    m_sessionName = QStringLiteral("KswordProcessTrace");
-
-    if (m_captureProgressPid == 0)
-    {
-        m_captureProgressPid = kPro.addReusable(this, "监控", "进程定向监控");
-    }
+    if (!m_captureProgressPid) m_captureProgressPid = kPro.addReusable(this, "监控", "进程定向监控");
     kPro.set(m_captureProgressPid, "准备固定 ETW Provider 与目标进程树", 0, 10.0f);
-
-    if (m_uiUpdateTimer != nullptr && !m_uiUpdateTimer->isActive())
     {
-        m_uiUpdateTimer->start();
+        // The job's synchronous stop signal and this gate close the admission/start race.
+        std::lock_guard<std::mutex> gate(state->operationGate);
+        if (state->m_captureStopFlag.load() || cleanup->isCleanupRequested()) return;
+        state->finished.store(false);
+        state->m_captureRunning.store(true);
+        state->cleanupPending.store(true);
+        try { state->m_captureThread = std::make_unique<std::thread>([state]() { runCapture(state); }); }
+        catch (...)
+        {
+            state->startupError.store(ERROR_NOT_ENOUGH_MEMORY);
+            state->finished.store(true);
+            state->m_captureRunning.store(false);
+        }
     }
-    if (m_runtimeRefreshTimer != nullptr && !m_runtimeRefreshTimer->isActive())
-    {
-        m_runtimeRefreshTimer->start();
-    }
-
+    if (m_uiUpdateTimer && !m_uiUpdateTimer->isActive()) m_uiUpdateTimer->start();
+    if (m_runtimeRefreshTimer && !m_runtimeRefreshTimer->isActive()) m_runtimeRefreshTimer->start();
     updateActionState();
     updateStatusLabel();
+}
 
-    kLogEvent startEvent;
-    info << startEvent
-        << "[ProcessTraceMonitorWidget] 启动进程定向监控, targetCount="
-        << m_targetProcessList.size()
-        << eol;
-
-    QPointer<ProcessTraceMonitorWidget> guardThis(this);
-    const auto dispatcher = m_uiDispatcher;
-    m_captureThread = std::make_unique<std::thread>([guardThis, dispatcher]() {
-        if (guardThis == nullptr)
-        {
-            return;
-        }
-
-        // 固定 Provider 解析：
-        // - 先枚举系统全部 Provider；
-        // - 再按预设名称做精确/模糊匹配；
-        // - 只要能解析出 GUID，就纳入本轮会话。
-        QStringList wantedProviderNames = defaultProviderNameList();
+void ProcessTraceMonitorWidget::runCapture(const std::shared_ptr<CaptureState>& state)
+{
+    struct Completion
+    {
+        CaptureState& state;
+        ~Completion() { state.m_captureRunning.store(false); state.m_capturePaused.store(false); state.finished.store(true); }
+    } completion{ *state };
+    try
+    {
+        if (state->m_captureStopFlag.load()) return;
+        const auto processes = ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto);
+        seedTrackedProcessTree(*state, processes);
+        if (state->m_captureStopFlag.load()) return;
         std::vector<ProviderSelectionResolved> selectedProviders;
-
-        ULONG providerBufferSize = 0;
-        ULONG enumerateStatus = ::TdhEnumerateProviders(nullptr, &providerBufferSize);
-        if (enumerateStatus == ERROR_INSUFFICIENT_BUFFER && providerBufferSize > 0)
+        ULONG bytes = 0;
+        ULONG status = ::TdhEnumerateProviders(nullptr, &bytes);
+        if (status == ERROR_INSUFFICIENT_BUFFER && bytes)
         {
-            std::vector<unsigned char> providerBuffer(providerBufferSize, 0);
-            auto* providerInfo = reinterpret_cast<PROVIDER_ENUMERATION_INFO*>(providerBuffer.data());
-            enumerateStatus = ::TdhEnumerateProviders(providerInfo, &providerBufferSize);
-            if (enumerateStatus == ERROR_SUCCESS && providerInfo != nullptr)
+            std::vector<unsigned char> buffer(bytes, 0);
+            auto* info = reinterpret_cast<PROVIDER_ENUMERATION_INFO*>(buffer.data());
+            status = ::TdhEnumerateProviders(info, &bytes);
+            if (status == ERROR_SUCCESS)
             {
-                std::vector<ProviderSelectionResolved> allProviders;
-                allProviders.reserve(providerInfo->NumberOfProviders);
-                for (ULONG indexValue = 0; indexValue < providerInfo->NumberOfProviders; ++indexValue)
+                for (const auto& wanted : defaultProviderNameList())
                 {
-                    const TRACE_PROVIDER_INFO& traceInfo = providerInfo->TraceProviderInfoArray[indexValue];
-                    const wchar_t* providerNamePointer = reinterpret_cast<const wchar_t*>(
-                        providerBuffer.data() + traceInfo.ProviderNameOffset);
-
-                    ProviderSelectionResolved entry;
-                    entry.providerName = providerNamePointer != nullptr
-                        ? QString::fromWCharArray(providerNamePointer)
-                        : QStringLiteral("<Unknown>");
-                    entry.providerGuidText = guardThis->guidToText(traceInfo.ProviderGuid);
-                    entry.providerTypeText = guardThis->providerTypeFromName(entry.providerName);
-                    entry.providerGuid = traceInfo.ProviderGuid;
-                    allProviders.push_back(entry);
-                }
-
-                for (const QString& wantedName : wantedProviderNames)
-                {
-                    auto found = std::find_if(
-                        allProviders.begin(),
-                        allProviders.end(),
-                        [wantedName](const ProviderSelectionResolved& item) {
-                            return item.providerName.compare(wantedName, Qt::CaseInsensitive) == 0;
-                        });
-                    if (found == allProviders.end())
+                    const TRACE_PROVIDER_INFO* selected = nullptr;
+                    QString selectedName;
+                    for (ULONG index = 0; index < info->NumberOfProviders; ++index)
                     {
-                        found = std::find_if(
-                            allProviders.begin(),
-                            allProviders.end(),
-                            [wantedName](const ProviderSelectionResolved& item) {
-                                return item.providerName.contains(wantedName, Qt::CaseInsensitive)
-                                    || wantedName.contains(item.providerName, Qt::CaseInsensitive);
-                            });
+                        const auto& entry = info->TraceProviderInfoArray[index];
+                        const QString name = QString::fromWCharArray(reinterpret_cast<const wchar_t*>(buffer.data() + entry.ProviderNameOffset));
+                        if (name.compare(wanted, Qt::CaseInsensitive) == 0) { selected = &entry; selectedName = name; break; }
+                        if (!selected && (name.contains(wanted, Qt::CaseInsensitive) || wanted.contains(name, Qt::CaseInsensitive)))
+                        { selected = &entry; selectedName = name; }
                     }
-                    if (found == allProviders.end())
-                    {
-                        continue;
-                    }
-
-                    const bool duplicate = std::any_of(
-                        selectedProviders.begin(),
-                        selectedProviders.end(),
-                        [found](const ProviderSelectionResolved& item) {
-                            return ::IsEqualGUID(item.providerGuid, found->providerGuid) != FALSE;
-                        });
-                    if (!duplicate)
-                    {
-                        selectedProviders.push_back(*found);
-                    }
+                    if (!selected) continue;
+                    if (std::any_of(selectedProviders.begin(), selectedProviders.end(), [selected](const auto& entry) { return !!::IsEqualGUID(entry.providerGuid, selected->ProviderGuid); })) continue;
+                    selectedProviders.push_back({ selectedName, guidToText(selected->ProviderGuid), providerTypeFromName(selectedName), selected->ProviderGuid });
                 }
             }
         }
-
-        if (selectedProviders.empty())
+        if (selectedProviders.empty()) { state->startupError.store(status == ERROR_SUCCESS ? ERROR_NOT_FOUND : status); return; }
         {
-            dispatcher->post([guardThis]() {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-
-                guardThis->m_captureRunning.store(false);
-                guardThis->m_capturePaused.store(false);
-                if (guardThis->m_runtimeRefreshTimer != nullptr)
-                {
-                    guardThis->m_runtimeRefreshTimer->stop();
-                }
-                if (guardThis->m_uiUpdateTimer != nullptr)
-                {
-                    guardThis->m_uiUpdateTimer->stop();
-                }
-                kPro.set(guardThis->m_captureProgressPid, "预置 Provider 解析失败", 0, 100.0f);
-                QMessageBox::warning(
-                    guardThis,
-                    QStringLiteral("进程定向监控"),
-                    QStringLiteral("未解析到任何可用的 ETW Provider，监控无法启动。"));
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-            });
-            return;
+            std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+            for (const auto& provider : selectedProviders)
+                state->m_activeProviderList.push_back({ provider.providerName, provider.providerGuidText, provider.providerTypeText });
         }
-
+        TRACEHANDLE trace = INVALID_PROCESSTRACE_HANDLE;
         {
-            std::lock_guard<std::mutex> lock(guardThis->m_runtimeMutex);
-            guardThis->m_activeProviderList.clear();
-            for (const ProviderSelectionResolved& provider : selectedProviders)
+            std::lock_guard<std::mutex> gate(state->operationGate);
+            if (state->m_captureStopFlag.load()) return;
+            auto buffer = traceProperties(state->m_sessionName);
+            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
+            auto* name = reinterpret_cast<wchar_t*>(buffer.data() + properties->LoggerNameOffset);
+            TRACEHANDLE session = 0;
+            status = ::StartTraceW(&session, name, properties);
+            // A unique owned name never permits stopping another process's session.
+            if (status != ERROR_SUCCESS) { state->startupError.store(status); return; }
+            state->m_sessionHandle.store(session);
+            int enabled = 0;
+            for (const auto& provider : selectedProviders)
             {
-                ProviderEntry entry;
-                entry.providerName = provider.providerName;
-                entry.providerGuidText = provider.providerGuidText;
-                entry.providerTypeText = provider.providerTypeText;
-                guardThis->m_activeProviderList.push_back(entry);
+                if (state->m_captureStopFlag.load()) break;
+                if (::EnableTraceEx2(session, &provider.providerGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                    TRACE_LEVEL_VERBOSE, 0xFFFFFFFFFFFFFFFFULL, 0, 0, nullptr) == ERROR_SUCCESS) ++enabled;
             }
+            if (!enabled || state->m_captureStopFlag.load()) { state->startupError.store(enabled ? ERROR_CANCELLED : ERROR_NOT_SUPPORTED); return; }
+            EVENT_TRACE_LOGFILEW log{};
+            log.LoggerName = name;
+            log.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+            log.EventRecordCallback = &ProcessTraceMonitorWidget::processTraceEtwCallback;
+            log.Context = state.get();
+            trace = ::OpenTraceW(&log);
+            if (trace == INVALID_PROCESSTRACE_HANDLE) { state->startupError.store(::GetLastError()); return; }
+            state->m_traceHandle.store(trace);
         }
-
-        const std::wstring sessionNameWide = guardThis->m_sessionName.toStdWString();
-        const ULONG propertyBufferSize = static_cast<ULONG>(
-            sizeof(EVENT_TRACE_PROPERTIES) + (sessionNameWide.size() + 1) * sizeof(wchar_t));
-        std::vector<unsigned char> propertyBuffer(propertyBufferSize, 0);
-        auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBuffer.data());
-
-        properties->Wnode.BufferSize = propertyBufferSize;
-        properties->Wnode.ClientContext = 2;
-        properties->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-        properties->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-        properties->BufferSize = 256;
-        properties->MinimumBuffers = 32;
-        properties->MaximumBuffers = 128;
-
-        wchar_t* loggerNamePointer = reinterpret_cast<wchar_t*>(propertyBuffer.data() + properties->LoggerNameOffset);
-        if (!sessionNameWide.empty())
-        {
-            ::wcscpy_s(loggerNamePointer, sessionNameWide.size() + 1, sessionNameWide.c_str());
-        }
-
-        TRACEHANDLE sessionHandle = 0;
-        ULONG startStatus = ::StartTraceW(&sessionHandle, loggerNamePointer, properties);
-        if (startStatus == ERROR_ALREADY_EXISTS)
-        {
-            ::ControlTraceW(0, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
-            startStatus = ::StartTraceW(&sessionHandle, loggerNamePointer, properties);
-        }
-
-        if (startStatus != ERROR_SUCCESS)
-        {
-            dispatcher->post([guardThis, startStatus]() {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-
-                guardThis->m_captureRunning.store(false);
-                guardThis->m_capturePaused.store(false);
-                if (guardThis->m_runtimeRefreshTimer != nullptr)
-                {
-                    guardThis->m_runtimeRefreshTimer->stop();
-                }
-                if (guardThis->m_uiUpdateTimer != nullptr)
-                {
-                    guardThis->m_uiUpdateTimer->stop();
-                }
-                kPro.set(guardThis->m_captureProgressPid, "ETW 会话启动失败", 0, 100.0f);
-                QMessageBox::warning(
-                    guardThis,
-                    QStringLiteral("进程定向监控"),
-                    QStringLiteral("StartTraceW 失败，错误码=%1。").arg(startStatus));
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-            });
-            return;
-        }
-
-        guardThis->m_sessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
-        kPro.set(guardThis->m_captureProgressPid, "启用固定 Provider 集合", 0, 30.0f);
-
-        int enableSuccessCount = 0;
-        for (const ProviderSelectionResolved& provider : selectedProviders)
-        {
-            if (guardThis == nullptr || guardThis->m_captureStopFlag.load())
-            {
-                break;
-            }
-
-            const ULONG enableStatus = ::EnableTraceEx2(
-                sessionHandle,
-                &provider.providerGuid,
-                EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                TRACE_LEVEL_VERBOSE,
-                0xFFFFFFFFFFFFFFFFULL,
-                0,
-                0,
-                nullptr);
-            if (enableStatus == ERROR_SUCCESS)
-            {
-                ++enableSuccessCount;
-            }
-            else
-            {
-                kLogEvent event;
-                warn << event
-                    << "[ProcessTraceMonitorWidget] EnableTraceEx2失败, provider="
-                    << provider.providerName.toStdString()
-                    << ", status="
-                    << enableStatus
-                    << eol;
-            }
-        }
-
-        if (enableSuccessCount == 0)
-        {
-            ::ControlTraceW(sessionHandle, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
-            guardThis->m_sessionHandle.store(0);
-            dispatcher->post([guardThis]() {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-
-                guardThis->m_captureRunning.store(false);
-                guardThis->m_capturePaused.store(false);
-                if (guardThis->m_runtimeRefreshTimer != nullptr)
-                {
-                    guardThis->m_runtimeRefreshTimer->stop();
-                }
-                if (guardThis->m_uiUpdateTimer != nullptr)
-                {
-                    guardThis->m_uiUpdateTimer->stop();
-                }
-                kPro.set(guardThis->m_captureProgressPid, "Provider 启用失败", 0, 100.0f);
-                QMessageBox::warning(
-                    guardThis,
-                    QStringLiteral("进程定向监控"),
-                    QStringLiteral("固定 Provider 集合全部启用失败，监控已停止。"));
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-            });
-            return;
-        }
-
-        EVENT_TRACE_LOGFILEW traceLogFile{};
-        traceLogFile.LoggerName = loggerNamePointer;
-        traceLogFile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
-        traceLogFile.EventRecordCallback = &ProcessTraceMonitorWidget::processTraceEtwCallback;
-        traceLogFile.Context = guardThis.data();
-
-        TRACEHANDLE traceHandle = ::OpenTraceW(&traceLogFile);
-        if (traceHandle == INVALID_PROCESSTRACE_HANDLE)
-        {
-            ::ControlTraceW(sessionHandle, loggerNamePointer, properties, EVENT_TRACE_CONTROL_STOP);
-            guardThis->m_sessionHandle.store(0);
-
-            const ULONG lastError = ::GetLastError();
-            dispatcher->post([guardThis, lastError]() {
-                if (guardThis == nullptr)
-                {
-                    return;
-                }
-
-                guardThis->m_captureRunning.store(false);
-                guardThis->m_capturePaused.store(false);
-                if (guardThis->m_runtimeRefreshTimer != nullptr)
-                {
-                    guardThis->m_runtimeRefreshTimer->stop();
-                }
-                if (guardThis->m_uiUpdateTimer != nullptr)
-                {
-                    guardThis->m_uiUpdateTimer->stop();
-                }
-                kPro.set(guardThis->m_captureProgressPid, "OpenTrace 失败", 0, 100.0f);
-                QMessageBox::warning(
-                    guardThis,
-                    QStringLiteral("进程定向监控"),
-                    QStringLiteral("OpenTraceW 失败，错误码=%1。").arg(lastError));
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-            });
-            return;
-        }
-
-        guardThis->m_traceHandle.store(static_cast<std::uint64_t>(traceHandle));
-        kPro.set(guardThis->m_captureProgressPid, "开始接收目标相关 ETW 事件", 0, 55.0f);
-
-        const ULONG processStatus = ::ProcessTrace(&traceHandle, 1, nullptr, nullptr);
-        const std::uint64_t ownedTraceHandle = guardThis->m_traceHandle.exchange(0);
-        if (ownedTraceHandle != 0)
-        {
-            ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
-        }
-
-        const std::uint64_t ownedSessionHandle = guardThis->m_sessionHandle.exchange(0);
-        if (ownedSessionHandle != 0)
-        {
-            ::ControlTraceW(
-                static_cast<TRACEHANDLE>(ownedSessionHandle),
-                loggerNamePointer,
-                properties,
-                EVENT_TRACE_CONTROL_STOP);
-        }
-
-        dispatcher->post([guardThis, processStatus]() {
-            if (guardThis == nullptr)
-            {
-                return;
-            }
-
-            if (guardThis->m_captureStopTime100ns == 0)
-            {
-                guardThis->m_captureStopTime100ns = guardThis->currentSystemTime100ns();
-            }
-            guardThis->m_captureRunning.store(false);
-            guardThis->m_capturePaused.store(false);
-            if (guardThis->m_runtimeRefreshTimer != nullptr)
-            {
-                guardThis->m_runtimeRefreshTimer->stop();
-            }
-            if (guardThis->m_uiUpdateTimer != nullptr)
-            {
-                guardThis->flushPendingRows();
-            }
-            kPro.set(guardThis->m_captureProgressPid, "进程定向监控结束", 0, 100.0f);
-            guardThis->refreshTimelineRange(true);
-            if (guardThis->hasAnyEventFilterActive())
-            {
-                guardThis->applyEventFilter();
-            }
-
-            if (processStatus == ERROR_SUCCESS)
-            {
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-            }
-            else
-            {
-                guardThis->updateActionState();
-                guardThis->updateStatusLabel();
-                QMessageBox::warning(
-                    guardThis,
-                    QStringLiteral("进程定向监控"),
-                    QStringLiteral("ProcessTrace 结束，状态码=%1。").arg(processStatus));
-            }
-        });
-    });
+        state->processStarted.store(true);
+        state->processStatus.store(::ProcessTrace(&trace, 1, nullptr, nullptr));
+    }
+    catch (...) { state->startupError.store(ERROR_UNHANDLED_EXCEPTION); }
 }
 
-void ProcessTraceMonitorWidget::stopMonitoring()
+bool ProcessTraceMonitorWidget::cleanupCapture(const std::shared_ptr<CaptureState>& state)
 {
-    stopMonitoringInternal(false);
+    state->m_captureStopFlag.store(true);
+    bool stopped = true;
+    {
+        std::lock_guard<std::mutex> gate(state->operationGate);
+        if (const auto session = state->m_sessionHandle.load())
+        {
+            auto buffer = traceProperties(state->m_sessionName);
+            auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buffer.data());
+            auto* name = reinterpret_cast<wchar_t*>(buffer.data() + properties->LoggerNameOffset);
+            const ULONG status = ::ControlTraceW(session, name, properties, EVENT_TRACE_CONTROL_STOP);
+            stopped = status == ERROR_SUCCESS || status == ERROR_WMI_INSTANCE_NOT_FOUND;
+            if (stopped) state->m_sessionHandle.store(0);
+            else state->operationError.store(status); // Keep exact owned name and handle for Retry.
+        }
+        if ((!stopped || state->finished.load()) && state->m_traceHandle.load())
+        {
+            const ULONG status = ::CloseTrace(state->m_traceHandle.load());
+            if (status == ERROR_SUCCESS || status == ERROR_CTX_CLOSE_PENDING) state->m_traceHandle.store(0);
+            else { state->operationError.store(status); if (!state->finished.load()) return false; }
+        }
+        if (!stopped && !state->finished.load() && state->m_traceHandle.load()) return false;
+    }
+    // Only the retained worker joins. Successful STOP drains the final buffer first.
+    if (state->m_captureThread && state->m_captureThread->joinable()) state->m_captureThread->join();
+    state->m_captureThread.reset();
+    {
+        std::lock_guard<std::mutex> gate(state->operationGate);
+        if (const auto trace = state->m_traceHandle.load())
+        {
+            const ULONG status = ::CloseTrace(trace);
+            if (status == ERROR_SUCCESS || status == ERROR_CTX_CLOSE_PENDING) state->m_traceHandle.store(0);
+            else state->operationError.store(status);
+        }
+        const bool complete = state->m_sessionHandle.load() == 0 && state->m_traceHandle.load() == 0 && state->finished.load();
+        state->cleanupPending.store(!complete);
+        if (complete) state->operationError.store(ERROR_SUCCESS);
+        return complete;
+    }
 }
 
-void ProcessTraceMonitorWidget::stopMonitoringInternal(const bool waitForThread)
+void ProcessTraceMonitorWidget::stopMonitoring() { stopMonitoringInternal(false); }
+
+void ProcessTraceMonitorWidget::stopMonitoringInternal(const bool ownerClosing)
 {
-    m_captureStopFlag.store(true);
-    if (m_captureRunning.load() && m_captureStopTime100ns == 0)
-    {
-        m_captureStopTime100ns = currentSystemTime100ns();
-        refreshTimelineRange(true);
-    }
-
-    const std::uint64_t ownedTraceHandle = m_traceHandle.exchange(0);
-    if (ownedTraceHandle != 0)
-    {
-        ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
-    }
-
-    const std::uint64_t ownedSessionHandle = m_sessionHandle.exchange(0);
-    if (ownedSessionHandle != 0)
-    {
-        const std::wstring sessionNameWide = m_sessionName.toStdWString();
-        const ULONG propertyBufferSize = static_cast<ULONG>(
-            sizeof(EVENT_TRACE_PROPERTIES) + (sessionNameWide.size() + 1) * sizeof(wchar_t));
-        std::vector<unsigned char> propertyBuffer(propertyBufferSize, 0);
-        auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertyBuffer.data());
-        properties->Wnode.BufferSize = propertyBufferSize;
-        properties->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-        wchar_t* loggerNamePointer = reinterpret_cast<wchar_t*>(propertyBuffer.data() + properties->LoggerNameOffset);
-        if (!sessionNameWide.empty())
-        {
-            ::wcscpy_s(loggerNamePointer, sessionNameWide.size() + 1, sessionNameWide.c_str());
-        }
-
-        ::ControlTraceW(
-            static_cast<TRACEHANDLE>(ownedSessionHandle),
-            loggerNamePointer,
-            properties,
-            EVENT_TRACE_CONTROL_STOP);
-    }
-
-    if (m_runtimeRefreshTimer != nullptr && m_runtimeRefreshTimer->isActive())
-    {
-        m_runtimeRefreshTimer->stop();
-    }
-    if (waitForThread && m_uiUpdateTimer != nullptr && m_uiUpdateTimer->isActive())
-    {
-        m_uiUpdateTimer->stop();
-    }
-
-    if (m_captureThread == nullptr || !m_captureThread->joinable())
-    {
-        m_captureThread.reset();
-        m_captureRunning.store(false);
-        m_capturePaused.store(false);
-        updateActionState();
-        updateStatusLabel();
-        return;
-    }
-
-    if (waitForThread)
-    {
-        m_captureThread->join();
-        m_captureThread.reset();
-        m_captureRunning.store(false);
-        m_capturePaused.store(false);
-        updateActionState();
-        updateStatusLabel();
-        return;
-    }
-
-    // 交互停止只请求 ETW 线程退出，不能把唯一 join 句柄移入 detached
-    // 回收线程。析构函数必须仍能同步等待该线程，确保 ETW 回调 Context
-    // 指向的控件在 ProcessTrace 和所有回调结束前始终有效。
+    m_capture->m_captureStopFlag.store(true);
+    // Owner destruction signals stop but does not retry a failed retained cleanup.
+    // Explicit Stop and MainWindow Retry remain the retry actions.
+    if (m_captureCleanup && (!ownerClosing || !m_captureCleanup->isCleanupRequested()))
+        m_captureCleanup->requestCleanup();
+    if (m_captureStopTime100ns == 0) m_captureStopTime100ns = currentSystemTime100ns();
+    if (m_runtimeRefreshTimer) m_runtimeRefreshTimer->stop();
+    if (m_uiUpdateTimer && !m_uiUpdateTimer->isActive()) m_uiUpdateTimer->start();
+    refreshTimelineRange(true);
     updateActionState();
     updateStatusLabel();
+}
+
+void ProcessTraceMonitorWidget::pollCaptureState()
+{
+    const auto state = m_capture;
+    if (state->finished.load() && m_captureCleanup && !m_captureCleanup->isCleanupRequested()) m_captureCleanup->requestCleanup();
+    bool targetChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+        if (m_appliedTargetVersion != state->targetVersion)
+        {
+            m_targetProcessList = state->targets;
+            m_appliedTargetVersion = state->targetVersion;
+            targetChanged = true;
+        }
+    }
+    if (targetChanged) refreshTargetTable();
+    if (state->finished.load() && !m_captureCompletionApplied)
+    {
+        m_captureCompletionApplied = true;
+        if (!m_captureStopTime100ns) m_captureStopTime100ns = currentSystemTime100ns();
+        if (m_runtimeRefreshTimer) m_runtimeRefreshTimer->stop();
+        kPro.set(m_captureProgressPid, "进程定向监控结束", 0, 100.0f);
+        refreshTimelineRange(true);
+        updateActionState();
+        updateStatusLabel();
+    }
+    updateStatusLabel();
+    if (m_stopButton) m_stopButton->setEnabled(state->m_captureRunning.load() || (m_captureCleanup && !m_captureCleanup->isComplete()));
 }
 
 void ProcessTraceMonitorWidget::setMonitoringPaused(const bool paused)
 {
-    if (!m_captureRunning.load())
-    {
-        return;
-    }
-
-    m_capturePaused.store(paused);
+    if (!m_capture->m_captureRunning.load() || m_capture->m_captureStopFlag.load()) return;
+    m_capture->m_capturePaused.store(paused);
     updateActionState();
     updateStatusLabel();
-
-    kLogEvent event;
-    info << event
-        << "[ProcessTraceMonitorWidget] 监控暂停状态变更, paused="
-        << (paused ? "true" : "false")
-        << eol;
 }
 
 void ProcessTraceMonitorWidget::refreshTrackedProcessSnapshotAsync()
 {
-    if (!m_captureRunning.load() || m_runtimeRefreshPending.exchange(true))
+    const auto state = m_capture;
+    if (!state->m_captureRunning.load() || state->m_captureStopFlag.load() || state->m_runtimeRefreshPending.exchange(true)) return;
+    const auto lease = ks::ui::AsyncCleanupRegistry::global().acquire();
+    if (!lease) { state->m_runtimeRefreshPending.store(false); return; }
+    try
     {
-        return;
-    }
-
-    QPointer<ProcessTraceMonitorWidget> guardThis(this);
-    const auto dispatcher = m_uiDispatcher;
-    std::thread([guardThis, dispatcher]() {
-        std::vector<ks::process::ProcessRecord> processList = ks::process::EnumerateProcesses(
-            ks::process::ProcessEnumStrategy::Auto);
-        dispatcher->post([guardThis, processList = std::move(processList)]() {
-            if (guardThis == nullptr)
+        QThreadPool::globalInstance()->start(QRunnable::create([lease, state]()
+        {
+            try
             {
-                return;
+                if (!state->m_captureStopFlag.load())
+                    syncTrackedProcessTree(*state, ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto));
             }
-
-            guardThis->m_runtimeRefreshPending.store(false);
-            guardThis->syncTrackedProcessTree(processList);
-            guardThis->refreshTargetTable();
-            guardThis->updateStatusLabel();
-        });
-    }).detach();
+            catch (...) {}
+            state->m_runtimeRefreshPending.store(false);
+        }));
+    }
+    catch (...) { state->m_runtimeRefreshPending.store(false); }
 }
 
-void ProcessTraceMonitorWidget::seedTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList)
+void ProcessTraceMonitorWidget::seedTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList)
 {
-    std::lock_guard<std::mutex> lock(m_runtimeMutex);
-    m_trackedProcessMap.clear();
+    // Expensive closure/pruning runs on a private value snapshot. GUI readers only
+    // contend with short copy/swap sections, never the system-sized tree walk.
+    CaptureState next;
+    std::uint64_t baseVersion = 0;
+    std::uint64_t baseRuntimeRevision = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        baseVersion = state.targetVersion;
+        baseRuntimeRevision = state.runtimeRevision;
+        next.targets = state.targets;
+    }
 
-    for (TargetProcessEntry& targetEntry : m_targetProcessList)
+    next.m_trackedProcessMap.clear();
+
+    for (TargetProcessEntry& targetEntry : next.targets)
     {
         targetEntry.alive = false;
         const auto found = std::find_if(
@@ -749,7 +386,7 @@ void ProcessTraceMonitorWidget::seedTrackedProcessTree(const std::vector<ks::pro
             }
         }
 
-        m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
+        next.m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
     }
 
     bool added = true;
@@ -758,13 +395,13 @@ void ProcessTraceMonitorWidget::seedTrackedProcessTree(const std::vector<ks::pro
         added = false;
         for (const ks::process::ProcessRecord& record : processList)
         {
-            if (record.pid == 0 || m_trackedProcessMap.find(record.pid) != m_trackedProcessMap.end())
+            if (record.pid == 0 || next.m_trackedProcessMap.find(record.pid) != next.m_trackedProcessMap.end())
             {
                 continue;
             }
 
-            const auto parentIt = m_trackedProcessMap.find(record.parentPid);
-            if (parentIt == m_trackedProcessMap.end())
+            const auto parentIt = next.m_trackedProcessMap.find(record.parentPid);
+            if (parentIt == next.m_trackedProcessMap.end())
             {
                 continue;
             }
@@ -780,17 +417,38 @@ void ProcessTraceMonitorWidget::seedTrackedProcessTree(const std::vector<ks::pro
             trackedProcess.isRoot = false;
             trackedProcess.staleSnapshotRounds = 0;
             trackedProcess.lastRelatedEventTime100ns = 0;
-            m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
+            next.m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
             added = true;
         }
     }
+
+    {
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        if (state.targetVersion != baseVersion || state.runtimeRevision != baseRuntimeRevision) return;
+        state.m_trackedProcessMap.swap(next.m_trackedProcessMap);
+        ++state.runtimeRevision;
+        state.targets.swap(next.targets);
+        ++state.targetVersion;
+    }
 }
 
-void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList)
+void ProcessTraceMonitorWidget::syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList)
 {
-    std::lock_guard<std::mutex> lock(m_runtimeMutex);
+    // Expensive closure/pruning runs on a private value snapshot. GUI readers only
+    // contend with short copy/swap sections, never the system-sized tree walk.
+    CaptureState next;
+    std::uint64_t baseVersion = 0;
+    std::uint64_t baseRuntimeRevision = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        baseVersion = state.targetVersion;
+        baseRuntimeRevision = state.runtimeRevision;
+        next.targets = state.targets;
+        next.m_trackedProcessMap = state.m_trackedProcessMap;
+    }
 
-    for (auto& [pidValue, trackedProcess] : m_trackedProcessMap)
+
+    for (auto& [pidValue, trackedProcess] : next.m_trackedProcessMap)
     {
         (void)pidValue;
         trackedProcess.alive = false;
@@ -807,8 +465,8 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::pro
                 continue;
             }
 
-            auto existingIt = m_trackedProcessMap.find(record.pid);
-            if (existingIt != m_trackedProcessMap.end())
+            auto existingIt = next.m_trackedProcessMap.find(record.pid);
+            if (existingIt != next.m_trackedProcessMap.end())
             {
                 const bool creationMatches = existingIt->second.creationTime100ns == 0
                     || record.creationTime100ns == 0
@@ -821,8 +479,8 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::pro
                         continue;
                     }
 
-                    const auto parentIt = m_trackedProcessMap.find(record.parentPid);
-                    if (parentIt == m_trackedProcessMap.end())
+                    const auto parentIt = next.m_trackedProcessMap.find(record.parentPid);
+                    if (parentIt == next.m_trackedProcessMap.end())
                     {
                         existingIt->second.alive = false;
                         continue;
@@ -848,8 +506,8 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::pro
                 continue;
             }
 
-            const auto parentIt = m_trackedProcessMap.find(record.parentPid);
-            if (parentIt == m_trackedProcessMap.end())
+            const auto parentIt = next.m_trackedProcessMap.find(record.parentPid);
+            if (parentIt == next.m_trackedProcessMap.end())
             {
                 continue;
             }
@@ -865,17 +523,17 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::pro
             trackedProcess.isRoot = false;
             trackedProcess.staleSnapshotRounds = 0;
             trackedProcess.lastRelatedEventTime100ns = 0;
-            m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
+            next.m_trackedProcessMap[trackedProcess.pid] = trackedProcess;
             added = true;
         }
     }
 
-    pruneStaleTrackedProcesses();
+    pruneStaleTrackedProcesses(next);
 
-    for (TargetProcessEntry& targetEntry : m_targetProcessList)
+    for (TargetProcessEntry& targetEntry : next.targets)
     {
-        const auto trackedIt = m_trackedProcessMap.find(targetEntry.pid);
-        if (trackedIt == m_trackedProcessMap.end())
+        const auto trackedIt = next.m_trackedProcessMap.find(targetEntry.pid);
+        if (trackedIt == next.m_trackedProcessMap.end())
         {
             targetEntry.alive = false;
             continue;
@@ -902,9 +560,18 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(const std::vector<ks::pro
             targetEntry.creationTime100ns = trackedIt->second.creationTime100ns;
         }
     }
+
+    {
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        if (state.targetVersion != baseVersion || state.runtimeRevision != baseRuntimeRevision) return;
+        state.m_trackedProcessMap.swap(next.m_trackedProcessMap);
+        ++state.runtimeRevision;
+        state.targets.swap(next.targets);
+        ++state.targetVersion;
+    }
 }
 
-void ProcessTraceMonitorWidget::pruneStaleTrackedProcesses()
+void ProcessTraceMonitorWidget::pruneStaleTrackedProcesses(CaptureState& state)
 {
     FILETIME fileTimeValue{};
     ::GetSystemTimeAsFileTime(&fileTimeValue);
@@ -915,9 +582,9 @@ void ProcessTraceMonitorWidget::pruneStaleTrackedProcesses()
     const std::uint64_t kRecentEventKeepWindow100ns = 15ULL * 1000ULL * 1000ULL * 10ULL;
 
     std::vector<std::uint32_t> pidListNeedErase;
-    pidListNeedErase.reserve(m_trackedProcessMap.size());
+    pidListNeedErase.reserve(state.m_trackedProcessMap.size());
 
-    for (auto& [pidValue, trackedProcess] : m_trackedProcessMap)
+    for (auto& [pidValue, trackedProcess] : state.m_trackedProcessMap)
     {
         (void)pidValue;
         if (trackedProcess.alive)
@@ -940,6 +607,6 @@ void ProcessTraceMonitorWidget::pruneStaleTrackedProcesses()
 
     for (const std::uint32_t pidValue : pidListNeedErase)
     {
-        m_trackedProcessMap.erase(pidValue);
+        state.m_trackedProcessMap.erase(pidValue);
     }
 }

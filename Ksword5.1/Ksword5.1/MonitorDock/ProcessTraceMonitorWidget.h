@@ -12,6 +12,7 @@
 #include "ProcessTraceTimelineWidget.h"
 #include "../Framework.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/RetainedCleanupJob.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <QWidget>
@@ -200,6 +201,7 @@ public:
     };
 
 private:
+    struct CaptureState;
     // event：
     // - 作用：监听全局调色板/样式变化，刷新本页自定义 Collapse 的动态样式；
     // - 处理：先交给 QWidget 基类，再按事件类型重刷折叠面板；
@@ -296,29 +298,30 @@ private:
     // ========================= 监控流程 ==========================
     void startMonitoring();
     void stopMonitoring();
-    void stopMonitoringInternal(bool waitForThread);
+    void stopMonitoringInternal(bool ownerClosing);
     void setMonitoringPaused(bool paused);
     void refreshTrackedProcessSnapshotAsync();
-    void seedTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList);
-    void syncTrackedProcessTree(const std::vector<ks::process::ProcessRecord>& processList);
-    void pruneStaleTrackedProcesses();
+    static void seedTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList);
+    static void syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList);
+    static void pruneStaleTrackedProcesses(CaptureState& state);
 
     // ========================= ETW 采集 ==========================
     static void WINAPI processTraceEtwCallback(struct _EVENT_RECORD* eventRecordPtr);
-    void enqueueEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr);
-    bool buildRelevantEventRow(
+    static void enqueueEventFromRecord(CaptureState& state, const struct _EVENT_RECORD* eventRecordPtr);
+    static bool buildRelevantEventRow(CaptureState& state,
         const struct _EVENT_RECORD* eventRecordPtr,
         const QString& providerNameText,
         const QString& providerTypeText,
         const std::vector<EtwPropertyValue>& propertyList,
         CapturedEventRow* rowOut);
-    bool extractEventProperties(
+    static bool extractEventProperties(
         const struct _EVENT_RECORD* eventRecordPtr,
-        std::vector<EtwPropertyValue>* propertyListOut, bool identityOnly = false, const std::vector<EtwPropertyValue>* knownIdentity = nullptr) const;
-    ks::ui::FieldDocument buildEventDetailDocument(
+        std::vector<EtwPropertyValue>* propertyListOut, bool identityOnly = false,
+        const std::vector<EtwPropertyValue>* knownIdentity = nullptr);
+    static ks::ui::FieldDocument buildEventDetailDocument(
         const QString& providerGuidText,
         const struct _EVENT_RECORD* eventRecordPtr,
-        const std::vector<EtwPropertyValue>& propertyList) const;
+        const std::vector<EtwPropertyValue>& propertyList);
 
     // ========================= 文本与样式辅助 ====================
     static QString blueButtonStyle();
@@ -340,6 +343,42 @@ private:
     static QTableWidgetItem* createReadOnlyItem(const QString& textValue);
 
 private:
+    // Value capture epoch. Workers and ETW callback context never borrow QWidget.
+    struct CaptureState
+    {
+        std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
+        std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
+        std::deque<CapturedEventRow> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
+        std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
+        std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
+        std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
+        std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
+        std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
+        std::atomic_bool m_captureStopFlag{ false };                    // m_captureStopFlag：后台线程停止信号。
+        std::atomic_bool m_runtimeRefreshPending{ false };              // m_runtimeRefreshPending：运行期快照刷新是否进行中。
+        std::unique_ptr<std::thread> m_captureThread;                   // m_captureThread：ETW 会话线程。
+        std::atomic<std::uint64_t> m_sessionHandle{ 0 };                // m_sessionHandle：ETW 会话句柄。
+        std::atomic<std::uint64_t> m_traceHandle{ 0 };                  // m_traceHandle：ETW 消费句柄。
+        QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
+        std::mutex operationGate;
+        std::atomic_bool finished{ true };
+        std::atomic_bool cleanupPending{ false };
+        std::atomic<unsigned long> operationError{ 0 };
+        std::atomic<unsigned long> startupError{ 0 };
+        std::atomic_bool processStarted{ false };
+        std::atomic<unsigned long> processStatus{ 0 };
+        std::vector<TargetProcessEntry> targets;
+        std::uint64_t targetVersion = 0; // under m_runtimeMutex
+        std::uint64_t runtimeRevision = 0; // every tracked map mutation, under m_runtimeMutex
+    };
+    static void runCapture(const std::shared_ptr<CaptureState>& state);
+    static bool cleanupCapture(const std::shared_ptr<CaptureState>& state);
+    void pollCaptureState();
+    std::shared_ptr<CaptureState> m_capture = std::make_shared<CaptureState>();
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_captureCleanup;
+    std::uint64_t m_appliedTargetVersion = 0;
+    bool m_captureCompletionApplied = true;
+
     // ========================= 顶层控件 =========================
     QVBoxLayout* m_rootLayout = nullptr;                 // m_rootLayout：根布局。
     QWidget* m_configurationCollapseWidget = nullptr;    // m_configurationCollapseWidget：默认展开的进程定向配置折叠段。
@@ -393,35 +432,21 @@ private:
     // ========================= 后台状态 =========================
     std::vector<ks::process::ProcessRecord> m_availableProcessList; // m_availableProcessList：可选进程快照。
     std::vector<TargetProcessEntry> m_targetProcessList;            // m_targetProcessList：用户选择的根进程列表。
-    std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
-    std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
     static constexpr std::size_t kPendingRowCapacity = 24000;       // 待显示事件上限，积压时丢弃最旧事件。
     static constexpr std::size_t kUiFlushRowLimit = 160;            // 单个 GUI tick 最多写入的行数。
     static constexpr int kUiFlushBudgetMs = 4;                       // 单个 GUI tick 的渲染时间预算。
 
-    std::deque<CapturedEventRow> m_pendingRows;                     // m_pendingRows：后台待刷入 UI 的有界 FIFO 队列。
     std::vector<ProcessTraceTimelineEventPoint> m_timelineEventPoints; // m_timelineEventPoints：时间轴绘制用轻量事件缓存。
-    std::mutex m_runtimeMutex;                                      // m_runtimeMutex：保护目标进程树与 Provider 列表。
-    std::mutex m_pendingMutex;                                      // m_pendingMutex：保护待刷新事件队列。
-    std::size_t m_pendingDroppedRows = 0;                            // m_pendingDroppedRows：因积压保护丢弃的事件数。
-    std::atomic_bool m_captureRunning{ false };                     // m_captureRunning：ETW 监听是否在运行。
-    std::atomic_bool m_capturePaused{ false };                      // m_capturePaused：ETW 监听是否处于暂停态。
-    std::atomic_bool m_captureStopFlag{ false };                    // m_captureStopFlag：后台线程停止信号。
     std::atomic_bool m_availableRefreshPending{ false };            // m_availableRefreshPending：可选进程刷新是否进行中。
-    std::atomic_bool m_runtimeRefreshPending{ false };              // m_runtimeRefreshPending：运行期快照刷新是否进行中。
-    std::unique_ptr<std::thread> m_captureThread;                   // m_captureThread：ETW 会话线程。
     QTimer* m_uiUpdateTimer = nullptr;                              // m_uiUpdateTimer：事件表节流刷新定时器。
     QTimer* m_eventFilterDebounceTimer = nullptr;                   // m_eventFilterDebounceTimer：事件筛选节流定时器。
     QTimer* m_runtimeRefreshTimer = nullptr;                        // m_runtimeRefreshTimer：运行期快照辅助定时器。
     int m_captureProgressPid = 0;                                   // m_captureProgressPid：进度条任务 ID。
-    std::atomic<std::uint64_t> m_sessionHandle{ 0 };                // m_sessionHandle：ETW 会话句柄。
-    std::atomic<std::uint64_t> m_traceHandle{ 0 };                  // m_traceHandle：ETW 消费句柄。
     std::uint64_t m_captureStartTime100ns = 0;                      // m_captureStartTime100ns：本轮监控起点时间。
     std::uint64_t m_captureStopTime100ns = 0;                       // m_captureStopTime100ns：本轮监控停止时间。
     std::uint64_t m_timelineSelectionStart100ns = 0;                // m_timelineSelectionStart100ns：时间轴框选起点。
     std::uint64_t m_timelineSelectionEnd100ns = 0;                  // m_timelineSelectionEnd100ns：时间轴框选终点。
     bool m_timelineUserSelectionActive = false;                     // m_timelineUserSelectionActive：用户是否已启用时间框选。
     qint64 m_lastTimelineRefreshMs = 0;                             // m_lastTimelineRefreshMs：上次向时间轴复制事件点的时间。
-    QString m_sessionName;                                          // m_sessionName：本轮 ETW 会话名。
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_uiDispatcher;        // 辅助快照晚完成时不借用已释放控件或应用。
 };

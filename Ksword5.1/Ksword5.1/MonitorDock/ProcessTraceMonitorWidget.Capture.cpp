@@ -537,14 +537,14 @@ void WINAPI ProcessTraceMonitorWidget::processTraceEtwCallback(struct _EVENT_REC
         return;
     }
 
-    auto* widgetPointer = reinterpret_cast<ProcessTraceMonitorWidget*>(eventRecord->UserContext);
-    widgetPointer->enqueueEventFromRecord(eventRecordPtr);
+    auto* state = reinterpret_cast<CaptureState*>(eventRecord->UserContext);
+    enqueueEventFromRecord(*state, eventRecordPtr);
 }
 
-void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECORD* eventRecordPtr)
+void ProcessTraceMonitorWidget::enqueueEventFromRecord(CaptureState& state, const struct _EVENT_RECORD* eventRecordPtr)
 {
     const EVENT_RECORD* eventRecord = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
-    if (eventRecord == nullptr || m_captureStopFlag.load() || m_capturePaused.load())
+    if (eventRecord == nullptr || state.m_captureStopFlag.load() || state.m_capturePaused.load())
     {
         return;
     }
@@ -553,14 +553,14 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECOR
     QString providerNameText = providerGuidText;
     QString providerTypeText = providerTypeFromName(providerGuidText);
     {
-        std::lock_guard<std::mutex> lock(m_runtimeMutex);
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
         const auto found = std::find_if(
-            m_activeProviderList.begin(),
-            m_activeProviderList.end(),
+            state.m_activeProviderList.begin(),
+            state.m_activeProviderList.end(),
             [providerGuidText](const ProviderEntry& entry) {
                 return entry.providerGuidText.compare(providerGuidText, Qt::CaseInsensitive) == 0;
             });
-        if (found != m_activeProviderList.end())
+        if (found != state.m_activeProviderList.end())
         {
             providerNameText = found->providerName;
             providerTypeText = found->providerTypeText;
@@ -571,25 +571,25 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECOR
     extractEventProperties(eventRecordPtr, &propertyList, true);
 
     CapturedEventRow rowValue;
-    if (!buildRelevantEventRow(eventRecordPtr, providerNameText, providerTypeText, propertyList, &rowValue))
+    if (!buildRelevantEventRow(state, eventRecordPtr, providerNameText, providerTypeText, propertyList, &rowValue))
     {
         return;
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        if (m_pendingRows.size() >= kPendingRowCapacity)
+        std::lock_guard<std::mutex> lock(state.m_pendingMutex);
+        if (state.m_pendingRows.size() >= kPendingRowCapacity)
         {
-            m_pendingRows.pop_front();
-            ++m_pendingDroppedRows;
+            state.m_pendingRows.pop_front();
+            ++state.m_pendingDroppedRows;
         }
-        m_pendingRows.push_back(std::move(rowValue));
+        state.m_pendingRows.push_back(std::move(rowValue));
     }
 }
 
 bool ProcessTraceMonitorWidget::extractEventProperties(
     const struct _EVENT_RECORD* eventRecordPtr,
-    std::vector<EtwPropertyValue>* propertyListOut, const bool identityOnly, const std::vector<EtwPropertyValue>* knownIdentity) const
+    std::vector<EtwPropertyValue>* propertyListOut, const bool identityOnly, const std::vector<EtwPropertyValue>* knownIdentity)
 {
     if (propertyListOut == nullptr)
     {
@@ -730,7 +730,7 @@ bool ProcessTraceMonitorWidget::extractEventProperties(
 ks::ui::FieldDocument ProcessTraceMonitorWidget::buildEventDetailDocument(
     const QString& providerGuidText,
     const struct _EVENT_RECORD* eventRecordPtr,
-    const std::vector<EtwPropertyValue>& propertyList) const
+    const std::vector<EtwPropertyValue>& propertyList)
 {
     const EVENT_RECORD* eventRecord = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
     if (eventRecord == nullptr) return {};
@@ -754,7 +754,7 @@ ks::ui::FieldDocument ProcessTraceMonitorWidget::buildEventDetailDocument(
     return document;
 }
 
-bool ProcessTraceMonitorWidget::buildRelevantEventRow(
+bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
     const struct _EVENT_RECORD* eventRecordPtr,
     const QString& providerNameText,
     const QString& providerTypeText,
@@ -813,19 +813,20 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     bool allowStopAutoRemove = false;
 
     {
-        std::lock_guard<std::mutex> lock(m_runtimeMutex);
-        auto markTrackedAlive = [this](const std::uint32_t pidValue) {
-            const auto found = m_trackedProcessMap.find(pidValue);
-            if (found != m_trackedProcessMap.end())
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        auto markTrackedAlive = [&state](const std::uint32_t pidValue) {
+            const auto found = state.m_trackedProcessMap.find(pidValue);
+            if (found != state.m_trackedProcessMap.end())
             {
                 found->second.alive = true;
+                ++state.runtimeRevision;
                 found->second.staleSnapshotRounds = 0;
             }
         };
 
-        const auto trackedByPid = [this](const std::uint32_t pidValue) -> RuntimeTrackedProcess* {
-            const auto found = m_trackedProcessMap.find(pidValue);
-            return found != m_trackedProcessMap.end() ? &found->second : nullptr;
+        const auto trackedByPid = [&state](const std::uint32_t pidValue) -> RuntimeTrackedProcess* {
+            const auto found = state.m_trackedProcessMap.find(pidValue);
+            return found != state.m_trackedProcessMap.end() ? &found->second : nullptr;
         };
 
         RuntimeTrackedProcess* matchedTrackedProcess = nullptr;
@@ -878,8 +879,8 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
             {
                 // parentRootPidValue：先拷贝父根 PID，避免 map 插入导致指针失效后仍访问父节点。
                 const std::uint32_t parentRootPidValue = parentTrackedProcess->rootPid;
-                auto childIt = m_trackedProcessMap.find(propertyPidValue);
-                if (childIt == m_trackedProcessMap.end())
+                auto childIt = state.m_trackedProcessMap.find(propertyPidValue);
+                if (childIt == state.m_trackedProcessMap.end())
                 {
                     RuntimeTrackedProcess childTrackedProcess;
                     childTrackedProcess.pid = propertyPidValue;
@@ -892,8 +893,9 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
                     childTrackedProcess.isRoot = false;
                     childTrackedProcess.staleSnapshotRounds = 0;
                     childTrackedProcess.lastRelatedEventTime100ns = eventTimestamp100ns;
-                    m_trackedProcessMap[propertyPidValue] = childTrackedProcess;
-                    childIt = m_trackedProcessMap.find(propertyPidValue);
+                    state.m_trackedProcessMap[propertyPidValue] = childTrackedProcess;
+                    ++state.runtimeRevision;
+                    childIt = state.m_trackedProcessMap.find(propertyPidValue);
                 }
                 else
                 {
@@ -903,6 +905,7 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
                     childIt->second.isRoot = false;
                     childIt->second.staleSnapshotRounds = 0;
                     childIt->second.lastRelatedEventTime100ns = eventTimestamp100ns;
+                    ++state.runtimeRevision;
                     if (!processHintText.trimmed().isEmpty())
                     {
                         childIt->second.processName = processHintText;
@@ -972,12 +975,14 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
             && allowStopAutoRemove
             && isProcessStopEvent(providerTypeText, eventNameText))
         {
-            auto found = m_trackedProcessMap.find(displayPidValue);
-            if (found != m_trackedProcessMap.end())
+            auto found = state.m_trackedProcessMap.find(displayPidValue);
+            if (found != state.m_trackedProcessMap.end())
             {
                 found->second.alive = false;
                 found->second.lastRelatedEventTime100ns = eventTimestamp100ns;
-                m_trackedProcessMap.erase(found);
+                ++state.runtimeRevision;
+                state.m_trackedProcessMap.erase(found);
+                ++state.runtimeRevision;
             }
             shouldAutoRemoveTargetList = true;
             autoRemovePidValue = displayPidValue;
@@ -1002,14 +1007,15 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
             processNameText = QString::fromStdString(detailRecord.processName);
             processPathText = QString::fromStdString(detailRecord.imagePath);
 
-            std::lock_guard<std::mutex> lock(m_runtimeMutex);
-            auto found = m_trackedProcessMap.find(displayPidValue);
-            if (found != m_trackedProcessMap.end())
+            std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+            auto found = state.m_trackedProcessMap.find(displayPidValue);
+            if (found != state.m_trackedProcessMap.end())
             {
                 found->second.processName = processNameText;
                 found->second.imagePath = processPathText;
                 found->second.creationTime100ns = detailRecord.creationTime100ns;
                 found->second.alive = true;
+                ++state.runtimeRevision;
                 found->second.staleSnapshotRounds = 0;
             }
         }
@@ -1047,44 +1053,40 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     rowOut->detailDocument = buildEventDetailDocument(providerGuidText, eventRecordPtr, fullProperties);
     rowOut->activityIdText = guidToText(eventRecord->EventHeader.ActivityId);
 
-    // UI 同步：
-    // - ETW 线程只负责判定；
-    // - 监听列表变更统一回到 UI 线程，避免并发写 m_targetProcessList。
+    // Preserve accepted lifecycle events in a value inbox; one GUI poll applies a batch.
     if (shouldSyncAutoAddTargetList && autoAddPidValue != 0)
     {
-        m_uiDispatcher->post(
-            [this,
-             autoAddPidValue,
-             autoAddParentPidValue,
-             autoAddProcessNameText,
-             autoAddProcessPathText,
-             autoAddCreationTime100ns]() {
-                upsertAutoTrackedProcessInTargetList(
-                    autoAddPidValue,
-                    autoAddParentPidValue,
-                    autoAddProcessNameText,
-                    autoAddProcessPathText,
-                    autoAddCreationTime100ns);
-            });
+        TargetProcessEntry entry;
+        entry.pid = autoAddPidValue;
+        entry.processName = autoAddProcessNameText;
+        entry.imagePath = autoAddProcessPathText;
+        entry.creationTime100ns = autoAddCreationTime100ns;
+        entry.alive = true;
+        entry.remarkText = QStringLiteral("ETW 自动加入（父PID=%1）").arg(autoAddParentPidValue);
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        const auto found = std::find_if(state.targets.begin(), state.targets.end(), [&entry](const auto& value) { return value.pid == entry.pid; });
+        if (found == state.targets.end()) state.targets.push_back(std::move(entry));
+        else if (!entry.creationTime100ns || !found->creationTime100ns || entry.creationTime100ns >= found->creationTime100ns) *found = std::move(entry);
+        ++state.targetVersion;
     }
-
     if (shouldAutoRemoveTargetList && autoRemovePidValue != 0)
     {
-        m_uiDispatcher->post(
-            [this, autoRemovePidValue]() {
-                removeTrackedProcessFromTargetListByPid(
-                    autoRemovePidValue,
-                    QStringLiteral("ETW 进程退出事件"));
-            });
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        state.targets.erase(std::remove_if(state.targets.begin(), state.targets.end(), [autoRemovePidValue, eventTimestamp100ns](const auto& value)
+        {
+            return value.pid == autoRemovePidValue && (!value.creationTime100ns || value.creationTime100ns <= eventTimestamp100ns);
+        }), state.targets.end());
+        ++state.targetVersion;
     }
 
     if (displayPidValue != 0 && !shouldAutoRemoveTargetList)
     {
-        std::lock_guard<std::mutex> lock(m_runtimeMutex);
-        const auto found = m_trackedProcessMap.find(displayPidValue);
-        if (found != m_trackedProcessMap.end())
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        const auto found = state.m_trackedProcessMap.find(displayPidValue);
+        if (found != state.m_trackedProcessMap.end())
         {
             found->second.lastRelatedEventTime100ns = eventTimestamp100ns;
+            ++state.runtimeRevision;
         }
     }
     return true;

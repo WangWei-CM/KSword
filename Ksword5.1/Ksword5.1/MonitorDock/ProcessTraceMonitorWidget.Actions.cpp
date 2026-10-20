@@ -513,7 +513,7 @@ void ProcessTraceMonitorWidget::initializeConnections()
     if (m_pauseButton != nullptr)
     {
         connect(m_pauseButton, &QPushButton::clicked, this, [this]() {
-            if (!m_capturePaused.load())
+            if (!m_capture->m_capturePaused.load())
             {
                 setMonitoringPaused(true);
             }
@@ -819,7 +819,7 @@ void ProcessTraceMonitorWidget::addManualProcessByPid()
 void ProcessTraceMonitorWidget::createSuspendedTargetProcess()
 {
     // 运行期不接受修改根目标集合，和现有“手动添加 / 批量添加”保持同一约束。
-    if (m_captureRunning.load())
+    if (m_capture->m_captureRunning.load())
     {
         return;
     }
@@ -1444,7 +1444,7 @@ void ProcessTraceMonitorWidget::showAvailableContextMenu(const QPoint& position)
 
     const std::vector<int> selectedRows = selectedTableRows(m_availableTable);
     const int currentRow = m_availableTable->currentRow();
-    const bool running = m_captureRunning.load();
+    const bool running = m_capture->m_captureRunning.load();
 
     QMenu menu(this);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
@@ -1537,7 +1537,7 @@ void ProcessTraceMonitorWidget::showTargetContextMenu(const QPoint& position)
         QIcon(":/Icon/process_terminate.svg"),
         QStringLiteral("清空全部目标"));
 
-    const bool running = m_captureRunning.load();
+    const bool running = m_capture->m_captureRunning.load();
     copyCurrentAction->setEnabled(currentRow >= 0);
     copySelectedAction->setEnabled(!selectedRows.empty());
     removeSelectedAction->setEnabled(!running && !m_targetTable->selectedItems().isEmpty());
@@ -1808,13 +1808,14 @@ void ProcessTraceMonitorWidget::clearEventFilter()
 
 void ProcessTraceMonitorWidget::flushPendingRows()
 {
+    pollCaptureState();
     if (m_eventTable == nullptr)
     {
         return;
     }
 
     // 在 drain 前延后整个 UI 提交；同键 timeout 只保留一次重试，原始事件仍留在
-    // m_pendingRows 中，因此菜单关闭后不会丢批次，也不会让头部裁剪改变动作目标。
+    // m_capture->m_pendingRows 中，因此菜单关闭后不会丢批次，也不会让头部裁剪改变动作目标。
     const QPointer<ProcessTraceMonitorWidget> guardThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
@@ -1833,20 +1834,20 @@ void ProcessTraceMonitorWidget::flushPendingRows()
 
     std::vector<CapturedEventRow> rowList;
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_pendingRows.size());
+        std::lock_guard<std::mutex> lock(m_capture->m_pendingMutex);
+        const std::size_t takeCount = std::min(kUiFlushRowLimit, m_capture->m_pendingRows.size());
         rowList.reserve(takeCount);
         for (std::size_t index = 0; index < takeCount; ++index)
         {
-            rowList.push_back(std::move(m_pendingRows.front()));
-            m_pendingRows.pop_front();
+            rowList.push_back(std::move(m_capture->m_pendingRows.front()));
+            m_capture->m_pendingRows.pop_front();
         }
     }
 
     if (rowList.empty())
     {
         refreshTimelineRange(false);
-        if (!m_captureRunning.load() && m_uiUpdateTimer != nullptr)
+        if (!m_capture->m_captureRunning.load() && (!m_captureCleanup || m_captureCleanup->isComplete()) && m_uiUpdateTimer != nullptr)
         {
             m_uiUpdateTimer->stop();
         }
@@ -1888,21 +1889,21 @@ void ProcessTraceMonitorWidget::flushPendingRows()
 
     if (renderedCount < rowList.size())
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        std::lock_guard<std::mutex> lock(m_capture->m_pendingMutex);
         for (std::size_t index = rowList.size(); index > renderedCount; --index)
         {
-            m_pendingRows.push_front(std::move(rowList[index - 1]));
+            m_capture->m_pendingRows.push_front(std::move(rowList[index - 1]));
         }
-        while (m_pendingRows.size() > kPendingRowCapacity)
+        while (m_capture->m_pendingRows.size() > kPendingRowCapacity)
         {
-            m_pendingRows.pop_back();
-            ++m_pendingDroppedRows;
+            m_capture->m_pendingRows.pop_back();
+            ++m_capture->m_pendingDroppedRows;
         }
     }
 
     refreshTimelineRange(false);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (!m_captureRunning.load() || (nowMs - m_lastTimelineRefreshMs) >= 250)
+    if (!m_capture->m_captureRunning.load() || (nowMs - m_lastTimelineRefreshMs) >= 250)
     {
         refreshTimelinePoints();
         m_lastTimelineRefreshMs = nowMs;
