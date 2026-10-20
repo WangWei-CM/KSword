@@ -5,6 +5,7 @@
 #include <QSortFilterProxyModel>
 #include <QStringList>
 #include <memory>
+#include <functional>
 
 namespace ks::ui
 {
@@ -31,6 +32,24 @@ namespace ks::ui
     class ComplexReportModel final : public QAbstractItemModel
     {
     public:
+        // Prepared values contain no model/QObject and may be built on a worker.
+        struct State;
+        using Snapshot = std::shared_ptr<const State>;
+        using Translator = std::function<QString(const QString&)>;
+        struct ChangedRange { int parent; int first; int last; };
+        struct PreparedDocument
+        {
+            Snapshot base;
+            Snapshot next;
+            QVector<ChangedRange> changes;
+            bool reset = false;
+        };
+        static PreparedDocument prepareDocument(const FieldDocument& document, const Translator& translate,
+            Snapshot previous = {}, const std::function<bool()>& cancelled = {});
+        Snapshot snapshot() const { return m_state; }
+        enum class InstallResult { Rejected, Updated, Reset };
+        InstallResult installPrepared(const PreparedDocument& prepared);
+        bool applyPrepared(const PreparedDocument& prepared);
         explicit ComplexReportModel(QObject* parent = nullptr);
         ~ComplexReportModel() override;
         bool setDocument(const FieldDocument& document);
@@ -48,8 +67,7 @@ namespace ks::ui
         QString textForIndex(const QModelIndex& index) const;
         const FieldDocument& document() const;
     private:
-        struct State;
-        std::unique_ptr<State> m_state; // 本模型独占节点索引和翻译缓存，避免跨快照的裸节点引用。
+        Snapshot m_state; // 本模型独占节点索引和翻译缓存，避免跨快照的裸节点引用。
     };
 
     // 紧凑浏览过滤器：只隐藏已出现在列中的资料，搜索按多个词匹配完整规范上下文。

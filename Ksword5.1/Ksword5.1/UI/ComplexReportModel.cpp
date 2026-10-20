@@ -2,6 +2,8 @@
 #include "../Internationalization/LanguageManager.h"
 
 #include <QHash>
+#include <QThreadPool>
+#include <QPointer>
 #include <QStringList>
 #include <QUrl>
 #include <QRegularExpression>
@@ -36,16 +38,17 @@ namespace ks::ui
             bool expanded = false; // 首次展开策略，不在值刷新时重设视图状态。
         };
 
-        explicit State(const FieldDocument& source) : snapshot(source)
+        explicit State(const FieldDocument& source, Translator translator, std::function<bool()> cancellation = {})
+            : translate(std::move(translator)), cancelled(std::move(cancellation)), snapshot(source)
         {
             const QString context = localized(snapshot.title, true) + QLatin1Char('\n') + snapshot.title;
             appendNodes(snapshot.nodes, -1, {}, QString(), context, QString());
         }
 
         // 输入规范节点和翻译策略，返回完整本地化文本；业务数据不会经 HTML 或报告文本解析。
-        static QString localized(const QString& text, bool translate)
+        QString localized(const QString& text, bool enabled) const
         {
-            return translate ? ks::i18n::sourceText(text) : text;
+            return enabled && translate ? translate(text) : text;
         }
 
         // 只有确有长值的叶内容增加详情子行，短地址和普通属性不出现无意义的展开箭头。
@@ -74,7 +77,7 @@ namespace ks::ui
         }
 
         // PDB 字段组的折叠行只投影原 Offset/Type 属性值，复制与规范文档仍保留完整子树。
-        static QString fieldPropertySummary(const FieldNode& node)
+        QString fieldPropertySummary(const FieldNode& node) const
         {
             QStringList values; // 明确属性次序，不从显示标题或说明猜测字段含义。
             for (const QString& name : {QStringLiteral("Offset"), QStringLiteral("Type")})
@@ -102,6 +105,7 @@ namespace ks::ui
             QHash<QString, int> occurrences; // 当前兄弟层的同名节点计数。
             for (int row = 0; row < nodes.size(); ++row)
             {
+                if (cancelled && cancelled()) return;
                 const FieldNode& node = nodes.at(row);
                 const QString key = QString::number(static_cast<int>(node.kind)) + QLatin1Char(':') + node.name;
                 const int occurrence = occurrences.value(key);
@@ -234,58 +238,104 @@ namespace ks::ui
             return result;
         }
 
+        Translator translate; // Frozen value callback; production workers never consult LanguageManager.
+        std::function<bool()> cancelled;
         FieldDocument snapshot; // 复制、导出与所有角色共用的完整规范文档快照。
         QVector<Entry> entries; // internalId 使用此 preorder 下标加一，零留给无效索引。
         QVector<int> roots; // 顶层原分区和字段的阅读次序。
         QHash<QString, int> paths; // 稳定路径到 preorder 下标的快速定位。
     };
 
+    namespace
+    {
+        // The complete canonical document and index may be large, including on close/reset.
+        // Snapshot ownership is thread independent; its final release always retires off GUI.
+        void retireState(const ComplexReportModel::State* state)
+        {
+            QThreadPool::globalInstance()->start([state]() { delete state; });
+        }
+    }
+
     ComplexReportModel::ComplexReportModel(QObject* parent)
-        : QAbstractItemModel(parent), m_state(std::make_unique<State>(FieldDocument{}))
+        : QAbstractItemModel(parent), m_state(new State(FieldDocument{}, Translator{}), retireState)
     {
     }
 
     ComplexReportModel::~ComplexReportModel() = default;
 
-    // 新快照只在拓扑变化时 reset；普通值更新按同父节点的连续区间合并通知。
+    ComplexReportModel::PreparedDocument ComplexReportModel::prepareDocument(const FieldDocument& document,
+        const Translator& translate, Snapshot previous, const std::function<bool()>& cancelled)
+    {
+        PreparedDocument result;
+        result.base = std::move(previous);
+        auto next = std::make_unique<State>(document, translate, cancelled);
+        if (cancelled && cancelled()) return result;
+        result.reset = !result.base || !result.base->sameStructure(*next);
+        if (!result.reset)
+        {
+            QHash<int, QVector<int>> changedRows;
+            for (int item = 0; item < next->entries.size(); ++item)
+            {
+                if ((item & 255) == 0 && cancelled && cancelled()) return result;
+                const State::Entry& entry = next->entries.at(item);
+                if (!State::sameDisplay(result.base->entries.at(item), entry))
+                    changedRows[entry.parent].append(entry.row);
+            }
+            for (auto iterator = changedRows.constBegin(); iterator != changedRows.constEnd(); ++iterator)
+            {
+                QVector<int> rows = iterator.value();
+                std::sort(rows.begin(), rows.end());
+                for (int offset = 0; offset < rows.size();)
+                {
+                    const int first = rows.at(offset);
+                    int last = first;
+                    while (++offset < rows.size() && rows.at(offset) == last + 1) last = rows.at(offset);
+                    result.changes.append({iterator.key(), first, last});
+                }
+            }
+        }
+        // Cancellation closures belong to a request, not the installed immutable value.
+        next->cancelled = {};
+        result.next = Snapshot(next.release(), retireState);
+        return result;
+    }
+
+    ComplexReportModel::InstallResult ComplexReportModel::installPrepared(const PreparedDocument& prepared)
+    {
+        // A reentrant latest query can reuse the exact State that an earlier delivery installed.
+        if (prepared.next && prepared.next == m_state) return InstallResult::Updated;
+        if (!prepared.next || prepared.base != m_state) return InstallResult::Rejected;
+        const QPointer<ComplexReportModel> alive(this);
+        const bool reset = applyPrepared(prepared);
+        if (!alive || m_state != prepared.next) return InstallResult::Rejected;
+        return reset ? InstallResult::Reset : InstallResult::Updated;
+    }
+
+    // GUI installs precomputed topology/display decisions; stable integer IDs retain persistent indexes.
+    bool ComplexReportModel::applyPrepared(const PreparedDocument& prepared)
+    {
+        if (!prepared.next || prepared.base != m_state) return false;
+        const QPointer<ComplexReportModel> alive(this);
+        if (prepared.reset) beginResetModel();
+        if (!alive) return false;
+        m_state = prepared.next;
+        if (prepared.reset) endResetModel();
+        if (!alive || m_state != prepared.next) return false;
+        if (!prepared.reset) for (const ChangedRange& range : prepared.changes)
+        {
+            const QModelIndex parentIndex = range.parent < 0 ? QModelIndex()
+                : indexForPath(m_state->entries.at(range.parent).path);
+            emit dataChanged(index(range.first, 0, parentIndex), index(range.last, 2, parentIndex));
+            if (!alive || m_state != prepared.next) return false;
+        }
+        return prepared.reset;
+    }
+
+    // Synchronous compatibility entry for QtCore callers. The report widget uses the worker API.
     bool ComplexReportModel::setDocument(const FieldDocument& document)
     {
-        auto next = std::make_unique<State>(document);
-        if (!m_state->sameStructure(*next))
-        {
-            beginResetModel();
-            m_state = std::move(next);
-            endResetModel();
-            return true;
-        }
-        QHash<int, QVector<int>> changedRows; // 每个父节点中真正变化的行号。
-        for (int index = 0; index < next->entries.size(); ++index)
-        {
-            const State::Entry& entry = next->entries.at(index);
-            if (!State::sameDisplay(m_state->entries.at(index), entry))
-            {
-                changedRows[entry.parent].append(entry.row);
-            }
-        }
-        m_state = std::move(next); // integer internalId 和所有持久索引仍指向同一节点身份。
-        for (auto iterator = changedRows.constBegin(); iterator != changedRows.constEnd(); ++iterator)
-        {
-            QVector<int> rows = iterator.value();
-            std::sort(rows.begin(), rows.end());
-            const QModelIndex parentIndex = iterator.key() < 0 ? QModelIndex()
-                : indexForPath(m_state->entries.at(iterator.key()).path);
-            for (int offset = 0; offset < rows.size();)
-            {
-                const int first = rows.at(offset);
-                int last = first;
-                while (++offset < rows.size() && rows.at(offset) == last + 1)
-                {
-                    last = rows.at(offset);
-                }
-                emit dataChanged(index(first, 0, parentIndex), index(last, 2, parentIndex));
-            }
-        }
-        return false;
+        return applyPrepared(prepareDocument(document,
+            [](const QString& source) { return ks::i18n::sourceText(source); }, m_state));
     }
 
     // 语言变化只重算显示缓存；规范名称、路径及层级不随语言变化。

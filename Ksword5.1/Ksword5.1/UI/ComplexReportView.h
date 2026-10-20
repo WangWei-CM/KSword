@@ -4,11 +4,14 @@
 #include <QSet>
 #include <QHash>
 #include <QWidget>
+#include <atomic>
+#include <memory>
 
 class QTreeView;
 class QToolButton;
 class QComboBox;
 class QEvent;
+class QShowEvent;
 class QLineEdit;
 class QLabel;
 class QTabBar;
@@ -19,11 +22,13 @@ namespace ks::ui
 {
     class ComplexReportModel;
     class ComplexReportFilter;
+    class AsyncUiDispatcher;
     // 同一规范文档的紧凑浏览器：范围/类型直达，字段一行三列，完整原文随时可读。
     class ComplexReportView final : public QWidget
     {
     public:
         explicit ComplexReportView(QWidget* parent = nullptr);
+        ~ComplexReportView() override;
         void setDocument(const FieldDocument& document);
         void setSearchText(const QString& query);
         void bindSearchField(QLineEdit* search);
@@ -32,7 +37,9 @@ namespace ks::ui
         QTreeView* tree() const { return m_tree; }
     protected:
         void changeEvent(QEvent* event) override;
+        void showEvent(QShowEvent* event) override;
     private:
+        void prepareDocument();
         void updateNavigation(bool firstDocument);
         void updateTypes(bool selectFirst);
         void applyNavigation();
@@ -47,6 +54,7 @@ namespace ks::ui
         QModelIndex displayRoot() const;
         QSet<QString> expandedPaths() const;
         void restoreExpansion(const QSet<QString>& paths);
+        std::shared_ptr<AsyncUiDispatcher> m_dispatcher; // Close before any derived teardown.
         ComplexReportModel* m_model = nullptr; // 唯一完整规范快照，原文和复制均从这里读取。
         ComplexReportFilter* m_proxy = nullptr; // 元数据去重与多词匹配，不重建第二份字段数据。
         QTreeView* m_tree = nullptr; // 三列正文视口，使用共享紧凑表格外观。
@@ -69,6 +77,11 @@ namespace ks::ui
         QString m_beforeSearchSelected; // 搜索前选中的规范字段。
         int m_beforeSearchColumn = 0; // 搜索前实际选中的值列。
         int m_beforeSearchScroll = 0; // 搜索前的阅读位置。
+        FieldDocument m_requestedDocument; // Latest complete canonical input; no background QObject access.
+        std::shared_ptr<std::atomic<quint64>> m_prepareGeneration = std::make_shared<std::atomic<quint64>>(0);
+        std::shared_ptr<std::atomic<quint64>> m_filterGeneration = std::make_shared<std::atomic<quint64>>(0);
+        bool m_preparing = false;
+        bool m_projectionDirty = false;
         bool m_initialized = false; // 首份目录到达时选择默认范围和类型。
         bool m_updatingNavigation = false; // 批量重填组合框时不触发业务导航。
         bool m_rawDirty = true; // 隐藏原文只记脏，避免每次更新重复序列化大报告。

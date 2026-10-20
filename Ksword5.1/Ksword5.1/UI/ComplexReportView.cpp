@@ -2,6 +2,7 @@
 #include "./ComplexReportView.h"
 #include "./ComplexReportModel.h"
 #include "./ComplexReportDelegate.h"
+#include "./AsyncUiDispatcher.h"
 #include "./CodeEditorWidget.h"
 #include "./SegmentedControl.h"
 #include "./FlatButtonTheme.h"
@@ -18,6 +19,9 @@
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QShowEvent>
+#include <QThreadPool>
+#include <QTimer>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -40,10 +44,12 @@ namespace
     void visit(const QAbstractItemModel* model, const QModelIndex& parent,
         const std::function<void(const QModelIndex&)>& action)
     {
-        for (int row = 0; row < model->rowCount(parent); ++row)
+        const QPointer<QAbstractItemModel> alive(const_cast<QAbstractItemModel*>(model));
+        for (int row = 0; alive && row < model->rowCount(parent); ++row)
         {
             const QModelIndex index = model->index(row, 0, parent);
             action(index);
+            if (!alive) return;
             visit(model, index, action);
         }
     }
@@ -65,7 +71,8 @@ namespace
 
 namespace ks::ui
 {
-    ComplexReportView::ComplexReportView(QWidget* parent) : QWidget(parent)
+    ComplexReportView::ComplexReportView(QWidget* parent)
+        : QWidget(parent), m_dispatcher(std::make_shared<AsyncUiDispatcher>(this))
     {
         setObjectName(QStringLiteral("ksword_complex_report"));
         setMinimumSize(0, 0);
@@ -233,18 +240,18 @@ namespace ks::ui
 
     void ComplexReportView::changeEvent(QEvent* event)
     {
+        const QPointer<ComplexReportView> alive(this);
         QWidget::changeEvent(event);
+        if (!alive) return;
         if (event != nullptr && event->type() == QEvent::LanguageChange)
         {
             // 语言是原文版本的一部分；不依赖父投影随后恰好再次提交 document。
             m_rawDirty = true;
-            if (m_model)
-            {
-                m_model->relocalize();
-                m_language = ks::i18n::LanguageManager::instance().currentLanguageId();
-                updateNavigation(false);
-                m_tree->setRootIndex(displayRoot());
-            }
+            m_language = ks::i18n::LanguageManager::instance().currentLanguageId();
+            m_projectionDirty = true;
+            ++*m_prepareGeneration; // Cancel an obsolete language projection before any queued return.
+            if (isVisible()) prepareDocument();
+            if (!alive) return;
             refreshTheme(); // 当前原文立即更新一次，隐藏原文保留 dirty 到下次显示。
         }
     }
@@ -262,41 +269,129 @@ namespace ks::ui
 
     void ComplexReportView::restoreExpansion(const QSet<QString>& paths)
     {
+        const QPointer<ComplexReportView> alive(this);
+        const auto documentGeneration = m_prepareGeneration;
+        const auto filterGeneration = m_filterGeneration;
+        const quint64 documentTicket = documentGeneration->load();
+        const quint64 filterTicket = filterGeneration->load();
         for (const QString& path : paths)
         {
             const QModelIndex index = m_proxy->mapFromSource(m_model->indexForPath(path));
             if (index.isValid()) m_tree->setExpanded(index, true);
+            if (!alive || documentGeneration->load() != documentTicket || filterGeneration->load() != filterTicket) return;
         }
+    }
+
+    ComplexReportView::~ComplexReportView()
+    {
+        m_dispatcher->close();
+        ++*m_prepareGeneration;
+        ++*m_filterGeneration;
+    }
+
+    void ComplexReportView::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        if (m_projectionDirty) prepareDocument();
     }
 
     void ComplexReportView::setDocument(const FieldDocument& document)
     {
-        QElapsedTimer elapsed;
-        elapsed.start();
-        QSet<QString> expanded;
-        const QString selected = m_tree->currentIndex().data(ReportPathRole).toString();
-        const int column = m_tree->currentIndex().column();
-        const int scroll = m_tree->verticalScrollBar()->value();
-        const auto connection = connect(m_model, &QAbstractItemModel::modelAboutToBeReset, this,
-            [&]() { expanded = expandedPaths(); }, Qt::DirectConnection);
-        const bool reset = m_model->setDocument(document);
-        disconnect(connection);
-        const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-        if (m_language != language) { m_model->relocalize(); m_language = language; }
-        updateNavigation(!m_initialized);
-        m_tree->setRootIndex(displayRoot());
-        if (reset)
-        {
-            restoreExpansion(expanded);
-            const QModelIndex current = m_proxy->mapFromSource(m_model->indexForPath(selected));
-            if (current.isValid()) m_tree->setCurrentIndex(current.siblingAtColumn(qMax(0, column)));
-            m_tree->doItemsLayout();
-            m_tree->verticalScrollBar()->setValue(scroll);
-        }
-        if (!m_query.isEmpty()) expandSearchGroups();
-        m_rawDirty = true;
+        m_requestedDocument = document;
+        m_projectionDirty = true;
+        ++*m_prepareGeneration;
+        if (isVisible()) prepareDocument();
+    }
+
+    void ComplexReportView::prepareDocument()
+    {
+        const QPointer<ComplexReportView> safe(this);
+        const auto generation = m_prepareGeneration;
+        const quint64 ticket = ++*generation;
+        m_projectionDirty = false;
+        m_preparing = true;
         updatePresentation();
-        setProperty("ksword_report_update_us", elapsed.nsecsElapsed() / 1000);
+        if (!safe || generation->load() != ticket) return;
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        const QString language = translator.languageId();
+        const auto previous = m_model->snapshot();
+        const FieldDocument document = m_requestedDocument;
+        const auto dispatcher = m_dispatcher;
+        QThreadPool::globalInstance()->start([generation, ticket, translator, language, previous, document, safe, dispatcher]()
+        {
+            const auto cancelled = [generation, ticket]() { return generation->load() != ticket; };
+            auto prepared = ComplexReportModel::prepareDocument(document,
+                [translator](const QString& source) { return translator.sourceText(source); }, previous, cancelled);
+            if (!prepared.next || cancelled()) return;
+            dispatcher->post([safe, generation, ticket, prepared = std::move(prepared), language]() mutable
+            {
+                if (!safe || generation->load() != ticket) return;
+                const auto filterGeneration = safe->m_filterGeneration;
+                const quint64 filterTicket = filterGeneration->load();
+                const auto current = [&]()
+                { return safe && generation->load() == ticket && filterGeneration->load() == filterTicket; };
+                const auto resumeLatest = [&]()
+                {
+                    if (safe && generation->load() == ticket)
+                        QTimer::singleShot(0, safe, [safe, generation, ticket]()
+                        {
+                            if (!safe || generation->load() != ticket) return;
+                            if (safe->isVisible()) safe->prepareDocument();
+                            else safe->m_projectionDirty = true;
+                        });
+                };
+                if (!safe->isVisible())
+                {
+                    safe->m_projectionDirty = true;
+                    safe->m_preparing = false;
+                    return;
+                }
+                QElapsedTimer elapsed;
+                elapsed.start();
+                QSet<QString> expanded;
+                const QString selected = safe->m_tree->currentIndex().data(ReportPathRole).toString();
+                const int column = safe->m_tree->currentIndex().column();
+                const int scroll = safe->m_tree->verticalScrollBar()->value();
+                if (prepared.reset) expanded = safe->expandedPaths();
+                const auto installed = safe->m_model->installPrepared(prepared);
+                if (!current()) { resumeLatest(); return; }
+                if (installed == ComplexReportModel::InstallResult::Rejected)
+                {
+                    // A modelAboutToBeReset slot can start this request before the previous
+                    // State swap. Reprepare the latest canonical input against the actual base.
+                    safe->prepareDocument();
+                    return;
+                }
+                const bool reset = installed == ComplexReportModel::InstallResult::Reset;
+                safe->m_language = language;
+                safe->updateNavigation(!safe->m_initialized);
+                if (!current()) { resumeLatest(); return; }
+                safe->m_tree->setRootIndex(safe->displayRoot());
+                if (!current()) { resumeLatest(); return; }
+                safe->m_preparing = false;
+                if (reset)
+                {
+                    safe->restoreExpansion(expanded);
+                    if (!current()) { resumeLatest(); return; }
+                    const QModelIndex selectedIndex = safe->m_proxy->mapFromSource(safe->m_model->indexForPath(selected));
+                    if (selectedIndex.isValid()) safe->m_tree->setCurrentIndex(selectedIndex.siblingAtColumn(qMax(0, column)));
+                    if (!current()) { resumeLatest(); return; }
+                    safe->m_tree->doItemsLayout();
+                    if (!current()) { resumeLatest(); return; }
+                    safe->m_tree->verticalScrollBar()->setValue(scroll);
+                    if (!current()) { resumeLatest(); return; }
+                }
+                if (!safe->m_query.isEmpty()) safe->expandSearchGroups();
+                if (!current()) { resumeLatest(); return; }
+                safe->m_rawDirty = true;
+                safe->updatePresentation();
+                if (!current()) { resumeLatest(); return; }
+                safe->setProperty("ksword_report_update_us", elapsed.nsecsElapsed() / 1000);
+                // The previous large state and request closures are retired outside the GUI thread,
+                // including stale results delivered after a newer request or window destruction.
+                QThreadPool::globalInstance()->start([retired = std::move(prepared)]() {});
+            });
+        });
     }
 
     // 顶层目录由生产者标记，诊断合为一个入口；默认范围直接承接当前业务对象。
@@ -368,6 +463,7 @@ namespace ks::ui
 
     void ComplexReportView::applyNavigation()
     {
+        ++*m_filterGeneration;
         if (!m_query.isEmpty())
         {
             m_beforeSearch.clear(); // 搜索中换范围时不能把上一范围的阅读位置带到新范围。
@@ -389,6 +485,7 @@ namespace ks::ui
     {
         const QString next = query.trimmed();
         if (next == m_query) return;
+        ++*m_filterGeneration;
         if (m_query.isEmpty() && !next.isEmpty())
         {
             m_beforeSearch = expandedPaths();
@@ -436,6 +533,10 @@ namespace ks::ui
     {
         const bool raw = m_modes->currentIndex() == 1;
         const bool empty = m_proxy->rowCount(displayRoot()) == 0;
+        m_tree->setEnabled(!m_preparing);
+        m_scopes->setEnabled(!m_preparing);
+        m_actions->setEnabled(!m_preparing);
+        m_diagnostics->setEnabled(!m_preparing);
         const bool diagnostics = m_scopePath == kDiagnostics;
         if (diagnostics != m_diagnosticColumns)
         {
@@ -447,10 +548,10 @@ namespace ks::ui
             m_tree->setColumnWidth(0, diagnostics ? m_diagnosticNameWidth : m_catalogNameWidth);
         }
         m_tree->setVisible(!raw && !empty);
-        m_empty->setText(text(m_query.isEmpty() ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
+        m_empty->setText(text(m_preparing ? QStringLiteral("正在加载...") : m_query.isEmpty() ? QStringLiteral("暂无报告数据") : QStringLiteral("没有匹配的属性")));
         m_empty->setVisible(!raw && empty);
-        m_types->setEnabled(raw || m_query.isEmpty());
-        m_count->setText(raw ? text(QStringLiteral("完整原文")) : !m_query.isEmpty()
+        m_types->setEnabled(!m_preparing && (raw || m_query.isEmpty()));
+        m_count->setText(m_preparing ? text(QStringLiteral("正在加载...")) : raw ? text(QStringLiteral("完整原文")) : !m_query.isEmpty()
             ? text(QStringLiteral("%1 项匹配")).arg(matches(m_proxy, displayRoot()))
             : text(QStringLiteral("%1 行")).arg(m_proxy->rowCount(displayRoot())));
         if (m_search)
@@ -472,7 +573,9 @@ namespace ks::ui
                 m_editor->setWordWrapEnabled(false);
                 m_layout->addWidget(m_editor, 1);
             }
-            updateRawText();
+            const QPointer<ComplexReportView> alive(this);
+            if (!m_preparing) updateRawText();
+            if (!alive) return;
             m_editor->show();
         }
         else if (m_editor) m_editor->hide();
@@ -482,7 +585,13 @@ namespace ks::ui
     void ComplexReportView::updateRawText()
     {
         if (!m_editor || !m_rawDirty) return;
+        const QPointer<ComplexReportView> alive(this);
+        const auto documentGeneration = m_prepareGeneration;
+        const auto filterGeneration = m_filterGeneration;
+        const quint64 documentTicket = documentGeneration->load();
+        const quint64 filterTicket = filterGeneration->load();
         m_editor->replaceRawText(currentScopeText(), false);
+        if (!alive || documentGeneration->load() != documentTicket || filterGeneration->load() != filterTicket) return;
         m_rawDirty = false;
     }
 
