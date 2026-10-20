@@ -901,9 +901,12 @@ void ContextMenuCleanerTab::clearLatencyColumn(const MenuArea area)
 
 void ContextMenuCleanerTab::setLatencyUiRunning(const bool running)
 {
+    const bool busy = running || m_shellPromptActive || m_shellPending;
+    if (m_backupButton) m_backupButton->setEnabled(!busy);
+    if (m_restoreBackupButton) m_restoreBackupButton->setEnabled(!busy);
     if (m_latencyButton != nullptr)
     {
-        m_latencyButton->setEnabled(!running);
+        m_latencyButton->setEnabled(!busy);
     }
     if (m_latencyStopButton != nullptr)
     {
@@ -923,26 +926,26 @@ void ContextMenuCleanerTab::setLatencyUiRunning(const bool running)
         }
         if (widgets->refreshButton != nullptr)
         {
-            widgets->refreshButton->setEnabled(!running);
+            widgets->refreshButton->setEnabled(!busy);
         }
         if (widgets->deleteButton != nullptr)
         {
-            widgets->deleteButton->setEnabled(!running);
+            widgets->deleteButton->setEnabled(!busy && !widgets->tableBuilding);
         }
         if (widgets->copyButton != nullptr)
         {
-            widgets->copyButton->setEnabled(!running);
+            widgets->copyButton->setEnabled(!busy && !widgets->tableBuilding);
         }
         if (widgets->filterEdit != nullptr)
         {
-            widgets->filterEdit->setEnabled(!running);
+            widgets->filterEdit->setEnabled(!busy);
         }
         if (widgets->restoreButton != nullptr)
         {
-            widgets->restoreButton->setEnabled(!running);
+            widgets->restoreButton->setEnabled(!busy);
         }
     }
-    if (!running) flushDeferredAreaRefreshes();
+    if (!busy) flushDeferredAreaRefreshes();
 }
 
 }  // namespace ks::misc

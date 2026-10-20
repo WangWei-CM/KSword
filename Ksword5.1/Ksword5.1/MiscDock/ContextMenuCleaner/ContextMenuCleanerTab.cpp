@@ -30,6 +30,8 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPointer>
+#include <exception>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
@@ -50,6 +52,11 @@ using namespace context_menu_cleaner_detail;
 ContextMenuCleanerTab::ContextMenuCleanerTab(QWidget* parent)
     : QWidget(parent)
 {
+    // One value gate survives page close/reopen while accepted work drains.
+    static const auto registrySerial = std::make_shared<std::mutex>();
+    m_registrySerial = registrySerial;
+    m_shellOperation = new ks::ui::AsyncOperation(this);
+    m_shellOperation->setStateChangedCallback([this]() { settleShellTransaction(); });
     initializeUi();
     refreshArea(MenuArea::InternetExplorer);
 
@@ -59,6 +66,8 @@ ContextMenuCleanerTab::ContextMenuCleanerTab(QWidget* parent)
 
 ContextMenuCleanerTab::~ContextMenuCleanerTab()
 {
+    m_shellCompletion = {};
+    if (m_shellOperation != nullptr) m_shellOperation->close();
     const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
         MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu,
         MenuArea::ExplorerHome};
@@ -409,7 +418,7 @@ void ContextMenuCleanerTab::refreshArea(const MenuArea area)
 {
     AreaWidgets* widgets = widgetsForArea(area);
     if (widgets == nullptr) return;
-    if (m_latencyRunning.load())
+    if (shellBusy())
     {
         widgets->refreshDeferred = true;
         return;
@@ -453,7 +462,7 @@ void ContextMenuCleanerTab::applyAreaSnapshot(const MenuArea area, const std::ui
     AreaWidgets* widgets = widgetsForArea(area);
     if (generation != widgets->refreshGeneration) return;
     widgets->hasLoaded = true;
-    if (!widgets->page->isVisible())
+    if (shellBusy() || !widgets->page->isVisible())
     {
         widgets->pendingSnapshot = std::move(entries);
         widgets->pendingSnapshotGeneration = generation;
@@ -510,6 +519,7 @@ void ContextMenuCleanerTab::rebuildAreaTable(const MenuArea area)
 void ContextMenuCleanerTab::processAreaPresentation(const MenuArea area)
 {
     AreaWidgets* widgets = widgetsForArea(area);
+    if (shellBusy()) return;
     if (widgets->pendingSnapshot.has_value())
     {
         QVector<ContextMenuEntry> entries = std::move(*widgets->pendingSnapshot);
@@ -557,10 +567,10 @@ void ContextMenuCleanerTab::processAreaPresentation(const MenuArea area)
     }
     widgets->tableBuilding = false;
     widgets->table->setSortingEnabled(true);
-    widgets->table->setEnabled(true);
-    widgets->deleteButton->setEnabled(!m_latencyRunning.load());
-    widgets->copyButton->setEnabled(!m_latencyRunning.load());
-    if (currentArea() == area) m_latencyButton->setEnabled(!m_latencyRunning.load());
+    widgets->table->setEnabled(!shellBusy());
+    widgets->deleteButton->setEnabled(!shellBusy());
+    widgets->copyButton->setEnabled(!shellBusy());
+    if (currentArea() == area) m_latencyButton->setEnabled(!shellBusy());
     applyAreaFilter(area);
     if (widgets->queryPending)
         widgets->statusLabel->setText(ks::i18n::text(QStringLiteral("misc.shell.refreshing"),
@@ -657,6 +667,9 @@ void ContextMenuCleanerTab::showAreaContextMenu(const MenuArea area, const QPoin
 
 void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
 {
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();
+    if (!alive || shellBusy()) return;
     AreaWidgets* areaWidgets = widgetsForArea(area);
     if (areaWidgets == nullptr || areaWidgets->tableBuilding)
     {
@@ -671,7 +684,7 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
     }
 
     QStringList targetPaths;
-    QVector<int> deleteableIndexes;
+    QVector<ContextMenuEntry> targets;
     int machineScopeTargetCount = 0;
     for (const int entryIndex : selectedIndexes)
     {
@@ -680,12 +693,11 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             continue;
         }
         const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        if (!entry.canDelete
-            || (area == MenuArea::UrlBinding && !isUrlBindingDeletionAllowed(entry)))
+        if (!entry.canDelete)
         {
             continue;
         }
-        deleteableIndexes.push_back(entryIndex);
+        targets.push_back(entry);
         if (entry.rootKey == HKEY_LOCAL_MACHINE)
         {
             ++machineScopeTargetCount;
@@ -696,7 +708,7 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             entry.deleteKind == DeleteKind::RegistryValue,
             entry.valueName));
     }
-    if (deleteableIndexes.isEmpty())
+    if (targets.isEmpty())
     {
         QMessageBox::information(
             this,
@@ -723,122 +735,70 @@ void ContextMenuCleanerTab::deleteSelectedEntries(const MenuArea area)
             .arg(targetPaths.size())
             .arg(previewText)
             .arg(moreText);
-    const QMessageBox::StandardButton confirmButton = QMessageBox::warning(
-        this,
-        QStringLiteral("确认删除注册表项目"),
-        confirmationText,
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmButton != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    if (area == MenuArea::UrlBinding)
-    {
-        QString backupError;
-        if (!createUrlBindingBackup(deleteableIndexes, &backupError))
+    if (!beginShellAction()) return;
+    const auto confirmButton = QMessageBox::warning(this,
+        QStringLiteral("确认删除注册表项目"), confirmationText,
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!alive) return;
+    if (confirmButton != QMessageBox::Yes) { endShellAction(); return; }
+    submitShellTransaction([targets, area]() {
+        ShellTransactionResult result;
+        if (area == MenuArea::UrlBinding && !createUrlBindingBackup(targets, &result.error))
+        { result.stage = ShellTransactionStage::BackupFailed; return result; } // No target mutation before a complete published backup.
+        result.stage = ShellTransactionStage::Completed;
+        for (const ContextMenuEntry& entry : targets)
         {
-            QMessageBox::critical(
-                this,
-                QStringLiteral("URL 绑定备份失败"),
-                QStringLiteral("删除已取消，因为无法建立可恢复备份：\n\n%1").arg(backupError));
+            QString errorText;
+            const QString path = registryTargetPathText(entry.rootLabel, entry.subKeyPath,
+                entry.deleteKind == DeleteKind::RegistryValue, entry.valueName);
+            bool ok = entry.canDelete;
+            if (area == MenuArea::UrlBinding) ok = ok && isUrlBindingDeletionAllowed(entry);
+            if (ok)
+                ok = entry.deleteKind == DeleteKind::RegistryValue
+                    ? deleteRegistryValueWithView(entry.rootKey, entry.subKeyPath, entry.valueName,
+                        entry.viewFlag, entry.cleanupOpenWithMru, &errorText)
+                    : deleteRegistryTreeWithView(entry.rootKey, entry.subKeyPath, entry.viewFlag, &errorText);
+            else errorText = QStringLiteral("执行时安全校验拒绝删除");
+            if (ok) ++result.count;
+            else result.failures.push_back(QStringLiteral("%1：%2").arg(path, errorText));
+            kLogEvent event;
+            if (ok) warn << event << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目成功, path="
+                << path.toStdString() << eol;
+            else err << event << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目失败, path="
+                << path.toStdString() << ", error=" << errorText.toStdString() << eol;
+        }
+        result.ok = result.failures.isEmpty();
+        return result;
+    }, [this, area](const ShellTransactionResult& result) {
+        const QPointer<ContextMenuCleanerTab> alive(this);
+        if (result.stage == ShellTransactionStage::BackupFailed)
+        {
+            QMessageBox::critical(this, QStringLiteral("URL 绑定备份失败"),
+                QStringLiteral("删除已取消，因为无法建立可恢复备份：\n\n%1").arg(result.error));
             return;
         }
-    }
-
-    QStringList failedMessages;
-    int successCount = 0;
-    // privilegePromptHandled：批量删除中最多显示一次权限恢复提示，并抑制最终重复失败框。
-    bool privilegePromptHandled = false;
-    for (const int entryIndex : deleteableIndexes)
-    {
-        if (entryIndex < 0 || entryIndex >= areaWidgets->entries.size())
+        refreshArea(area);
+        if (result.stage != ShellTransactionStage::Completed)
         {
-            continue;
+            QMessageBox::warning(this, QStringLiteral("Shell 关联管理"),
+                result.stage == ShellTransactionStage::NotAccepted
+                    ? QStringLiteral("事务未被接受，未执行注册表修改。")
+                    : QStringLiteral("后台事务未返回可确认的完成状态；可能已部分执行。请刷新后核对实际注册表：%1").arg(result.error));
+            return;
         }
-        const ContextMenuEntry& entry = areaWidgets->entries.at(entryIndex);
-        if (area == MenuArea::UrlBinding && !isUrlBindingDeletionAllowed(entry))
-        {
-            failedMessages.push_back(QStringLiteral("%1：执行时安全校验拒绝删除")
-                .arg(registryTargetPathText(
-                    entry.rootLabel,
-                    entry.subKeyPath,
-                    entry.deleteKind == DeleteKind::RegistryValue,
-                    entry.valueName)));
-            continue;
-        }
-        QString errorText;
-        const bool deleteOk = entry.deleteKind == DeleteKind::RegistryValue
-            ? deleteRegistryValueWithView(
-                entry.rootKey,
-                entry.subKeyPath,
-                entry.valueName,
-                entry.viewFlag,
-                entry.cleanupOpenWithMru,
-                &errorText)
-            : deleteRegistryTreeWithView(
-                entry.rootKey,
-                entry.subKeyPath,
-                entry.viewFlag,
-                &errorText);
-        const QString targetPath = registryTargetPathText(
-            entry.rootLabel,
-            entry.subKeyPath,
-            entry.deleteKind == DeleteKind::RegistryValue,
-            entry.valueName);
-        if (deleteOk)
-        {
-            ++successCount;
-            kLogEvent event;
-            warn << event
-                << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目成功, path="
-                << targetPath.toStdString()
-                << eol;
-        }
+        if (result.failures.isEmpty())
+            QMessageBox::information(this, QStringLiteral("Shell 关联管理"),
+                QStringLiteral("已删除 %1 项。建议重启 Explorer 或相关程序后确认变化。").arg(result.count));
         else
         {
-            if (!privilegePromptHandled)
-            {
-                privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("清理 Shell 关联注册表项目"),
-                    errorText);
-            }
-            failedMessages.push_back(QStringLiteral("%1：%2")
-                .arg(targetPath, errorText));
-            kLogEvent event;
-            err << event
-                << "[ContextMenuCleanerTab] 删除 Shell 关联注册表项目失败, path="
-                << targetPath.toStdString()
-                << ", error="
-                << errorText.toStdString()
-                << eol;
-        }
-    }
-
-    refreshArea(area);
-
-    if (failedMessages.isEmpty())
-    {
-        QMessageBox::information(
-            this,
-            QStringLiteral("Shell 关联管理"),
-            QStringLiteral("已删除 %1 项。建议重启 Explorer 或相关程序后确认变化。").arg(successCount));
-    }
-    else
-    {
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("Shell 关联管理"),
+            const bool handled = ks::ui::promptForPrivilegeFailure(this,
+                QStringLiteral("清理 Shell 关联注册表项目"), result.failures.first());
+            if (!alive) return;
+            if (!handled) QMessageBox::warning(this, QStringLiteral("Shell 关联管理"),
                 QStringLiteral("成功删除 %1 项，失败 %2 项：\n\n%3")
-                    .arg(successCount)
-                    .arg(failedMessages.size())
-                    .arg(failedMessages.join('\n')));
+                    .arg(result.count).arg(result.failures.size()).arg(result.failures.join('\n')));
         }
-    }
+    });
 }
 
 void ContextMenuCleanerTab::copySelectedEntries(const MenuArea area) const
@@ -1097,6 +1057,122 @@ ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const Cont
             : QStringLiteral("否（系统保护项或受策略限制）")));
 
     return lines;
+}
+
+bool ContextMenuCleanerTab::shellBusy() const
+{
+    return m_shellPromptActive || m_shellPending || m_latencyRunning.load();
+}
+
+void ContextMenuCleanerTab::suspendShellQueries()
+{
+    const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
+        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu, MenuArea::ExplorerHome};
+    for (const MenuArea area : areas)
+    {
+        auto* widgets = widgetsForArea(area);
+        if (widgets->queryOperation->isInFlight() || widgets->pendingSnapshot || widgets->tableBuilding)
+            widgets->refreshDeferred = true;
+        widgets->queryPending = false;
+        ++widgets->refreshGeneration;
+        widgets->queryOperation->cancel();
+        widgets->pendingSnapshot.reset();
+        widgets->presentationTimer->stop();
+    }
+}
+
+bool ContextMenuCleanerTab::beginShellAction()
+{
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();
+    if (!alive || shellBusy()) return false;
+    m_shellPromptActive = true;
+    suspendShellQueries();
+    setLatencyUiRunning(m_latencyRunning.load());
+    return true;
+}
+
+void ContextMenuCleanerTab::endShellAction()
+{
+    m_shellPromptActive = false;
+    setLatencyUiRunning(m_latencyRunning.load());
+}
+
+void ContextMenuCleanerTab::settleShellTransaction()
+{
+    if (!m_shellPending || m_shellOperation->isInFlight()) return;
+    ShellTransactionResult result;
+    if (m_shellReceipt)
+    {
+        std::lock_guard<std::mutex> lock(m_shellReceipt->mutex);
+        if (m_shellReceipt->result) result = *m_shellReceipt->result;
+        else result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+    }
+    else result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+    // Consume old state before any callback/modal can accept a new transaction.
+    auto completed = std::move(m_shellCompletion);
+    m_shellReceipt.reset();
+    m_shellPending = false;
+    m_shellPromptActive = false;
+    setLatencyUiRunning(m_latencyRunning.load());
+    if (completed) completed(result);
+}
+
+void ContextMenuCleanerTab::submitShellTransaction(
+    std::function<ShellTransactionResult()> worker,
+    std::function<void(const ShellTransactionResult&)> completed)
+{
+    auto receipt = std::make_shared<ShellTransactionReceipt>();
+    const auto serial = m_registrySerial;
+    m_shellPromptActive = false;
+    m_shellPending = true;
+    m_shellReceipt = receipt;
+    m_shellCompletion = std::move(completed);
+    setLatencyUiRunning(m_latencyRunning.load());
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    std::uint64_t accepted = 0;
+    bool submitReturned = false;
+    try
+    {
+        accepted = m_shellOperation->submitTransaction<int, ShellTransactionResult>(0,
+            [serial, receipt, worker = std::move(worker)](const int&) {
+            ShellTransactionResult result;
+            {
+                std::lock_guard<std::mutex> lock(*serial);
+                try { result = worker(); }
+                catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
+                catch (...) { result.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。"); }
+            }
+            kLogEvent event;
+            info << event << "[ContextMenuCleanerTab] accepted transaction receipt: success="
+                << result.ok << ", count=" << result.count << ", path=" << result.path.toStdString()
+                << ", error=" << result.error.toStdString() << ", failures="
+                << result.failures.join('\n').toStdString() << eol;
+            { std::lock_guard<std::mutex> lock(receipt->mutex); receipt->result = result; }
+            return result;
+        }, [](const ShellTransactionResult&, std::uint64_t) { return true; },
+        [receipt](std::exception_ptr) {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            ShellTransactionResult failed;
+            failed.error = QStringLiteral("后台任务未返回有效回执，请刷新状态。");
+            receipt->result = std::move(failed);
+        });
+        submitReturned = true;
+    }
+    catch (...) {}
+    if (!alive) return;
+    if (accepted == 0)
+    {
+        if (submitReturned && m_shellReceipt == receipt)
+        {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            ShellTransactionResult rejected;
+            rejected.stage = ShellTransactionStage::NotAccepted;
+            rejected.error = QStringLiteral("事务未被接受，未执行注册表修改。");
+            receipt->result = std::move(rejected);
+        }
+        settleShellTransaction();
+    }
 }
 
 } // namespace ks::misc

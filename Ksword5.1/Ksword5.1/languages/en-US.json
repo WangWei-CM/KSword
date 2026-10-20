@@ -6960,6 +6960,9 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "执行时安全校验拒绝删除": "Execution-time safety checks refused deletion.",
+    "事务未被接受，未执行注册表修改。": "The transaction was not accepted; no registry changes were made.",
+    "后台事务未返回可确认的完成状态；可能已部分执行。请刷新后核对实际注册表：%1": "No confirmed completion receipt was returned; part of the transaction may have run. Refresh and check the registry: %1",
     "目标窗口身份已变化或无法验证": "The target window identity changed or could not be verified.",
     "当前复制/导出尚未完成，请稍候。": "A copy or export is still in progress. Please wait.",
     "当前表格尚无可用的完整数据版本，请刷新后重试。": "No complete data version is available for this table. Refresh and retry.",

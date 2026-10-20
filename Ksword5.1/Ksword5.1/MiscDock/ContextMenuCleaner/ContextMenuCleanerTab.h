@@ -11,6 +11,8 @@
 #include "../../Framework.h"
 
 #include <QVector>
+#include <QJsonObject>
+#include <functional>
 #include <QWidget>
 
 #include <atomic>
@@ -184,10 +186,42 @@ namespace ks::misc
         static bool isProtectedUrlBindingEntry(const ContextMenuEntry& entry);
 
         // createUrlBindingBackup：
-        // - 输入 entryIndexes：即将删除的 URL 绑定条目下标；
+        // - 输入 entries：确认前冻结的 URL 绑定条目值；
         // - 处理：把完整注册表树复制到当前用户 KSword 备份区并原子切换“最近备份”；
         // - 返回：全部备份成功返回 true，否则返回 false 并写错误文本。
-        bool createUrlBindingBackup(const QVector<int>& entryIndexes, QString* errorTextOut) const;
+        static bool createUrlBindingBackup(const QVector<ContextMenuEntry>& entries, QString* errorTextOut);
+        enum class ShellTransactionStage { NotAccepted, Completed, BackupFailed, Unknown };
+        struct ShellTransactionResult
+        {
+            bool ok = false;
+            ShellTransactionStage stage = ShellTransactionStage::Unknown;
+            QString error;
+            QString path;
+            QStringList failures;
+            int count = 0;
+            QJsonObject payload;
+            QString failureText() const
+            {
+                if (stage == ShellTransactionStage::NotAccepted)
+                    return QStringLiteral("事务未被接受，未执行注册表修改。");
+                if (stage == ShellTransactionStage::Unknown)
+                    return QStringLiteral("后台事务未返回可确认的完成状态；可能已部分执行。请刷新后核对实际注册表：%1").arg(error);
+                return error;
+            }
+        };
+        struct ShellTransactionReceipt
+        {
+            std::mutex mutex;
+            std::optional<ShellTransactionResult> result;
+        };
+        static ShellTransactionResult restoreUrlBindingBackupValue();
+        bool beginShellAction();
+        void endShellAction();
+        bool shellBusy() const;
+        void suspendShellQueries();
+        void settleShellTransaction();
+        void submitShellTransaction(std::function<ShellTransactionResult()> worker,
+            std::function<void(const ShellTransactionResult&)> completed);
 
         // restoreLastUrlBindingBackup：
         // - 输入：无；
@@ -383,7 +417,12 @@ namespace ks::misc
 
     private:
         // Shared by immutable registry query workers; transaction follow-up uses the same gate.
-        std::shared_ptr<std::mutex> m_registrySerial = std::make_shared<std::mutex>();
+        std::shared_ptr<std::mutex> m_registrySerial;
+        ks::ui::AsyncOperation* m_shellOperation = nullptr;
+        bool m_shellPromptActive = false;
+        bool m_shellPending = false;
+        std::shared_ptr<ShellTransactionReceipt> m_shellReceipt;
+        std::function<void(const ShellTransactionResult&)> m_shellCompletion;
         QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：本页根布局。
         QTabWidget* m_areaTabWidget = nullptr; // m_areaTabWidget：七类 Shell 关联子 Tab 容器。
 
