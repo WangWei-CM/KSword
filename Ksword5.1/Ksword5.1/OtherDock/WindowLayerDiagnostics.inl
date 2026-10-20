@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QEvent>
 #include <QFile>
+#include "../UI/CompleteExport.h"
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QGridLayout>
@@ -1051,8 +1052,9 @@ namespace ks::window::layerdiag
         return document;
     }
 
-    QJsonArray zOrderJson()
+    QJsonArray zOrderJson(bool* complete = nullptr)
     {
+        if (complete != nullptr) *complete = true;
         QJsonArray array;
         QSet<quintptr> visited;
         QHash<DWORD, int> bandPositions;
@@ -1061,7 +1063,7 @@ namespace ks::window::layerdiag
         for (int index = 0; hwnd != nullptr && index < kWalkLimit; ++index)
         {
             const quintptr raw = reinterpret_cast<quintptr>(hwnd);
-            if (visited.contains(raw)) break;
+            if (visited.contains(raw)) { if (complete != nullptr) *complete = false; break; }
             visited.insert(raw);
 
             DWORD pid = 0;
@@ -1102,6 +1104,7 @@ namespace ks::window::layerdiag
             array.append(item);
             hwnd = ::GetWindow(hwnd, GW_HWNDNEXT);
         }
+        if (hwnd != nullptr && complete != nullptr) *complete = false;
         return array;
     }
 
@@ -1241,6 +1244,68 @@ namespace ks::window::layerdiag
         if (failure) std::rethrow_exception(failure);
         return reply;
     }
+
+    struct ZOrderTraversal
+    {
+        std::atomic_bool known{false}, complete{false};
+    };
+    struct ZOrderExportValue
+    {
+        std::shared_ptr<DesktopValue> desktop;
+        std::shared_ptr<ZOrderTraversal> traversal;
+    };
+    struct ZOrderExportPayload
+    {
+        DWORD desktopError = ERROR_SUCCESS;
+        QByteArray bytes;
+        quint64 rows = 0;
+    };
+    ZOrderExportPayload collectZOrderExport(const ZOrderExportValue& request)
+    {
+        ZOrderExportPayload reply;
+        std::exception_ptr failure;
+        std::thread collector([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle && ::SetThreadDesktop(request.desktop->handle);
+            if (!bound) {
+                reply.desktopError = request.desktop && request.desktop->error != ERROR_SUCCESS ? request.desktop->error : ::GetLastError();
+                if (reply.desktopError == ERROR_SUCCESS) reply.desktopError = ERROR_INVALID_HANDLE;
+                return;
+            }
+            try {
+                QJsonObject root;
+                root.insert(QStringLiteral("generatedAt"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
+                root.insert(QStringLiteral("warning"), QStringLiteral("Band IDs are identifiers, not linear z-height."));
+                bool complete = true;
+                const QJsonArray windows = zOrderJson(&complete);
+                request.traversal->complete.store(complete);
+                request.traversal->known.store(true);
+                root.insert(QStringLiteral("windows"), windows);
+                root.insert(QStringLiteral("complete"), complete);
+                root.insert(QStringLiteral("walkLimit"), kWalkLimit);
+                root.insert(QStringLiteral("enumeratedCount"), windows.size());
+                reply.rows = static_cast<quint64>(windows.size());
+                reply.bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+            } catch (...) { failure = std::current_exception(); }
+            ::SetThreadDesktop(previous);
+        });
+        collector.join();
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+    struct ZOrderExportFormatter
+    {
+        bool operator()(const ZOrderExportValue& value, ks::ui::CompleteExportSink& sink,
+            const ks::i18n::SourceTextSnapshot&) const
+        {
+            const auto payload = collectZOrderExport(value);
+            if (payload.desktopError != ERROR_SUCCESS) {
+                sink.fail(ks::ui::CompleteExportError::FormatFailed,
+                    QStringLiteral("SetThreadDesktop: %1").arg(payload.desktopError)); return false;
+            }
+            return sink.writeUtf8(QByteArrayView(payload.bytes)) && sink.rowsCompleted(payload.rows);
+        }
+    };
 
     class Page;
     constexpr std::size_t kEventIngressLimit = 8192;
@@ -1386,6 +1451,18 @@ namespace ks::window::layerdiag
             : QWidget(parent), m_readOperation(std::make_unique<ks::ui::AsyncOperation>(this)),
               m_desktop(captureDesktopValue()), m_target(target)
         {
+            m_exportOperation = std::make_unique<ks::ui::CompleteExportOperation>(this);
+            m_exportOperation->setStateChangedCallback([this] {
+                const QPointer<Page> guard(this);
+                const bool busy = m_exportOperation->isBusy();
+                if (m_exportZButton != nullptr) m_exportZButton->setEnabled(!busy);
+                if (!guard) return;
+                if (m_snapshotExportButton != nullptr) m_snapshotExportButton->setEnabled(!busy);
+                if (guard && !busy && m_exportAfterRead && !m_reportBusy) {
+                    m_exportAfterRead = false;
+                    QTimer::singleShot(0, this, [this] { exportSnapshot(); });
+                }
+            });
             m_eventOperation = std::make_unique<ks::ui::AsyncOperation>(this);
             m_eventDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
             m_eventMailbox = std::make_shared<EventMailbox>(m_eventDispatcher, this);
@@ -1406,6 +1483,7 @@ namespace ks::window::layerdiag
 
         ~Page() override
         {
+            m_exportOperation->close();
             m_eventDispatcher->close();
             m_eventOperation->close();
             { QMutexLocker locker(&m_eventMailbox->mutex); m_eventMailbox->closed = true; }
@@ -1665,7 +1743,9 @@ namespace ks::window::layerdiag
             bindUiText(refreshButton, "window.layer.action.refresh", "刷新");
             bindUiText(delayedButton, "window.layer.action.delayed_snapshot", "3 秒后快照");
             bindUiText(copyButton, "window.layer.action.copy", "复制");
+            m_snapshotExportButton = exportButton;
             bindUiText(exportButton, "window.layer.action.export_snapshot", "导出快照");
+            m_exportZButton = exportZButton;
             bindUiText(exportZButton, "window.layer.action.export_z_order", "导出完整 Z 序");
             bindUiText(pickButton, "window.layer.action.pick_top_window", "取鼠标下顶层窗口");
             bindUiText(compareButton, "window.layer.action.compare", "对比");
@@ -2390,6 +2470,7 @@ namespace ks::window::layerdiag
 
         void exportSnapshot()
         {
+            if (m_exportOperation->isBusy()) { m_exportAfterRead = true; return; }
             if (!m_current.has_value() || m_reportBusy || !m_analysisCoherent) {
                 m_exportAfterRead = true;
                 if (!m_reportBusy) {
@@ -2462,23 +2543,41 @@ namespace ks::window::layerdiag
 
         void exportZOrder()
         {
+            const QPointer<Page> guard(this);
+            m_exportOperation->reconcile();
+            if (!guard || m_exportOperation->isBusy()) return;
             const QString path = QFileDialog::getSaveFileName(
                 this, uiText("window.layer.export.z_order_title", "导出完整顶层 Z 序"),
                 QStringLiteral("window-z-order-%1.json").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))),
                 QStringLiteral("JSON (*.json)"));
-            if (path.isEmpty()) return;
-            QJsonObject root;
-            root.insert(QStringLiteral("generatedAt"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
-            root.insert(QStringLiteral("warning"), QStringLiteral("Band IDs are identifiers, not linear z-height."));
-            root.insert(QStringLiteral("windows"), zOrderJson());
-            QFile file(path);
-            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            {
-                QMessageBox::warning(this, uiText("window.layer.export.failed_title", "导出失败"), uiText("window.layer.export.failed_message", "无法写入文件。"));
-                return;
-            }
-            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            m_status->setText(uiText("window.layer.status.z_order_exported", "完整 Z 序已导出。"));
+            if (!guard || path.isEmpty() || m_exportOperation->isBusy()) return;
+            const auto traversal = std::make_shared<ZOrderTraversal>();
+            const auto value = std::make_shared<const ZOrderExportValue>(ZOrderExportValue{m_desktop, traversal});
+            auto input = ks::ui::MakeCompleteExportInput(value, QStringLiteral("WindowLayerDiagnostics/ZOrder"),
+                ++m_exportVersion, std::nullopt, ks::i18n::LanguageManager::instance().sourceTextSnapshot(), ZOrderExportFormatter{});
+            input.fileMode = ks::ui::CompleteExportFileMode::Binary;
+            const auto id = m_exportOperation->startFile(path, std::move(input),
+                [this, traversal](const ks::ui::CompleteExportReceipt& receipt) {
+                    const auto journal = m_exportOperation->journal();
+                    const bool unknown = receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable ||
+                        receipt.error == ks::ui::CompleteExportError::ResultUnavailable;
+                    const QString message = unknown
+                        ? uiText("window.layer.export.receipt_unknown", "导出结果尚未确认；请检查目标文件并保留回执。")
+                        : receipt.succeeded()
+                        ? (traversal->known.load() && !traversal->complete.load()
+                            ? uiText("window.layer.status.z_order_exported_incomplete", "Z 序已导出，但遍历不完整；请查看 complete 与 walkLimit 字段。")
+                            : uiText("window.layer.status.z_order_exported", "完整 Z 序已导出。"))
+                        : uiText("window.layer.export.failed_title", "导出失败") + QStringLiteral(": ") + receipt.nativeError;
+                    const QPointer<Page> self(this);
+                    appendOperationLog({message, receipt.outputPath});
+                    if (!self) return;
+                    m_status->setText(message);
+                    if (!unknown && !receipt.succeeded()) QMessageBox::warning(this,
+                        uiText("window.layer.export.failed_title", "导出失败"), message);
+                    if (self && !unknown) journal->acknowledge(receipt.id);
+                });
+            // Reconciliation/state notifications may synchronously close this page.
+            if (guard && id != 0) m_status->setText(ks::i18n::sourceText(QStringLiteral("正在读取")));
         }
 
         void startTracking()
@@ -2543,6 +2642,10 @@ namespace ks::window::layerdiag
             }
         }
 
+        std::unique_ptr<ks::ui::CompleteExportOperation> m_exportOperation;
+        quint64 m_exportVersion = 0;
+        QPushButton* m_snapshotExportButton = nullptr;
+        QPushButton* m_exportZButton = nullptr;
         std::unique_ptr<ks::ui::AsyncOperation> m_eventOperation;
         std::shared_ptr<ks::ui::AsyncUiDispatcher> m_eventDispatcher;
         std::shared_ptr<EventMailbox> m_eventMailbox;

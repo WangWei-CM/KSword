@@ -8,6 +8,8 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "window.layer.status.z_order_exported_incomplete": "Z 序已导出，但遍历不完整；请查看 complete 与 walkLimit 字段。",
+    "window.layer.export.receipt_unknown": "导出结果尚未确认；请检查目标文件并保留回执。",
     "hardware.power.status.receipt_missing": "状态：电源操作已结束但未收到完整回执，请刷新当前状态，勿自动重发。",
     "hardware.power.status.not_accepted": "状态：当前忙碌或正在退出，未接受新的电源操作。",
     "hardware.power.status.transaction": "状态：正在应用电源操作并读取当前状态…",
