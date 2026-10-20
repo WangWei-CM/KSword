@@ -6,6 +6,8 @@
 
 #include <QDialog>
 #include <QPointer>
+#include <QSet>
+#include <functional>
 
 #include <atomic>
 #include <deque>
@@ -14,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+namespace ks::ui { class AsyncOperation; }
 class QLabel;
 class QPushButton;
 class QTimer;
@@ -81,13 +84,15 @@ private:
     void updateCountdownLabel();
     void finishCurrentEventWithDecision(quint32 decision, bool fromTimeoutOrClose);
     void onPopupClosedByUser();
-    bool sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGuid, quint32 decision);
+    void sendAnswerToDriver(const KSWORD_ARK_GUID128& eventGuid, quint32 decision, std::function<void(bool)> completed);
     void cancelAllPendingDecisionsBestEffort();
     quint64 currentUtc100ns() const;
     quint32 currentSessionId() const;
     void movePopupToBottomRight();
 
 private:
+    ks::ui::AsyncOperation* m_iconOperation = nullptr;
+    QSet<ks::ui::AsyncOperation*> m_replyOperations;
     QWidget* m_hostWindow = nullptr;
     std::atomic_bool m_running{ false };
     std::vector<std::unique_ptr<WaitWorkerContext>> m_workerList;
