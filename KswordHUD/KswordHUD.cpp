@@ -132,42 +132,6 @@ void OpenGLWidget::setChildWidgets(QWidget* left, QWidget* right) {
     }
 }
 
-QPixmap OpenGLWidget::captureContent() {
-    QPixmap pixmap(size());
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    // 绘制背景（与paintGL完全一致）
-    if (!m_backgroundPixmap.isNull()) {
-        painter.setOpacity(m_opacity);
-        QPixmap scaled = m_backgroundPixmap.scaled(
-            size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation
-        );
-        QRect rect = scaled.rect();
-        rect.moveCenter(QRect(QPoint(), size()).center());
-        painter.drawPixmap(rect, scaled);
-    }
-    else {
-        painter.setOpacity(m_opacity);
-        painter.fillRect(rect(), QColor(0, 0, 0, 128));
-    }
-
-    // 绘制子部件：使用实际抓图结果，避免复杂子控件/透明效果在 render() 路径下丢失。
-    painter.setOpacity(1);
-    if (m_leftWidget && m_leftWidget->isVisible()) {
-        const QPixmap leftPixmap = m_leftWidget->grab();
-        painter.drawPixmap(m_leftWidget->geometry().topLeft(), leftPixmap);
-    }
-    if (m_rightWidget && m_rightWidget->isVisible()) {
-        const QPixmap rightPixmap = m_rightWidget->grab();
-        painter.drawPixmap(m_rightWidget->geometry().topLeft(), rightPixmap);
-    }
-    // 移除setWindowOpacity(1.0)和setWindowOpacity(0.5)的波动操作
-    return pixmap;
-}
 void OpenGLWidget::initializeGL() {
     initializeOpenGLFunctions();
     glClearColor(0, 0, 0, 0);
@@ -223,7 +187,7 @@ void OpenGLWidget::paintGL() {
 }
 KswordHUD::KswordHUD(QWidget* parent)
     : QMainWindow(parent)
-    , m_windowOpacity(0.5)
+    , m_windowOpacity(1.0)
     , m_isVisible(false)
     , m_isAnimating(false)
     , m_pendingToggleRequest(false)
@@ -233,9 +197,6 @@ KswordHUD::KswordHUD(QWidget* parent)
     , m_hideAnimation(nullptr)
     , m_showAnimation(nullptr)
     , m_glWidget(nullptr)
-    , m_contentScale(1.0)
-    , m_paintFrameCount(0)
-    , m_animationFrameCount(0)
 {
     m_debugTimer.start();
     debugOutput("KswordHUD 构造函数开始");
@@ -353,15 +314,10 @@ KswordHUD::~KswordHUD()
 
 void KswordHUD::setWindowOpacity(qreal opacity)
 {
-    // 确保透明度在有效范围内
-    m_windowOpacity = qBound(0.0, opacity, 1.0);
-    debugOutput(QString("setWindowOpacity 被调用，新透明度: %1").arg(m_windowOpacity));
-
-    // 只有在非动画状态下才立即更新
-    if (!m_isAnimating) {
-        update();
-    }
-    // 在动画状态下，update() 会在动画的valueChanged信号中调用
+    const qreal value = qBound(0.0, opacity, 1.0);
+    if (qFuzzyCompare(m_windowOpacity, value)) return;
+    m_windowOpacity = value;
+    QMainWindow::setWindowOpacity(value);
 }
 
 KswordHUD::HudConfig KswordHUD::loadOrCreateConfig() const
@@ -609,59 +565,6 @@ void KswordHUD::resizeEvent(QResizeEvent* event)
         QString::number(m_originalRect.height()));
 }
 
-void KswordHUD::paintEvent(QPaintEvent* event)
-{
-    m_paintFrameCount++;
-
-    // 如果正在动画中且缓存内容有效，才绘制缓存内容
-    if (m_isAnimating && !m_cachedContent.isNull()) {
-
-        debugOutput(QString("paintEvent [动画帧 %1] - 透明度: %2, 缩放: %3")
-            .arg(m_paintFrameCount)
-            .arg(m_windowOpacity, 0, 'f', 3)
-            .arg(m_contentScale, 0, 'f', 3));
-
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-
-        // 计算缩放后的尺寸和位置
-        QSize scaledSize = m_cachedContent.size() * m_contentScale;
-        QPoint centerPoint = rect().center() - QPoint(scaledSize.width() / 2, scaledSize.height() / 2);
-        QRect drawRect(centerPoint, scaledSize);
-
-        // 设置窗口透明度
-        painter.setOpacity(m_windowOpacity);
-
-        // 绘制缩放后的内容
-        painter.drawPixmap(drawRect, m_cachedContent);
-    }
-    else {
-        // 正常绘制 - 确保缓存已清除
-        if (!m_cachedContent.isNull()) {
-            clearCache(); // 额外安全检查
-        }
-
-        debugOutput(QString("paintEvent [正常帧 %1] - 透明度: %2")
-            .arg(m_paintFrameCount)
-            .arg(m_windowOpacity, 0, 'f', 3));
-                //clearCache();
-        QMainWindow::paintEvent(event);
-    }
-}
-void KswordHUD::cacheWindowContent(const bool refreshFromLiveScene)
-{
-    if (m_glWidget) {
-        if (refreshFromLiveScene) {
-            m_cachedContent = m_glWidget->captureContent();
-            m_lastStableContent = m_cachedContent;
-        }
-        else {
-            m_cachedContent = m_lastStableContent;
-        }
-        debugOutput("已缓存窗口内容");
-    }
-}
-
 void KswordHUD::debugOutput(const QString& message)
 {
     if (!qEnvironmentVariableIsSet("KSWORDHUD_DEBUG")) {
@@ -673,166 +576,58 @@ void KswordHUD::debugOutput(const QString& message)
 
 void KswordHUD::initializeAnimations()
 {
-    debugOutput("初始化动画系统");
-    // 隐藏动画：透明度从1.0→0.0（叠加后0.5→0.0）
-    m_hideAnimation = new QPropertyAnimation(this, "windowOpacity");
-    m_hideAnimation->setDuration(500);
+    BOOL animate = TRUE;
+    ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0);
+    const int duration = animate ? 500 : 0;
+    m_hideAnimation = new QPropertyAnimation(this, "windowOpacity", this);
+    m_hideAnimation->setDuration(duration);
     m_hideAnimation->setEasingCurve(QEasingCurve::OutCubic);
-    m_hideAnimation->setStartValue(1.0);  // 初始透明度1.0（叠加后0.5）
-    m_hideAnimation->setEndValue(0.0);    // 结束时完全透明
-
-    connect(m_hideAnimation, &QPropertyAnimation::valueChanged, this, [this](const QVariant& value) {
-        m_animationFrameCount++;
-        qreal opacity = value.toReal();
-
-        // 进度计算：1.0→0.0 对应 0→1 的进度
-        qreal progress = 1.0 - opacity;  // 关键修改：进度 = 1 - 当前透明度
-        m_contentScale = 1.0 + progress * 0.5;  // 缩放仍保持1.0→1.5
-
-        debugOutput(QString("隐藏动画 [帧 %1] - 透明度: %2, 缩放: %3, 进度: %4")
-            .arg(m_animationFrameCount)
-            .arg(opacity, 0, 'f', 3)
-            .arg(m_contentScale, 0, 'f', 3)
-            .arg(progress, 0, 'f', 3));
-        update();
-        });
-    // 其他代码保持不变...
+    m_hideAnimation->setStartValue(1.0);
+    m_hideAnimation->setEndValue(0.0);
+    m_showAnimation = new QPropertyAnimation(this, "windowOpacity", this);
+    m_showAnimation->setDuration(duration);
+    m_showAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    m_showAnimation->setStartValue(0.0);
+    m_showAnimation->setEndValue(1.0);
     connect(m_hideAnimation, &QPropertyAnimation::finished, this, [this]() {
         hide();
-        clearCache(); // 重要：清除缓存
         m_isVisible = false;
         m_isAnimating = false;
-        m_glWidget->show();
-
-        m_glWidget->update(); // 强制OpenGL部件重绘
-        debugOutput("隐藏动画完成，窗口已隐藏");
-        m_animationFrameCount = 0;
+        setWindowOpacity(1.0);
         if (m_pendingToggleRequest) {
             m_pendingToggleRequest = false;
             QTimer::singleShot(0, this, [this]() { toggleVisibility(); });
         }
-        });
-
-    // 显示动画：透明度从0.0→1.0（叠加后0.0→0.5）
-
-    m_showAnimation = new QPropertyAnimation(this, "windowOpacity");
-    m_showAnimation->setDuration(500);
-    m_showAnimation->setEasingCurve(QEasingCurve::OutCubic);
-    m_showAnimation->setStartValue(0.0);  // 初始完全透明
-    m_showAnimation->setEndValue(1.0);    // 结束时透明度1.0（叠加后0.5）
-    setWindowOpacity(1.0);
-    connect(m_showAnimation, &QPropertyAnimation::valueChanged, this, [this](const QVariant& value) {
-        m_animationFrameCount++;
-        qreal opacity = value.toReal();
-
-        // 进度计算：0.0→1.0 对应 0→1 的进度
-        qreal progress = opacity;  // 关键修改：进度 = 当前透明度
-        m_contentScale = 1.5 - progress * 0.5;  // 缩放仍保持1.5→1.0
-
-        debugOutput(QString("显示动画 [帧 %1] - 透明度: %2, 缩放: %3, 进度: %4")
-            .arg(m_animationFrameCount)
-            .arg(opacity, 0, 'f', 3)
-            .arg(m_contentScale, 0, 'f', 3)
-            .arg(progress, 0, 'f', 3));
-        update();
-        });
+    });
     connect(m_showAnimation, &QPropertyAnimation::finished, this, [this]() {
         m_isVisible = true;
         m_isAnimating = false;
-        m_glWidget->show(); // 恢复显示OpenGL部件
-        clearCache(); // 重要：清除缓存
-        m_glWidget->update(); // 强制OpenGL部件重绘
-
-        debugOutput("显示动画完成，窗口已显示");
-        m_animationFrameCount = 0;
         if (m_pendingToggleRequest) {
             m_pendingToggleRequest = false;
             QTimer::singleShot(0, this, [this]() { toggleVisibility(); });
         }
-        });
-    setWindowOpacity(0.5);
+    });
 }
 
 void KswordHUD::toggleVisibility()
 {
     if (m_isAnimating) {
-        m_pendingToggleRequest = true;
-        debugOutput("动画进行中，已记录切换请求");
+        // Keep the parity of additional key presses without recapturing any content.
+        m_pendingToggleRequest = !m_pendingToggleRequest;
         return;
     }
-
     m_pendingToggleRequest = false;
-
-    debugOutput("切换可见性，当前状态:" + QString(m_isVisible ? "显示" : "隐藏"));
-
-    // 停止所有正在运行的动画
-    if (m_hideAnimation->state() == QAbstractAnimation::Running) {
-        m_hideAnimation->stop();
-        debugOutput("停止正在运行的隐藏动画");
-    }
-    if (m_showAnimation->state() == QAbstractAnimation::Running) {
-        m_showAnimation->stop();
-        debugOutput("停止正在运行的显示动画");
-    }
-
+    m_isAnimating = true;
     if (m_isVisible) {
-        // 隐藏窗口
-        debugOutput("开始隐藏动画");
-
-        m_isAnimating = true;
-        m_animationFrameCount = 0;
-
-        // 缓存当前窗口内容
-        cacheWindowContent(true);
-
-        // 隐藏OpenGL部件，只显示缓存内容
-        m_glWidget->hide();
-
+        // The system compositor fades the current surface; no child grab or CPU image scaling.
         m_hideAnimation->start();
+    } else {
+        setWindowOpacity(0.0);
+        show();
+        raise();
+        activateWindow();
+        m_showAnimation->start();
     }
-    else {
-        // 显示窗口
-        debugOutput("开始显示动画");
-
-        if (m_lastStableContent.isNull()) {
-            show();
-            raise();
-            activateWindow();
-            m_isVisible = true;
-            m_isAnimating = false;
-            clearCache();
-            m_glWidget->show();
-            m_glWidget->update();
-            debugOutput("无历史快照，直接显示窗口");
-        }
-        else {
-            cacheWindowContent(false);
-            m_glWidget->hide();
-
-            m_isAnimating = true;
-            m_animationFrameCount = 0;
-
-            // 用上次快照直接做显示动画，避免真实面板先闪现。
-            show();
-            raise();
-            activateWindow();
-
-            m_showAnimation->start();
-        }
-    }
-}
-void KswordHUD::clearCache() {
-    m_cachedContent = QPixmap();
-    debugOutput("缓存已清除");
-}
-
-void KswordHUD::forceUpdateCache() {
-    clearCache();
-    if (m_glWidget) {
-        m_glWidget->update(); // 强制OpenGLWidget重绘
-    }
-    update(); // 强制窗口重绘
-    debugOutput("强制更新缓存");
 }
 
 // 1. 初始化CPU条形图（60秒历史数据，Y轴0-100%）
