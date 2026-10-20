@@ -28,6 +28,7 @@ class QLineEdit;
 class QPoint;
 class QPushButton;
 class QSplitter;
+class QShowEvent;
 class QTabWidget;
 class QTableWidget;
 class QTableWidgetItem;
@@ -91,6 +92,9 @@ public:
     // - 作用：由 NetworkDock 注入“NSI UDP endpoint -> 防火墙阻断规则”的预填动作；
     // - handler 为空时 UDP 菜单不显示该写操作。
     void setUdpEndpointBlockRuleHandler(UdpEndpointBlockRuleHandler handler);
+
+protected:
+    void showEvent(QShowEvent* event) override;
 
 private:
     // CrossViewRow：TCP/UDP 交叉视图的一行聚合结果。
@@ -304,10 +308,16 @@ private:
     void refreshCrossViewAsync();
 
     // applySnapshot 作用：
-    // - 将后台采集完成的全部快照写回各个表格；
+    // - 保存完整规范快照，只投影当前可见分支；
     // - 输入 snapshot：后台线程采集结果；
     // - 返回：无。
-    void applySnapshot(const AuditSnapshot& snapshot);
+    void applySnapshot(AuditSnapshot snapshot);
+
+    // R3 高频刷新合并最近 R0；非连接分区保留最近一次完整审计结果。
+    void applyCrossViewSnapshot(AuditSnapshot snapshot);
+
+    // Show/切页/回投共用入口；菜单屏障后只消费当前分支的最新 dirty 快照。
+    void presentVisibleSnapshot();
 
     // refreshCrossViewTable 作用：
     // - 重建 TCP/UDP 明细表和进程维度交叉视图表格；
@@ -369,13 +379,13 @@ private:
     // - 重建 WFP provider / sublayer / callout / filter 四张只读表；
     // - 输入 snapshot：来自后台的 WFP 目录结果；
     // - 返回：无。
-    void refreshWfpTables(const AuditSnapshot& snapshot);
+    void refreshWfpTables(const AuditSnapshot& snapshot, QTableWidget* targetTable);
 
     // refreshNdisTables 作用：
     // - 重建 NDIS miniport / binding / protocol 表；
     // - 输入 snapshot：来自后台的 NDIS 结果；
     // - 返回：无。
-    void refreshNdisTables(const AuditSnapshot& snapshot);
+    void refreshNdisTables(const AuditSnapshot& snapshot, QTableWidget* targetTable);
 
     // refreshNsiSummaryTable 作用：
     // - 重建 NSI 与 R0 网络审计摘要表；
@@ -470,6 +480,10 @@ private:
     QWidget* m_nsiPage = nullptr;
     QTableWidget* m_nsiSummaryTable = nullptr;
 
+    std::shared_ptr<AuditSnapshot> m_latestAuditSnapshot; // 最新完整规范数据；采集不受页面隐藏影响。
+    QSet<QTableWidget*> m_dirtyAuditTables; // 未投影表只保留规范数据，不构造隐藏 item。
+    bool m_projectionRequestedWhileBusy = false;
+    bool m_projectionInProgress = false; // 防止投影期间同步 Show/currentChanged 重入。
     QTimer* m_crossAutoRefreshTimer = nullptr; // 原连接管理页自动刷新能力。
     QSet<quint32> m_processFilterSet; // 进程页带入的独立 PID 筛选。
     std::vector<TcpEndpointRow> m_tcpEndpointCache; // UI 行通过 UserRole 回查终止参数。

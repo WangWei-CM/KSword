@@ -3,6 +3,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/TablePresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
@@ -51,6 +52,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSizePolicy>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStringList>
 #include <QTabWidget>
@@ -799,6 +801,12 @@ NetworkAuditPage::~NetworkAuditPage()
     }
 }
 
+void NetworkAuditPage::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    presentVisibleSnapshot();
+}
+
 void NetworkAuditPage::requestInitialRefresh()
 {
     bool expected = false;
@@ -1198,6 +1206,15 @@ void NetworkAuditPage::initializeConnections()
         m_crossAutoRefreshTimer->start();
     }
 
+    // 采集与投影分离：切页只消费当前分支，尚未查看的表继续保留规范快照。
+    for (QTabWidget* tabs : { m_sectionTabWidget, m_wfpTabWidget, m_ndisTabWidget })
+    {
+        connect(tabs, &QTabWidget::currentChanged, this, [this](int)
+        {
+            presentVisibleSnapshot();
+        });
+    }
+
     connect(m_crossSearchEdit, &QLineEdit::textChanged, this, [this](const QString&)
     {
         applyCrossViewSearchFilter();
@@ -1281,9 +1298,10 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
             {
                 return;
             }
+            const QPointer<NetworkAuditPage> guard(page);
             if (failureText.isEmpty())
             {
-                page->applySnapshot(snapshot);
+                page->applySnapshot(std::move(snapshot));
             }
             else
             {
@@ -1298,10 +1316,12 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
                         "状态：刷新失败；详情已写入日志。"));
                 }
             }
+            if (guard.isNull()) return;
             if (page->m_refreshButton != nullptr)
             {
                 page->m_refreshButton->setEnabled(true);
             }
+            if (guard.isNull()) return;
             page->m_refreshInProgress.store(false);
         }, Qt::QueuedConnection);
     }).detach();
@@ -1353,24 +1373,10 @@ void NetworkAuditPage::refreshCrossViewAsync()
                     return;
                 }
 
+                const QPointer<NetworkAuditPage> guard(page);
                 if (failureText.isEmpty())
                 {
-                    // R0 行由完整审计采集；高频连接刷新只替换 R3 行。
-                    for (const TcpEndpointRow& cachedRow : page->m_tcpEndpointCache)
-                    {
-                        if (cachedRow.isR0Snapshot)
-                        {
-                            snapshot.tcpEndpointRows.push_back(cachedRow);
-                        }
-                    }
-                    for (const UdpEndpointRow& cachedRow : page->m_udpEndpointCache)
-                    {
-                        if (cachedRow.sourceText.startsWith(QStringLiteral("R0")))
-                        {
-                            snapshot.udpEndpointRows.push_back(cachedRow);
-                        }
-                    }
-                    page->refreshCrossViewTable(snapshot);
+                    page->applyCrossViewSnapshot(std::move(snapshot));
                 }
                 else
                 {
@@ -1385,6 +1391,7 @@ void NetworkAuditPage::refreshCrossViewAsync()
                             "状态：刷新失败；详情已写入日志。"));
                     }
                 }
+                if (guard.isNull()) return;
                 page->m_refreshInProgress.store(false);
             },
             Qt::QueuedConnection);
@@ -2122,71 +2129,190 @@ NetworkAuditPage::AuditSnapshot NetworkAuditPage::buildAuditSnapshot(const bool 
     return snapshot;
 }
 
-void NetworkAuditPage::applySnapshot(const AuditSnapshot& snapshot)
+void NetworkAuditPage::applySnapshot(AuditSnapshot snapshot)
 {
-    // 完整审计会重建多个关联表格；任一右键菜单打开时必须整体延后提交，
-    // 否则同一快照只更新部分表格，也可能让菜单行号指向下一轮数据。
+    // 规范快照始终接收完整采集结果；隐藏与菜单屏障只延后控件投影。
+    m_latestAuditSnapshot = std::make_shared<AuditSnapshot>(std::move(snapshot));
+    m_dirtyAuditTables = {
+        m_tcpTable, m_udpTable, m_crossSummaryTable, m_afdTable,
+        m_wfpProviderTable, m_wfpSubLayerTable, m_wfpCalloutTable, m_wfpFilterTable,
+        m_ndisAdapterTable, m_ndisBindingTable, m_ndisProtocolTable, m_ndisUnknownTable,
+        m_nsiSummaryTable
+    };
+    const QPointer<NetworkAuditPage> guard(this);
+    const auto accepted = m_latestAuditSnapshot;
+    const QPointer<QLabel> statusLabel(m_statusLabel);
+    if (statusLabel != nullptr)
+    {
+        statusLabel->setText(accepted->statusText);
+        if (guard.isNull()) return;
+        if (m_latestAuditSnapshot != accepted)
+        {
+            presentVisibleSnapshot();
+            return;
+        }
+        if (statusLabel != nullptr) statusLabel->setToolTip(accepted->detailText);
+        if (guard.isNull()) return;
+    }
+    presentVisibleSnapshot();
+}
+
+void NetworkAuditPage::applyCrossViewSnapshot(AuditSnapshot snapshot)
+{
+    if (m_latestAuditSnapshot == nullptr)
+    {
+        m_latestAuditSnapshot = std::make_shared<AuditSnapshot>();
+    }
+    // A nested event loop may still be projecting the previous value snapshot.
+    // Copy only in that reentrant case; normal acceptance keeps one canonical value.
+    else if (m_latestAuditSnapshot.use_count() > 1)
+    {
+        m_latestAuditSnapshot = std::make_shared<AuditSnapshot>(*m_latestAuditSnapshot);
+    }
+    // 自动刷新只替换 R3 端点；从最新规范快照保留 R0，而不是依赖已显示表的旧缓存。
+    for (const TcpEndpointRow& row : m_latestAuditSnapshot->tcpEndpointRows)
+    {
+        if (row.isR0Snapshot)
+        {
+            snapshot.tcpEndpointRows.push_back(row);
+        }
+    }
+    for (const UdpEndpointRow& row : m_latestAuditSnapshot->udpEndpointRows)
+    {
+        if (row.sourceText.startsWith(QStringLiteral("R0")))
+        {
+            snapshot.udpEndpointRows.push_back(row);
+        }
+    }
+    m_latestAuditSnapshot->tcpEndpointRows = std::move(snapshot.tcpEndpointRows);
+    m_latestAuditSnapshot->udpEndpointRows = std::move(snapshot.udpEndpointRows);
+    m_latestAuditSnapshot->crossViewRows = std::move(snapshot.crossViewRows);
+    m_dirtyAuditTables.insert(m_tcpTable);
+    m_dirtyAuditTables.insert(m_udpTable);
+    m_dirtyAuditTables.insert(m_crossSummaryTable);
+    presentVisibleSnapshot();
+}
+
+void NetworkAuditPage::presentVisibleSnapshot()
+{
+    if (m_projectionInProgress)
+    {
+        m_projectionRequestedWhileBusy = true;
+        return;
+    }
+    if (!isVisible() || m_latestAuditSnapshot == nullptr || m_sectionTabWidget == nullptr)
+    {
+        return;
+    }
+
+    QTableWidget* table = nullptr;
+    QWidget* const section = m_sectionTabWidget->currentWidget();
+    if (section == m_crossViewPage)
+    {
+        table = m_tcpTable; // 三表共享动作行缓存，始终在同一个提交中替换。
+    }
+    else if (section == m_afdPage)
+    {
+        table = m_afdTable;
+    }
+    else if (section == m_wfpPage && m_wfpTabWidget != nullptr)
+    {
+        switch (m_wfpTabWidget->currentIndex())
+        {
+        case 0: table = m_wfpProviderTable; break;
+        case 1: table = m_wfpSubLayerTable; break;
+        case 2: table = m_wfpCalloutTable; break;
+        case 3: table = m_wfpFilterTable; break;
+        default: break;
+        }
+    }
+    else if (section == m_ndisPage && m_ndisTabWidget != nullptr)
+    {
+        switch (m_ndisTabWidget->currentIndex())
+        {
+        case 0: table = m_ndisAdapterTable; break;
+        case 1: table = m_ndisBindingTable; break;
+        case 2: table = m_ndisProtocolTable; break;
+        case 3: table = m_ndisUnknownTable; break;
+        default: break;
+        }
+    }
+    else if (section == m_nsiPage)
+    {
+        table = m_nsiSummaryTable;
+    }
+    if (table == nullptr || !m_dirtyAuditTables.contains(table))
+    {
+        return;
+    }
+
+    // 共用一个 latest-wins 投影键；回调不保存过期快照，解除屏障后重新验证可见分支。
     const QPointer<NetworkAuditPage> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
-        QStringLiteral("network-audit-full-snapshot"),
-        {
-            m_tcpTable,
-            m_udpTable,
-            m_crossSummaryTable,
-            m_afdTable,
-            m_wfpProviderTable,
-            m_wfpSubLayerTable,
-            m_wfpCalloutTable,
-            m_wfpFilterTable,
-            m_ndisAdapterTable,
-            m_ndisBindingTable,
-            m_ndisProtocolTable,
-            m_nsiSummaryTable
-        },
-        [safeThis, snapshot]()
+        QStringLiteral("network-audit-visible-snapshot"),
+        { m_tcpTable, m_udpTable, m_crossSummaryTable, m_afdTable,
+          m_wfpProviderTable, m_wfpSubLayerTable, m_wfpCalloutTable, m_wfpFilterTable,
+          m_ndisAdapterTable, m_ndisBindingTable, m_ndisProtocolTable, m_ndisUnknownTable,
+          m_nsiSummaryTable },
+        [safeThis]()
         {
             if (!safeThis.isNull())
             {
-                safeThis->applySnapshot(snapshot);
+                safeThis->presentVisibleSnapshot();
             }
         }))
     {
         return;
     }
 
-    refreshCrossViewTable(snapshot);
-    refreshAfdTable(snapshot.afdRows);
-    refreshWfpTables(snapshot);
-    refreshNdisTables(snapshot);
-    refreshNsiSummaryTable(snapshot);
-
-    if (m_statusLabel != nullptr)
+    m_projectionInProgress = true;
+    m_projectionRequestedWhileBusy = false;
+    const auto snapshot = m_latestAuditSnapshot;
+    const QPointer<QWidget> safeSection(section);
+    m_dirtyAuditTables.remove(table);
+    if (section == m_crossViewPage)
     {
-        m_statusLabel->setText(snapshot.statusText);
-        m_statusLabel->setToolTip(snapshot.detailText);
+        m_dirtyAuditTables.remove(m_udpTable);
+        m_dirtyAuditTables.remove(m_crossSummaryTable);
+        refreshCrossViewTable(*snapshot);
+    }
+    else if (section == m_afdPage)
+    {
+        refreshAfdTable(snapshot->afdRows);
+    }
+    else if (section == m_wfpPage)
+    {
+        refreshWfpTables(*snapshot, table);
+    }
+    else if (section == m_ndisPage)
+    {
+        refreshNdisTables(*snapshot, table);
+    }
+    else if (section == m_nsiPage)
+    {
+        refreshNsiSummaryTable(*snapshot);
+    }
+    if (safeThis.isNull()) return;
+    if (safeSection != nullptr && safeThis->isVisible()
+        && safeThis->m_sectionTabWidget->currentWidget() == safeSection)
+    {
+        ks::ui::PrepareWidgetThemeBindingsForShow(safeSection);
+        if (safeThis.isNull()) return;
+    }
+    safeThis->m_projectionInProgress = false;
+    if (safeThis->m_projectionRequestedWhileBusy || safeThis->m_latestAuditSnapshot != snapshot)
+    {
+        QTimer::singleShot(0, safeThis, [safeThis]()
+        {
+            if (!safeThis.isNull()) safeThis->presentVisibleSnapshot();
+        });
     }
 }
 
 void NetworkAuditPage::refreshCrossViewTable(const AuditSnapshot& snapshot)
 {
-    // 高频 TCP/UDP 自动刷新只重建交叉视图三表；菜单打开期间合并为最新快照。
-    const QPointer<NetworkAuditPage> safeThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-        this,
-        QStringLiteral("network-audit-cross-view"),
-        { m_tcpTable, m_udpTable, m_crossSummaryTable },
-        [safeThis, snapshot]()
-        {
-            if (!safeThis.isNull())
-            {
-                safeThis->refreshCrossViewTable(snapshot);
-            }
-        }))
-    {
-        return;
-    }
-
+    // presentVisibleSnapshot 已验证可见性并经过菜单屏障；缓存与三表同轮提交。
     m_tcpEndpointCache = snapshot.tcpEndpointRows;
     m_udpEndpointCache = snapshot.udpEndpointRows;
     if (!snapshot.r0TcpStatusText.isEmpty())
@@ -2770,11 +2896,11 @@ void NetworkAuditPage::refreshAfdTable(const std::vector<AfdHandleRow>& snapshot
     }
 }
 
-void NetworkAuditPage::refreshWfpTables(const AuditSnapshot& snapshot)
+void NetworkAuditPage::refreshWfpTables(const AuditSnapshot& snapshot, QTableWidget* targetTable)
 {
-    auto fillTable = [](QTableWidget* tableWidget, const auto& rows, const auto& writer)
+    auto fillTable = [targetTable](QTableWidget* tableWidget, const auto& rows, const auto& writer)
     {
-        if (tableWidget == nullptr)
+        if (tableWidget == nullptr || tableWidget != targetTable)
         {
             return;
         }
@@ -2834,11 +2960,11 @@ void NetworkAuditPage::refreshWfpTables(const AuditSnapshot& snapshot)
     });
 }
 
-void NetworkAuditPage::refreshNdisTables(const AuditSnapshot& snapshot)
+void NetworkAuditPage::refreshNdisTables(const AuditSnapshot& snapshot, QTableWidget* targetTable)
 {
-    auto fillTable = [](QTableWidget* tableWidget, const auto& rows, const auto& writer)
+    auto fillTable = [targetTable](QTableWidget* tableWidget, const auto& rows, const auto& writer)
     {
-        if (tableWidget == nullptr)
+        if (tableWidget == nullptr || tableWidget != targetTable)
         {
             return;
         }
