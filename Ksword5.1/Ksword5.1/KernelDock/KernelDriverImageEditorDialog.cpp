@@ -3,6 +3,7 @@
 #include "../UI/DetailPresentation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
 
 #include "KernelDock.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
@@ -19,6 +20,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -108,7 +110,13 @@ KernelDriverImageEditorDialog::KernelDriverImageEditorDialog(
       m_requestedDriverName(driverObjectName.trimmed())
 {
     initializeUi();
+    m_readOperation = new ks::ui::AsyncOperation(this);
     QTimer::singleShot(0, this, [this]() { refreshSnapshot(); });
+}
+
+KernelDriverImageEditorDialog::~KernelDriverImageEditorDialog()
+{
+    if (m_readOperation != nullptr) m_readOperation->close();
 }
 
 // 构建明确不透明的高级编辑器；每个可执行按钮都有图标和后果说明。
@@ -324,16 +332,45 @@ void KernelDriverImageEditorDialog::initializeUi()
 // 身份首查不要求 DriverStart 非零，因此字段被改坏后仍可按对象名进入事务恢复路径。
 void KernelDriverImageEditorDialog::refreshSnapshot()
 {
+    if (m_mutationBusy || m_queryInFlight) return;
+    m_queryInFlight = true;
     setActionsEnabled(false, false);
-    setStatus(
-        kernelText(
-            "kernel.driver_image.status.identity_querying",
-            QStringLiteral("状态：正在引用 DriverObject...")),
-        KswordTheme::InfoHex());
+    m_refreshButton->setEnabled(false);
+    m_table->setEnabled(false);
+    setStatus(kernelText("kernel.driver_image.status.identity_querying", QStringLiteral("状态：正在引用 DriverObject...")), KswordTheme::InfoHex());
+    using ReadResult = std::pair<ksword::ark::DriverObjectQueryResult, ksword::ark::DriverImageControlResult>;
+    const auto ticket = m_readOperation->submit<std::wstring, ReadResult>(m_requestedDriverName.toStdWString(),
+        [](const std::wstring& name, const ks::ui::AsyncOperationToken& token) {
+            const ksword::ark::DriverClient client;
+            ReadResult result;
+            result.first = client.queryDriverObject(name, KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES);
+            if (result.first.io.ok && result.first.lastStatus >= 0 && result.first.driverObjectAddress != 0U && !token.isCanceled())
+                result.second = client.queryDriverImage(0U, result.first.driverName.empty() ? name : result.first.driverName, result.first.driverObjectAddress);
+            return result;
+        },
+        [this](const ReadResult& result, std::uint64_t) { applyReadSnapshot(result.first, result.second); return true; },
+        [this](std::exception_ptr) {
+            m_queryInFlight = false;
+            m_refreshButton->setEnabled(true);
+            m_table->setEnabled(true);
+            setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+        });
+    if (ticket == 0)
+    {
+        m_queryInFlight = false;
+        m_refreshButton->setEnabled(true);
+        m_table->setEnabled(true);
+        setStatus(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")), KswordTheme::ErrorHex());
+    }
+}
 
-    const ksword::ark::DriverClient client;
-    const auto identity =
-        client.queryDriverObject(m_requestedDriverName.toStdWString());
+void KernelDriverImageEditorDialog::applyReadSnapshot(
+    const ksword::ark::DriverObjectQueryResult& identity,
+    const ksword::ark::DriverImageControlResult& transaction)
+{
+    m_queryInFlight = false;
+    m_refreshButton->setEnabled(true);
+    m_table->setEnabled(true);
     if (!identity.io.ok)
     {
         setStatus(
@@ -363,8 +400,7 @@ void KernelDriverImageEditorDialog::refreshSnapshot()
     m_moduleBase = 0U;
     m_driverObjectAddress = identity.driverObjectAddress;
 
-    ksword::ark::DriverImageControlResult result{};
-    (void)queryTransaction(result, true);
+    (void)applyTransactionResult(transaction, true);
 }
 
 // 每个破坏动作执行前都调用本函数刷新代次和邻接；目标输入格可选择保留。
@@ -382,6 +418,13 @@ bool KernelDriverImageEditorDialog::queryTransaction(
         m_moduleBase,
         m_canonicalDriverName.toStdWString(),
         m_driverObjectAddress);
+    return applyTransactionResult(resultOut, resetDesiredValues);
+}
+
+bool KernelDriverImageEditorDialog::applyTransactionResult(
+    const ksword::ark::DriverImageControlResult& resultOut,
+    const bool resetDesiredValues)
+{
     if (!resultOut.io.ok)
     {
         setStatus(
@@ -420,6 +463,9 @@ bool KernelDriverImageEditorDialog::queryTransaction(
 // 原子批量修改只使用刚查询的 currentValues 作为 expected；解析不筛选地址归属。
 void KernelDriverImageEditorDialog::applySelectedFields()
 {
+    if (m_queryInFlight || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     const std::uint32_t fieldMask = selectedFieldMask();
     if (fieldMask == 0U)
     {
@@ -487,6 +533,9 @@ void KernelDriverImageEditorDialog::applySelectedFields()
 // 加载链摘除始终回传查询到的双向邻接，R0 再在真实 ERESOURCE 下验证。
 void KernelDriverImageEditorDialog::hideFromLoadedModuleList()
 {
+    if (m_queryInFlight || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     ksword::ark::DriverImageControlResult snapshot{};
     if (!queryTransaction(snapshot, false))
     {
@@ -531,6 +580,9 @@ void KernelDriverImageEditorDialog::hideFromLoadedModuleList()
 // 恢复仅覆盖仍等于本事务 applied 值的字段；第三方值会进入 conflict 而不被覆盖。
 void KernelDriverImageEditorDialog::restoreManagedState()
 {
+    if (m_queryInFlight || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     ksword::ark::DriverImageControlResult snapshot{};
     if (!queryTransaction(snapshot, false))
     {
@@ -609,6 +661,9 @@ void KernelDriverImageEditorDialog::restoreManagedState()
 // 放弃是不可逆的记录删除；当前字段、隐藏链和第三方冲突全部原样保留。
 void KernelDriverImageEditorDialog::abandonRecoveryRecord()
 {
+    if (m_queryInFlight || m_mutationBusy) return;
+    const QScopedValueRollback<bool> mutationGuard(m_mutationBusy, true);
+    m_readOperation->cancel();
     ksword::ark::DriverImageControlResult snapshot{};
     if (!queryTransaction(snapshot, false))
     {
