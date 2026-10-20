@@ -90,6 +90,7 @@ constexpr UINT kMsgCallbackEventReceived = WM_APP + 607;
 constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
 constexpr UINT kMsgR0EvidenceFilterCompleted = WM_APP + 609;
 constexpr UINT kMsgCallbackFileIoCompleted = WM_APP + 610;
+constexpr UINT kMsgKernelSortCompleted = WM_APP + 611;
 constexpr UINT_PTR kTimerR0EvidenceFilter = 51057;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
@@ -1550,6 +1551,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     switch (msg) {
     case WM_CREATE:
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd, kMsgKernelQueryCompleted);
+        sortTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>>(hwnd, kMsgKernelSortCompleted);
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
         callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
@@ -1562,6 +1564,9 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
     case WM_SIZE:
         Layout();
         return 0;
+    case kMsgKernelSortCompleted:
+        if (sortTask_ && sortTask_->consume(hwnd, wParam, lParam)) return 0;
+        break;
     case kMsgKernelQueryCompleted:
         if (queryTask_ && queryTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -2456,6 +2461,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         if (callbackEventReceiver_) {
             callbackEventReceiver_->Shutdown();
         }
+        if (sortTask_) sortTask_->cancel();
         if (queryTask_) {
             queryTask_->cancel();
         }
@@ -4461,6 +4467,9 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     }
     cache.hasData = false;
     if (pendingCachedFilterFeatures_.contains(featureId)) ScheduleCachedFilter(featureId);
+    if (const auto pending = pendingSorts_.find(featureId); pending != pendingSorts_.end()) {
+        RequestResultSort(pending->second.first, pending->second.second);
+    }
     return true;
 }
 
@@ -4471,6 +4480,7 @@ void KernelPage::ResetVisibleResultRows() {
 }
 
 void KernelPage::SyncResultListVirtualRows() {
+    ++rowsRevision_;
     if (!resultList_) {
         return;
     }
@@ -8595,25 +8605,78 @@ void KernelPage::SortResultRowsByColumn(const int columnIndex) {
         sortColumn_ = columnIndex;
         sortAscending_ = true;
     }
-    Ksword::Ui::ScopedListViewRedrawLock resultListLock(resultList_);
-    Ksword::Ui::ScopedListViewRedrawLock propertyListLock(propertyList_);
-    Ksword::Ui::ScopedListViewRedrawLock summaryListLock(summaryList_);
-    Ksword::Ui::ScopedWindowRedrawLock objectTreeLock(objectNamespaceTree_);
+    RequestResultSort(columnIndex, sortAscending_);
+}
 
-    // Nearly every kernel feature table puts addresses, sizes, counts and status
-    // codes in these columns, and a plain string compare orders them by their
-    // printed characters: 0x2 lands after 0x1FF and 9 lands after 10. The
-    // comparison is numeric whenever both cells start with a number and falls
-    // back to the case-insensitive string order otherwise.
-    std::stable_sort(currentRows_.begin(), currentRows_.end(), [&](const auto& left, const auto& right) {
-        const std::wstring leftValue = columnIndex < static_cast<int>(left.size()) ? left[static_cast<std::size_t>(columnIndex)] : std::wstring{};
-        const std::wstring rightValue = columnIndex < static_cast<int>(right.size()) ? right[static_cast<std::size_t>(columnIndex)] : std::wstring{};
-        const int compare = Ksword::Ui::CompareCellsNumericAware(leftValue, rightValue);
-        return sortAscending_ ? compare < 0 : compare > 0;
-    });
-    SyncResultListVirtualRows();
-    UpdateSelectedRowDetail();
-    InvalidateCurrentFeatureViewCache();
+void KernelPage::RequestResultSort(const int columnIndex, const bool ascending) {
+    const auto* descriptor = CurrentDescriptor();
+    if (!descriptor || !sortTask_ || columnIndex < 0 ||
+        columnIndex >= static_cast<int>(currentColumns_.size()) || currentRows_.empty()) return;
+    const auto featureId = descriptor->id;
+    if (featureId == KernelFeatureId::ObjectNamespaceOverview ||
+        featureId == KernelFeatureId::ObjectDirectoryRecursive) return;
+    auto cells = std::make_shared<std::vector<std::wstring>>();
+    cells->reserve(currentRows_.size());
+    for (const auto& row : currentRows_) cells->push_back(
+        static_cast<std::size_t>(columnIndex) < row.size() ? row[static_cast<std::size_t>(columnIndex)] : std::wstring{});
+    const auto revision = rowsRevision_;
+    const auto requestId = ++sortRequestId_;
+    pendingSorts_[featureId] = {columnIndex, ascending};
+    sortTask_->request(
+        [cells, featureId, revision, requestId, columnIndex, ascending] {
+            KernelSortSnapshot result;
+            result.featureId = featureId;
+            result.revision = revision;
+            result.requestId = requestId;
+            result.column = columnIndex;
+            result.ascending = ascending;
+            result.order = BuildKernelSortOrder(*cells, ascending);
+            return result;
+        },
+        [this](std::uint64_t, std::optional<KernelSortSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result || result->requestId != sortRequestId_) return;
+            const auto* current = CurrentDescriptor();
+            if (!current || current->id != result->featureId) return;
+            if (result->revision != rowsRevision_ || result->column != sortColumn_ ||
+                result->ascending != sortAscending_ || result->order.size() != currentRows_.size()) {
+                pendingSorts_.erase(result->featureId);
+                return;
+            }
+            const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
+            const int top = ListView_GetTopIndex(resultList_);
+            int newSelected = -1;
+            int newTop = -1;
+            std::vector<std::vector<std::wstring>> ordered;
+            std::vector<int> indents;
+            ordered.reserve(currentRows_.size());
+            const bool hasIndents = currentRowIndents_.size() == currentRows_.size();
+            if (hasIndents) indents.reserve(currentRowIndents_.size());
+            for (std::size_t index = 0; index < result->order.size(); ++index) {
+                const auto old = result->order[index];
+                if (static_cast<int>(old) == selected) newSelected = static_cast<int>(index);
+                if (static_cast<int>(old) == top) newTop = static_cast<int>(index);
+                ordered.push_back(std::move(currentRows_[old]));
+                if (hasIndents) indents.push_back(currentRowIndents_[old]);
+            }
+            currentRows_ = std::move(ordered);
+            if (hasIndents) currentRowIndents_ = std::move(indents);
+            pendingSorts_.erase(result->featureId);
+            Ksword::Ui::ScopedListViewRedrawLock resultListLock(resultList_);
+            SyncResultListVirtualRows();
+            ListView_SetItemState(resultList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+            if (newSelected >= 0) ListView_SetItemState(resultList_, newSelected,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            if (newTop >= 0) {
+                ListView_EnsureVisible(resultList_, newTop, FALSE);
+                RECT item{};
+                if (ListView_GetItemRect(resultList_, newTop, &item, LVIR_BOUNDS)) {
+                    ListView_Scroll(resultList_, 0, (newTop - ListView_GetTopIndex(resultList_)) *
+                        static_cast<int>(item.bottom - item.top));
+                }
+            }
+            UpdateSelectedRowDetail();
+            InvalidateCurrentFeatureViewCache();
+        });
 }
 
 void KernelPage::UpdateSelectedRowDetail() {
@@ -13938,6 +14001,7 @@ bool KernelPage::CurrentPrimaryUsesSecondaryTabs() const {
 }
 
 void KernelPage::ClearResultGridOnly() {
+    ++rowsRevision_;
     // ClearResultGridOnly clears only the owner-data result grid. Inputs are
     // the current resultList_ HWND; processing drops the visible row count and
     // column headers but deliberately leaves auxiliary tree/property/summary

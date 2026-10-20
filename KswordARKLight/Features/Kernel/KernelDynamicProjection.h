@@ -1,11 +1,13 @@
 #pragma once
 
 #include "KernelPageLayout.h"
+#include "../../Ui/NumericSortKey.h"
 
 #include <algorithm>
 #include <cwchar>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -73,6 +75,30 @@ inline KernelDynamicProjection BuildKernelDynamicProjection(const KernelFeatureI
     output.rawRows = std::make_shared<const KernelDynamicProjection::Rows>(output.rows);
     return output;
 }
+
+inline std::vector<std::size_t> BuildKernelSortOrder(const std::vector<std::wstring>& cells,
+    const bool ascending) {
+    std::vector<Ksword::Ui::NumericSortKey> keys;
+    keys.reserve(cells.size());
+    for (const auto& cell : cells) keys.push_back(Ksword::Ui::ParseNumericSortKey(cell));
+    std::vector<std::size_t> order(cells.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::stable_sort(order.begin(), order.end(), [&](const auto left, const auto right) {
+        int compared = Ksword::Ui::CompareNumericSortKeys(keys[left], keys[right]);
+        if (!compared) compared = ::_wcsicmp(cells[left].c_str(), cells[right].c_str());
+        return ascending ? compared < 0 : compared > 0;
+    });
+    return order;
+}
+
+struct KernelSortSnapshot {
+    KernelFeatureId featureId = KernelFeatureId::ObjectNamespaceOverview;
+    std::uint64_t revision = 0;
+    std::uint64_t requestId = 0;
+    int column = -1;
+    bool ascending = true;
+    std::vector<std::size_t> order;
+};
 
 struct KernelQuerySnapshot {
     KernelOperationResult result;

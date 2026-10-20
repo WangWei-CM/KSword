@@ -147,6 +147,7 @@ private:
     void AddDynamicResultRow(int rowIndex, const KernelResultRow& resultRow, const std::vector<std::wstring>& orderedColumns);
     void RebuildResultListFromCache();
     void SortResultRowsByColumn(int columnIndex);
+    void RequestResultSort(int columnIndex, bool ascending);
     void UpdateSelectedRowDetail();
     LRESULT HandleResultListCustomDraw(LPARAM lParam);
     void UpdatePropertyTableFromSelection();
@@ -437,6 +438,10 @@ private:
     int contextColumn_ = -1;
     int sortColumn_ = -1;
     bool sortAscending_ = true;
+    std::uint64_t rowsRevision_ = 0;
+    std::uint64_t sortRequestId_ = 0;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>> sortTask_;
+    std::unordered_map<KernelFeatureId, std::pair<int, bool>> pendingSorts_;
     std::uint64_t queryRequestId_ = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> queryTask_;
     std::uint64_t actionRequestId_ = 0;
