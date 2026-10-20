@@ -8099,8 +8099,7 @@ void MonitorDock::updateEtwFilterStateLabel(const EtwFilterStage stage)
     bool archiveAvailable = false;
     if (stage == EtwFilterStage::Post)
     {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveAvailable = !m_etwArchiveDirectory.trimmed().isEmpty();
+        archiveAvailable = !m_etwArchiveMetadata.snapshot().directory.trimmed().isEmpty();
     }
 
     if (compiledGroupList.empty())
@@ -8256,11 +8255,7 @@ void MonitorDock::applyEtwFilterRules(const EtwFilterStage stage)
     {
         m_etwPostSimpleFilterCompiled = simpleFilter;
         m_etwPostFilterCompiledGroupList = std::move(compiledGroupList);
-        QString archiveDirectory;
-        {
-            std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-            archiveDirectory = m_etwArchiveDirectory;
-        }
+        const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
         if (archiveDirectory.trimmed().isEmpty())
         {
             applyEtwPostFilterToTable();
@@ -9060,11 +9055,7 @@ void MonitorDock::commitEtwFilterConfigModel(
         m_etwPreFilterCompiledSnapshot = preSnapshotPointer;
     }
 
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty())
     {
         applyEtwPostFilterToTable(0, false);
@@ -11491,11 +11482,7 @@ void MonitorDock::cancelAndWaitEtwArchiveBackgroundTasks()
 
 void MonitorDock::scheduleEtwArchiveFilterRebuild()
 {
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty())
     {
         applyEtwPostFilterToTable();
@@ -11550,6 +11537,7 @@ bool MonitorDock::prepareEtwArchiveSession(QString* errorTextOut)
     m_etwArchiveNextSequence = 0;
     m_etwArchiveSegmentIndex = 0;
     m_etwArchiveWriteFailed = false;
+    m_etwArchiveMetadata.beginSession(m_etwArchiveDirectory);
     return true;
 }
 
@@ -11656,6 +11644,7 @@ bool MonitorDock::archiveEtwCapturedRow(EtwCapturedEventRow* rowData)
         }
         m_etwArchiveWriteBuffer.clear();
     }
+    m_etwArchiveMetadata.accepted(rowData->archiveSequence);
     return true;
 }
 
@@ -11697,11 +11686,7 @@ void MonitorDock::finishEtwArchiveSession(const bool flushToPhysicalDisk)
 
 void MonitorDock::rebuildEtwArchiveFilterAsync()
 {
-    QString archiveDirectory;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        archiveDirectory = m_etwArchiveDirectory;
-    }
+    const QString archiveDirectory = m_etwArchiveMetadata.snapshot().directory;
     if (archiveDirectory.trimmed().isEmpty() || !beginEtwArchiveBackgroundTask())
     {
         return;
@@ -13578,12 +13563,9 @@ bool MonitorDock::isEtwTimelineFilterActive() const
 
 void MonitorDock::exportEtwRowsToTsv(const bool visibleOnly)
 {
-    bool hasArchiveRows = false;
-    {
-        std::lock_guard<std::mutex> lock(m_etwArchiveMutex);
-        hasArchiveRows = !m_etwArchiveDirectory.trimmed().isEmpty()
-            && m_etwArchiveNextSequence != 0;
-    }
+    const auto archiveMetadata = m_etwArchiveMetadata.snapshot();
+    const bool hasArchiveRows = !archiveMetadata.directory.trimmed().isEmpty()
+        && archiveMetadata.acceptedSequence != 0;
 
     if (hasArchiveRows)
     {

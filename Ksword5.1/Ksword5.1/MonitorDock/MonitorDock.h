@@ -11,6 +11,7 @@
 
 #include "ProcessTraceTimelineWidget.h"
 #include "WmiEventArchive.h"
+#include "EtwArchiveMetadata.h"
 #include "../Framework.h"
 
 // F-05：ARK 风险中心的每行进程身份都要带一份采集结果（成功 / 权限不足 / 其它失败
@@ -1088,6 +1089,7 @@ private:
     std::atomic<std::uint64_t> m_etwUiSkippedRows{ 0 }; // 仅 UI 镜像未展示的事件数，归档中仍完整保留。
     std::atomic<std::uint64_t> m_etwSourceEventsLost{ 0 }; // ETW 会话自身报告的源事件丢失数，必须显式告警。
     QElapsedTimer m_etwTimelineRefreshTimer;         // 时间轴重绘节流计时器。
+    ks::monitor::EtwArchiveMetadata m_etwArchiveMetadata; // GUI metadata never takes the IO mutex.
     QString m_etwArchiveDirectory;                  // 当前捕获会话的全量归档目录。
     QString m_etwArchiveActiveSegmentPath;          // 当前正在写入的 10 秒分段。
     QStringList m_etwArchiveClosedSegmentPaths;     // 已封存、可供后台筛选读取的分段。

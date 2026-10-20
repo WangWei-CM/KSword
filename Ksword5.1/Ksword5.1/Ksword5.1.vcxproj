@@ -848,6 +848,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="MonitorDock\EtwArchiveMetadata.h" />
     <ClInclude Include="RegistryDock\OfflineHiveSession.h" />
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuTemporaryOverride.h" />
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuRegistrySnapshot.h" />
