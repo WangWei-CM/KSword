@@ -12989,6 +12989,117 @@ namespace
         return result;
     }
 
+    struct FileNavigationRequest
+    {
+        QString path;
+        QString previous;
+    };
+
+    struct FileNavigationResult
+    {
+        QString path;
+        QString parentOfPrevious;
+        bool exists = false;
+    };
+
+    FileNavigationResult probeFileNavigation(const FileNavigationRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileNavigationResult result;
+        if (token.isCanceled()) return result;
+        QDir directory(request.path);
+        result.path = QDir::cleanPath(directory.absolutePath());
+        result.exists = directory.exists();
+        if (!token.isCanceled() && !request.previous.isEmpty())
+        {
+            QDir previous(request.previous);
+            if (previous.cdUp()) result.parentOfPrevious = previous.absolutePath();
+        }
+        return result;
+    }
+
+    struct FileMenuMetadata
+    {
+        bool integrityKnown = false;
+        DWORD integrityRid = 0;
+        bool implicitMedium = false;
+        QString integrityDetail;
+        QStringList links;
+        QString locatePath;
+        ks::process::RunAsAvailability runAs;
+    };
+
+    struct FileMenuMetadataRequest
+    {
+        std::vector<QString> paths;
+        bool executable = false;
+    };
+
+    FileMenuMetadata queryFileMenuMetadata(const FileMenuMetadataRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        FileMenuMetadata result;
+        if (request.paths.empty() || token.isCanceled()) return result;
+        result.integrityKnown = queryFileIntegrityRid(request.paths.front(), &result.integrityRid,
+            &result.implicitMedium, &result.integrityDetail);
+        QSet<QString> linkKeys;
+        for (const QString& path : request.paths)
+        {
+            if (token.isCanceled()) return result;
+            if (!isPathReparsePoint(path)) continue;
+            const auto reparse = queryReparsePointForUi(path);
+            const QString target = reparseTargetFromResult(reparse).trimmed();
+            const QString key = target.toCaseFolded();
+            if (!target.isEmpty() && !linkKeys.contains(key))
+            { linkKeys.insert(key); result.links.push_back(target); }
+        }
+        if (!token.isCanceled() && request.paths.size() == 1 && !result.links.isEmpty())
+        {
+            const QFileInfo target(result.links.front());
+            result.locatePath = target.isDir() ? target.absoluteFilePath() : target.absolutePath();
+            if (!QDir(result.locatePath).exists()) result.locatePath.clear();
+        }
+        if (!token.isCanceled() && request.executable) result.runAs = ks::process::QueryRunAsAvailability();
+        return result;
+    }
+
+    struct FileShortNameResult
+    {
+        QString text;
+        int hits = 0;
+        int fallbacks = 0;
+        bool canceled = false;
+    };
+
+    template<class Query, class Canceled>
+    FileShortNameResult queryFileShortNames(const std::vector<QString>& paths, Query query, Canceled canceled)
+    {
+        FileShortNameResult result;
+        QStringList lines;
+        lines.reserve(static_cast<qsizetype>(paths.size()));
+        for (const QString& path : paths)
+        {
+            if (canceled()) { result.canceled = true; return result; }
+            const QString shortPath = query(path);
+            QString name;
+            if (!shortPath.isEmpty())
+            {
+                name = QFileInfo(shortPath).fileName().trimmed();
+                if (name.isEmpty()) name = QDir::toNativeSeparators(shortPath);
+                ++result.hits;
+            }
+            else
+            {
+                name = QFileInfo(path).fileName().trimmed();
+                if (name.isEmpty()) name = QDir::toNativeSeparators(path);
+                ++result.fallbacks;
+            }
+            lines.push_back(name);
+        }
+        result.text = lines.join(QLatin1Char('\n'));
+        return result;
+    }
+
     // kRecoveryVolumeProbeGenerationProperty 作用：
     // - 用途：记录“这是第几次卷探测请求”，以动态属性挂在恢复页的卷下拉框上；
     // - 入参：无（作为 QObject::property/setProperty 的键使用）；
@@ -13391,6 +13502,10 @@ FileDock::FileDock(QWidget* parent)
 
 FileDock::~FileDock()
 {
+    if (m_leftPanel.navigationOperation) m_leftPanel.navigationOperation->close();
+    if (m_rightPanel.navigationOperation) m_rightPanel.navigationOperation->close();
+    if (m_fileMenuOperation) m_fileMenuOperation->close();
+    if (m_shortNameOperation) m_shortNameOperation->close();
     if (m_fileMutationOperation != nullptr) m_fileMutationOperation->close();
     if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
     m_uiDispatcher->close();
@@ -13895,24 +14010,8 @@ void FileDock::initializeConnections(FilePanelWidgets& panel)
             return;
         }
 
-        QDir currentDir(panel.currentPath);
-        if (!currentDir.cdUp())
-        {
-            return;
-        }
-
-        {
-            kLogEvent event;
-            info << event
-                << "[FileDock] 上级目录跳转, panel="
-                << panel.panelNameText.toStdString()
-                << ", from="
-                << QDir::toNativeSeparators(panel.currentPath).toStdString()
-                << ", to="
-                << QDir::toNativeSeparators(currentDir.absolutePath()).toStdString()
-                << eol;
-        }
-        navigateToPath(panel, currentDir.absolutePath(), true);
+        const QString parentPath = QDir::cleanPath(QDir(panel.currentPath).absoluteFilePath(QStringLiteral("..")));
+        if (!pathEqualsCaseInsensitive(parentPath, panel.currentPath)) navigateToPath(panel, parentPath, true);
     });
 
     // 刷新按钮：重新加载当前目录。
@@ -14216,29 +14315,53 @@ void FileDock::navigateToPath(FilePanelWidgets& panel, const QString& pathText, 
         normalizedPath += QDir::separator();
     }
 
-    ++panel.navigationGeneration;
-    QDir targetDir(normalizedPath);
-    if (!targetDir.exists())
-    {
-        kLogEvent event;
-        warn << event << "[FileDock] 导航失败，目录不存在: " << normalizedPath.toStdString() << eol;
-        QMessageBox::warning(this, QStringLiteral("路径无效"), QStringLiteral("目录不存在：%1").arg(normalizedPath));
-        return;
-    }
+    const auto generation = ++panel.navigationGeneration;
+    if (!panel.navigationOperation) panel.navigationOperation = new ks::ui::AsyncOperation(this);
+    const bool left = &panel == &m_leftPanel;
+    panel.pathStatusLabel->setText(ks::i18n::displayText(QStringLiteral("正在加载...")));
+    panel.navigationOperation->submit<FileNavigationRequest, FileNavigationResult>(
+        { normalizedPath, panel.currentPath }, probeFileNavigation,
+        [this, left, recordHistory, generation](const FileNavigationResult& result, std::uint64_t ticket)
+        {
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            if (target.navigationGeneration != generation) return true;
+            const QPointer<FileDock> self(this);
+            const auto commit = [self, left, recordHistory, generation, ticket, result]()
+            {
+                if (!self) return;
+                FilePanelWidgets& current = left ? self->m_leftPanel : self->m_rightPanel;
+                if (current.navigationGeneration == generation && current.navigationOperation->isCurrent(ticket))
+                {
+                    if (!result.exists)
+                    {
+                        self->updatePanelStatus(current);
+                        QMessageBox::warning(self, QStringLiteral("路径无效"), QStringLiteral("目录不存在：%1").arg(result.path));
+                    }
+                    else self->commitFileNavigation(current, result.path, result.parentOfPrevious, recordHistory);
+                }
+                if (self) current.navigationOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                left ? QStringLiteral("file-navigation-left") : QStringLiteral("file-navigation-right"),
+                { target.fileView, target.compactFileView }, commit)) return false;
+            commit();
+            return true;
+        },
+        [this, left, generation](std::exception_ptr)
+        {
+            FilePanelWidgets& target = left ? m_leftPanel : m_rightPanel;
+            if (target.navigationGeneration == generation) updatePanelStatus(target);
+            kLogEvent event; warn << event << "[FileDock] navigation probe failed" << eol;
+        });
+}
 
-    // 如果目标正好是当前目录的父目录，记住刚离开的目录，稍后在新模型
-    // 可见后恢复选中。模型加载是异步的，所以不能只依赖一次 setCurrentIndex。
+void FileDock::commitFileNavigation(FilePanelWidgets& panel, const QString& normalizedPath,
+    const QString& parentOfPrevious, const bool recordHistory)
+{
     const QString previousPath = panel.currentPath;
     panel.pendingSelectionPath.clear();
-    if (!previousPath.isEmpty())
-    {
-        QDir previousDir(previousPath);
-        if (previousDir.cdUp() &&
-            pathEqualsCaseInsensitive(previousDir.absolutePath(), normalizedPath))
-        {
-            panel.pendingSelectionPath = previousPath;
-        }
-    }
+    if (!previousPath.isEmpty() && pathEqualsCaseInsensitive(parentOfPrevious, normalizedPath))
+        panel.pendingSelectionPath = previousPath;
 
     // 根据当前读取模式更新模型根路径。
     if (currentModeIsManual(panel))
@@ -16807,34 +16930,33 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     const bool hasSelection = !menuPaths.empty();
     const bool isSingleSelection = menuPaths.size() == 1;
     const QString firstPath = isSingleSelection ? menuPaths.front() : QString();
-    DWORD firstFileIntegrityRid = 0;
-    bool firstFileIntegrityImplicitMedium = false;
-    QString firstFileIntegrityDetailText;
-    const bool firstFileIntegrityKnown = hasSelection &&
-        queryFileIntegrityRid(
-            menuPaths.front(),
-            &firstFileIntegrityRid,
-            &firstFileIntegrityImplicitMedium,
-            &firstFileIntegrityDetailText);
-
-    // 统计选中内容类型：用于控制菜单可用状态，避免多选时误触单文件功能。
     bool hasAnyFile = false;
-    QStringList linkTargetList;
-    for (const QString& path : menuPaths)
+    std::vector<QString> menuFilePaths;
+    QSet<QString> selectedFileKeys;
+    if (selectionModel)
     {
-        QFileInfo info(path);
-        hasAnyFile = hasAnyFile || info.isFile();
-        if (isPathReparsePoint(path))
+        QModelIndexList fileRows = selectionModel->selectedRows(0);
+        if (fileRows.isEmpty() && menuView->currentIndex().isValid())
+            fileRows.push_back(menuView->currentIndex().siblingAtColumn(0));
+        for (const QModelIndex& selected : fileRows)
         {
-            const ks::file::ReparsePointQueryResult reparseResult = queryReparsePointForUi(path);
-            const QString targetText = reparseTargetFromResult(reparseResult).trimmed();
-            if (!targetText.isEmpty() && !linkTargetList.contains(targetText, Qt::CaseInsensitive))
+            const bool manual = currentModeIsManual(panel);
+            const QModelIndex source = manual ? panel.manualProxyModel->mapToSource(selected) : panel.proxyModel->mapToSource(selected);
+            if (!source.isValid()) continue;
+            const bool directory = manual ? source.data(Qt::UserRole + 1).toBool() : panel.fsModel->isDir(source);
+            if (!directory)
             {
-                linkTargetList.push_back(targetText);
+                const QString path = manual ? source.data(Qt::UserRole).toString() : panel.fsModel->filePath(source);
+                selectedFileKeys.insert(path.toCaseFolded());
             }
         }
     }
-    const QString firstLinkTarget = (!linkTargetList.isEmpty() && isSingleSelection) ? linkTargetList.front() : QString();
+    for (const auto& path : menuPaths)
+        if (selectedFileKeys.contains(path.toCaseFolded())) menuFilePaths.push_back(path);
+    hasAnyFile = !menuFilePaths.empty();
+    QStringList linkTargetList;
+    QString firstLinkTarget;
+    QString firstLinkLocatePath;
 
     // 复制/移动是双栏文件管理器语义：源面板的选中项会直接落到对侧面板。
     // 菜单文案必须把目标面板说清楚，避免用户误解为 Windows 剪贴板“复制/剪切”。
@@ -16918,22 +17040,10 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QMenu* fileIntegritySubMenu = menu.addMenu(QIcon(":/Icon/file_owner.svg"), QStringLiteral("文件完整性"));
     fileIntegritySubMenu->setToolTipsVisible(true);
     fileIntegritySubMenu->setEnabled(hasSelection);
-    if (!firstFileIntegrityKnown && hasSelection)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("当前文件完整性读取失败：%1")
-            .arg(firstFileIntegrityDetailText));
-    }
-    else if (firstFileIntegrityKnown && firstFileIntegrityImplicitMedium)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("当前未设置显式 Mandatory Label，Windows 按 Medium 处理。"));
-    }
-    else if (hasSelection && menuPaths.size() > 1U)
-    {
-        fileIntegritySubMenu->setToolTip(QStringLiteral("多选时圆点按第一项的文件完整性显示，执行时会批量写入所有选中项。"));
-    }
+    if (hasSelection) fileIntegritySubMenu->setToolTip(ks::i18n::displayText(QStringLiteral("正在加载...")));
     for (const FileIntegrityLevelPreset& preset : FileIntegrityLevelPresets)
     {
-        const bool isCurrentLevel = firstFileIntegrityKnown && firstFileIntegrityRid == preset.rid;
+        const bool isCurrentLevel = false;
         QAction* integrityAction = fileIntegritySubMenu->addAction(
             QIcon(":/Icon/file_owner.svg"),
             QStringLiteral("%1 %2 - %3")
@@ -16968,11 +17078,10 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     QAction* detailAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("属性..."));
 
     // 结合选中集合动态启用菜单项，保证“多选”和“右键动作”行为一致。
-    const bool singleFileOnly = isSingleSelection && QFileInfo(firstPath).isFile();
+    const bool singleFileOnly = isSingleSelection && hasAnyFile;
     const bool executableSelected = singleFileOnly &&
         QFileInfo(firstPath).suffix().compare(QStringLiteral("exe"), Qt::CaseInsensitive) == 0;
-    const ks::process::RunAsAvailability runAsAvailability = executableSelected
-        ? ks::process::QueryRunAsAvailability() : ks::process::RunAsAvailability{};
+    const ks::process::RunAsAvailability runAsAvailability{ false, false, false, false };
     runAsMenu->setEnabled(executableSelected);
     runAsSystemAction->setEnabled(executableSelected && runAsAvailability.system);
     runAsTrustedInstallerAction->setEnabled(executableSelected && runAsAvailability.trustedInstaller);
@@ -17042,8 +17151,55 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     mappedProcessScanAction->setEnabled(hasAnyFile);
     pluginMenu->setEnabled(singleFileOnly);
 
+    if (!m_fileMenuOperation) m_fileMenuOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<QMenu> menuGuard(&menu);
+    if (hasSelection)
+    {
+        m_fileMenuOperation->submit<FileMenuMetadataRequest, FileMenuMetadata>(
+            { menuPaths, executableSelected }, queryFileMenuMetadata,
+            [menuGuard, fileIntegritySubMenu, runAsMenu, runAsSystemAction, runAsTrustedInstallerAction,
+                runAsAdministratorAction, runAsStandardAction, copyLinkTargetAction, openLinkTargetAction,
+                locateLinkTargetAction, executableSelected, isSingleSelection, selectionCount = menuPaths.size(), &linkTargetList,
+                &firstLinkTarget, &firstLinkLocatePath](const FileMenuMetadata& result, std::uint64_t)
+            {
+                if (!menuGuard || !menuGuard->isVisible()) return true;
+                fileIntegritySubMenu->setToolTip(result.integrityKnown
+                    ? (result.implicitMedium ? QStringLiteral("当前未设置显式 Mandatory Label，Windows 按 Medium 处理。")
+                        : (selectionCount > 1 ? QStringLiteral("多选时圆点按第一项的文件完整性显示，执行时会批量写入所有选中项。") : QString()))
+                    : QStringLiteral("当前文件完整性读取失败：%1").arg(result.integrityDetail));
+                for (QAction* action : fileIntegritySubMenu->actions())
+                {
+                    const DWORD rid = action->data().toUInt();
+                    const auto preset = std::find_if(std::begin(FileIntegrityLevelPresets), std::end(FileIntegrityLevelPresets),
+                        [rid](const auto& value) { return value.rid == rid; });
+                    if (preset == std::end(FileIntegrityLevelPresets)) continue;
+                    action->setText(QStringLiteral("%1 %2 - %3")
+                        .arg(result.integrityKnown && result.integrityRid == rid ? QStringLiteral("●") : QStringLiteral(" "))
+                        .arg(QString::fromLatin1(preset->nameText)).arg(QString::fromUtf8(preset->detailText)));
+                }
+                linkTargetList = result.links;
+                firstLinkTarget = isSingleSelection && !result.links.isEmpty() ? result.links.front() : QString();
+                firstLinkLocatePath = result.locatePath;
+                const auto available = [](QAction* action, const bool enabled)
+                { action->setEnabled(enabled); action->setVisible(enabled); };
+                available(copyLinkTargetAction, !linkTargetList.isEmpty());
+                available(openLinkTargetAction, !firstLinkTarget.isEmpty());
+                available(locateLinkTargetAction, !firstLinkTarget.isEmpty());
+                available(runAsSystemAction, executableSelected && result.runAs.system);
+                available(runAsTrustedInstallerAction, executableSelected && result.runAs.trustedInstaller);
+                available(runAsAdministratorAction, executableSelected && result.runAs.administrator);
+                available(runAsStandardAction, executableSelected && result.runAs.standardUser);
+                runAsMenu->setEnabled(executableSelected);
+                runAsMenu->menuAction()->setVisible(executableSelected);
+                hideUnavailableFileMenuActions(*menuGuard);
+                return true;
+            }, [](std::exception_ptr) { kLogEvent event; warn << event << "[FileDock] menu metadata failed" << eol; });
+    }
+    connect(&menu, &QMenu::aboutToHide, this, [this]() { if (m_fileMenuOperation) m_fileMenuOperation->cancel(); });
     hideUnavailableFileMenuActions(menu);
+    const QPointer<FileDock> self(this);
     QAction* selectedAction = menu.exec(menuView->viewport()->mapToGlobal(localPos));
+    if (!self) return;
     if (selectedAction == nullptr)
     {
         kLogEvent menuCancelEvent;
@@ -17153,11 +17309,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
     if (selectedAction == locateLinkTargetAction)
     {
-        const QFileInfo targetInfo(firstLinkTarget);
-        const QString locatePath = targetInfo.isDir()
-            ? targetInfo.absoluteFilePath()
-            : targetInfo.absolutePath();
-        if (locatePath.trimmed().isEmpty() || !QDir(locatePath).exists())
+        const QString locatePath = firstLinkLocatePath;
+        if (locatePath.trimmed().isEmpty())
         {
             QMessageBox::warning(
                 this,
@@ -17379,12 +17532,8 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
 
         constexpr std::size_t kMaxAutoOpenSignCount = 8;
         std::size_t openedCount = 0;
-        for (const QString& path : menuPaths)
+        for (const QString& path : menuFilePaths)
         {
-            if (!QFileInfo(path).isFile())
-            {
-                continue;
-            }
             if (openedCount >= kMaxAutoOpenSignCount)
             {
                 break;
@@ -17393,13 +17542,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
             openedCount += 1;
         }
 
-        const std::size_t fileSelectionCount = static_cast<std::size_t>(std::count_if(
-            menuPaths.begin(),
-            menuPaths.end(),
-            [](const QString& path)
-            {
-                return QFileInfo(path).isFile();
-            }));
+        const std::size_t fileSelectionCount = menuFilePaths.size();
         kLogEvent signEvent;
         if (openedCount == kMaxAutoOpenSignCount && fileSelectionCount > kMaxAutoOpenSignCount)
         {
@@ -17425,7 +17568,7 @@ void FileDock::showPanelContextMenu(FilePanelWidgets& panel, const QPoint& local
     }
     if (selectedAction == hexAction || selectedAction == peAction)
     {
-        if (!firstPath.isEmpty() && QFileInfo(firstPath).isFile())
+        if (singleFileOnly)
         {
             showFileDetailDialog(firstPath, selectedAction == hexAction ? QStringLiteral("hex") : QStringLiteral("pe"));
         }
@@ -17574,56 +17717,32 @@ void FileDock::copySelectedItemKernelPath(FilePanelWidgets& panel)
 
 void FileDock::copySelectedItemShortName(FilePanelWidgets& panel)
 {
-    const std::vector<QString> paths = selectedPaths(panel);
-    if (paths.empty())
-    {
-        return;
-    }
-
-    QStringList shortNameLines;
-    shortNameLines.reserve(static_cast<int>(paths.size()));
-
-    int shortNameHitCount = 0;
-    int fallbackCount = 0;
-    for (const QString& path : paths)
-    {
-        const QString shortPathText = queryShortPathText(path);
-        QString shortNameText;
-        if (!shortPathText.isEmpty())
+    const auto paths = selectedPaths(panel);
+    if (paths.empty()) return;
+    if (!m_shortNameOperation) m_shortNameOperation = new ks::ui::AsyncOperation(this);
+    QObject::disconnect(m_shortNameClipboardConnection);
+    m_shortNameClipboardConnection = connect(QApplication::clipboard(), &QClipboard::dataChanged,
+        m_shortNameOperation, [this]() { m_shortNameOperation->cancel(); });
+    const QString panelName = panel.panelNameText;
+    m_shortNameOperation->submit<std::vector<QString>, FileShortNameResult>(paths,
+        [](const std::vector<QString>& targets, const ks::ui::AsyncOperationToken& token)
         {
-            shortNameText = QFileInfo(shortPathText).fileName().trimmed();
-            if (shortNameText.isEmpty())
-            {
-                shortNameText = QDir::toNativeSeparators(shortPathText);
-            }
-            shortNameHitCount += 1;
-        }
-        else
+            return queryFileShortNames(targets, queryShortPathText, [&token]() { return token.isCanceled(); });
+        },
+        [this, panelName, count = paths.size()](const FileShortNameResult& result, std::uint64_t)
         {
-            shortNameText = QFileInfo(path).fileName().trimmed();
-            if (shortNameText.isEmpty())
-            {
-                shortNameText = QDir::toNativeSeparators(path);
-            }
-            fallbackCount += 1;
-        }
-
-        shortNameLines << shortNameText;
-    }
-
-    QApplication::clipboard()->setText(shortNameLines.join('\n'));
-
-    kLogEvent event;
-    info << event
-        << "[FileDock] 复制短文件名到剪贴板, panel="
-        << panel.panelNameText.toStdString()
-        << ", count="
-        << paths.size()
-        << ", shortNameHitCount="
-        << shortNameHitCount
-        << ", fallbackCount="
-        << fallbackCount
-        << eol;
+            QObject::disconnect(m_shortNameClipboardConnection);
+            if (!result.canceled) QApplication::clipboard()->setText(result.text);
+            kLogEvent event;
+            info << event << "[FileDock] 复制短文件名到剪贴板, panel=" << panelName.toStdString()
+                << ", count=" << count << ", shortNameHitCount=" << result.hits << ", fallbackCount=" << result.fallbacks << eol;
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            QObject::disconnect(m_shortNameClipboardConnection);
+            kLogEvent event; warn << event << "[FileDock] short-name query failed" << eol;
+        });
 }
 
 void FileDock::copySelectedItems(FilePanelWidgets& panel)

@@ -164,6 +164,7 @@ private:
 
         std::vector<QString> history;          // 路径历史列表。
         int historyIndex = -1;                 // 当前历史索引。
+        ks::ui::AsyncOperation* navigationOperation = nullptr; // One probe and latest pending per panel.
         std::uint64_t navigationGeneration = 0; // Successful/attempted navigation identity for mutation refresh.
         QString currentPath;                   // 当前目录路径。
         QString pendingSelectionPath;          // 返回上级后待恢复选中的子目录路径。
@@ -534,6 +535,9 @@ private:
     // - 参数 scanPaths：待扫描文件路径集合。
     void openMappedProcessScanWindow(const std::vector<QString>& scanPaths);
 
+    void commitFileNavigation(FilePanelWidgets& panel, const QString& normalizedPath,
+        const QString& parentOfPrevious, bool recordHistory);
+
     void submitFileMutation(FilePanelWidgets& panel, std::vector<QString> paths,
         const QString& destination, unsigned long integrityRid, const QString& displayText,
         int kind, const QString& directory, std::uint64_t directoryGeneration);
@@ -662,6 +666,9 @@ private:
     FilePanelWidgets m_rightPanel;             // 右侧面板状态。
     bool m_transferInProgress = false;         // 跨面板复制/移动后台任务是否运行。
 
+    ks::ui::AsyncOperation* m_fileMenuOperation = nullptr;
+    ks::ui::AsyncOperation* m_shortNameOperation = nullptr;
+    QMetaObject::Connection m_shortNameClipboardConnection;
     ks::ui::AsyncOperation* m_fileMutationOperation = nullptr; // Approved write lane; reject overlap.
     ks::ui::AsyncOperation* m_fileAnalysisOperation = nullptr; // 单个值化分析任务，析构先关闭。
 
