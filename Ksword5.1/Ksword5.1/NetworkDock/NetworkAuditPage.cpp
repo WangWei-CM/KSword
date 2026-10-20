@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkAuditPage.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
@@ -1050,7 +1051,7 @@ void NetworkAuditPage::initializeUi()
     m_crossViewSplitter->setStretchFactor(0, 3);
     m_crossViewSplitter->setStretchFactor(1, 2);
     crossLayout->addWidget(m_crossViewSplitter, 1);
-    m_sectionTabWidget->addTab(m_crossViewPage, QStringLiteral("TCP/UDP Cross-View"));
+    network_navigation_detail::AddTab(m_sectionTabWidget, m_crossViewPage, QStringLiteral("audit.cross-view"));
 
     // AFD。
     m_afdPage = new QWidget(this);
@@ -1079,7 +1080,7 @@ void NetworkAuditPage::initializeUi()
     m_afdTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_afdTable, 0);
     afdLayout->addWidget(m_afdTable, 1);
-    m_sectionTabWidget->addTab(m_afdPage, QStringLiteral("AFD"));
+    network_navigation_detail::AddTab(m_sectionTabWidget, m_afdPage, QStringLiteral("audit.afd"));
 
     // WFP。
     m_wfpPage = new QWidget(this);
@@ -1114,11 +1115,11 @@ void NetworkAuditPage::initializeUi()
     ks::ui::SetTableActionBarMode(m_wfpSubLayerTable, ks::ui::TableActionBarMode::Compact);
     ks::ui::SetTableActionBarMode(m_wfpCalloutTable, ks::ui::TableActionBarMode::Compact);
     ks::ui::SetTableActionBarMode(m_wfpFilterTable, ks::ui::TableActionBarMode::Full);
-    m_wfpTabWidget->addTab(m_wfpProviderTable, QStringLiteral("Provider"));
-    m_wfpTabWidget->addTab(m_wfpSubLayerTable, QStringLiteral("Sublayer"));
-    m_wfpTabWidget->addTab(m_wfpCalloutTable, QStringLiteral("Callout"));
-    m_wfpTabWidget->addTab(m_wfpFilterTable, QStringLiteral("Filter"));
-    m_sectionTabWidget->addTab(m_wfpPage, QStringLiteral("WFP"));
+    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpProviderTable, QStringLiteral("audit.wfp.provider"));
+    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpSubLayerTable, QStringLiteral("audit.wfp.sublayer"));
+    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpCalloutTable, QStringLiteral("audit.wfp.callout"));
+    network_navigation_detail::AddTab(m_wfpTabWidget, m_wfpFilterTable, QStringLiteral("audit.wfp.filter"));
+    network_navigation_detail::AddTab(m_sectionTabWidget, m_wfpPage, QStringLiteral("audit.wfp"));
 
     // NDIS。
     m_ndisPage = new QWidget(this);
@@ -1138,13 +1139,11 @@ void NetworkAuditPage::initializeUi()
     ks::ui::SetTableActionBarMode(m_ndisBindingTable, ks::ui::TableActionBarMode::Compact);
     ks::ui::SetTableActionBarMode(m_ndisProtocolTable, ks::ui::TableActionBarMode::Compact);
     ks::ui::SetTableActionBarMode(m_ndisUnknownTable, ks::ui::TableActionBarMode::Full);
-    m_ndisTabWidget->addTab(m_ndisAdapterTable, QStringLiteral("Miniport"));
-    m_ndisTabWidget->addTab(m_ndisBindingTable, QStringLiteral("Binding"));
-    m_ndisTabWidget->addTab(m_ndisProtocolTable, QStringLiteral("Protocol"));
-    m_ndisTabWidget->addTab(
-        m_ndisUnknownTable,
-        QStringLiteral("未知/未证明"));
-    m_sectionTabWidget->addTab(m_ndisPage, QStringLiteral("NDIS"));
+    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisAdapterTable, QStringLiteral("audit.ndis.miniport"));
+    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisBindingTable, QStringLiteral("audit.ndis.binding"));
+    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisProtocolTable, QStringLiteral("audit.ndis.protocol"));
+    network_navigation_detail::AddTab(m_ndisTabWidget, m_ndisUnknownTable, QStringLiteral("audit.ndis.unknown"));
+    network_navigation_detail::AddTab(m_sectionTabWidget, m_ndisPage, QStringLiteral("audit.ndis"));
 
     // NSI。
     m_nsiPage = new QWidget(this);
@@ -1170,7 +1169,7 @@ void NetworkAuditPage::initializeUi()
     m_nsiSummaryTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     installCopyMenu(m_nsiSummaryTable);
     nsiLayout->addWidget(m_nsiSummaryTable, 1);
-    m_sectionTabWidget->addTab(m_nsiPage, QStringLiteral("NSI"));
+    network_navigation_detail::AddTab(m_sectionTabWidget, m_nsiPage, QStringLiteral("audit.nsi"));
     // 证据模型和专业分割器保留，只统一各列表页的阅读基线。
     for (QWidget* page : {m_crossViewPage, m_afdPage, m_wfpPage, m_ndisPage, m_nsiPage})
         ks::ui::StyleWorkspacePage(page);

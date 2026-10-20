@@ -3513,6 +3513,9 @@
     <ClInclude Include="MonitorDock\WinApiMonitorProtocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="NetworkDock\NetworkDock.NavigationData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h">
       <Filter>Header Files</Filter>
     </ClInclude>

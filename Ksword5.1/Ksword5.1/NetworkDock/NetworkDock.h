@@ -11,6 +11,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationCatalog.h"
 #include "../MonitorDock/ProcessTraceTimelineWidget.h"
 #include "../ksword/network/network_nids.h"
 
@@ -100,6 +101,11 @@ public:
     // setProcessDetailConnectionScope：进程详情内嵌时仅显示网络审计 Cross-View 入口。
     void setProcessDetailConnectionScope();
 
+    static ks::ui::PageNavigationCatalog navigationCatalog(const NetworkDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+    // Actual tab factories register existing identities, never lazy business creation.
+    void registerNavigationTab(const QString& id, QTabWidget* tabs, QWidget* page);
+
 protected:
     // showEvent：
     // - 首次显示时再初始化 HTTPS 代理服务实例；
@@ -107,6 +113,13 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    struct NavigationTarget
+    {
+        QPointer<QTabWidget> tabs;
+        QPointer<QWidget> page;
+    };
+    QHash<QString, NavigationTarget> m_navigationTargets;
+
     // PacketTableColumn：流量监控主表列索引定义。
     enum class PacketTableColumn : int
     {

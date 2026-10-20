@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
@@ -439,7 +440,7 @@ void NetworkDock::initializeNidsTab()
     });
 
     updateNidsStatusLabel();
-    m_sideTabWidget->addTab(m_nidsPage, QIcon(":/Icon/process_critical.svg"), QStringLiteral("NIDS"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_nidsPage, QStringLiteral("nids"), QIcon(":/Icon/process_critical.svg"));
 
     kLogEvent initNidsEvent;
     info << initNidsEvent << "[NetworkDock] NIDS 页初始化完成。" << eol;

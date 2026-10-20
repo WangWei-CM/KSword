@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/CodeTextEdit.h"
@@ -43,10 +44,8 @@ void NetworkDock::initializeUi()
     initializeNetworkAuditTab();
     // 端口诊断是独立工具页，避免把解除操作与抓包、审计刷新混在一起。
     auto* portDiagnostics = new PortDiagnosticsPage(m_sideTabWidget);
-    m_sideTabWidget->addTab(portDiagnostics,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("端口诊断"));
-    ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, portDiagnostics,
-        QStringLiteral("network.tab.port_diagnostics"), QStringLiteral("端口诊断"));
+    network_navigation_detail::AddTab(m_sideTabWidget, portDiagnostics, QStringLiteral("port-diagnostics"), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+
     initializeManualRequestTab();
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
@@ -265,9 +264,8 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_packetTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 
     m_trafficMonitorLayout->addWidget(m_packetTable, 1);
-    m_sideTabWidget->addTab(m_trafficMonitorPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("流量监控"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_trafficMonitorPage, QStringLiteral("network.tab.traffic"), QStringLiteral("流量监控"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_trafficMonitorPage, QStringLiteral("traffic"), QIcon(":/Icon/process_main.svg"));
+
 }
 
 void NetworkDock::initializeRateLimitTab()
@@ -369,9 +367,8 @@ void NetworkDock::initializeRateLimitTab()
     m_rateLimitLogOutput->setPlaceholderText(QStringLiteral("限速动作日志将显示在这里..."));
     m_rateLimitLayout->addWidget(m_rateLimitLogOutput, 1);
 
-    m_sideTabWidget->addTab(m_rateLimitPage, QIcon(":/Icon/process_priority.svg"), QStringLiteral("进程限速"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_rateLimitPage, QStringLiteral("network.tab.rate_limit"), QStringLiteral("进程限速"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_rateLimitPage, QStringLiteral("rate-limit"), QIcon(":/Icon/process_priority.svg"));
+
 }
 
 void NetworkDock::initializeConnectionManageTab()
@@ -454,7 +451,7 @@ void NetworkDock::initializeConnectionManageTab()
     m_tcpConnectionTable->verticalHeader()->setVisible(false);
     m_tcpConnectionTable->horizontalHeader()->setStretchLastSection(true);
     m_tcpConnectionTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_connectionSubTabWidget->addTab(m_tcpConnectionTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("TCP"));
+    network_navigation_detail::AddTab(m_connectionSubTabWidget, m_tcpConnectionTable, QStringLiteral("connections.tcp"), QIcon(":/Icon/process_main.svg"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_connectionSubTabWidget,
         m_tcpConnectionTable,
@@ -477,16 +474,15 @@ void NetworkDock::initializeConnectionManageTab()
     m_udpEndpointTable->verticalHeader()->setVisible(false);
     m_udpEndpointTable->horizontalHeader()->setStretchLastSection(true);
     m_udpEndpointTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_connectionSubTabWidget->addTab(m_udpEndpointTable, QIcon(":/Icon/process_main.svg"), QStringLiteral("UDP"));
+    network_navigation_detail::AddTab(m_connectionSubTabWidget, m_udpEndpointTable, QStringLiteral("connections.udp"), QIcon(":/Icon/process_main.svg"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_connectionSubTabWidget,
         m_udpEndpointTable,
         QStringLiteral("network.tab.udp"),
         QStringLiteral("UDP"));
 
-    m_sideTabWidget->addTab(m_connectionManagePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("连接管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_connectionManagePage, QStringLiteral("network.tab.connections"), QStringLiteral("连接管理"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_connectionManagePage, QStringLiteral("connections"), QIcon(":/Icon/process_details.svg"));
+
 
     kLogEvent initConnectionTabEvent;
     info << initConnectionTabEvent << "[NetworkDock] 连接管理页初始化完成（TCP/UDP）。" << eol;
@@ -499,12 +495,8 @@ void NetworkDock::initializeFirewallTab()
     // - 处理：独立展示历史/实时防火墙事件，不复用流量抓包管线；
     // - 返回：无，作为 NetworkDock 顶层 Tab 呈现。
     m_firewallPage = new NetworkFirewallPage(this);
-    m_sideTabWidget->addTab(
-        m_firewallPage,
-        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("防火墙"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_firewallPage, QStringLiteral("network.tab.firewall"), QStringLiteral("防火墙"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_firewallPage, QStringLiteral("firewall"), QIcon(QStringLiteral(":/Icon/process_critical.svg")));
+
 }
 
 void NetworkDock::initializeNetworkAuditTab()
@@ -553,12 +545,8 @@ void NetworkDock::initializeNetworkAuditTab()
             m_firewallPage->addUdpEndpointBlockRuleFromEvidence(localEndpointText, processId);
         }
     });
-    m_sideTabWidget->addTab(
-        m_networkAuditPage,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("网络审计"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_networkAuditPage, QStringLiteral("network.tab.audit"), QStringLiteral("网络审计"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_networkAuditPage, QStringLiteral("audit"), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+
 }
 
 void NetworkDock::initializeManualRequestTab()
@@ -752,9 +740,8 @@ void NetworkDock::initializeManualRequestTab()
     // 构建完成后先按默认模式回填一组“可直接执行”的参数。
     resetManualRequestForm();
 
-    m_sideTabWidget->addTab(m_manualRequestPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("请求构造"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_manualRequestPage, QStringLiteral("network.tab.manual_request"), QStringLiteral("请求构造"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_manualRequestPage, QStringLiteral("manual-request"), QIcon(":/Icon/process_main.svg"));
+
 
     kLogEvent initManualTabEvent;
     info << initManualTabEvent << "[NetworkDock] 请求构造页初始化完成。" << eol;

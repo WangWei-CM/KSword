@@ -1,3 +1,5 @@
+#include "NetworkDock.NavigationData.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "NetworkDock.InternalCommon.h"
 #include "HttpsProxyService.h"
@@ -252,4 +254,92 @@ void NetworkDock::showEvent(QShowEvent* event)
                     }, Qt::QueuedConnection);
             });
     }
+}
+
+void NetworkDock::registerNavigationTab(const QString& id, QTabWidget* tabs, QWidget* page)
+{
+    if (network_navigation_detail::Find(id) != nullptr && tabs != nullptr && page != nullptr)
+        m_navigationTargets.insert(id, {tabs, page});
+}
+
+ks::ui::PageNavigationCatalog NetworkDock::navigationCatalog(const NetworkDock* existing)
+{
+    ks::ui::PageNavigationCatalog catalog;
+    catalog.reserve(static_cast<int>(std::size(network_navigation_detail::Definitions)));
+    for (const auto& definition : network_navigation_detail::Definitions)
+    {
+        ks::ui::PageNavigationDescriptor page;
+        page.id = QString::fromLatin1(definition.id);
+        page.parentId = QString::fromLatin1(definition.parent);
+        page.title = network_navigation_detail::Title(definition);
+        page.searchTexts = {QString::fromWCharArray(definition.sourceTitle), page.id};
+        page.visible = definition.exposed;
+        if (existing != nullptr)
+        {
+            const auto target = existing->m_navigationTargets.constFind(page.id);
+            if (target == existing->m_navigationTargets.cend() || !target->tabs || !target->page)
+            {
+                page.visible = false;
+                page.enabled = false;
+            }
+            else
+            {
+                const int index = target->tabs->indexOf(target->page);
+                page.visible = index >= 0 && target->tabs->isTabVisible(index);
+                page.enabled = index >= 0 && target->tabs->isTabEnabled(index);
+                page.current = index >= 0 && target->tabs->currentIndex() == index;
+                if (index >= 0) page.title = target->tabs->tabText(index);
+            }
+        }
+        catalog.push_back(std::move(page));
+    }
+    return catalog;
+}
+
+QWidget* NetworkDock::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<NetworkDock> guard(this);
+    const auto* definition = network_navigation_detail::Find(id);
+    if (definition == nullptr) return nullptr;
+    QVector<NavigationTarget> path;
+    while (definition != nullptr)
+    {
+        const auto target = m_navigationTargets.constFind(QString::fromLatin1(definition->id));
+        if (target == m_navigationTargets.cend() || !target->tabs || !target->page) return nullptr;
+        const int index = target->tabs->indexOf(target->page);
+        if (index < 0 || !target->tabs->isTabVisible(index) || !target->tabs->isTabEnabled(index)) return nullptr;
+        path.prepend(*target);
+        if (*definition->parent == '\0') definition = nullptr;
+        else
+        {
+            definition = network_navigation_detail::Find(QString::fromLatin1(definition->parent));
+            if (definition == nullptr) return nullptr;
+        }
+    }
+    QPointer<QWidget> targetPage;
+    for (const auto& target : path)
+    {
+        if (!guard || !target.tabs || !target.page) return nullptr;
+        const int index = target.tabs->indexOf(target.page);
+        if (index < 0 || !target.tabs->isTabVisible(index) || !target.tabs->isTabEnabled(index)) return nullptr;
+        target.tabs->setCurrentWidget(target.page);
+        if (!guard || !target.tabs || !target.page) return nullptr;
+        ks::ui::PrepareWidgetThemeBindingsForShow(target.page);
+        if (!guard || !target.tabs || !target.page || target.tabs->currentWidget() != target.page) return nullptr;
+        targetPage = target.page;
+    }
+    for (const auto& target : path)
+    {
+        if (!guard || !target.tabs || !target.page) return nullptr;
+        const int index = target.tabs->indexOf(target.page);
+        if (index < 0 || !target.tabs->isTabVisible(index) || !target.tabs->isTabEnabled(index)
+            || target.tabs->currentWidget() != target.page) return nullptr;
+    }
+    return guard ? targetPage.data() : nullptr;
+}
+
+namespace
+{
+    const bool kRegisterNetworkNavigationCatalog =
+        ks::ui::RegisterTypedPageNavigationCatalog<NetworkDock>(QStringLiteral("network"));
 }

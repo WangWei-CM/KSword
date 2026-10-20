@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -501,7 +502,7 @@ void NetworkDock::initializeRouteTableTab()
     m_routeTable->horizontalHeader()->setStretchLastSection(true);
     installCopyCurrentRowMenu(m_routeTable);
     m_routeTableLayout->addWidget(m_routeTable, 1);
-    m_sideTabWidget->addTab(m_routeTablePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("路由表"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_routeTablePage, QStringLiteral("route"), QIcon(":/Icon/process_tree.svg"));
 
     connect(m_refreshRouteButton, &QPushButton::clicked, this, [this]() { refreshRouteTable(); });
     connect(m_addRouteButton, &QPushButton::clicked, this, [this]() { addRouteEntry(); });
@@ -922,7 +923,7 @@ void NetworkDock::initializeArpCacheTab()
     installCopyCurrentRowMenu(m_arpTable);
     m_arpCacheLayout->addWidget(m_arpTable, 1);
 
-    m_sideTabWidget->addTab(m_arpCachePage, QIcon(":/Icon/process_tree.svg"), QStringLiteral("ARP缓存"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_arpCachePage, QStringLiteral("arp"), QIcon(":/Icon/process_tree.svg"));
 }
 
 void NetworkDock::initializeDnsCacheTab()
@@ -991,7 +992,7 @@ void NetworkDock::initializeDnsCacheTab()
     installCopyCurrentRowMenu(m_dnsTable);
     m_dnsCacheLayout->addWidget(m_dnsTable, 1);
 
-    m_sideTabWidget->addTab(m_dnsCachePage, QIcon(":/Icon/process_list.svg"), QStringLiteral("DNS缓存"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_dnsCachePage, QStringLiteral("dns"), QIcon(":/Icon/process_list.svg"));
 }
 
 void NetworkDock::initializeAliveHostScanTab()
@@ -1068,7 +1069,7 @@ void NetworkDock::initializeAliveHostScanTab()
     workspace->results()->addWidget(m_aliveScanTable, 1);
     workspace->finish();
 
-    m_sideTabWidget->addTab(m_aliveScanPage, QIcon(":/Icon/process_main.svg"), QStringLiteral("存活主机"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_aliveScanPage, QStringLiteral("alive-hosts"), QIcon(":/Icon/process_main.svg"));
 }
 
 void NetworkDock::initializeHostsFileEditorTab()
@@ -1082,7 +1083,7 @@ void NetworkDock::initializeHostsFileEditorTab()
     m_hostsFileEditor->setReadOnly(false);
     m_hostsFileEditorLayout->addWidget(m_hostsFileEditor, 1);
 
-    m_sideTabWidget->addTab(m_hostsFileEditorPage, QIcon(":/Icon/codeeditor_open.svg"), QStringLiteral("hosts文件编辑"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_hostsFileEditorPage, QStringLiteral("hosts-editor"), QIcon(":/Icon/codeeditor_open.svg"));
 }
 
 void NetworkDock::loadHostsFileEditor()

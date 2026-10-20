@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "NetworkDock.InternalCommon.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
@@ -600,7 +601,7 @@ void NetworkDock::initializeHttpsAnalyzeTab()
     m_httpsProxyLogOutput->setFixedHeight(150);
     m_httpsAnalyzeLayout->addWidget(m_httpsProxyLogOutput, 0);
 
-    m_sideTabWidget->addTab(m_httpsAnalyzePage, QIcon(":/Icon/process_details.svg"), QStringLiteral("HTTPS解析"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_httpsAnalyzePage, QStringLiteral("https"), QIcon(":/Icon/process_details.svg"));
     updateHttpsProxyStatusLabel(QStringLiteral("状态：HTTPS代理未启动"));
     updateHttpsParsedSummary();
 

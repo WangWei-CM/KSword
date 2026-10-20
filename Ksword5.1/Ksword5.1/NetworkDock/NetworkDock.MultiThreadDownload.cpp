@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeAccentIcon.h"
 #include "../UI/ToolbarMetrics.h"
@@ -1788,10 +1789,7 @@ void NetworkDock::initializeMultiThreadDownloadTab()
     workspace->results()->addWidget(m_multiDownloadSegmentTable, 1);
     workspace->finish();
 
-    m_sideTabWidget->addTab(
-        m_multiThreadDownloadPage,
-        QIcon(":/Icon/process_start.svg"),
-        QStringLiteral("多线程下载"));
+    network_navigation_detail::AddTab(m_sideTabWidget, m_multiThreadDownloadPage, QStringLiteral("download"), QIcon(":/Icon/process_start.svg"));
 
     // 设置加载时机：
     // - 必须在控件构建完成后调用，才能把 JSON 值正确回填到 UI；

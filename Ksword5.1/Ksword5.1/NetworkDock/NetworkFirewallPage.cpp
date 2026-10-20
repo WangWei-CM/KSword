@@ -1,3 +1,4 @@
+#include "NetworkDock.NavigationData.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
@@ -2733,7 +2734,7 @@ void NetworkFirewallPage::initializeEventMonitorUi()
 
     if (m_innerTabWidget != nullptr)
     {
-        m_innerTabWidget->addTab(m_eventMonitorPage, QStringLiteral("事件监控"));
+        network_navigation_detail::AddTab(m_innerTabWidget, m_eventMonitorPage, QStringLiteral("firewall.events"));
     }
 }
 
@@ -2856,7 +2857,7 @@ void NetworkFirewallPage::initializeRuleManagerUi()
 
     if (m_innerTabWidget != nullptr)
     {
-        m_innerTabWidget->addTab(m_ruleManagerPage, QStringLiteral("规则管理"));
+        network_navigation_detail::AddTab(m_innerTabWidget, m_ruleManagerPage, QStringLiteral("firewall.rules"));
     }
 }
 
