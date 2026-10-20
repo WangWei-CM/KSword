@@ -8,6 +8,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 
 #include <QAbstractItemView>
 #include <QByteArray>
@@ -21,6 +23,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSpinBox>
@@ -40,6 +43,13 @@
 #include <PowrProf.h>
 
 #pragma comment(lib, "PowrProf.lib")
+
+struct HardwarePowerSchemeSnapshot
+{
+    struct Scheme { QString name; QByteArray guid; bool active = false; };
+    std::vector<Scheme> schemes;
+    QByteArray activeGuid;
+};
 
 namespace
 {
@@ -331,6 +341,13 @@ HardwarePowerPage::HardwarePowerPage(QWidget* parent)
 {
     initializeUi();
     initializeConnections();
+    m_queryOperation = new ks::ui::AsyncOperation(this);
+    m_queryOperation->setStateChangedCallback([this]() { updateControlAvailability(); });
+}
+
+HardwarePowerPage::~HardwarePowerPage()
+{
+    m_queryOperation->close();
 }
 
 void HardwarePowerPage::showEvent(QShowEvent* event)
@@ -678,93 +695,119 @@ void HardwarePowerPage::initializeConnections()
     });
 }
 
+namespace { HardwarePowerSchemeSnapshot collectPowerSchemeSnapshot(const ks::ui::AsyncOperationToken* token); }
+
 void HardwarePowerPage::refreshAll()
 {
-    setStatus(powerText(
-        QStringLiteral("hardware.power.status.refreshing"),
+    if (m_queryOperation->isBusy()) return;
+    struct Result { HardwarePowerSchemeSnapshot schemes; ksword::ark::CpuPowerResult cpu; };
+    m_queryPending = true;
+    setStatus(powerText(QStringLiteral("hardware.power.status.refreshing"),
         QStringLiteral("状态：正在刷新 Windows 电源方案与 R0 CPU 电源快照...")));
-    refreshPowerSchemes();
-    refreshCpuPower();
+    const auto consume = [this](const Result& result) {
+        m_queryPending = false;
+        applyPowerSchemesSnapshot(result.schemes);
+        applySnapshotToUi(result.cpu);
+    };
+    m_queryOperation->submit<int, Result>(0, [](int, const ks::ui::AsyncOperationToken& token) {
+        Result result;
+        result.schemes = collectPowerSchemeSnapshot(&token);
+        if (!token.isCanceled())
+        {
+            const ksword::ark::DriverClient client;
+            result.cpu = client.queryCpuPowerState();
+        }
+        return result;
+    }, [this, consume](const Result& result, std::uint64_t ticket) {
+        const QPointer<HardwarePowerPage> guard(this);
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("hardware-power-query"),
+            {m_snapshotTable}, [guard, result, consume, ticket]() {
+                if (guard == nullptr || !guard->m_queryOperation->isCurrent(ticket)) return;
+                consume(result);
+                guard->m_queryOperation->completeDeferred(ticket);
+            })) return false;
+        consume(result);
+        return true;
+    }, [this](std::exception_ptr failure) {
+        m_queryPending = false;
+        ksword::ark::CpuPowerResult result;
+        try { if (failure) std::rethrow_exception(failure); }
+        catch (const std::exception& error) { result.io.message = error.what(); }
+        catch (...) {}
+        applySnapshotToUi(result);
+    });
 }
+
+namespace
+{
+    HardwarePowerSchemeSnapshot collectPowerSchemeSnapshot(const ks::ui::AsyncOperationToken* token)
+    {
+        HardwarePowerSchemeSnapshot result;
+        GUID* activeGuid = nullptr;
+        const DWORD activeError = ::PowerGetActiveScheme(nullptr, &activeGuid);
+
+
+        for (ULONG schemeIndex = 0UL;; ++schemeIndex)
+        {
+            if (token != nullptr && token->isCanceled()) break;
+            GUID schemeGuid{};
+            DWORD guidBytesCount = sizeof(schemeGuid);
+            const DWORD enumerateError = ::PowerEnumerate(
+                nullptr,
+                nullptr,
+                nullptr,
+                ACCESS_SCHEME,
+                schemeIndex,
+                reinterpret_cast<UCHAR*>(&schemeGuid),
+                &guidBytesCount);
+            if (enumerateError == ERROR_NO_MORE_ITEMS)
+            {
+                break;
+            }
+            if (enumerateError != ERROR_SUCCESS || guidBytesCount != sizeof(schemeGuid))
+            {
+                continue;
+            }
+
+            result.schemes.push_back({ powerSchemeFriendlyName(schemeGuid), guidBytes(schemeGuid),
+                activeError == ERROR_SUCCESS && activeGuid != nullptr && ::IsEqualGUID(*activeGuid, schemeGuid) });
+        }
+        if (activeError == ERROR_SUCCESS && activeGuid != nullptr) result.activeGuid = guidBytes(*activeGuid);
+        if (activeGuid != nullptr) ::LocalFree(activeGuid);
+        return result;
+    }
+}
+
 
 void HardwarePowerPage::refreshPowerSchemes()
 {
-    if (m_powerSchemeCombo == nullptr)
-    {
-        return;
-    }
+    applyPowerSchemesSnapshot(collectPowerSchemeSnapshot(nullptr));
+}
 
+void HardwarePowerPage::applyPowerSchemesSnapshot(const HardwarePowerSchemeSnapshot& snapshot)
+{
+    if (m_powerSchemeCombo == nullptr) return;
     m_powerSchemeCombo->clear();
-    GUID* activeGuid = nullptr;
-    const DWORD activeError = ::PowerGetActiveScheme(nullptr, &activeGuid);
     int activeIndex = -1;
-
-    for (ULONG schemeIndex = 0UL;; ++schemeIndex)
+    for (const auto& scheme : snapshot.schemes)
     {
-        GUID schemeGuid{};
-        DWORD guidBytesCount = sizeof(schemeGuid);
-        const DWORD enumerateError = ::PowerEnumerate(
-            nullptr,
-            nullptr,
-            nullptr,
-            ACCESS_SCHEME,
-            schemeIndex,
-            reinterpret_cast<UCHAR*>(&schemeGuid),
-            &guidBytesCount);
-        if (enumerateError == ERROR_NO_MORE_ITEMS)
-        {
-            break;
-        }
-        if (enumerateError != ERROR_SUCCESS || guidBytesCount != sizeof(schemeGuid))
-        {
-            continue;
-        }
-
-        QString friendlyName = powerSchemeFriendlyName(schemeGuid);
-        if (friendlyName.isEmpty())
-        {
-            friendlyName = powerText(
-                QStringLiteral("hardware.power.scheme.unnamed"),
-                QStringLiteral("未命名电源方案"));
-        }
-        const bool isActive = activeError == ERROR_SUCCESS &&
-            activeGuid != nullptr && ::IsEqualGUID(*activeGuid, schemeGuid);
-        if (isActive)
-        {
-            friendlyName += powerText(
-                QStringLiteral("hardware.power.scheme.active_suffix"),
-                QStringLiteral("（当前）"));
-        }
-        const int comboIndex = m_powerSchemeCombo->count();
-        m_powerSchemeCombo->addItem(friendlyName, guidBytes(schemeGuid));
-        if (isActive)
-        {
-            activeIndex = comboIndex;
-        }
+        QString name = scheme.name;
+        if (name.isEmpty()) name = powerText(QStringLiteral("hardware.power.scheme.unnamed"),
+            QStringLiteral("未命名电源方案"));
+        if (scheme.active) name += powerText(QStringLiteral("hardware.power.scheme.active_suffix"),
+            QStringLiteral("（当前）"));
+        m_powerSchemeCombo->addItem(name, scheme.guid);
+        if (scheme.active) activeIndex = m_powerSchemeCombo->count()-1;
     }
-
-    // 首次成功读取的活动方案作为本页面生命周期内的一键还原目标，后续刷新不覆盖。
-    if (activeError == ERROR_SUCCESS && activeGuid != nullptr &&
-        m_restorePowerSchemeGuid.isEmpty())
-    {
-        m_restorePowerSchemeGuid = guidBytes(*activeGuid);
-    }
-    if (activeGuid != nullptr)
-    {
-        ::LocalFree(activeGuid);
-    }
-    if (activeIndex >= 0)
-    {
-        m_powerSchemeCombo->setCurrentIndex(activeIndex);
-    }
-    const bool hasSchemes = m_powerSchemeCombo->count() > 0;
-    m_powerSchemeCombo->setEnabled(hasSchemes);
-    m_applyPowerSchemeButton->setEnabled(hasSchemes);
+    if (m_restorePowerSchemeGuid.isEmpty() && !snapshot.activeGuid.isEmpty())
+        m_restorePowerSchemeGuid = snapshot.activeGuid;
+    if (activeIndex >= 0) m_powerSchemeCombo->setCurrentIndex(activeIndex);
     updateControlAvailability();
 }
 
 void HardwarePowerPage::applySelectedPowerScheme()
 {
+    if (m_queryOperation->isBusy()) return;
     if (m_powerSchemeCombo == nullptr || m_powerSchemeCombo->currentIndex() < 0)
     {
         QMessageBox::critical(
@@ -809,6 +852,7 @@ void HardwarePowerPage::applySelectedPowerScheme()
 
 void HardwarePowerPage::restoreInitialState()
 {
+    if (m_queryOperation->isBusy()) return;
     const QString errorTitle = powerText(
         QStringLiteral("hardware.power.error.title"),
         QStringLiteral("电源调节失败"));
@@ -1213,6 +1257,30 @@ void HardwarePowerPage::applySnapshotToUi(const ksword::ark::CpuPowerResult& res
 
 void HardwarePowerPage::updateControlAvailability()
 {
+    const bool busy = m_queryOperation != nullptr && m_queryOperation->isBusy();
+    if (m_queryPending && !busy)
+    {
+        m_queryPending = false;
+        m_hasSnapshot = false;
+        setStatus(powerText(QStringLiteral("hardware.power.status.query_dropped"),
+            QStringLiteral("状态：电源查询已结束但未收到结果，请刷新。")), true);
+    }
+    m_refreshAllButton->setEnabled(!busy);
+    const bool hasSchemes = m_powerSchemeCombo->count() > 0;
+    m_powerSchemeCombo->setEnabled(!busy && hasSchemes);
+    m_applyPowerSchemeButton->setEnabled(!busy && hasSchemes);
+    if (busy)
+    {
+        const QList<QWidget*> controls { m_restoreInitialStateButton, m_pl1Spin, m_pl2Spin,
+            m_pl1EnableCheck, m_pl1ClampCheck, m_pl2EnableCheck, m_pl2ClampCheck,
+            m_applyPowerLimitsButton, m_raisePowerLimitsButton, m_turboEnableCheck, m_applyTurboButton,
+            m_turboRatioSpin, m_applyTurboRatioButton, m_requestedMultiplierSpin,
+            m_applyRequestedMultiplierButton, m_hwpMinimumSpin, m_hwpMaximumSpin,
+            m_hwpDesiredSpin, m_hwpEppSpin, m_applyHwpButton };
+        for (QWidget* control : controls) control->setEnabled(false);
+        return;
+    }
+
     const bool hasIntelSnapshot = m_hasSnapshot &&
         m_snapshot.vendor == KSWORD_ARK_CPU_POWER_VENDOR_INTEL;
     const bool powerLimitLocked = m_hasSnapshot &&
@@ -1546,6 +1614,7 @@ void HardwarePowerPage::sendControlRequest(
     const unsigned long applyFlags,
     const QString& confirmationText)
 {
+    if (m_queryOperation->isBusy()) return;
     const QString errorTitle = powerText(
         QStringLiteral("hardware.power.error.title"),
         QStringLiteral("电源调节失败"));
@@ -1586,6 +1655,7 @@ void HardwarePowerPage::sendControlRequest(
 
 void HardwarePowerPage::raisePowerLimitsToPlatformMaximum()
 {
+    if (m_queryOperation->isBusy()) return;
     if (!m_hasSnapshot ||
         m_snapshot.packageMaximumPowerMilliwatts == 0UL ||
         (m_snapshot.responseFlags &

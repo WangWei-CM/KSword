@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "hardware.power.status.query_dropped": "状态：电源查询已结束但未收到结果，请刷新。",
     "window.layer.events.sample": "采样 %1；关联事件序号 %2–%3（%4 个相关事件），不是逐事件瞬时状态。",
     "window.layer.events.dropped": "事件入口队列溢出：丢弃 %1 条（序号 %2–%3）；原始事件导出保留该计数。",
     "misc.shell.refreshing": "正在刷新注册表快照…",
@@ -6962,6 +6963,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "状态：电源查询已结束但未收到结果，请刷新。": "状态：电源查询已结束但未收到结果，请刷新。",
     "%1 项（停止、失败或超出本次时间预算）": "%1 项（停止、失败或超出本次时间预算）",
     "临时注册表已恢复；测量结果保留在详情中。": "临时注册表已恢复；测量结果保留在详情中。",
     "临时注册表恢复未完成，请重试恢复：%1": "临时注册表恢复未完成，请重试恢复：%1",

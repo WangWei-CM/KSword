@@ -5,6 +5,8 @@
 #include <QByteArray>
 #include <QWidget>
 
+namespace ks::ui { class AsyncOperation; }
+struct HardwarePowerSchemeSnapshot;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -20,6 +22,7 @@ class HardwarePowerPage final : public QWidget
 {
 public:
     explicit HardwarePowerPage(QWidget* parent = nullptr);
+    ~HardwarePowerPage() override;
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -29,6 +32,7 @@ private:
     void initializeConnections();
     void refreshAll();
     void refreshPowerSchemes();
+    void applyPowerSchemesSnapshot(const HardwarePowerSchemeSnapshot& snapshot);
     void applySelectedPowerScheme();
     void restoreInitialState();
     void refreshCpuPower();
@@ -47,6 +51,8 @@ private:
         const QString& confirmationText);
     void raisePowerLimitsToPlatformMaximum();
 
+    ks::ui::AsyncOperation* m_queryOperation = nullptr;
+    bool m_queryPending = false;
     bool m_loadedOnce = false;                        // m_loadedOnce：首次显示时自动刷新一次。
     bool m_hasSnapshot = false;                       // m_hasSnapshot：expected raw MSR 是否有效。
     KSWORD_ARK_CPU_POWER_RESPONSE m_snapshot{};       // m_snapshot：最近一次锁内 R0 快照。
