@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Ksword::Features::Kernel {
@@ -120,7 +121,8 @@ private:
     void RebuildCrossViewListFromCache(KernelFeatureId featureId);
     void RebuildIntegrityEvidenceListFromCache(KernelFeatureId featureId);
     void RebuildR0EvidenceListFromCache(KernelFeatureId featureId);
-    void ScheduleR0EvidenceFilter(KernelFeatureId featureId);
+    void ScheduleCachedFilter(KernelFeatureId featureId);
+    void ApplyCachedFilter(KernelFeatureId featureId);
     void RequestR0EvidenceRebuild(KernelFeatureId featureId);
     void ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot);
     const KernelFeatureDescriptor* CurrentDescriptor() const;
@@ -439,6 +441,7 @@ private:
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
     KernelFeatureId pendingR0EvidenceFeatureId_ = KernelFeatureId::CpuHardwareSnapshot;
     bool hasPendingR0EvidenceFilter_ = false;
+    std::unordered_set<KernelFeatureId> pendingCachedFilterFeatures_;
     KernelFacade facade_;
 };
 

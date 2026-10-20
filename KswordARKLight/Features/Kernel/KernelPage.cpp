@@ -1593,7 +1593,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
             ::KillTimer(hwnd, kTimerR0EvidenceFilter);
             if (hasPendingR0EvidenceFilter_) {
                 hasPendingR0EvidenceFilter_ = false;
-                RequestR0EvidenceRebuild(pendingR0EvidenceFeatureId_);
+                ApplyCachedFilter(pendingR0EvidenceFeatureId_);
             }
             return 0;
         }
@@ -1663,12 +1663,10 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
             return 0;
         }
         if ((LOWORD(wParam) == kIdFilterEdit || LOWORD(wParam) == kIdModuleFilterEdit) && HIWORD(wParam) == EN_CHANGE) {
-            if (suppressFilterChange_) {
-                return 0;
-            }
+            if (suppressFilterChange_) return 0;
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
                 descriptor != nullptr && IsR0EvidenceFeature(descriptor->id) && !currentRawColumns_.empty()) {
-                ScheduleR0EvidenceFilter(descriptor->id);
+                ScheduleCachedFilter(descriptor->id);
                 return 0;
             }
             if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
@@ -1701,43 +1699,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                     descriptor->id == KernelFeatureId::IoctlRegistry ||
                     IsKernelHookFeature(descriptor->id)) &&
                 !currentRawColumns_.empty()) {
-                currentColumns_ = currentRawColumns_;
-                currentRows_ = currentRawRows_;
-                if (IsObjectNamespaceFeature(descriptor->id)) {
-                    RebuildObjectNamespaceListFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::AtomTable) {
-                    RebuildAtomTableFromCache();
-                } else if (descriptor->id == KernelFeatureId::DynData ||
-                    descriptor->id == KernelFeatureId::DriverStatus) {
-                    RebuildDiagnosticDualTableFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::CallbackEnumeration) {
-                    RebuildCallbackEnumerationListFromCache();
-                } else if (IsKernelHookFeature(descriptor->id)) {
-                    RebuildKernelHookListFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::KernelExecutableMemory ||
-                    descriptor->id == KernelFeatureId::KernelMemoryEvidence) {
-                    RebuildKernelMemoryScanListFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::ProcessCrossView ||
-                    descriptor->id == KernelFeatureId::ThreadCrossView) {
-                    RebuildCrossViewListFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::DriverIntegrity ||
-                    descriptor->id == KernelFeatureId::KernelCpuIntegrity) {
-                    RebuildIntegrityEvidenceListFromCache(descriptor->id);
-                } else if (descriptor->id == KernelFeatureId::CpuHardwareSnapshot ||
-                    descriptor->id == KernelFeatureId::PhysicalMemoryLayout ||
-                    descriptor->id == KernelFeatureId::MutationAudit ||
-                    descriptor->id == KernelFeatureId::KeyboardHotkeys ||
-                    descriptor->id == KernelFeatureId::KeyboardHooks ||
-                    descriptor->id == KernelFeatureId::DynDataCapabilities ||
-                    descriptor->id == KernelFeatureId::MinifilterBypassPids ||
-                    descriptor->id == KernelFeatureId::KernelTimerDpc ||
-                    descriptor->id == KernelFeatureId::IoctlRegistry) {
-                    RebuildR0EvidenceListFromCache(descriptor->id);
-                } else {
-                    RebuildResultListFromCache();
-                }
-                ConfigureVisibleLayout();
-                InvalidateCurrentFeatureViewCache();
+                ScheduleCachedFilter(descriptor->id);
             }
             return 0;
         }
@@ -4488,6 +4450,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
         }
     }
     cache.hasData = false;
+    if (pendingCachedFilterFeatures_.contains(featureId)) ScheduleCachedFilter(featureId);
     return true;
 }
 
@@ -8431,10 +8394,60 @@ void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId)
     RequestR0EvidenceRebuild(featureId);
 }
 
-void KernelPage::ScheduleR0EvidenceFilter(const KernelFeatureId featureId) {
-    if (!hwnd_ || !IsR0EvidenceFeature(featureId)) {
+void KernelPage::ApplyCachedFilter(const KernelFeatureId featureId) {
+    const auto* descriptor = CurrentDescriptor();
+    if (!descriptor || descriptor->id != featureId || currentRawColumns_.empty()) return;
+    pendingCachedFilterFeatures_.erase(featureId);
+    if (IsR0EvidenceFeature(featureId)) {
+        RequestR0EvidenceRebuild(featureId);
         return;
     }
+    currentColumns_ = currentRawColumns_;
+    currentRows_ = currentRawRows_;
+    if (IsObjectNamespaceFeature(descriptor->id)) {
+        RebuildObjectNamespaceListFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::AtomTable) {
+        RebuildAtomTableFromCache();
+    } else if (descriptor->id == KernelFeatureId::DynData ||
+        descriptor->id == KernelFeatureId::DriverStatus) {
+        RebuildDiagnosticDualTableFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::CallbackEnumeration) {
+        RebuildCallbackEnumerationListFromCache();
+    } else if (IsKernelHookFeature(descriptor->id)) {
+        RebuildKernelHookListFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::KernelExecutableMemory ||
+        descriptor->id == KernelFeatureId::KernelMemoryEvidence) {
+        RebuildKernelMemoryScanListFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::ProcessCrossView ||
+        descriptor->id == KernelFeatureId::ThreadCrossView) {
+        RebuildCrossViewListFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::DriverIntegrity ||
+        descriptor->id == KernelFeatureId::KernelCpuIntegrity) {
+        RebuildIntegrityEvidenceListFromCache(descriptor->id);
+    } else if (descriptor->id == KernelFeatureId::CpuHardwareSnapshot ||
+        descriptor->id == KernelFeatureId::PhysicalMemoryLayout ||
+        descriptor->id == KernelFeatureId::MutationAudit ||
+        descriptor->id == KernelFeatureId::KeyboardHotkeys ||
+        descriptor->id == KernelFeatureId::KeyboardHooks ||
+        descriptor->id == KernelFeatureId::DynDataCapabilities ||
+        descriptor->id == KernelFeatureId::MinifilterBypassPids ||
+        descriptor->id == KernelFeatureId::KernelTimerDpc ||
+        descriptor->id == KernelFeatureId::IoctlRegistry) {
+        RebuildR0EvidenceListFromCache(descriptor->id);
+    } else {
+        RebuildResultListFromCache();
+    }
+    ConfigureVisibleLayout();
+    InvalidateCurrentFeatureViewCache();
+
+
+}
+
+void KernelPage::ScheduleCachedFilter(const KernelFeatureId featureId) {
+    if (!hwnd_) {
+        return;
+    }
+    pendingCachedFilterFeatures_.insert(featureId);
     pendingR0EvidenceFeatureId_ = featureId;
     hasPendingR0EvidenceFilter_ = true;
     ::SetTimer(hwnd_, kTimerR0EvidenceFilter, 200, nullptr);
