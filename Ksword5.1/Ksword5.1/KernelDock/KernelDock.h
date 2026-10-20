@@ -44,6 +44,8 @@ class QProgressBar;
 class QTableWidget;
 class QTabWidget;
 class QTreeWidget;
+class QTreeWidgetItem;
+class QTimer;
 class QVBoxLayout;
 class QEvent;
 class QShowEvent;
@@ -1241,6 +1243,12 @@ private:
     QLabel* m_callbackRemoveStatusLabel = nullptr;                  // m_callbackRemoveStatusLabel：状态文本。
 
     // ==================== 数据缓存 ====================
+    bool m_objectNamespaceProjectionDirty = true;
+    bool m_objectNamespaceFiltering = false;
+    QTimer* m_objectNamespaceFilterTimer = nullptr;
+    QTreeWidgetItem* m_objectNamespaceUnfilteredSelection = nullptr;
+    int m_objectNamespaceUnfilteredHorizontalScroll = 0;
+    int m_objectNamespaceUnfilteredVerticalScroll = 0;
     std::vector<KernelObjectNamespaceEntry> m_objectNamespaceRows; // m_objectNamespaceRows：对象命名空间快照行。
     std::vector<KernelAtomEntry> m_atomRows;                       // m_atomRows：原子快照行。
     std::vector<KernelNtQueryResultEntry> m_ntQueryResults;        // m_ntQueryResults：历史 NtQuery 快照行。

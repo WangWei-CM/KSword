@@ -1141,8 +1141,14 @@ void KernelDock::initializeObjectNamespaceTab()
     connect(m_refreshObjectNamespaceButton, &QPushButton::clicked, this, [this]() {
         refreshObjectNamespaceAsync();
     });
-    connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildObjectNamespaceTable(filterText.trimmed());
+    m_objectNamespaceFilterTimer = new QTimer(this);
+    m_objectNamespaceFilterTimer->setSingleShot(true);
+    m_objectNamespaceFilterTimer->setInterval(120);
+    connect(m_objectNamespaceFilterTimer, &QTimer::timeout, this, [this]() {
+        rebuildObjectNamespaceTable(m_objectNamespaceFilterEdit->text().trimmed());
+    });
+    connect(m_objectNamespaceFilterEdit, &QLineEdit::textChanged, this, [this]() {
+        m_objectNamespaceFilterTimer->start();
     });
     connect(m_objectNamespaceTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
         showObjectNamespaceDetailByCurrentRow();

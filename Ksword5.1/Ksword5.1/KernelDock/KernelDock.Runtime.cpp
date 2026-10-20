@@ -1,5 +1,6 @@
 
 #include "KernelDock.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/ThemeItemForeground.h"
 
@@ -28,6 +29,8 @@
 #include <QTableWidgetItem>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QScrollBar>
+#include <QTimer>
 
 #include <algorithm> // std::count_if：统计失败项。
 #include <limits>    // std::numeric_limits：定义树节点哨兵值。
@@ -89,6 +92,7 @@ namespace
     constexpr int NodeKindRole = Qt::UserRole + 2;
     constexpr int NodePathRole = Qt::UserRole + 3;
     constexpr int NodeDescriptionRole = Qt::UserRole + 4;
+    constexpr int UnfilteredExpandedRole = Qt::UserRole + 5;
 
     // kInvalidSourceIndex：树节点未绑定对象记录时使用的哨兵值。
     constexpr qulonglong kInvalidSourceIndex = std::numeric_limits<qulonglong>::max();
@@ -144,7 +148,7 @@ namespace
         for (int rootIndex = 0; rootIndex < treeWidget->topLevelItemCount(); ++rootIndex)
         {
             QTreeWidgetItem* rootItem = treeWidget->topLevelItem(rootIndex);
-            if (rootItem == nullptr)
+            if (rootItem == nullptr || rootItem->isHidden())
             {
                 continue;
             }
@@ -152,7 +156,7 @@ namespace
             for (int directoryIndex = 0; directoryIndex < rootItem->childCount(); ++directoryIndex)
             {
                 QTreeWidgetItem* directoryItem = rootItem->child(directoryIndex);
-                if (directoryItem == nullptr)
+                if (directoryItem == nullptr || directoryItem->isHidden())
                 {
                     continue;
                 }
@@ -160,7 +164,7 @@ namespace
                 for (int entryIndex = 0; entryIndex < directoryItem->childCount(); ++entryIndex)
                 {
                     QTreeWidgetItem* entryItem = directoryItem->child(entryIndex);
-                    if (entryItem == nullptr)
+                    if (entryItem == nullptr || entryItem->isHidden())
                     {
                         continue;
                     }
@@ -245,6 +249,8 @@ void KernelDock::refreshObjectNamespaceAsync()
             }
 
             guardThis->m_objectNamespaceRows = std::move(resultRows);
+            guardThis->m_objectNamespaceProjectionDirty = true;
+            guardThis->m_objectNamespaceFilterTimer->stop();
             guardThis->rebuildObjectNamespaceTable(guardThis->m_objectNamespaceFilterEdit->text().trimmed());
 
             const std::size_t failedCount = static_cast<std::size_t>(
@@ -262,7 +268,7 @@ void KernelDock::refreshObjectNamespaceAsync()
             guardThis->m_objectNamespaceStatusLabel->setStyleSheet(
                 statusLabelStyle(failedCount == 0 ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
-            if (guardThis->m_objectNamespaceTree->topLevelItemCount() > 0)
+            if (findFirstEntryItem(guardThis->m_objectNamespaceTree) != nullptr)
             {
                 guardThis->selectFirstObjectNamespaceEntryItem();
             }
@@ -443,18 +449,120 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
     {
         return;
     }
-
-    m_objectNamespaceTree->clear();
-
-    // rootItemMap：缓存“根路径 -> 根节点”映射，避免重复创建根节点。
-    QMap<QString, QTreeWidgetItem*> rootItemMap;
-    // directoryItemMap：缓存“根路径+目录路径 -> 目录节点”映射，避免重复创建目录节点。
-    QMap<QString, QTreeWidgetItem*> directoryItemMap;
-
-    for (std::size_t sourceIndex = 0; sourceIndex < m_objectNamespaceRows.size(); ++sourceIndex)
+    const QPointer<KernelDock> guard(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("kernel-object-namespace-filter"),
+        {m_objectNamespaceTree}, [guard, filterKeyword]() {
+            if (guard) guard->rebuildObjectNamespaceTable(filterKeyword);
+        })) return;
+    if (m_objectNamespaceProjectionDirty)
     {
-        const KernelObjectNamespaceEntry& entry = m_objectNamespaceRows[sourceIndex];
-        const bool matched = filterKeyword.isEmpty()
+        m_objectNamespaceProjectionDirty = false;
+        m_objectNamespaceFiltering = false;
+        m_objectNamespaceUnfilteredSelection = nullptr;
+        m_objectNamespaceTree->clear();
+        // rootItemMap：缓存“根路径 -> 根节点”映射，避免重复创建根节点。
+        QMap<QString, QTreeWidgetItem*> rootItemMap;
+        // directoryItemMap：缓存“根路径+目录路径 -> 目录节点”映射，避免重复创建目录节点。
+        QMap<QString, QTreeWidgetItem*> directoryItemMap;
+
+        for (std::size_t sourceIndex = 0; sourceIndex < m_objectNamespaceRows.size(); ++sourceIndex)
+        {
+            const KernelObjectNamespaceEntry& entry = m_objectNamespaceRows[sourceIndex];
+            QTreeWidgetItem* rootItem = rootItemMap.value(entry.rootPathText, nullptr);
+            if (rootItem == nullptr)
+            {
+                rootItem = new QTreeWidgetItem(m_objectNamespaceTree);
+                rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), entry.rootPathText);
+                rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.root_directory", QStringLiteral("根目录")));
+                rootItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.scopeDescriptionText));
+                rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.root", QStringLiteral("根节点")));
+                rootItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
+                rootItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
+                rootItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Root));
+                rootItem->setData(0, NodePathRole, entry.rootPathText);
+                rootItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
+                ks::ui::ApplyThemeItemForeground(rootItem,
+                    static_cast<int>(ObjectNamespaceColumn::Type),
+                    ks::ui::ItemForegroundRole::Accent);
+
+                rootItemMap.insert(entry.rootPathText, rootItem);
+            }
+
+            const QString directoryKeyText = entry.rootPathText + QChar('\n') + entry.directoryPathText;
+            QTreeWidgetItem* directoryItem = directoryItemMap.value(directoryKeyText, nullptr);
+            if (directoryItem == nullptr)
+            {
+                directoryItem = new QTreeWidgetItem(rootItem);
+                directoryItem->setText(
+                    static_cast<int>(ObjectNamespaceColumn::Name),
+                    leafNameFromObjectPath(entry.directoryPathText));
+                directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.directory", QStringLiteral("目录")));
+                directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), entry.directoryPathText);
+                directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.enumerated", QStringLiteral("已展开枚举")));
+                directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
+                directoryItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
+                directoryItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Directory));
+                directoryItem->setData(0, NodePathRole, entry.directoryPathText);
+                directoryItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
+                ks::ui::ApplyThemeItemForeground(directoryItem,
+                    static_cast<int>(ObjectNamespaceColumn::Type),
+                    ks::ui::ItemForegroundRole::Accent);
+
+                directoryItemMap.insert(directoryKeyText, directoryItem);
+            }
+
+            auto* objectItem = new QTreeWidgetItem(directoryItem);
+            const QString objectNameText = entry.objectNameText.trimmed().isEmpty()
+                ? kernelText("kernel.runtime.placeholder.unnamed_object", QStringLiteral("<未命名对象>"))
+                : entry.objectNameText;
+            objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), objectNameText);
+            objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), safeText(entry.objectTypeText));
+            objectItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.fullPathText));
+            objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), safeText(entry.statusText));
+            objectItem->setText(
+                static_cast<int>(ObjectNamespaceColumn::SymbolicTarget),
+                safeText(entry.symbolicLinkTargetText));
+            objectItem->setData(0, SourceIndexRole, static_cast<qulonglong>(sourceIndex));
+            objectItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::ObjectEntry));
+            objectItem->setData(0, NodePathRole, entry.fullPathText);
+            objectItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
+
+            if (!entry.querySucceeded)
+            {
+                ks::ui::ApplyThemeItemForeground(objectItem,
+                    static_cast<int>(ObjectNamespaceColumn::Status),
+                    ks::ui::ItemForegroundRole::Warning);
+            }
+            else if (entry.isDirectory)
+            {
+                ks::ui::ApplyThemeItemForeground(objectItem,
+                    static_cast<int>(ObjectNamespaceColumn::Type),
+                    ks::ui::ItemForegroundRole::Accent);
+            }
+        }
+
+        for (int rootIndex = 0; rootIndex < m_objectNamespaceTree->topLevelItemCount(); ++rootIndex)
+        {
+            auto* root = m_objectNamespaceTree->topLevelItem(rootIndex);
+            root->setExpanded(true);
+            for (int directoryIndex = 0; directoryIndex < root->childCount(); ++directoryIndex)
+            {
+                root->child(directoryIndex)->setExpanded(false);
+            }
+        }
+    }
+
+    const bool filtering = !filterKeyword.isEmpty();
+    const bool enteringFilter = filtering && !m_objectNamespaceFiltering;
+    const bool leavingFilter = !filtering && m_objectNamespaceFiltering;
+    if (enteringFilter)
+    {
+        m_objectNamespaceUnfilteredSelection = m_objectNamespaceTree->currentItem();
+        m_objectNamespaceUnfilteredHorizontalScroll = m_objectNamespaceTree->horizontalScrollBar()->value();
+        m_objectNamespaceUnfilteredVerticalScroll = m_objectNamespaceTree->verticalScrollBar()->value();
+    }
+    auto matches = [&filterKeyword](const KernelObjectNamespaceEntry& entry) {
+        return filterKeyword.isEmpty()
             || entry.rootPathText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.scopeDescriptionText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.directoryPathText.contains(filterKeyword, Qt::CaseInsensitive)
@@ -464,112 +572,55 @@ void KernelDock::rebuildObjectNamespaceTable(const QString& filterKeyword)
             || entry.enumApiText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.symbolicLinkTargetText.contains(filterKeyword, Qt::CaseInsensitive)
             || entry.statusText.contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
-        QTreeWidgetItem* rootItem = rootItemMap.value(entry.rootPathText, nullptr);
-        if (rootItem == nullptr)
-        {
-            rootItem = new QTreeWidgetItem(m_objectNamespaceTree);
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), entry.rootPathText);
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.root_directory", QStringLiteral("根目录")));
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.scopeDescriptionText));
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.root", QStringLiteral("根节点")));
-            rootItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
-            rootItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
-            rootItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Root));
-            rootItem->setData(0, NodePathRole, entry.rootPathText);
-            rootItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
-            ks::ui::ApplyThemeItemForeground(rootItem,
-                static_cast<int>(ObjectNamespaceColumn::Type),
-                ks::ui::ItemForegroundRole::Accent);
-
-            rootItemMap.insert(entry.rootPathText, rootItem);
-        }
-
-        const QString directoryKeyText = entry.rootPathText + QChar('\n') + entry.directoryPathText;
-        QTreeWidgetItem* directoryItem = directoryItemMap.value(directoryKeyText, nullptr);
-        if (directoryItem == nullptr)
-        {
-            directoryItem = new QTreeWidgetItem(rootItem);
-            directoryItem->setText(
-                static_cast<int>(ObjectNamespaceColumn::Name),
-                leafNameFromObjectPath(entry.directoryPathText));
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), kernelText("kernel.runtime.object_namespace.node.directory", QStringLiteral("目录")));
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), entry.directoryPathText);
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), kernelText("kernel.runtime.object_namespace.node.enumerated", QStringLiteral("已展开枚举")));
-            directoryItem->setText(static_cast<int>(ObjectNamespaceColumn::SymbolicTarget), kernelText("kernel.runtime.placeholder.none", QStringLiteral("<无>")));
-            directoryItem->setData(0, SourceIndexRole, kInvalidSourceIndex);
-            directoryItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::Directory));
-            directoryItem->setData(0, NodePathRole, entry.directoryPathText);
-            directoryItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
-            ks::ui::ApplyThemeItemForeground(directoryItem,
-                static_cast<int>(ObjectNamespaceColumn::Type),
-                ks::ui::ItemForegroundRole::Accent);
-
-            directoryItemMap.insert(directoryKeyText, directoryItem);
-        }
-
-        auto* objectItem = new QTreeWidgetItem(directoryItem);
-        const QString objectNameText = entry.objectNameText.trimmed().isEmpty()
-            ? kernelText("kernel.runtime.placeholder.unnamed_object", QStringLiteral("<未命名对象>"))
-            : entry.objectNameText;
-        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Name), objectNameText);
-        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Type), safeText(entry.objectTypeText));
-        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::PathOrScope), safeText(entry.fullPathText));
-        objectItem->setText(static_cast<int>(ObjectNamespaceColumn::Status), safeText(entry.statusText));
-        objectItem->setText(
-            static_cast<int>(ObjectNamespaceColumn::SymbolicTarget),
-            safeText(entry.symbolicLinkTargetText));
-        objectItem->setData(0, SourceIndexRole, static_cast<qulonglong>(sourceIndex));
-        objectItem->setData(0, NodeKindRole, static_cast<int>(ObjectNamespaceNodeKind::ObjectEntry));
-        objectItem->setData(0, NodePathRole, entry.fullPathText);
-        objectItem->setData(0, NodeDescriptionRole, entry.scopeDescriptionText);
-
-        if (!entry.querySucceeded)
-        {
-            ks::ui::ApplyThemeItemForeground(objectItem,
-                static_cast<int>(ObjectNamespaceColumn::Status),
-                ks::ui::ItemForegroundRole::Warning);
-        }
-        else if (entry.isDirectory)
-        {
-            ks::ui::ApplyThemeItemForeground(objectItem,
-                static_cast<int>(ObjectNamespaceColumn::Type),
-                ks::ui::ItemForegroundRole::Accent);
-        }
-    }
-
-    if (!filterKeyword.isEmpty())
+    };
+    for (int rootIndex = 0; rootIndex < m_objectNamespaceTree->topLevelItemCount(); ++rootIndex)
     {
-        m_objectNamespaceTree->expandAll();
-    }
-    else
-    {
-        for (int rootIndex = 0; rootIndex < m_objectNamespaceTree->topLevelItemCount(); ++rootIndex)
+        auto* root = m_objectNamespaceTree->topLevelItem(rootIndex);
+        if (enteringFilter) root->setData(0, UnfilteredExpandedRole, root->isExpanded());
+        bool rootVisible = false;
+        for (int directoryIndex = 0; directoryIndex < root->childCount(); ++directoryIndex)
         {
-            QTreeWidgetItem* rootItem = m_objectNamespaceTree->topLevelItem(rootIndex);
-            if (rootItem == nullptr)
+            auto* directory = root->child(directoryIndex);
+            if (enteringFilter) directory->setData(0, UnfilteredExpandedRole, directory->isExpanded());
+            bool directoryVisible = false;
+            for (int row = 0; row < directory->childCount(); ++row)
             {
-                continue;
+                auto* item = directory->child(row);
+                const auto sourceIndex = static_cast<std::size_t>(item->data(0, SourceIndexRole).toULongLong());
+                const bool visible = sourceIndex < m_objectNamespaceRows.size() && matches(m_objectNamespaceRows[sourceIndex]);
+                item->setHidden(!visible);
+                directoryVisible = directoryVisible || visible;
             }
-            rootItem->setExpanded(true);
-            for (int directoryIndex = 0; directoryIndex < rootItem->childCount(); ++directoryIndex)
-            {
-                QTreeWidgetItem* directoryItem = rootItem->child(directoryIndex);
-                if (directoryItem != nullptr)
-                {
-                    directoryItem->setExpanded(false);
-                }
-            }
+            directory->setHidden(!directoryVisible);
+            if (filtering) directory->setExpanded(directoryVisible);
+            else if (leavingFilter) directory->setExpanded(directory->data(0, UnfilteredExpandedRole).toBool());
+            rootVisible = rootVisible || directoryVisible;
         }
+        root->setHidden(!rootVisible);
+        if (filtering) root->setExpanded(rootVisible);
+        else if (leavingFilter) root->setExpanded(root->data(0, UnfilteredExpandedRole).toBool());
     }
-
-    if (m_objectNamespaceTree->currentItem() == nullptr)
+    m_objectNamespaceFiltering = filtering;
+    if (leavingFilter && m_objectNamespaceUnfilteredSelection != nullptr)
     {
+        m_objectNamespaceTree->setCurrentItem(m_objectNamespaceUnfilteredSelection, 0);
+        m_objectNamespaceUnfilteredSelection = nullptr;
+    }
+    auto* current = m_objectNamespaceTree->currentItem();
+    bool currentVisible = current != nullptr;
+    for (auto* item = current; item != nullptr; item = item->parent())
+    {
+        currentVisible = currentVisible && !item->isHidden();
+    }
+    if (!currentVisible)
+    {
+        m_objectNamespaceTree->setCurrentItem(nullptr);
         selectFirstObjectNamespaceEntryItem();
+    }
+    if (leavingFilter)
+    {
+        m_objectNamespaceTree->horizontalScrollBar()->setValue(m_objectNamespaceUnfilteredHorizontalScroll);
+        m_objectNamespaceTree->verticalScrollBar()->setValue(m_objectNamespaceUnfilteredVerticalScroll);
     }
 }
 
@@ -668,10 +719,14 @@ void KernelDock::selectFirstObjectNamespaceEntryItem()
         return;
     }
 
-    if (m_objectNamespaceTree->topLevelItemCount() > 0)
+    for (int index = 0; index < m_objectNamespaceTree->topLevelItemCount(); ++index)
     {
-        m_objectNamespaceTree->setCurrentItem(m_objectNamespaceTree->topLevelItem(0), 0);
-        return;
+        auto* root = m_objectNamespaceTree->topLevelItem(index);
+        if (!root->isHidden())
+        {
+            m_objectNamespaceTree->setCurrentItem(root, 0);
+            return;
+        }
     }
 
     rebuildObjectNamespacePropertyTable(
