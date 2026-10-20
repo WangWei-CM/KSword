@@ -18,6 +18,8 @@
 
 #include <atomic> // std::atomic_bool：控制后台刷新任务互斥。
 
+namespace ks::ui { class AsyncOperation; }
+
 class QLabel;
 class QPushButton;
 class QTableWidget;
@@ -75,6 +77,7 @@ private:
     // requestAsyncRefresh 作用：
     // - 在后台线程采集各审计页快照与表格行模型；
     // - 结果通过 queued connection 回投 UI。
+    void reconcileAuditRefreshState();
     void requestAsyncRefresh();
 
     // setRefreshingPlaceholderRows 作用：
@@ -130,6 +133,8 @@ private:
     QTableWidget* m_hooksTable = nullptr;       // m_hooksTable：Hook 表。
     QTableWidget* m_clipboardTable = nullptr;   // m_clipboardTable：剪贴板属性/值表。
     QTableWidget* m_deviceTable = nullptr;      // m_deviceTable：GPU/显示/watchdog 设备审计表。
+
+    ks::ui::AsyncOperation* m_auditOperation = nullptr;
 
     // 刷新控制。
     std::atomic_bool m_refreshing{ false };     // m_refreshing：后台刷新互斥。

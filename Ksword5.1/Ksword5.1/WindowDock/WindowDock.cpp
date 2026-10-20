@@ -1,4 +1,6 @@
 #include "WindowDock.h"
+#include "WindowSnapshotSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "WindowEventHookTab.h"
@@ -89,6 +91,21 @@
 
 namespace
 {
+    struct WindowAuditRequest
+    {
+        QVector<QStringList> clipboard;
+        QString screenName;
+        QRect screenGeometry;
+        double screenDpi = 0.0;
+        ks::window::SnapshotTexts texts;
+    };
+    struct WindowAuditSnapshot
+    {
+        ks::ui::FieldDocument sessionSummary, hotkeyHookSummary, displaySummary;
+        QVector<QStringList> windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows, deviceRows, clipboardRows;
+        QString failure;
+    };
+
     // kColumnPresetSelectedProperty 作用：标识 A/B 列预设按钮的当前选中态。
     // 该内部属性名不是用户可见文本，集中定义可避免误入 i18n 语言包。
     constexpr char kColumnPresetSelectedProperty[] = {
@@ -679,22 +696,16 @@ namespace
             .arg(formatUInt64Hex(flags));
     }
 
-    QString messageHookLayoutSourceText(const std::uint32_t source)
+    QString messageHookLayoutSourceText(const std::uint32_t source, const ks::window::SnapshotTexts& texts)
     {
         switch (source)
         {
         case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.exact"),
-                QStringLiteral("精确 PE 身份"));
+            return texts.value(QStringLiteral("window.message_hook.layout.exact"), QStringLiteral("精确 PE 身份"));
         case KSWORD_ARK_WIN32K_MESSAGE_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.previous"),
-                QStringLiteral("最近旧版回退"));
+            return texts.value(QStringLiteral("window.message_hook.layout.previous"), QStringLiteral("最近旧版回退"));
         default:
-            return ks::i18n::contextText(
-                QStringLiteral("window.message_hook.layout.unknown"),
-                QStringLiteral("未知"));
+            return texts.value(QStringLiteral("window.message_hook.layout.unknown"), QStringLiteral("未知"));
         }
     }
 
@@ -2579,7 +2590,8 @@ namespace
 
     QVector<QStringList> buildHookRows(
         const ksword::ark::Win32kHooksPdbResult& result,
-        const ksword::ark::KeyboardHookEnumResult* const fallbackResult)
+        const ksword::ark::KeyboardHookEnumResult* const fallbackResult,
+        const ks::window::SnapshotTexts& texts)
     {
         QVector<QStringList> rows;
         rows.reserve(static_cast<int>(result.entries.size()));
@@ -2626,7 +2638,7 @@ namespace
                 QStringLiteral("fieldFlags=%1; moduleBase=%2; layout=%3; profileFull=%4/%5; currentFull=%6/%7; %8")
                     .arg(formatUInt64Hex(entry.fieldFlags))
                     .arg(formatUInt64Hex(entry.moduleBase))
-                    .arg(messageHookLayoutSourceText(result.layout.source))
+                    .arg(messageHookLayoutSourceText(result.layout.source, texts))
                     .arg(formatUInt64Hex(result.layout.timeDateStamp))
                     .arg(formatUInt64Hex(result.layout.imageSize))
                     .arg(formatUInt64Hex(result.win32kfullTimeDateStamp))
@@ -2838,12 +2850,18 @@ namespace
         {
             return;
         }
+        const QPointer<QTableWidget> alive(table);
         const bool wasSorting = table->isSortingEnabled();
         table->setSortingEnabled(false);
+        if (!alive) return;
         table->setVisible(true);
+        if (!alive) return;
         table->clearContents();
+        if (!alive) return;
         applyAuditTablePalette(table);
+        if (!alive) return;
         table->setRowCount(rows.size());
+        if (!alive) return;
         bool hasProcessIconColumn = false;
         bool hasProcessPathColumn = false;
         const int processIconColumn = table->property("kswordProcessIconColumn").toInt(&hasProcessIconColumn);
@@ -2884,10 +2902,13 @@ namespace
                     item->setIcon(processIcon);
                 }
                 table->setItem(rowIndex, columnIndex, item);
+        if (!alive) return;
             }
         }
         table->setSortingEnabled(wasSorting);
+        if (!alive) return;
         table->resizeRowsToContents();
+        if (!alive) return;
         if (table->viewport() != nullptr)
         {
             table->viewport()->update();
@@ -2947,8 +2968,10 @@ namespace
 WindowDock::WindowDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_auditOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
     initializeConnections();
+    m_auditOperation->setStateChangedCallback([this] { reconcileAuditRefreshState(); });
 
     // 初始状态：
     // - 窗口列表页由内嵌 OtherDock 保持原有行为；
@@ -2985,6 +3008,11 @@ WindowDock::WindowDock(QWidget* parent)
 
 WindowDock::~WindowDock()
 {
+    m_auditOperation->close();
+    ks::window::retireSnapshotValues(std::move(m_cachedSessionSummary), std::move(m_cachedHotkeyHookSummary),
+        std::move(m_cachedDisplaySummary), std::move(m_cachedWindowsRows), std::move(m_cachedGuiThreadRows),
+        std::move(m_cachedSessionRows), std::move(m_cachedHotkeyRows), std::move(m_cachedHookRows),
+        std::move(m_cachedDeviceRows), std::move(m_cachedClipboardRows));
 }
 
 void WindowDock::focusWindowsByPids(const QVector<quint32>& processIds)
@@ -3025,7 +3053,10 @@ void WindowDock::refreshThemeVisuals()
 
 void WindowDock::showEvent(QShowEvent* showEventPointer)
 {
+    const QPointer<WindowDock> alive(this);
     QWidget::showEvent(showEventPointer);
+    if (!alive) return;
+    reconcileAuditRefreshState();
 }
 
 void WindowDock::initializeUi()
@@ -3493,6 +3524,10 @@ void WindowDock::initializeConnections()
 
 void WindowDock::setRefreshingPlaceholderRows()
 {
+    ks::window::retireSnapshotValues(std::move(m_cachedSessionSummary), std::move(m_cachedHotkeyHookSummary),
+        std::move(m_cachedDisplaySummary), std::move(m_cachedWindowsRows), std::move(m_cachedGuiThreadRows),
+        std::move(m_cachedSessionRows), std::move(m_cachedHotkeyRows), std::move(m_cachedHookRows),
+        std::move(m_cachedDeviceRows), std::move(m_cachedClipboardRows));
     // Loading rows describe state only. R0/R3 discovery remains in the worker;
     // invoking the final row builders here also invokes their EnumWindows fallback.
     const QString pendingDetailText = QStringLiteral("正在收集窗口信息，请稍候...");
@@ -3536,8 +3571,20 @@ void WindowDock::setRefreshingPlaceholderRows()
     applyAuditViews();
 }
 
+void WindowDock::reconcileAuditRefreshState()
+{
+    if (!m_refreshing.load() || m_auditOperation->isBusy() || m_auditOperation->isInFlight()) return;
+    const QPointer<WindowDock> alive(this);
+    m_refreshing.store(false);
+    if (m_refreshButton) m_refreshButton->setEnabled(true);
+    if (alive && !m_auditOperation->isBusy() && !m_auditOperation->isInFlight() && m_statusLabel) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+}
+
 void WindowDock::requestAsyncRefresh()
 {
+    const QPointer<WindowDock> refreshOwner(this);
+    reconcileAuditRefreshState();
+    if (!refreshOwner) return;
     // 一轮窗口审计会同步替换七张关联表；任一表格菜单打开时，启动阶段的
     // 占位缓存和七表提交都必须作为一个整体延后。
     const QPointer<WindowDock> deferredGuard(this);
@@ -3574,7 +3621,9 @@ void WindowDock::requestAsyncRefresh()
     {
         m_statusLabel->setText(QStringLiteral("正在采集窗口审计快照..."));
     }
+    if (!deferredGuard) return;
     setRefreshingPlaceholderRows();
+    if (!deferredGuard) return;
 
     // UI线程快照：
     // - 输入：当前 Qt GUI 线程可安全访问的剪贴板与屏幕对象；
@@ -3594,113 +3643,19 @@ void WindowDock::requestAsyncRefresh()
         primaryScreenDpi = primaryScreen->logicalDotsPerInch();
     }
 
-    QPointer<WindowDock> safeThis(this);
-    std::thread([safeThis, clipboardSnapshot, primaryScreenName, primaryScreenGeometry, primaryScreenDpi]()
-    {
-        // reportRefreshFailure 作用：
-        // - 输入 failureText：后台线程捕获到的异常或失败描述；
-        // - 处理：通过 queued connection 回到 UI 线程写入可读诊断行；
-        // - 返回：无，但一定释放 m_refreshing，避免一次异常后刷新按钮永久失效。
-        const auto reportRefreshFailure = [safeThis](const QString& failureText)
-        {
-            if (safeThis.isNull())
+    WindowAuditRequest request{clipboardSnapshot, primaryScreenName, primaryScreenGeometry, primaryScreenDpi, {
+        {QStringLiteral("window.message_hook.layout.exact"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.exact"), QStringLiteral("精确 PE 身份"))},
+        {QStringLiteral("window.message_hook.layout.previous"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.previous"), QStringLiteral("最近旧版回退"))},
+        {QStringLiteral("window.message_hook.layout.unknown"), ks::i18n::contextText(QStringLiteral("window.message_hook.layout.unknown"), QStringLiteral("未知"))}}};
+    m_auditOperation->submit<WindowAuditRequest, std::shared_ptr<const WindowAuditSnapshot>>(
+        std::move(request),
+        [](const WindowAuditRequest& request, const ks::ui::AsyncOperationToken&) {
+            const auto& clipboardSnapshot = request.clipboard;
+            const auto& primaryScreenName = request.screenName;
+            const auto& primaryScreenGeometry = request.screenGeometry;
+            const double primaryScreenDpi = request.screenDpi;
+            try
             {
-                return;
-            }
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                safeThis.data(),
-                [safeThis, failureText]()
-                {
-                    const auto commitFailure = [safeThis, failureText]()
-                    {
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-
-                    const ks::ui::FieldDocument summaryText = ks::ui::FieldDocument{}.note(QStringLiteral(
-                        "[Window audit refresh]\n"
-                        "后台刷新异常，已保留/写入诊断行，用户可再次点击刷新。\n"
-                        "原因: %1\n").arg(failureText));
-
-                    safeThis->m_cachedSessionSummary = summaryText;
-                    safeThis->m_cachedHotkeyHookSummary = summaryText;
-                    safeThis->m_cachedDisplaySummary = summaryText;
-                    safeThis->m_cachedWindowsRows = buildPendingRows(
-                        safeThis->m_windowsTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedGuiThreadRows = buildPendingRows(
-                        safeThis->m_guiThreadsTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedSessionRows = buildPendingRows(
-                        safeThis->m_sessionTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedHotkeyRows = buildPendingRows(
-                        safeThis->m_hotkeysTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedHookRows = buildPendingRows(
-                        safeThis->m_hooksTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedClipboardRows = buildPendingRows(
-                        safeThis->m_clipboardTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->m_cachedDeviceRows = buildPendingRows(
-                        safeThis->m_deviceTable,
-                        QStringLiteral("<刷新异常>"),
-                        failureText);
-                    safeThis->applyAuditViews();
-                    kLogEvent failureEvent;
-                    warn << failureEvent
-                        << "[WindowDock] audit refresh failed, detail="
-                        << failureText.toStdString()
-                        << eol;
-                    if (safeThis->m_statusLabel != nullptr)
-                    {
-                        safeThis->m_statusLabel->setText(QStringLiteral(
-                            "窗口审计刷新异常；详情已写入日志。"));
-                    }
-                    safeThis->m_refreshing.store(false);
-                    };
-
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-                    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                        safeThis.data(),
-                        QStringLiteral("window-audit-failure-apply"),
-                        {
-                            safeThis->m_windowsTable,
-                            safeThis->m_guiThreadsTable,
-                            safeThis->m_sessionTable,
-                            safeThis->m_hotkeysTable,
-                            safeThis->m_hooksTable,
-                            safeThis->m_clipboardTable,
-                            safeThis->m_deviceTable
-                        },
-                        commitFailure))
-                    {
-                        return;
-                    }
-                    commitFailure();
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk && !safeThis.isNull())
-            {
-                safeThis->m_refreshing.store(false);
-            }
-        };
-
-        try
-        {
             // ArkDriverClient 只读 wrapper：
             // - 作用：统一通过 R3 client 访问 R0 PDB 审计结果；
             // - 处理：在后台线程顺序采集，避免阻塞 UI；
@@ -3826,99 +3781,92 @@ void WindowDock::requestAsyncRefresh()
                 keyboardHotkeysFallbackQueried ? &keyboardHotkeysFallbackResult : nullptr);
             const QVector<QStringList> hookRows = buildHookRows(
                 win32kHooksResult,
-                keyboardHooksFallbackQueried ? &keyboardHooksFallbackResult : nullptr);
+                keyboardHooksFallbackQueried ? &keyboardHooksFallbackResult : nullptr, request.texts);
             const QVector<QStringList> deviceRows = buildDeviceRows(gpuAuditResult);
-
-            if (safeThis.isNull())
-            {
-                return;
+                return ks::window::makeSnapshotValue(WindowAuditSnapshot{sessionSummary, hotkeyHookSummary,
+                    displaySummary, windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows,
+                    deviceRows, clipboardRows, {}});
             }
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                safeThis.data(),
-                [safeThis, sessionSummary, hotkeyHookSummary, displaySummary,
-                 windowsRows, guiThreadRows, sessionRows, hotkeyRows, hookRows, deviceRows, clipboardRows]()
+            catch (const std::exception& exceptionObject)
+            {
+                WindowAuditSnapshot failed;
+                failed.failure = QString::fromLocal8Bit(exceptionObject.what());
+                return ks::window::makeSnapshotValue(std::move(failed));
+            }
+            catch (...)
+            {
+                WindowAuditSnapshot failed;
+                failed.failure = QStringLiteral("未知异常");
+                return ks::window::makeSnapshotValue(std::move(failed));
+            }
+        },
+        [this](const std::shared_ptr<const WindowAuditSnapshot>& snapshot, std::uint64_t ticket) {
+            const QPointer<WindowDock> alive(this);
+            const auto commit = [alive, snapshot, ticket](bool deferred) {
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                ks::window::retireSnapshotValues(std::move(alive->m_cachedSessionSummary), std::move(alive->m_cachedHotkeyHookSummary),
+                    std::move(alive->m_cachedDisplaySummary), std::move(alive->m_cachedWindowsRows), std::move(alive->m_cachedGuiThreadRows),
+                    std::move(alive->m_cachedSessionRows), std::move(alive->m_cachedHotkeyRows), std::move(alive->m_cachedHookRows),
+                    std::move(alive->m_cachedDeviceRows), std::move(alive->m_cachedClipboardRows));
+                if (snapshot->failure.isEmpty())
                 {
-                    const auto commitSnapshot = [
-                        safeThis,
-                        sessionSummary,
-                        hotkeyHookSummary,
-                        displaySummary,
-                        windowsRows,
-                        guiThreadRows,
-                        sessionRows,
-                        hotkeyRows,
-                        hookRows,
-                        deviceRows,
-                        clipboardRows]()
-                    {
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-
-                    safeThis->m_cachedSessionSummary = sessionSummary;
-                    safeThis->m_cachedHotkeyHookSummary = hotkeyHookSummary;
-                    safeThis->m_cachedDisplaySummary = displaySummary;
-                    safeThis->m_cachedWindowsRows = windowsRows;
-                    safeThis->m_cachedGuiThreadRows = guiThreadRows;
-                    safeThis->m_cachedSessionRows = sessionRows;
-                    safeThis->m_cachedHotkeyRows = hotkeyRows;
-                    safeThis->m_cachedHookRows = hookRows;
-                    safeThis->m_cachedDeviceRows = deviceRows;
-                    safeThis->m_cachedClipboardRows = clipboardRows;
-                    safeThis->applyAuditViews();
-                    if (safeThis->m_statusLabel != nullptr)
-                    {
-                        safeThis->m_statusLabel->setText(
-                            QStringLiteral("最近刷新：%1")
-                            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
-                    }
-                    safeThis->m_refreshing.store(false);
-                    };
-
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-                    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                        safeThis.data(),
-                        QStringLiteral("window-audit-seven-table-apply"),
-                        {
-                            safeThis->m_windowsTable,
-                            safeThis->m_guiThreadsTable,
-                            safeThis->m_sessionTable,
-                            safeThis->m_hotkeysTable,
-                            safeThis->m_hooksTable,
-                            safeThis->m_clipboardTable,
-                            safeThis->m_deviceTable
-                        },
-                        commitSnapshot))
-                    {
-                        return;
-                    }
-                    commitSnapshot();
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk && !safeThis.isNull())
-            {
-                safeThis->m_refreshing.store(false);
-            }
-        }
-        catch (const std::exception& exceptionObject)
-        {
-            reportRefreshFailure(QString::fromLocal8Bit(exceptionObject.what()));
-        }
-        catch (...)
-        {
-            reportRefreshFailure(QStringLiteral("未知异常"));
-        }
-    }).detach();
+                    alive->m_cachedSessionSummary = snapshot->sessionSummary;
+                    alive->m_cachedHotkeyHookSummary = snapshot->hotkeyHookSummary;
+                    alive->m_cachedDisplaySummary = snapshot->displaySummary;
+                    alive->m_cachedWindowsRows = snapshot->windowsRows;
+                    alive->m_cachedGuiThreadRows = snapshot->guiThreadRows;
+                    alive->m_cachedSessionRows = snapshot->sessionRows;
+                    alive->m_cachedHotkeyRows = snapshot->hotkeyRows;
+                    alive->m_cachedHookRows = snapshot->hookRows;
+                    alive->m_cachedDeviceRows = snapshot->deviceRows;
+                    alive->m_cachedClipboardRows = snapshot->clipboardRows;
+                }
+                else
+                {
+                    const auto summary = ks::ui::FieldDocument{}.note(QStringLiteral(
+                        "[Window audit refresh]\n"
+                        "后台刷新异常，已保留/写入诊断行，用户可再次点击刷新。\n"
+                        "原因: %1\n").arg(snapshot->failure));
+                    alive->m_cachedSessionSummary = summary;
+                    alive->m_cachedHotkeyHookSummary = summary;
+                    alive->m_cachedDisplaySummary = summary;
+                    alive->m_cachedWindowsRows = buildPendingRows(alive->m_windowsTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedGuiThreadRows = buildPendingRows(alive->m_guiThreadsTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedSessionRows = buildPendingRows(alive->m_sessionTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedHotkeyRows = buildPendingRows(alive->m_hotkeysTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedHookRows = buildPendingRows(alive->m_hooksTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedClipboardRows = buildPendingRows(alive->m_clipboardTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    alive->m_cachedDeviceRows = buildPendingRows(alive->m_deviceTable, QStringLiteral("<刷新异常>"), snapshot->failure);
+                    kLogEvent failureEvent;
+                    warn << failureEvent << "[WindowDock] audit refresh failed, detail=" << snapshot->failure.toStdString() << eol;
+                }
+                alive->applyAuditViews();
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                if (alive->m_statusLabel)
+                    alive->m_statusLabel->setText(snapshot->failure.isEmpty()
+                        ? QStringLiteral("最近刷新：%1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                        : QStringLiteral("窗口审计刷新异常；详情已写入日志。"));
+                if (!alive || !alive->m_auditOperation->isCurrent(ticket)) return;
+                alive->m_refreshing.store(false);
+                if (deferred) alive->m_auditOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("window-audit-seven-table-apply"),
+                {m_windowsTable, m_guiThreadsTable, m_sessionTable, m_hotkeysTable, m_hooksTable, m_clipboardTable, m_deviceTable},
+                [commit] { commit(true); })) return false;
+            commit(false);
+            return true;
+        },
+        [this](std::exception_ptr) {
+            // Infrastructure allocation/dispatch failure still releases the refresh latch.
+            m_refreshing.store(false);
+            if (m_statusLabel) m_statusLabel->setText(QStringLiteral("窗口审计刷新异常；详情已写入日志。"));
+        });
 }
 
 void WindowDock::applyAuditViews()
 {
+    const QPointer<WindowDock> alive(this);
     // 表格空白硬保护：
     // - 输入：后台线程或刷新占位阶段生成的缓存行；
     // - 处理：关键审计页即使遇到异常空结果，也补成一行诊断而不是 0 行空表；
@@ -3962,33 +3910,45 @@ void WindowDock::applyAuditViews()
     if (m_sessionSummaryEditor != nullptr && !m_cachedSessionSummary.isEmpty())
     {
         m_sessionSummaryEditor->setDocument(m_cachedSessionSummary);
+        if (!alive) return;
     }
     if (m_hotkeyHookSummaryEditor != nullptr && !m_cachedHotkeyHookSummary.isEmpty())
     {
         m_hotkeyHookSummaryEditor->setDocument(m_cachedHotkeyHookSummary);
+        if (!alive) return;
     }
     if (m_displaySummaryEditor != nullptr && !m_cachedDisplaySummary.isEmpty())
     {
         m_displaySummaryEditor->setDocument(m_cachedDisplaySummary);
+        if (!alive) return;
     }
 
     populateTable(m_windowsTable, m_cachedWindowsRows);
+    if (!alive) return;
     populateTable(m_guiThreadsTable, m_cachedGuiThreadRows);
+    if (!alive) return;
     populateTable(m_sessionTable, m_cachedSessionRows);
+    if (!alive) return;
     populateTable(m_hotkeysTable, m_cachedHotkeyRows);
+    if (!alive) return;
     populateTable(m_hooksTable, m_cachedHookRows);
+    if (!alive) return;
     populateTable(m_clipboardTable, m_cachedClipboardRows);
+    if (!alive) return;
     populateTable(m_deviceTable, m_cachedDeviceRows);
+    if (!alive) return;
 
     if (m_windowsTable != nullptr && m_windowsTable->rowCount() > 0 && m_windowsTable->currentRow() < 0)
     {
         m_windowsTable->setCurrentCell(0, 0);
+        if (!alive) return;
     }
     updateSelectedWindowSnapshotDetail(m_windowsTable != nullptr ? m_windowsTable->currentRow() : -1);
 }
 
 void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
 {
+    const QPointer<WindowDock> alive(this);
     // 选中窗口快照详情：
     // - 输入 currentRow：窗口表当前行；
     // - 处理：从可见列生成多行说明，不访问驱动；
@@ -4000,6 +3960,7 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     if (m_windowsTable == nullptr || currentRow < 0 || currentRow >= m_windowsTable->rowCount())
     {
         m_windowDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择 Win32K 窗口行查看快照；需要更深诊断时点击“查询选中窗口详情”。")));
+        if (!alive) return;
         if (m_queryWindowDetailButton != nullptr)
         {
             m_queryWindowDetailButton->setEnabled(false);
@@ -4027,6 +3988,7 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     snapshot.note(QStringLiteral("SnapshotDetail: GUI/Session 窗口表仅保留可见字段；tagWND/profile/capability 详情请使用下方按需查询。"));
     snapshot.note(QStringLiteral("提示：批量刷新不会逐 HWND 查询 detail；如需查看 tagWND readiness/能力缺口，请点击“查询选中窗口详情”。"));
     m_windowDetailEditor->setDocument(snapshot);
+        if (!alive) return;
 
     if (m_queryWindowDetailButton != nullptr)
     {
