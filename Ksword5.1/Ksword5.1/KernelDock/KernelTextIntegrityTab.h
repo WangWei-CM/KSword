@@ -3,6 +3,8 @@
 #include "KernelCleanImageBaseline.h"
 
 #include <QWidget>
+#include <QSet>
+#include <QPersistentModelIndex>
 
 #include <atomic>
 #include <cstdint>
@@ -41,6 +43,7 @@ private:
     void appendModuleResult(const ks::kernel::KernelTextIntegrityResult& result);
     void finishScan(bool cancelled);
     void rebuildRangeTable();
+    void appendRangeRows(const ks::kernel::KernelTextIntegrityResult& result);
     void updateVerdict();
 
     static QString originText(ks::kernel::KernelTextDiffRange::Origin origin);
@@ -59,10 +62,16 @@ private:
     QTableWidget* m_rangeTable = nullptr;
 
     std::vector<ks::kernel::KernelTextIntegrityResult> m_results;
+    QSet<QPersistentModelIndex> m_rangeExclusions;
     std::shared_ptr<std::atomic_bool> m_cancelFlag;
     bool m_firstScanStarted = false;
     bool m_scanRunning = false;
     bool m_scanCancelled = false;
+    std::uint32_t m_unexplainedRangeCount = 0U;
+    std::uint32_t m_knownRangeCount = 0U;
+    std::uint32_t m_unparsedModuleCount = 0U;
+    std::uint32_t m_untrustedModuleCount = 0U;
+    std::uint32_t m_incompleteModuleCount = 0U;
     // HVCI 是否处于强制执行状态，决定「无法解释的差异」的定级。
     bool m_hvciEnforcing = false;
     bool m_hvciEvidenceUsable = false;
