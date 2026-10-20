@@ -5389,13 +5389,11 @@ MainWindow::MainWindow(
     // 显式要求“最后一个窗口关闭后退出应用”。
     // 说明：用户要求主窗口关闭时进程必须结束，这里先设置 Qt 全局退出策略。
     QApplication::setQuitOnLastWindowClosed(true);
-    const QPointer<MainWindow> quitOwner(this);
-    ks::ui::InstallCoordinatedApplicationQuit(this, [quitOwner]()
+    const QPointer<MainWindow> restartOwner(this);
+    ks::ui::InstallCoordinatedApplicationRestart(this,
+        [restartOwner](ks::ui::DeferredApplicationRestart::Launch launch)
     {
-        if (quitOwner) quitOwner->close();
-    }, [quitOwner](ks::ui::DeferredApplicationRestart::Launch launch)
-    {
-        return quitOwner && quitOwner->requestCoordinatedRestart(std::move(launch));
+        return restartOwner && restartOwner->requestCoordinatedRestart(std::move(launch));
     });
 
     // 设置窗口标题和大小
@@ -5488,7 +5486,7 @@ MainWindow::MainWindow(
 
 MainWindow::~MainWindow()
 {
-    ks::ui::RemoveCoordinatedApplicationQuit(this);
+    ks::ui::RemoveCoordinatedApplicationRestart(this);
     // 排队的 MCP 动作必须先失效，再拆除页面、驱动租约与后台消费者。
     if (m_mcpLocalBridge)
     {

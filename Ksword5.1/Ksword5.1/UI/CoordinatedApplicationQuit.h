@@ -81,12 +81,11 @@ namespace ks::ui
         return result;
     }
 
-    namespace coordinated_quit_detail
+    namespace coordinated_restart_detail
     {
         struct State
         {
             QPointer<QObject> owner;
-            std::function<void()> request;
             std::function<bool(DeferredApplicationRestart::Launch)> restart;
             std::uint64_t generation = 0;
         };
@@ -94,50 +93,31 @@ namespace ks::ui
     }
 
     // 仅UI线程登记/请求；不扫描窗口，不以静态裸this保活窗口。
-    inline void InstallCoordinatedApplicationQuit(QObject* owner, std::function<void()> request,
-        std::function<bool(DeferredApplicationRestart::Launch)> restart = {})
+    inline void InstallCoordinatedApplicationRestart(QObject* owner,
+        std::function<bool(DeferredApplicationRestart::Launch)> restart)
     {
         Q_ASSERT(owner && QThread::currentThread() == owner->thread());
-        auto& state = coordinated_quit_detail::state();
+        auto& state = coordinated_restart_detail::state();
         state.owner = owner;
-        state.request = std::move(request);
         state.restart = std::move(restart);
         const auto generation = ++state.generation;
         QObject::connect(owner, &QObject::destroyed, [generation]()
         {
-            auto& current = coordinated_quit_detail::state();
+            auto& current = coordinated_restart_detail::state();
             if (current.generation == generation)
             {
                 current.owner.clear();
-                current.request = {};
                 current.restart = {};
             }
         });
     }
 
-    inline void RequestCoordinatedApplicationQuit()
+    inline void RemoveCoordinatedApplicationRestart(QObject* owner)
     {
-        Q_ASSERT(!QCoreApplication::instance() ||
-            QThread::currentThread() == QCoreApplication::instance()->thread());
-        const auto& state = coordinated_quit_detail::state();
-        if (state.owner && state.request)
-        {
-            const auto request = state.request; // close回调可同步销毁登记者。
-            request();
-        }
-        else
-        {
-            QCoreApplication::quit(); // 业务窗口创建之前没有已接受的页面事务。
-        }
-    }
-
-    inline void RemoveCoordinatedApplicationQuit(QObject* owner)
-    {
-        auto& state = coordinated_quit_detail::state();
+        auto& state = coordinated_restart_detail::state();
         if (state.owner == owner)
         {
             state.owner.clear();
-            state.request = {};
             state.restart = {};
             ++state.generation;
         }
@@ -147,7 +127,7 @@ namespace ks::ui
     {
         Q_ASSERT(!QCoreApplication::instance() ||
             QThread::currentThread() == QCoreApplication::instance()->thread());
-        const auto& state = coordinated_quit_detail::state();
+        const auto& state = coordinated_restart_detail::state();
         if (!state.owner || !state.restart) return false;
         const auto restart = state.restart;
         return restart(std::move(launch));

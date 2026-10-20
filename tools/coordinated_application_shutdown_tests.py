@@ -25,7 +25,7 @@ check(all(x not in worker for x in ('this','QWidget','QCoreApplication','QApplic
 check('serviceState->finished.store(true' in worker and worker.index('executeR0ServiceStopOnWorker()')<worker.index('serviceState->finished.store(true'),'service cleanup publishes final completion')
 check('QMessageBox::Retry | QMessageBox::Cancel' in s and 'else cancelCoordinatedShutdown();' in s,'timeout offers retry/cancel without forced exit')
 check(s.count('ks::ui::RequestCoordinatedApplicationRestart(')==3,'all runtime MainWindow restart modes defer their launch')
-check('ks::ui::RemoveCoordinatedApplicationQuit(this);' in s,'derived destructor invalidates registration first')
+check('ks::ui::RemoveCoordinatedApplicationRestart(this);' in s,'derived destructor invalidates registration first')
 priv=(source/rel/'Framework/PrivilegeElevationPrompt.h').read_text(encoding='utf-8-sig')
 check('RequestCoordinatedApplicationRestart(' in priv and 'QCoreApplication::quit();' not in priv,'shared elevation prompt defers its launch until cleanup ready')
 finish=s[s.index('void MainWindow::finishCoordinatedShutdown('):s.index('bool MainWindow::requestCoordinatedRestart(')]
@@ -119,22 +119,22 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(ks::ui::ArgumentsWithRestartPredecessorWait({QStringLiteral("app"),key,QStringLiteral("--keep")},2)==QStringList({QStringLiteral("app"),QStringLiteral("--keep"),key,QStringLiteral("2")}),"malformed wait key cannot consume next unrelated option");
  check(ks::ui::QuoteCoordinatedRestartArgument(QString())==QStringLiteral("\"\""),"empty restart argument preserved");check(ks::ui::QuoteCoordinatedRestartArgument(QStringLiteral("C:\\space dir\\"))==QStringLiteral("\"C:\\space dir\\\\\""),"trailing slash in quoted path preserved");check(ks::ui::QuoteCoordinatedRestartArgument(QStringLiteral("a\"b"))==QStringLiteral("\"a\\\"b\""),"embedded argument quote escaped");
  int first=0,second=0;auto oldOwner=std::make_unique<QObject>();auto newOwner=std::make_unique<QObject>();
- ks::ui::InstallCoordinatedApplicationQuit(oldOwner.get(),[&]{++first;});ks::ui::RequestCoordinatedApplicationQuit();check(first==1,"quit uses registered owner");
- ks::ui::InstallCoordinatedApplicationQuit(newOwner.get(),[&]{++second;});oldOwner.reset();ks::ui::RequestCoordinatedApplicationQuit();check(first==1&&second==1,"old owner destroy cannot erase newer registration");ks::ui::RemoveCoordinatedApplicationQuit(newOwner.get());check(!ks::ui::coordinated_quit_detail::state().owner&&!ks::ui::coordinated_quit_detail::state().request,"explicit removal invalidates derived lifetime");
- ks::ui::InstallCoordinatedApplicationQuit(newOwner.get(),[&]{++second;});newOwner.reset();check(!ks::ui::coordinated_quit_detail::state().owner&&!ks::ui::coordinated_quit_detail::state().request,"destroyed owner releases stored callback");
+ ks::ui::InstallCoordinatedApplicationRestart(oldOwner.get(),[&](ks::ui::DeferredApplicationRestart::Launch){++first;return true;});check(ks::ui::RequestCoordinatedApplicationRestart([]{return true;})&&first==1,"restart uses registered owner");
+ ks::ui::InstallCoordinatedApplicationRestart(newOwner.get(),[&](ks::ui::DeferredApplicationRestart::Launch){++second;return true;});oldOwner.reset();check(ks::ui::RequestCoordinatedApplicationRestart([]{return true;})&&first==1&&second==1,"old owner destroy cannot erase newer restart registration");ks::ui::RemoveCoordinatedApplicationRestart(newOwner.get());check(!ks::ui::coordinated_restart_detail::state().owner&&!ks::ui::coordinated_restart_detail::state().restart,"explicit removal invalidates derived lifetime");
+ ks::ui::InstallCoordinatedApplicationRestart(newOwner.get(),[&](ks::ui::DeferredApplicationRestart::Launch){++second;return true;});newOwner.reset();check(!ks::ui::coordinated_restart_detail::state().owner&&!ks::ui::coordinated_restart_detail::state().restart,"destroyed owner releases stored restart callback");
  {
   QObject restartOwner;ks::ui::DeferredApplicationRestart intent;int launches=0;
-  ks::ui::InstallCoordinatedApplicationQuit(&restartOwner,[]{},[&](ks::ui::DeferredApplicationRestart::Launch launch){return intent.accept(std::move(launch));});
+  ks::ui::InstallCoordinatedApplicationRestart(&restartOwner,[&](ks::ui::DeferredApplicationRestart::Launch launch){return intent.accept(std::move(launch));});
   check(ks::ui::RequestCoordinatedApplicationRestart([&]{++launches;return true;})&&launches==0&&intent.hasIntent(),"restart bridge queues intent without launching before ready");
   check(!ks::ui::RequestCoordinatedApplicationRestart([]{return true;}),"restart bridge rejects replacing accepted runtime intent");
-  ks::ui::RemoveCoordinatedApplicationQuit(&restartOwner);check(!ks::ui::coordinated_quit_detail::state().restart&&!ks::ui::RequestCoordinatedApplicationRestart([]{return true;}),"removed owner cannot accept or launch runtime restart");intent.cancel();check(launches==0,"canceled bridged intent does not survive as stale launcher");
+  ks::ui::RemoveCoordinatedApplicationRestart(&restartOwner);check(!ks::ui::coordinated_restart_detail::state().restart&&!ks::ui::RequestCoordinatedApplicationRestart([]{return true;}),"removed owner cannot accept or launch runtime restart");intent.cancel();check(launches==0,"canceled bridged intent does not survive as stale launcher");
  }
  ks::ui::AsyncCleanupRegistry registry;ks::ui::AsyncShutdownWait wait;QSemaphore entered,stopRequested,allowFinish;std::atomic_int stopped=0,closed=0;int heartbeats=0;bool requested=false,finished=false,timedOut=false;
  auto lease=registry.acquire([&]{stopRequested.release();});std::thread worker([lease=std::move(lease),&entered,&stopRequested,&allowFinish,&stopped,&closed]()mutable{entered.release();stopRequested.acquire();++stopped;allowFinish.acquire();++closed;lease.reset();});check(entered.tryAcquire(1,5000),"mock session active");
- QObject owner;QElapsedTimer elapsed;QTimer poll;poll.setInterval(1);ks::ui::InstallCoordinatedApplicationQuit(&owner,[&]{requested=true;registry.beginShutdown();elapsed.start();wait.start(0,15);poll.start();});
+ QObject owner;QElapsedTimer elapsed;QTimer poll;poll.setInterval(1);
  QObject::connect(&poll,&QTimer::timeout,&app,[&]{++heartbeats;const auto state=wait.poll(elapsed.elapsed(),registry.pending());if(state==ks::ui::AsyncShutdownWait::Status::TimedOut){timedOut=true;registry.cancelShutdown();auto later=registry.acquire();check(bool(later),"cancel admits new value work");later.reset();registry.beginShutdown();wait.start(elapsed.elapsed(),1000);}if(state==ks::ui::AsyncShutdownWait::Status::Ready){finished=true;poll.stop();QCoreApplication::quit();}});
- QTimer::singleShot(0,&app,[]{ks::ui::RequestCoordinatedApplicationQuit();});QTimer::singleShot(45,&app,[&]{allowFinish.release();});QTimer::singleShot(2000,&app,[&]{allowFinish.release();QCoreApplication::quit();});app.exec();worker.join();
- check(requested&&finished&&timedOut,"quit waits, reaches timeout policy, retries and finishes");check(heartbeats>=5&&stopped==1&&closed==1&&registry.pending()==0,"event loop remains live until final STOP/handle close/lease release");ks::ui::RemoveCoordinatedApplicationQuit(&owner);
+ QTimer::singleShot(0,&app,[&]{requested=true;registry.beginShutdown();elapsed.start();wait.start(0,15);poll.start();});QTimer::singleShot(45,&app,[&]{allowFinish.release();});QTimer::singleShot(2000,&app,[&]{allowFinish.release();QCoreApplication::quit();});app.exec();worker.join();
+ check(requested&&finished&&timedOut,"quit waits, reaches timeout policy, retries and finishes");check(heartbeats>=5&&stopped==1&&closed==1&&registry.pending()==0,"event loop remains live until final STOP/handle close/lease release");
  preQtRestartTests();runtimeRestartTests(app);
  std::cout<<"SHUTDOWN_CORE_CHECKS="<<checks<<"\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
