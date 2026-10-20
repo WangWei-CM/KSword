@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "../ksword/startup/startup.h"
 
 #include <QHash>
@@ -44,6 +45,9 @@ class StartupDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const StartupDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：初始化 UI、连接交互并执行首轮刷新。
     // - 参数 parent：Qt 父控件。
@@ -124,6 +128,8 @@ public:
     static int toStartupColumn(StartupColumn column);
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     struct TableRebuildTarget
     {
         StartupCategory category = StartupCategory::All;

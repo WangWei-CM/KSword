@@ -12,6 +12,19 @@
 #include <QColor>
 #include <QPair>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kStartupDockNavigation[] = {
+    {"startup.tab.overview", "", "startup.tab.overview", "总览", true},
+    {"startup.tab.logon", "", "startup.tab.logon", "登录", false},
+    {"startup.tab.services", "", "startup.tab.services", "服务", false},
+    {"startup.tab.drivers", "", "startup.tab.drivers", "驱动", false},
+    {"startup.tab.tasks", "", "startup.tab.tasks", "计划任务", false},
+    {"startup.tab.image_hijack", "", "startup.tab.image_hijack", "映像劫持", false},
+    {"startup.tab.registry", "", "startup.tab.registry", "高级注册表", false},
+    {"startup.tab.wmi", "", "startup.tab.wmi", "WMI", false},
+    {"startup.tab.hidden", "", "startup.tab.hidden", "隐藏项", false}
+};
+}
 using namespace startup_dock_detail;
 
 namespace startup_dock_detail
@@ -290,61 +303,15 @@ void StartupDock::initializeTabs()
     m_wmiPage = createSingleTablePage(&m_wmiTable, m_sideTabWidget);
     m_hiddenPage = createSingleTablePage(&m_hiddenTable, m_sideTabWidget);
 
-    m_sideTabWidget->addTab(
-        m_allPage,
-        QIcon(":/Icon/process_list.svg"),
-        startupText("startup.tab.overview", QStringLiteral("总览")));
-    m_sideTabWidget->addTab(
-        m_logonPage,
-        QIcon(":/Icon/process_main.svg"),
-        startupText("startup.tab.logon", QStringLiteral("登录")));
-    m_sideTabWidget->addTab(
-        m_servicesPage,
-        QIcon(":/Icon/process_start.svg"),
-        startupText("startup.tab.services", QStringLiteral("服务")));
-    m_sideTabWidget->addTab(
-        m_driversPage,
-        QIcon(":/Icon/process_details.svg"),
-        startupText("startup.tab.drivers", QStringLiteral("驱动")));
-    m_sideTabWidget->addTab(
-        m_tasksPage,
-        QIcon(":/Icon/process_refresh.svg"),
-        startupText("startup.tab.tasks", QStringLiteral("计划任务")));
-    m_sideTabWidget->addTab(
-        m_imageHijackPage,
-        QIcon(":/Icon/startup_image_hijack.svg"),
-        startupText("startup.tab.image_hijack", QStringLiteral("映像劫持")));
-    m_sideTabWidget->addTab(
-        m_registryPage,
-        QIcon(":/Icon/file_find.svg"),
-        startupText("startup.tab.registry", QStringLiteral("高级注册表")));
-    m_sideTabWidget->addTab(
-        m_wmiPage,
-        QIcon(":/Icon/process_tree.svg"),
-        startupText("startup.tab.wmi", QStringLiteral("WMI")));
-    m_sideTabWidget->addTab(
-        m_hiddenPage,
-        QIcon(":/Icon/startup_hidden.svg"),
-        startupText("startup.tab.hidden", QStringLiteral("隐藏项")));
-    const QList<QPair<QWidget*, QPair<QString, QString>>> tabTranslations{
-        {m_allPage, {QStringLiteral("startup.tab.overview"), QStringLiteral("总览")}},
-        {m_logonPage, {QStringLiteral("startup.tab.logon"), QStringLiteral("登录")}},
-        {m_servicesPage, {QStringLiteral("startup.tab.services"), QStringLiteral("服务")}},
-        {m_driversPage, {QStringLiteral("startup.tab.drivers"), QStringLiteral("驱动")}},
-        {m_tasksPage, {QStringLiteral("startup.tab.tasks"), QStringLiteral("计划任务")}},
-        {m_imageHijackPage, {QStringLiteral("startup.tab.image_hijack"), QStringLiteral("映像劫持")}},
-        {m_registryPage, {QStringLiteral("startup.tab.registry"), QStringLiteral("高级注册表")}},
-        {m_wmiPage, {QStringLiteral("startup.tab.wmi"), QStringLiteral("WMI")}},
-        {m_hiddenPage, {QStringLiteral("startup.tab.hidden"), QStringLiteral("隐藏项")}}
-    };
-    for (const auto& tabTranslation : tabTranslations)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_sideTabWidget,
-            tabTranslation.first,
-            tabTranslation.second.first,
-            tabTranslation.second.second);
-    }
+    m_navigationTabs.add(kStartupDockNavigation[0], m_sideTabWidget, m_allPage, QIcon(":/Icon/process_list.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[1], m_sideTabWidget, m_logonPage, QIcon(":/Icon/process_main.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[2], m_sideTabWidget, m_servicesPage, QIcon(":/Icon/process_start.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[3], m_sideTabWidget, m_driversPage, QIcon(":/Icon/process_details.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[4], m_sideTabWidget, m_tasksPage, QIcon(":/Icon/process_refresh.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[5], m_sideTabWidget, m_imageHijackPage, QIcon(":/Icon/startup_image_hijack.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[6], m_sideTabWidget, m_registryPage, QIcon(":/Icon/file_find.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[7], m_sideTabWidget, m_wmiPage, QIcon(":/Icon/process_tree.svg"));
+    m_navigationTabs.add(kStartupDockNavigation[8], m_sideTabWidget, m_hiddenPage, QIcon(":/Icon/startup_hidden.svg"));
 }
 
 void StartupDock::applyTranslatedHeaders()
@@ -980,3 +947,17 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
 
     groupItem->setExpanded(true);
 }
+
+ks::ui::PageNavigationCatalog StartupDock::navigationCatalog(const StartupDock* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kStartupDockNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* StartupDock::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kStartupDockNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<StartupDock>(QStringLiteral("startup")); }
