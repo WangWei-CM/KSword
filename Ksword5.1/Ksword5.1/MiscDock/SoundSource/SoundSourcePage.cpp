@@ -20,6 +20,8 @@
 #include <QRunnable>
 #include <QSet>
 #include <QShowEvent>
+#include <QSignalBlocker>
+#include <QItemSelectionModel>
 #include <QTableWidget>
 #include <QThreadPool>
 #include <QTimer>
@@ -40,6 +42,7 @@
 namespace
 {
     constexpr int kAutoRefreshIntervalMs = 1500;
+    constexpr int kSoundSourceIdentityRole = Qt::UserRole + 73;
     constexpr std::int64_t kRecentAudibleRetentionMs = 5000;
 
     enum SoundSourceColumn
@@ -154,6 +157,10 @@ namespace ks::misc
     void SoundSourcePage::showEvent(QShowEvent* const event)
     {
         QWidget::showEvent(event);
+        if (m_tableDirty)
+        {
+            rebuildTable();
+        }
         if (m_autoRefreshCheck != nullptr &&
             m_autoRefreshCheck->isChecked() &&
             m_refreshTimer != nullptr)
@@ -184,6 +191,14 @@ namespace ks::misc
              event->type() == QEvent::ApplicationPaletteChange))
         {
             applyThemeStyle();
+            rebuildTable();
+        }
+        if (event != nullptr &&
+            (event->type() == QEvent::FontChange ||
+             event->type() == QEvent::ApplicationFontChange))
+        {
+            m_columnsSized = false;
+            rebuildTable();
         }
     }
 
@@ -305,6 +320,12 @@ namespace ks::misc
 
     void SoundSourcePage::initializeConnections()
     {
+        // The global one-shot header sorter can reorder items even while sortingEnabled is false.
+        // After the first explicit header order, let Qt retain that order across value updates.
+        connect(m_table->horizontalHeader(), &QHeaderView::sortIndicatorChanged,
+            this, [this](int, Qt::SortOrder) {
+                if (!m_table->isSortingEnabled()) m_table->setSortingEnabled(true);
+            });
         connect(m_refreshButton, &QToolButton::clicked, this, [this]()
         {
             requestRefresh(true);
@@ -499,6 +520,12 @@ namespace ks::misc
 
     void SoundSourcePage::rebuildTable()
     {
+        m_tableDirty = true;
+        if (!isVisible())
+        {
+            return;
+        }
+        m_tableDirty = false;
         const bool showSilentSessions =
             m_showSilentCheck != nullptr && m_showSilentCheck->isChecked();
         std::vector<const SoundSourceRecord*> visibleRecords;
@@ -512,7 +539,64 @@ namespace ks::misc
             }
         }
 
-        m_table->setRowCount(static_cast<int>(visibleRecords.size()));
+        QStringList nextKeys;
+        for (const SoundSourceRecord* record : visibleRecords)
+        {
+            nextKeys.push_back(recordKey(*record));
+        }
+        QStringList currentKeys;
+        for (int row = 0; row < m_table->rowCount(); ++row)
+        {
+            const QTableWidgetItem* anchor = m_table->item(row, ColumnVerdict);
+            currentKeys.push_back(anchor ? anchor->data(kSoundSourceIdentityRole).toString() : QString());
+        }
+        const bool structureChanged = nextKeys != currentKeys;
+        QSet<QString> selectedKeys;
+        QString currentKey;
+        const int currentColumn = m_table->currentColumn();
+        for (const QModelIndex& index : m_table->selectionModel()->selectedRows())
+        {
+            const QTableWidgetItem* anchor = m_table->item(index.row(), ColumnVerdict);
+            if (anchor) selectedKeys.insert(anchor->data(kSoundSourceIdentityRole).toString());
+        }
+        if (const QTableWidgetItem* anchor = m_table->item(m_table->currentRow(), ColumnVerdict))
+        {
+            currentKey = anchor->data(kSoundSourceIdentityRole).toString();
+        }
+        const bool restoreSorting = m_table->isSortingEnabled();
+        const int sortColumn = m_table->horizontalHeader()->sortIndicatorSection();
+        const Qt::SortOrder sortOrder = m_table->horizontalHeader()->sortIndicatorOrder();
+        m_table->setSortingEnabled(false);
+        const QSignalBlocker tableSignals(m_table);
+        const bool updatesEnabled = m_table->updatesEnabled();
+        m_table->setUpdatesEnabled(false);
+        if (structureChanged)
+        {
+            // Reorder existing session items rather than deleting and allocating 21 cells per tick.
+            QHash<QString, QList<QTableWidgetItem*>> oldRows;
+            for (int row = 0; row < m_table->rowCount(); ++row)
+            {
+                QList<QTableWidgetItem*> cells;
+                for (int column = 0; column < ColumnCount; ++column)
+                {
+                    cells.push_back(m_table->takeItem(row, column));
+                }
+                oldRows.insert(currentKeys.value(row), cells);
+            }
+            m_table->setRowCount(static_cast<int>(visibleRecords.size()));
+            for (int row = 0; row < nextKeys.size(); ++row)
+            {
+                const QList<QTableWidgetItem*> cells = oldRows.take(nextKeys.at(row));
+                for (int column = 0; column < cells.size(); ++column)
+                {
+                    m_table->setItem(row, column, cells.at(column));
+                }
+            }
+            for (const auto& cells : oldRows)
+            {
+                qDeleteAll(cells);
+            }
+        }
         for (int rowIndex = 0; rowIndex < static_cast<int>(visibleRecords.size()); ++rowIndex)
         {
             const SoundSourceRecord& record = *visibleRecords[static_cast<std::size_t>(rowIndex)];
@@ -563,24 +647,70 @@ namespace ks::misc
 
             for (int columnIndex = 0; columnIndex < ColumnCount; ++columnIndex)
             {
-                auto* item = new QTableWidgetItem(values.at(columnIndex));
-                item->setToolTip(values.at(columnIndex));
-                if (record.currentlyAudible)
+                QTableWidgetItem* item = m_table->item(rowIndex, columnIndex);
+                if (item == nullptr)
                 {
-                    item->setBackground(KswordTheme::SuccessBackgroundColor());
+                    item = new QTableWidgetItem;
+                    if (columnIndex == ColumnPid)
+                    {
+                        item->setTextAlignment(Qt::AlignCenter);
+                    }
+                    m_table->setItem(rowIndex, columnIndex, item);
                 }
-                else if (record.recentlyAudible)
+                if (columnIndex == ColumnVerdict
+                    && item->data(kSoundSourceIdentityRole).toString() != nextKeys.at(rowIndex))
                 {
-                    item->setBackground(KswordTheme::WarningBackgroundColor());
+                    item->setData(kSoundSourceIdentityRole, nextKeys.at(rowIndex));
                 }
-                if (columnIndex == ColumnPid)
+                const QString& value = values.at(columnIndex);
+                if (item->text() != value)
                 {
-                    item->setTextAlignment(Qt::AlignCenter);
+                    item->setText(value);
+                    item->setToolTip(value);
                 }
-                m_table->setItem(rowIndex, columnIndex, item);
+                const QBrush background = record.currentlyAudible
+                    ? QBrush(KswordTheme::SuccessBackgroundColor())
+                    : record.recentlyAudible
+                        ? QBrush(KswordTheme::WarningBackgroundColor())
+                        : QBrush();
+                if (item->background() != background)
+                {
+                    item->setBackground(background);
+                }
             }
         }
-        m_table->resizeColumnsToContents();
+        if (restoreSorting && sortColumn >= 0)
+        {
+            m_table->horizontalHeader()->setSortIndicator(sortColumn, sortOrder);
+            m_table->setSortingEnabled(true);
+        }
+        if (structureChanged || restoreSorting)
+        {
+            m_table->clearSelection();
+            m_table->selectionModel()->clearCurrentIndex();
+            for (int row = 0; row < m_table->rowCount(); ++row)
+            {
+                const QTableWidgetItem* anchor = m_table->item(row, ColumnVerdict);
+                const QString key = anchor ? anchor->data(kSoundSourceIdentityRole).toString() : QString();
+                if (selectedKeys.contains(key))
+                {
+                    m_table->selectionModel()->select(
+                        m_table->model()->index(row, 0),
+                        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                }
+                if (!currentKey.isEmpty() && key == currentKey)
+                {
+                    m_table->setCurrentCell(row, std::max(0, currentColumn),
+                        QItemSelectionModel::NoUpdate);
+                }
+            }
+        }
+        if (!m_columnsSized && !visibleRecords.empty())
+        {
+            m_table->resizeColumnsToContents();
+            m_columnsSized = true;
+        }
+        m_table->setUpdatesEnabled(updatesEnabled);
     }
 
     void SoundSourcePage::updateSummary(const SoundSourceScanResult& result)
@@ -796,6 +926,7 @@ namespace ks::misc
         {
             sessionKey = QStringLiteral("pid:%1").arg(record.processId);
         }
-        return record.endpointId + QStringLiteral("|") + sessionKey;
+        return record.endpointId + QStringLiteral("|") + sessionKey
+            + QStringLiteral("|%1|%2").arg(record.processId).arg(record.creationTime100ns);
     }
 }
