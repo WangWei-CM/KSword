@@ -1,0 +1,23 @@
+"""Compile unchanged complete table capture/formatter with QCore-only fake ports. No Widgets or business IO."""
+from pathlib import Path
+import argparse, hashlib, json, os, re, shutil, subprocess
+p=argparse.ArgumentParser(description=__doc__); p.add_argument('--repository-root',type=Path); p.add_argument('--source-root',type=Path,required=True); p.add_argument('--foundation-root',type=Path,required=True); p.add_argument('--i18n-source-dir',type=Path,required=True); p.add_argument('--output-dir',type=Path,required=True); a=p.parse_args()
+root=(a.repository_root or next(x for x in Path(__file__).resolve().parents if (x/'AGENTS.md').is_file())).resolve(); source=a.source_root.resolve(); foundation=a.foundation_root.resolve(); out=a.output_dir.resolve(); assert out.is_relative_to(root/'.codex-build-logs'); (out/'UI').mkdir(parents=True,exist_ok=True); (out/'Internationalization').mkdir(exist_ok=True)
+manifest={'scope':'QCoreApplication + actual capture/serializer; UI integration symbols stubbed and never invoked; no Widgets/clipboard/real output/business IO','sources':{}}
+for n in ['CompleteExportCapture.h','CompleteExportCapture.cpp','TableCompleteExport.h','TableCompleteExport.cpp','UiCommitCoordinator.h']:
+ data=(source/'Ksword5.1/Ksword5.1/UI'/n).read_bytes(); (out/'UI'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()
+for n in ['CompleteExport.h','CompleteExport.cpp','AsyncOperation.h','AsyncOperation.cpp','AsyncUiDispatcher.h','AsyncCleanupRegistry.h']:
+ rel=Path('Ksword5.1/Ksword5.1/UI')/n; candidate=foundation/rel; original=candidate if candidate.is_file() else root/rel; data=original.read_bytes(); (out/'UI'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()
+for n in ['LanguageManager.h','LanguageManager.cpp']:
+ data=(a.i18n_source_dir/n).read_bytes(); (out/'Internationalization'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()
+fixture=Path(__file__).with_name('complete_table_export_core_tests.cpp'); (out/'fixture.cpp').write_bytes(fixture.read_bytes()); manifest['sources']['fixture.cpp']=hashlib.sha256(fixture.read_bytes()).hexdigest()
+base=root/'.codex-build-logs/ui-performance-implementation-20261020'; cache=json.loads((base/'tu-command-cache.json').read_text(encoding='utf-8-sig')); key=next(k for k in cache if k.endswith('UI\\TABLEINTERACTIONSUPPORT.CPP')); entry=cache[key]; opts=entry['options']; opts=opts[:opts.upper().rfind(key)]; opts=re.sub(r'/Fo"[^"]*"','',opts,flags=re.I); opts=re.sub(r'/Fd"[^"]*"','',opts,flags=re.I); opts=opts.replace('/GL','')+' /c /Zc:__cplusplus /utf-8 /I"'+str(out)+'" /I"'+str(out/'UI')+'" /I"'+str(root/'Ksword5.1/Ksword5.1')+'" /I"'+str(root/'Ksword5.1/Ksword5.1/UI')+'"'
+qt=root/'.deps/Qt/6.9.3/msvc2022_64'
+if not (qt/'lib/Qt6Core.lib').exists(): qt=Path('D:/Software/Qt/6.9.3/msvc2022_64')
+commands=['@echo off','call "D:\\Software\\VS\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 -host_arch=x64 >nul','if errorlevel 1 exit /b %errorlevel%']; objects=[]
+for i,rel in enumerate(['fixture.cpp','UI/CompleteExportCapture.cpp','UI/TableCompleteExport.cpp','UI/CompleteExport.cpp','UI/AsyncOperation.cpp','Internationalization/LanguageManager.cpp']):
+ obj=out/(str(i)+'.obj'); rsp=out/(str(i)+'.rsp'); rsp.write_text(opts+' /Fo"'+str(obj)+'" "'+str(out/rel)+'"',encoding='utf-8'); commands += ['cl.exe @"'+str(rsp)+'"','if errorlevel 1 exit /b %errorlevel%']; objects.append(obj)
+exe=out/'complete_table_export_core_tests.exe'; commands += ['link.exe /nologo /SUBSYSTEM:CONSOLE /OUT:"'+str(exe)+'" '+' '.join('"'+str(o)+'"' for o in objects)+' '+' '.join('"'+str(qt/'lib'/(n+'.lib'))+'"' for n in ['Qt6Core','Qt6Gui','Qt6Widgets','Qt6Network','Qt6Svg'])+' user32.lib','exit /b %errorlevel%']; cmd=out/'compile.cmd'; cmd.write_text('\n'.join(commands)+'\n',encoding='utf-8'); run=subprocess.run(['cmd.exe','/d','/c',str(cmd)],cwd=root/'Ksword5.1/Ksword5.1',capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=300); (out/'compile.log').write_text(run.stdout+run.stderr,encoding='utf-8'); print(run.stdout+run.stderr,end='',flush=True); manifest['build_returncode']=run.returncode
+if not run.returncode:
+ env=dict(os.environ); env['PATH']=str(qt/'bin')+os.pathsep+env.get('PATH',''); run=subprocess.run([str(exe)],cwd=out,env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=90); (out/'result.log').write_text(run.stdout+run.stderr,encoding='utf-8'); print(run.stdout+run.stderr,end='',flush=True); manifest['run_returncode']=run.returncode
+(out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8'); raise SystemExit(run.returncode)

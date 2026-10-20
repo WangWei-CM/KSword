@@ -1,4 +1,7 @@
 #include "CompleteExportCapture.h"
+#include "CompleteExport.h"
+#include <QAbstractItemView>
+#include <QTreeView>
 
 #include <QAbstractItemModel>
 #include <QElapsedTimer>
@@ -40,11 +43,15 @@ namespace ks::ui
     {
         struct ModelPort final : QObject
         {
-            QPointer<QTableView> view;
+            QPointer<QAbstractItemView> view;
+            QPointer<QItemSelectionModel> selection;
+            QPersistentModelIndex root;
             QPointer<QAbstractItemModel> model;
             std::uint64_t revision = 0;
-            explicit ModelPort(QTableView* source, const CompleteExportCaptureViewWatch watch)
-                : view(source), model(source ? source->model() : nullptr)
+            std::uint64_t lastModel = 0, lastScope = 0, serial = 0;
+            explicit ModelPort(QAbstractItemView* source, const CompleteExportCaptureViewWatch watch)
+                : view(source), selection(source ? source->selectionModel() : nullptr),
+                  root(source ? source->rootIndex() : QModelIndex{}), model(source ? source->model() : nullptr)
             {
                 const auto changed = [this]() { ++revision; };
                 if (model)
@@ -67,12 +74,21 @@ namespace ks::ui
                     view->installEventFilter(this);
                     if (watch.geometry)
                     {
-                        for (auto* header : { view->horizontalHeader(), view->verticalHeader() })
+                        QList<QHeaderView*> headers;
+                        if (auto* table = qobject_cast<QTableView*>(view.data()))
+                            headers = { table->horizontalHeader(), table->verticalHeader() };
+                        else if (auto* tree = qobject_cast<QTreeView*>(view.data())) headers = { tree->header() };
+                        for (auto* header : headers)
                         {
                             QObject::connect(header, &QHeaderView::geometriesChanged, this, changed);
                             QObject::connect(header, &QHeaderView::sectionMoved, this, changed);
                             QObject::connect(header, &QHeaderView::sectionResized, this, changed);
                         }
+                    }
+                    if (auto* tree = qobject_cast<QTreeView*>(view.data()))
+                    {
+                        QObject::connect(tree, &QTreeView::expanded, this, changed);
+                        QObject::connect(tree, &QTreeView::collapsed, this, changed);
                     }
                     if (watch.selection && view->selectionModel())
                     {
@@ -81,22 +97,12 @@ namespace ks::ui
                     }
                 }
             }
-            bool valid() const { return view && model && view->model() == model; }
+            bool valid() const { return view && model && view->model() == model
+                && view->selectionModel() == selection && view->rootIndex() == root; }
             bool eventFilter(QObject* watched, QEvent* event) override
             {
                 if (watched == view && event && event->type() == QEvent::LanguageChange) ++revision;
                 return false;
-            }
-        };
-
-        // Last-release can happen on GUI after cancellation/replacement. The
-        // large value destructor is queued independently, with no GUI pointers.
-        struct ReleaseTable
-        {
-            void operator()(CompleteExportCapturedTable* table) const noexcept
-            {
-                try { QThreadPool::globalInstance()->start(QRunnable::create([table]() { delete table; }), -1); }
-                catch (...) { delete table; }
             }
         };
 
@@ -108,7 +114,7 @@ namespace ks::ui
         }
     }
 
-    CompleteExportCapturePort MakeCompleteExportTableViewCapturePort(QTableView* view,
+    CompleteExportCapturePort MakeCompleteExportItemViewCapturePort(QAbstractItemView* view,
         QString sourceIdentity, const std::uint64_t sourceVersion,
         std::function<bool(int)> rowIncluded, std::function<bool(int)> columnIncluded,
         std::function<std::uint64_t()> scopeRevision, std::function<QString()> languageId,
@@ -123,21 +129,19 @@ namespace ks::ui
         port.valid = [state]() { return state->valid(); };
         // Keep model and scope counters separate through an injective pair
         // check, rather than an XOR/hash that can miss opposing mutations.
-        auto lastModel = std::make_shared<std::uint64_t>(state->revision);
-        auto lastScope = std::make_shared<std::uint64_t>(0);
-        auto serial = std::make_shared<std::uint64_t>(0);
-        port.revision = [state, scopeRevision = std::move(scopeRevision), lastModel, lastScope, serial]()
+        state->lastModel = state->revision;
+        port.revision = [state, scopeRevision = std::move(scopeRevision)]()
         {
             const auto scope = scopeRevision ? scopeRevision() : 0;
-            if (state->revision != *lastModel || scope != *lastScope)
+            if (state->revision != state->lastModel || scope != state->lastScope)
             {
-                *lastModel = state->revision; *lastScope = scope; ++*serial;
+                state->lastModel = state->revision; state->lastScope = scope; ++state->serial;
             }
-            return *serial;
+            return state->serial;
         };
         port.languageId = std::move(languageId);
-        port.rowCount = [state]() { return state->model ? state->model->rowCount() : -1; };
-        port.columnCount = [state]() { return state->model ? state->model->columnCount() : -1; };
+        port.rowCount = [state]() { return state->model ? state->model->rowCount(state->root) : -1; };
+        port.columnCount = [state]() { return state->model ? state->model->columnCount(state->root) : -1; };
         port.rowIncluded = std::move(rowIncluded);
         port.columnIncluded = std::move(columnIncluded);
         port.header = [state](const int column)
@@ -146,10 +150,20 @@ namespace ks::ui
         {
             const auto model = state->model;
             if (!model) return QString{};
-            const auto index = model->index(row, column);
+            const auto index = model->index(row, column, state->root);
             return model ? model->data(index, Qt::DisplayRole).toString() : QString{};
         };
         return port;
+    }
+
+    CompleteExportCapturePort MakeCompleteExportTableViewCapturePort(QTableView* view,
+        QString sourceIdentity, const std::uint64_t sourceVersion,
+        std::function<bool(int)> rowIncluded, std::function<bool(int)> columnIncluded,
+        std::function<std::uint64_t()> scopeRevision, std::function<QString()> languageId,
+        const CompleteExportCaptureViewWatch watch)
+    {
+        return MakeCompleteExportItemViewCapturePort(view, std::move(sourceIdentity), sourceVersion,
+            std::move(rowIncluded), std::move(columnIncluded), std::move(scopeRevision), std::move(languageId), watch);
     }
 
     struct CompleteExportCapture::State
@@ -162,7 +176,8 @@ namespace ks::ui
         std::shared_ptr<CompleteExportCapturedTable> table;
         std::uint64_t nextGeneration = 0;
         std::uint64_t revision = 0;
-        int rowCount = 0, columnCount = 0, nextColumn = 0, nextRow = 0;
+        int rowCount = 0, columnCount = 0, nextColumn = 0;
+        std::uint64_t nextRow = 0;
         std::size_t rowColumn = 0;
         QString language;
         QString pendingText;
@@ -182,7 +197,7 @@ namespace ks::ui
     {
         Q_ASSERT(QThread::currentThread() == thread());
         if (m_state->closed || m_state->busy || !port.source || !port.revision || !port.rowCount
-            || !port.columnCount || !port.header || !port.cell || budget.milliseconds <= 0
+            || !port.columnCount || !port.header || (!port.scopeOnly && !port.cell) || budget.milliseconds <= 0
             || budget.maximumUnits <= 0 || budget.utf16UnitsPerFragment <= 1
             || m_state->nextGeneration == std::numeric_limits<std::uint64_t>::max()) return 0;
         m_state->status = {};
@@ -190,15 +205,48 @@ namespace ks::ui
         m_state->budget = budget;
         m_state->port = std::make_shared<const CompleteExportCapturePort>(std::move(port));
         m_state->completion = std::move(completion);
-        m_state->table = std::shared_ptr<CompleteExportCapturedTable>(new CompleteExportCapturedTable, ReleaseTable{});
+        const auto mutableTable = std::make_shared<CompleteExportCapturedTable>();
+        const auto retainedTable = RetainCompleteExportSnapshot(std::shared_ptr<const CompleteExportCapturedTable>(mutableTable));
+        m_state->table = std::shared_ptr<CompleteExportCapturedTable>(retainedTable, mutableTable.get());
         m_state->table->sourceIdentity = m_state->port->sourceIdentity;
         m_state->table->sourceVersion = m_state->port->sourceVersion;
-        m_state->nextColumn = m_state->nextRow = 0;
+        m_state->nextColumn = 0; m_state->nextRow = 0;
         m_state->rowColumn = 0;
         m_state->rowStarted = m_state->initialized = false;
         m_state->busy = true;
-        queue();
-        return m_state->status.generation;
+        // Freeze the accepted epoch now, before the first queued slice. A sort,
+        // same-size replacement or language change in that gap must invalidate
+        // the whole preparation, not become a newer baseline for older values.
+        const QPointer<CompleteExportCapture> guard(this);
+        const auto generation = m_state->status.generation;
+        const auto retainedPort = m_state->port;
+        const auto current = [&]() { return guard && m_state->busy && m_state->status.generation == generation; };
+        try
+        {
+            const bool valid = retainedPort->source && (!retainedPort->valid || retainedPort->valid());
+            if (!current()) return generation;
+            if (!valid) { finish(CompleteExportCapturePhase::Invalidated, CompleteExportCaptureError::SourceChanged); return generation; }
+            const auto revision = retainedPort->revision();
+            if (!current()) return generation;
+            const auto language = retainedPort->languageId ? retainedPort->languageId() : QString{};
+            if (!current()) return generation;
+            const auto rows = retainedPort->rowCount();
+            if (!current()) return generation;
+            const auto columns = retainedPort->columnCount();
+            if (!current()) return generation;
+            if (rows < 0 || columns < 0)
+            { finish(CompleteExportCapturePhase::Failed, CompleteExportCaptureError::InvalidPort); return generation; }
+            m_state->revision = revision; m_state->language = language;
+            m_state->rowCount = rows; m_state->columnCount = columns;
+            m_state->table->languageId = language; m_state->status.sourceRows = rows;
+            m_state->initialized = true;
+            queue();
+        }
+        catch (...)
+        {
+            if (current()) finish(CompleteExportCapturePhase::Failed, CompleteExportCaptureError::ReadFailed, currentException());
+        }
+        return generation;
     }
 
     void CompleteExportCapture::queue()
@@ -251,26 +299,7 @@ namespace ks::ui
             if (!stillCurrent()) return;
             if (!initiallyUnchanged) { finish(CompleteExportCapturePhase::Invalidated, CompleteExportCaptureError::SourceChanged); return; }
             auto& state = *m_state;
-            if (!state.initialized)
-            {
-                const auto port = state.port;
-                const auto revision = port->revision();
-                if (!stillCurrent()) return;
-                const auto language = port->languageId ? port->languageId() : QString{};
-                if (!stillCurrent()) return;
-                const auto rows = port->rowCount();
-                if (!stillCurrent()) return;
-                const auto columns = port->columnCount();
-                if (!stillCurrent()) return;
-                if (rows < 0 || columns < 0)
-                { finish(CompleteExportCapturePhase::Failed, CompleteExportCaptureError::InvalidPort); return; }
-                state.revision = revision; state.language = language;
-                state.rowCount = rows; state.columnCount = columns;
-                state.table->languageId = state.language;
-                state.status.sourceRows = state.rowCount;
-                state.status.phase = CompleteExportCapturePhase::Capturing;
-                state.initialized = true;
-            }
+            state.status.phase = CompleteExportCapturePhase::Capturing;
             QElapsedTimer elapsed; elapsed.start();
             for (int unit = 0; unit < state.budget.maximumUnits && elapsed.elapsed() < state.budget.milliseconds; ++unit)
             {
@@ -319,17 +348,29 @@ namespace ks::ui
                     else ++state.nextColumn;
                     continue;
                 }
-                if (state.nextRow >= state.rowCount || state.table->sourceColumns.empty())
+                if ((!state.port->rowAvailable && state.nextRow >= static_cast<std::uint64_t>(state.rowCount))
+                    || state.table->sourceColumns.empty())
                 { finish(CompleteExportCapturePhase::Completed); return; }
                 if (!state.rowStarted)
                 {
                     const auto port = state.port;
-                    const bool included = !port->rowIncluded || port->rowIncluded(state.nextRow);
+                    if (port->rowAvailable)
+                    {
+                        const auto available = port->rowAvailable(state.nextRow);
+                        if (!stillCurrent()) return;
+                        if (!available) { finish(CompleteExportCapturePhase::Completed); return; }
+                    }
+                    const bool included = !port->rowIncluded || port->rowIncluded(static_cast<int>(state.nextRow));
                     if (!stillCurrent()) return;
                     if (!included) { ++state.nextRow; ++state.status.visitedRows; continue; }
+                    if (port->rowCaptured)
+                    {
+                        port->rowCaptured(static_cast<int>(state.nextRow));
+                        if (!stillCurrent()) return;
+                    }
                     state.rowStarted = true; state.rowColumn = 0;
                 }
-                if (state.rowColumn == state.table->sourceColumns.size())
+                if (state.port->scopeOnly || state.rowColumn == state.table->sourceColumns.size())
                 {
                     state.table->sourceRows.push_back(state.nextRow++);
                     ++state.status.capturedRows; ++state.status.visitedRows;
@@ -338,7 +379,7 @@ namespace ks::ui
                 else
                 {
                     const auto port = state.port;
-                    auto text = port->cell(state.nextRow, state.table->sourceColumns.at(state.rowColumn));
+                    auto text = port->cell(static_cast<int>(state.nextRow), state.table->sourceColumns.at(state.rowColumn));
                     if (!stillCurrent()) return;
                     state.pendingText = std::move(text);
                     state.pending = State::Pending::Cell;

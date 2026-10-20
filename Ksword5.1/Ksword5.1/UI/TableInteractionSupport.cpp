@@ -1,4 +1,5 @@
 #include "TableInteractionSupport.h"
+#include "TableCompleteExport.h"
 #include "./ToolbarMetrics.h"
 #include "./FlatButtonTheme.h"
 
@@ -166,15 +167,6 @@ namespace
         return nullptr;
     }
 
-    QString normalizedTsvField(const QVariant& value)
-    {
-        QString text = value.toString();
-        text.replace(QLatin1Char('\t'), QLatin1Char(' '));
-        text.replace(QLatin1Char('\r'), QLatin1Char(' '));
-        text.replace(QLatin1Char('\n'), QLatin1Char(' '));
-        return text;
-    }
-
     /*
      * 复制、导出、快照比对都只取"可见"行列，而冻结是靠 setRowHidden/setColumnHidden
      * 实现的，与筛选共用同一个状态位。若不区分，用户特意钉住的行列反而会从导出的
@@ -206,15 +198,13 @@ namespace
             return rowList;
         }
 
-        const QModelIndexList selectedIndexList = tableView->selectionModel()->selectedIndexes();
-        rowList.reserve(selectedIndexList.size());
-        for (const QModelIndex& index : selectedIndexList)
-        {
-            if (index.isValid() && !isRowHiddenByFilter(tableView, index.row()))
-            {
-                rowList.push_back(index.row());
-            }
-        }
+        // This helper belongs only to the explicit freeze-selected action.
+        // Copy/export and menu eligibility never materialize a selected cell list.
+        const auto ranges = tableView->selectionModel()->selection();
+        for (const auto& range : ranges)
+            if (range.isValid() && range.parent() == tableView->rootIndex())
+                for (int row = range.top(); row <= range.bottom(); ++row)
+                    if (!isRowHiddenByFilter(tableView, row)) rowList.push_back(row);
 
         std::sort(rowList.begin(), rowList.end());
         rowList.erase(std::unique(rowList.begin(), rowList.end()), rowList.end());
@@ -230,283 +220,20 @@ namespace
         return rowList;
     }
 
-    QVector<int> allVisibleRows(QTableView* tableView)
-    {
-        QVector<int> rowList;
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return rowList;
-        }
-
-        const int rowCount = tableView->model()->rowCount();
-        rowList.reserve(rowCount);
-        for (int row = 0; row < rowCount; ++row)
-        {
-            if (!isRowHiddenByFilter(tableView, row))
-            {
-                rowList.push_back(row);
-            }
-        }
-        return rowList;
-    }
-
-    QVector<int> visibleColumns(const QTableView* tableView)
-    {
-        QVector<int> columnList;
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return columnList;
-        }
-
-        const int columnCount = tableView->model()->columnCount();
-        columnList.reserve(columnCount);
-        for (int column = 0; column < columnCount; ++column)
-        {
-            if (!isColumnHiddenByFilter(tableView, column))
-            {
-                columnList.push_back(column);
-            }
-        }
-        return columnList;
-    }
-
-    QString tableRowsToTsv(
-        QTableView* tableView,
-        const QVector<int>& rowList,
-        const bool includeHeader)
-    {
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return {};
-        }
-
-        QAbstractItemModel* modelObject = tableView->model();
-        const QVector<int> columnList = visibleColumns(tableView);
-        if (rowList.isEmpty() || columnList.isEmpty())
-        {
-            return {};
-        }
-
-        QStringList lineList;
-        lineList.reserve(rowList.size() + (includeHeader ? 1 : 0));
-        if (includeHeader)
-        {
-            QStringList headerList;
-            headerList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                headerList.push_back(normalizedTsvField(
-                    modelObject->headerData(column, Qt::Horizontal, Qt::DisplayRole)));
-            }
-            lineList.push_back(headerList.join(QLatin1Char('\t')));
-        }
-
-        for (const int row : rowList)
-        {
-            if (row < 0 || row >= modelObject->rowCount() || isRowHiddenByFilter(tableView, row))
-            {
-                continue;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(modelObject->index(row, column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        return lineList.join(QLatin1Char('\n'));
-    }
-
-    void copyRowsToClipboard(QTableView* tableView, const QVector<int>& rowList)
-    {
-        if (QClipboard* clipboardObject = QApplication::clipboard())
-        {
-            const QString text = tableRowsToTsv(tableView, rowList, false);
-            if (!text.isEmpty())
-            {
-                clipboardObject->setText(text);
-            }
-        }
-    }
-
     void copySelectedRowsToClipboard(QTableView* tableView)
-    {
-        copyRowsToClipboard(tableView, selectedVisibleRows(tableView, true));
-    }
+    { ks::ui::CopyCompleteTableRows(tableView, ks::ui::CompleteTableScope::Selected); }
 
     void copyVisibleRowsToClipboard(QTableView* tableView)
-    {
-        copyRowsToClipboard(tableView, allVisibleRows(tableView));
-    }
+    { ks::ui::CopyCompleteTableRows(tableView, ks::ui::CompleteTableScope::All); }
 
-    // copySelectedTreeRowsToClipboard 作用：
-    // - 给 QTreeView/QTreeWidget 这类层级视图补上 Ctrl+C；
-    // - 上面那条表格路径按“扁平行号”工作，对树没有意义（不同父节点下 row 会重复），
-    //   所以这里改走 QModelIndex：用 indexBelow() 沿视觉顺序遍历，命中选中行就取一行；
-    //   折叠起来的子节点会被 indexBelow 自然跳过，复制结果与用户看到的完全一致；
-    // - 没有选中项时回落到当前行，与表格路径的 includeCurrentFallback 语义保持一致；
-    // - 列按表头视觉顺序输出并跳过隐藏列，用户拖动过列序时复制结果跟着走。
-    // 入参 treeView：目标树视图；为空或无模型时忽略。
-    // 返回：无；结果写入系统剪贴板。
     void copySelectedTreeRowsToClipboard(QTreeView* treeView)
-    {
-        if (treeView == nullptr || treeView->model() == nullptr)
-        {
-            return;
-        }
+    { ks::ui::CopyCompleteTreeRows(treeView); }
 
-        QItemSelectionModel* selectionModel = treeView->selectionModel();
-        QAbstractItemModel* modelObject = treeView->model();
-        if (selectionModel == nullptr)
-        {
-            return;
-        }
-
-        // 列序：优先按表头当前视觉顺序，没有表头时退回逻辑顺序。
-        QVector<int> columnList;
-        const int columnCount = modelObject->columnCount(treeView->rootIndex());
-        columnList.reserve(columnCount);
-        QHeaderView* headerView = treeView->header();
-        for (int position = 0; position < columnCount; ++position)
-        {
-            const int logicalColumn = headerView != nullptr
-                ? headerView->logicalIndex(position)
-                : position;
-            if (logicalColumn >= 0 && !treeView->isColumnHidden(logicalColumn))
-            {
-                columnList.push_back(logicalColumn);
-            }
-        }
-        if (columnList.isEmpty())
-        {
-            return;
-        }
-
-        QStringList lineList;
-        for (QModelIndex walkIndex = modelObject->index(0, 0, treeView->rootIndex());
-            walkIndex.isValid();
-            walkIndex = treeView->indexBelow(walkIndex))
-        {
-            // 用 isSelected(列 0) 判定整行：这些树一律是 SelectRows，选中即整行选中。
-            // 不用 isRowSelected(row, parent) 是因为它自 Qt 6.4 起已标记废弃。
-            if (!selectionModel->isSelected(walkIndex))
-            {
-                continue;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(walkIndex.sibling(walkIndex.row(), column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        if (lineList.isEmpty())
-        {
-            const QModelIndex currentIndex = selectionModel->currentIndex();
-            if (!currentIndex.isValid())
-            {
-                return;
-            }
-
-            QStringList valueList;
-            valueList.reserve(columnList.size());
-            for (const int column : columnList)
-            {
-                valueList.push_back(normalizedTsvField(
-                    modelObject->data(currentIndex.sibling(currentIndex.row(), column), Qt::DisplayRole)));
-            }
-            lineList.push_back(valueList.join(QLatin1Char('\t')));
-        }
-
-        if (QClipboard* clipboardObject = QApplication::clipboard())
-        {
-            clipboardObject->setText(lineList.join(QLatin1Char('\n')));
-        }
-    }
-
-    // exportRowsToTsv 作用：
-    // - 将指定的可见表格行连同表头保存为 UTF-8 TSV 文件；
-    // - 输入为表格对象、待导出行号及默认文件名前缀；
-    // - 行集合为空或写入失败时展示提示，成功时由 QSaveFile 原子提交文件。
-    void exportRowsToTsv(
-        QTableView* tableView,
-        const QVector<int>& rowList,
-        const QString& defaultFileNamePrefix)
-    {
-        // tableText 用途：保存已按当前可见列序列化的 TSV 正文。
-        const QString tableText = tableRowsToTsv(tableView, rowList, true);
-        if (tableText.isEmpty())
-        {
-            QMessageBox::information(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("没有可导出的行。"));
-            return;
-        }
-
-        // outputPath 用途：保存用户确认后的目标文件完整路径。
-        QString outputPath = QFileDialog::getSaveFileName(
-            tableView,
-            localizedSourceText("导出 TSV"),
-            defaultFileNamePrefix
-                + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))
-                + QStringLiteral(".tsv"),
-            localizedSourceText("TSV 文件 (*.tsv)"));
-        if (outputPath.trimmed().isEmpty())
-        {
-            return;
-        }
-        if (QFileInfo(outputPath).suffix().isEmpty())
-        {
-            outputPath += QStringLiteral(".tsv");
-        }
-
-        // fileObject 用途：以原子替换方式写入用户选择的 TSV 文件。
-        QSaveFile fileObject(outputPath);
-        if (!fileObject.open(QIODevice::WriteOnly | QIODevice::Text))
-        {
-            QMessageBox::warning(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("导出失败：%1").arg(fileObject.errorString()));
-            return;
-        }
-
-        // outputStream 用途：以 UTF-8 编码将 TSV 正文写入临时文件。
-        QTextStream outputStream(&fileObject);
-        outputStream.setEncoding(QStringConverter::Utf8);
-        outputStream << tableText << Qt::endl;
-        if (outputStream.status() != QTextStream::Ok || !fileObject.commit())
-        {
-            QMessageBox::warning(
-                tableView,
-                localizedSourceText("导出 TSV"),
-                localizedSourceText("导出失败：%1").arg(fileObject.errorString()));
-        }
-    }
-
-    // exportTableToTsv 作用：导出当前表格全部可见行，供顶部全量导出按钮使用。
     void exportTableToTsv(QTableView* tableView)
-    {
-        exportRowsToTsv(tableView, allVisibleRows(tableView), QStringLiteral("table_export_"));
-    }
+    { ks::ui::ExportCompleteTableRows(tableView, ks::ui::CompleteTableScope::All, QStringLiteral("table_export_")); }
 
-    // exportSelectedRowsToTsv 作用：导出当前选中行，未选中时回退到当前焦点行。
     void exportSelectedRowsToTsv(QTableView* tableView)
-    {
-        exportRowsToTsv(
-            tableView,
-            selectedVisibleRows(tableView, true),
-            QStringLiteral("table_selected_export_"));
-    }
+    { ks::ui::ExportCompleteTableRows(tableView, ks::ui::CompleteTableScope::Selected, QStringLiteral("table_selected_export_")); }
 
     // ComparisonTableView 同时用于比对视图和冻结视图。它继承表格外框宿主，
     // 因此冻结视图期间同样能像实时表一样预留冻结窗格所需的视口空间。
@@ -867,10 +594,12 @@ namespace
         {
             // Frozen sections are already published by the controller after model
             // resets/inserts/removes. Observe that state without polling or repolishing.
-            if (source == m_table && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
+            if ((source == m_table || source == activeTableView()) && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
             {
                 if (static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()
-                    == ks::ui::TableRowFilterRevisionProperty) updateControls();
+                    == ks::ui::TableRowFilterRevisionProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportBusyProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportPreparingProperty) updateControls();
                 else updateFreezeButton();
             }
             return QFrame::eventFilter(source, event);
@@ -1307,6 +1036,7 @@ namespace
             auto* pausedView = new ComparisonTableView(m_table.data());
             m_pauseOverlay = pausedView;
             configurePausedOverlay(pausedView, snapshot);
+            pausedView->installEventFilter(this);
 
             m_frozenPaneController->setTargetTable(nullptr);
             suspendOriginalTablePainting();
@@ -2048,6 +1778,7 @@ namespace
             auto* comparisonView = new ComparisonTableView(m_table.data());
             m_comparisonOverlay = comparisonView;
             configureComparisonOverlay(comparisonView, comparison);
+            comparisonView->installEventFilter(this);
             comparisonView->setProperty(kComparisonActiveProperty, true);
 
             m_frozenPaneController->setTargetTable(nullptr);
@@ -2366,8 +2097,9 @@ namespace
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_pauseCaptureInProgress;
-            m_copyAllButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows);
-            m_exportButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows);
+            const bool exportBusy = activeTable && activeTable->property(ks::ui::CompleteExportBusyProperty).toBool();
+            m_copyAllButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows && !exportBusy);
+            m_exportButton->setEnabled(controlsAvailable && projectionReady && hasVisibleRows && !exportBusy);
             m_freezePaneButton->setEnabled(
                 controlsAvailable && projectionReady &&
                 !m_inComparison &&
@@ -2552,7 +2284,9 @@ namespace
             menu,
             tableView,
             clickedIndex,
-            !selectedVisibleRows(tableView, true).isEmpty(),
+            tableView && tableView->selectionModel() &&
+                (tableView->selectionModel()->hasSelection() ||
+                    (tableView->currentIndex().isValid() && !isRowHiddenByFilter(tableView, tableView->currentIndex().row()))),
             [guardedTable]()
             {
                 if (!guardedTable.isNull())
@@ -2607,8 +2341,8 @@ namespace
             return;
         }
 
-        const QVector<int> selectedRowList = selectedVisibleRows(tableView, false);
-        if (std::find(selectedRowList.cbegin(), selectedRowList.cend(), clickedIndex.row()) != selectedRowList.cend())
+        if (!isRowHiddenByFilter(tableView, clickedIndex.row()) &&
+            tableView->selectionModel()->rowIntersectsSelection(clickedIndex.row(), clickedIndex.parent()))
         {
             tableView->selectionModel()->setCurrentIndex(clickedIndex, QItemSelectionModel::NoUpdate);
             return;
@@ -2974,6 +2708,20 @@ namespace ks::ui
             itemViewList.push_back(tableView);
         }
         return IsItemViewUiCommitBlockedByContextMenu(itemViewList);
+    }
+
+    bool DeferTablePresentationIfValueCaptureOpen(
+        QObject* owner,
+        const QString& commitKey,
+        const QList<QTableView*>& tableList,
+        std::function<void()> commitAction)
+    {
+        QList<QAbstractItemView*> views;
+        views.reserve(tableList.size());
+        for (QTableView* const table : tableList) views.append(table);
+        auto* const coordinator = UiCommitCoordinator::forApplication();
+        return coordinator != nullptr && coordinator->deferPresentationIfBlocked(
+            owner, commitKey, views, std::move(commitAction));
     }
 
     bool DeferItemViewUiCommitIfContextMenuOpen(

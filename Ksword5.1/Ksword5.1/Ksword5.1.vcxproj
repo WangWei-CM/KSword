@@ -155,6 +155,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ResourceCompile Include="AppIcon.rc" />
+    <ClCompile Include="UI\TableCompleteExport.cpp" />
     <ClCompile Include="UI\CompleteExportCapture.cpp" />
     <ClCompile Include="UI\CompleteExport.cpp" />
     <ClCompile Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.cpp" />
@@ -843,6 +844,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="UI\TableCompleteExport.h" />
     <ClInclude Include="UI\CompleteExportCapture.h" />
     <ClInclude Include="UI\CompleteExport.h" />
     <ClInclude Include="MonitorDock\ProcessTraceEventMetadata.h" />

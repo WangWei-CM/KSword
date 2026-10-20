@@ -65,6 +65,14 @@ namespace ks::ui
             const QList<QAbstractItemView*>& views,
             std::function<void()> action);
 
+        // Only pure presentation commits opt into the capture lease. Business
+        // cache, sampling and archive commits keep using deferIfBlocked/submit.
+        bool deferPresentationIfBlocked(
+            QObject* owner,
+            const QString& key,
+            const QList<QAbstractItemView*>& views,
+            std::function<void()> action);
+
         // 新接口在无屏障/续轮时直接执行；排队时只保留同键最后一份原子提交。
         UiCommitSubmission submit(
             QObject* owner,
@@ -75,6 +83,12 @@ namespace ks::ui
         // 菜单开始增加深度，结束延至外层事件循环，避免业务 action 仍使用旧行。
         void beginContextMenu(QAbstractItemView* view);
         void endContextMenu(QAbstractItemView* view);
+
+        // Bounded read-only value/scope preparation defers presentation commits
+        // only. Sampling and canonical archives continue; every lease is released
+        // on completion/cancel/close. Independent from real menu nesting.
+        void beginValueCapture(QAbstractItemView* view);
+        void endValueCapture(QAbstractItemView* view);
 
         // 释放事件合并调度复查；全 owner 共用软预算，续轮前重新核对完整目标组。
         void notifyInteractionEnded();
@@ -93,6 +107,7 @@ namespace ks::ui
             QString key;                              // 所有者内部去重键。
             QList<QPointer<QAbstractItemView>> views;  // 本次原子更新的目标集合。
             std::function<void()> action;             // 最新快照对应的提交动作。
+            bool waitsForValueCapture = false;        // Pure presentation only.
         };
 
         using PendingMap = QMap<quint64, PendingCommit>;
@@ -103,7 +118,9 @@ namespace ks::ui
             const QString& key,
             const QList<QAbstractItemView*>& views,
             std::function<void()>& action,
-            bool executingLegacyGuard = false);
+            bool executingLegacyGuard = false,
+            bool waitsForValueCapture = false);
+        bool isPresentationBlocked(const QList<QAbstractItemView*>& views) const;
         bool pendingBlocked(const PendingCommit& pending) const;
         bool targetsAlive(const PendingCommit& pending) const;
         void removeMatching(QObject* owner, const QString& key);

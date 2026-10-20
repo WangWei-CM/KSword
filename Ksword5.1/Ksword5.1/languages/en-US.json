@@ -6960,6 +6960,13 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "当前复制/导出尚未完成，请稍候。": "A copy or export is still in progress. Please wait.",
+    "当前表格尚无可用的完整数据版本，请刷新后重试。": "No complete data version is available for this table. Refresh and retry.",
+    "正在准备完整复制/导出（Esc 取消准备）": "Preparing complete copy/export (Esc cancels preparation)",
+    "复制/导出完整表格": "Copy/export complete table",
+    "复制/导出准备结束": "Copy/export preparation finished",
+    "复制/导出准备期间数据或范围已变化，请重试。": "The data or scope changed during copy/export preparation. Please retry.",
+    "复制/导出准备失败，请重试。": "Copy/export preparation failed. Please retry.",
     "暂存输入已变化，请检查当前内容后重新暂存。": "Staging input changed. Review the current values and stage again.",
     "● 归档失败: %1": "● Archive failed: %1",
     "WMI：归档 %1，显示跳过 %2，待显示 %3": "WMI: archived %1, skipped in display %2, pending display %3",

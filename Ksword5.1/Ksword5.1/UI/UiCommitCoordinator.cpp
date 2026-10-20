@@ -21,6 +21,7 @@ namespace
 {
     // 保留已有属性名，使菜单状态与存量表格代码的观察结果一致。
     constexpr char kMenuDepthProperty[] = "KSWORD_TABLE_CONTEXT_MENU_DEPTH";
+    constexpr char kValueCaptureDepthProperty[] = "ksword_table_value_capture_depth";
     constexpr char kCoordinatorName[] = "ksword_ui_commit_coordinator";
 
     bool realLeftCtrlHeld()
@@ -112,6 +113,14 @@ namespace ks::ui
         });
     }
 
+    bool UiCommitCoordinator::isPresentationBlocked(const QList<QAbstractItemView*>& views) const
+    {
+        return isBlocked(views) || std::any_of(views.cbegin(), views.cend(), [](const QAbstractItemView* view)
+        {
+            return view != nullptr && view->property(kValueCaptureDepthProperty).toInt() > 0;
+        });
+    }
+
     // 屏障解除时仍以完整目标集合复查，任一目标销毁意味着原子提交不可执行。
     bool UiCommitCoordinator::targetsAlive(const PendingCommit& pending) const
     {
@@ -130,7 +139,7 @@ namespace ks::ui
         {
             views.append(view.data());
         }
-        return isBlocked(views);
+        return pending.waitsForValueCapture ? isPresentationBlocked(views) : isBlocked(views);
     }
 
     void UiCommitCoordinator::removeIndex(const PendingCommit& pending)
@@ -180,13 +189,26 @@ namespace ks::ui
         return deferChecked(owner, key, views, action, executingLegacyGuard);
     }
 
+    bool UiCommitCoordinator::deferPresentationIfBlocked(
+        QObject* owner,
+        const QString& key,
+        const QList<QAbstractItemView*>& views,
+        std::function<void()> action)
+    {
+        const bool executingLegacyGuard = m_flushing && m_legacyGuardAvailable
+            && m_executingOwner.data() == owner && m_executingKey == key;
+        if (executingLegacyGuard) m_legacyGuardAvailable = false;
+        return deferChecked(owner, key, views, action, executingLegacyGuard, true);
+    }
+
     // 同一次输入状态只查询一次；未阻塞时保留 action，避免两次探针间松键丢提交。
     bool UiCommitCoordinator::deferChecked(
         QObject* owner,
         const QString& key,
         const QList<QAbstractItemView*>& views,
         std::function<void()>& action,
-        const bool executingLegacyGuard)
+        const bool executingLegacyGuard,
+        const bool waitsForValueCapture)
     {
         if (owner == nullptr || key.isEmpty() || !action)
         {
@@ -194,7 +216,8 @@ namespace ks::ui
         }
         // 先淘汰同键旧提交。松开 Ctrl 后先收到新快照时，旧快照不可随后覆盖它。
         removeMatching(owner, key);
-        if (!isBlocked(views) && (executingLegacyGuard || (!m_flushing && !m_roundActive && !m_continuationPending)))
+        const bool blocked = waitsForValueCapture ? isPresentationBlocked(views) : isBlocked(views);
+        if (!blocked && (executingLegacyGuard || (!m_flushing && !m_roundActive && !m_continuationPending)))
         {
             if (!m_pending.isEmpty() && !m_flushing)
             {
@@ -207,6 +230,7 @@ namespace ks::ui
         pending.owner = owner;
         pending.key = key;
         pending.action = std::move(action);
+        pending.waitsForValueCapture = waitsForValueCapture;
         for (QAbstractItemView* const view : views)
         {
             if (view != nullptr)
@@ -262,6 +286,18 @@ namespace ks::ui
             }
             notifyInteractionEnded();
         });
+    }
+
+    void UiCommitCoordinator::beginValueCapture(QAbstractItemView* view)
+    {
+        if (view) view->setProperty(kValueCaptureDepthProperty, view->property(kValueCaptureDepthProperty).toInt() + 1);
+    }
+
+    void UiCommitCoordinator::endValueCapture(QAbstractItemView* view)
+    {
+        if (view) view->setProperty(kValueCaptureDepthProperty,
+            std::max(0, view->property(kValueCaptureDepthProperty).toInt() - 1));
+        notifyInteractionEnded();
     }
 
     void UiCommitCoordinator::notifyInteractionEnded()

@@ -10,6 +10,7 @@
 #include <memory>
 
 class QTableView;
+class QAbstractItemView;
 
 namespace ks::ui
 {
@@ -27,7 +28,7 @@ namespace ks::ui
         std::uint64_t sourceVersion = 0;
         QString languageId;
         std::deque<int> sourceColumns;
-        std::deque<int> sourceRows;
+        std::deque<std::uint64_t> sourceRows;
         std::deque<CompleteExportCapturedCell> headers;
         std::deque<CompleteExportCapturedCell> cells; // Complete rows, row-major.
         const CompleteExportCapturedCell& cell(std::size_t row, std::size_t column) const;
@@ -47,6 +48,13 @@ namespace ks::ui
         std::function<QString()> languageId;
         std::function<int()> rowCount;
         std::function<int()> columnCount;
+        // Optional hierarchy cursor. It advances once per ordinal, returns
+        // false at the true end and removes the flat rowCount bound. GUI only.
+        std::function<bool(std::uint64_t)> rowAvailable;
+        bool scopeOnly = false; // Capture exact row/column scope, no DisplayRole cells.
+        // Optional GUI value capture, once per included row, before handoff.
+        // It must copy only that bounded business row, never format all cells.
+        std::function<void(int)> rowCaptured;
         std::function<bool(int)> rowIncluded;
         std::function<bool(int)> columnIncluded;
         std::function<QString(int)> header;
@@ -69,6 +77,12 @@ namespace ks::ui
         std::function<std::uint64_t()> scopeRevision = {}, std::function<QString()> languageId = {},
         CompleteExportCaptureViewWatch watch = {});
 
+    CompleteExportCapturePort MakeCompleteExportItemViewCapturePort(QAbstractItemView* view,
+        QString sourceIdentity, std::uint64_t sourceVersion,
+        std::function<bool(int)> rowIncluded, std::function<bool(int)> columnIncluded,
+        std::function<std::uint64_t()> scopeRevision = {}, std::function<QString()> languageId = {},
+        CompleteExportCaptureViewWatch watch = {});
+
     enum class CompleteExportCapturePhase { Queued, Capturing, Completed, Canceled, Invalidated, Failed, Closed };
     enum class CompleteExportCaptureError { None, InvalidPort, SourceChanged, ReadFailed };
     struct CompleteExportCaptureStatus
@@ -77,7 +91,7 @@ namespace ks::ui
         CompleteExportCapturePhase phase = CompleteExportCapturePhase::Queued;
         CompleteExportCaptureError error = CompleteExportCaptureError::None;
         int sourceRows = 0;
-        int visitedRows = 0;
+        std::uint64_t visitedRows = 0;
         std::uint64_t capturedRows = 0;
         std::uint64_t capturedCells = 0;
         QString nativeError;

@@ -145,6 +145,15 @@ namespace ks::ui
         const QList<QTableView*>& tableList,
         std::function<void()> commitAction);
 
+    // Pure presentation only: additionally wait for bounded complete-export
+    // value capture. Call after business cache/history/archive updates; never
+    // wrap an entire business result in this latest-wins queue.
+    bool DeferTablePresentationIfValueCaptureOpen(
+        QObject* owner,
+        const QString& commitKey,
+        const QList<QTableView*>& tableList,
+        std::function<void()> commitAction);
+
     // DeferItemViewUiCommitIfContextMenuOpen 作用：
     // - 为 QTableView 与 QTreeView 提供同一菜单/左 Ctrl 屏障、预算续轮与 owner/key latest-wins 语义；
     // - 刷新函数必须在清空缓存、模型或 item 前调用，返回 true 时立即结束。
