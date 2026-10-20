@@ -30,6 +30,8 @@ namespace ks::ui
         ksword::memwb::ApprovalRequest approval;
         ksword::memwb::WriteOperationResult result;
         ksword::memwb::PointerChainBindings bindings;
+        std::shared_ptr<ksword::memwb::MemoryDiffOverlay> preparedOverlay;
+        bool projectionPrepared = false;
         bool terminal = false;
         bool receiptFailed = false;
         std::string receiptFailure;
@@ -46,15 +48,19 @@ namespace ks::ui
             ksword::memwb::FrozenWriteInput input, FrozenWriteCapture capture,
             FrozenWriteFactories factories, std::shared_ptr<WorkbenchWriteLedger> ledger,
             std::optional<std::uint64_t> tick, std::optional<WorkbenchWriteLedger::ReplayTicket> replay,
-            std::string& reason);
+            std::string& reason,
+            std::optional<ksword::memwb::MemoryDiffOverlay> overlay = {});
         ~WorkbenchWriteOperationRunner();
         WorkbenchWriteOperationRunner(const WorkbenchWriteOperationRunner&) = delete;
         WorkbenchWriteOperationRunner& operator=(const WorkbenchWriteOperationRunner&) = delete;
 
         WritePhaseSnapshot RunPhase(WritePhaseAnswer answer = {});
+        std::shared_ptr<const WritePhaseSnapshot> RunPhaseShared(WritePhaseAnswer answer = {});
         // GUI polling never waits for a worker or I/O lock. Copies only an
         // already terminal value snapshot; allocation failure may propagate.
         std::optional<WritePhaseSnapshot> TryTerminalSnapshot() const;
+        std::shared_ptr<const WritePhaseSnapshot> TryTerminalSnapshotShared() const noexcept;
+        const std::optional<ksword::memwb::MemoryDiffOverlay>& OverlaySnapshot() const noexcept;
         void RequestStop(bool ownerGone = false) noexcept;
         std::uint64_t Id() const noexcept;
         const ksword::memwb::FrozenWriteInput& Input() const noexcept;

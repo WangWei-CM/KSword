@@ -1,11 +1,13 @@
 #include "WorkbenchWriteOperationRunner.h"
 #include "../AsyncCleanupRegistry.h"
+#include "WorkbenchWorkerValue.h"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -122,11 +124,13 @@ namespace ks::ui
 
         State(mem::FrozenWriteInput frozenInput, FrozenWriteCapture frozenCapture,
             FrozenWriteFactories frozenFactories, std::shared_ptr<WorkbenchWriteLedger> durable,
-            std::optional<std::uint64_t> operationTick, std::optional<WorkbenchWriteLedger::ReplayTicket> ticket)
+            std::optional<std::uint64_t> operationTick, std::optional<WorkbenchWriteLedger::ReplayTicket> ticket,
+            std::optional<mem::MemoryDiffOverlay> initialOverlay)
             : input(std::move(frozenInput)), writeLease(std::move(frozenCapture.writeLease)),
               capture(std::move(frozenCapture)), factories(std::move(frozenFactories)),
               ledger(std::move(durable)), tick(operationTick), replay(std::move(ticket)), id(ledger->NextOperation())
         {
+            overlay = std::move(initialOverlay);
             snapshot.operation = id;
             snapshot.bindings = capture.pointerBindings;
         }
@@ -256,6 +260,17 @@ namespace ks::ui
                     catch (...) { ReceiptFailure(CurrentException("history replay receipt failed: ")); }
                 }
             }
+            // Build the full verified projection on this worker. GUI receipt
+            // handling only swaps a shared revision after proving its serial.
+            if (overlay && !replay)
+            {
+                auto prepared = MakeWorkerValue<mem::MemoryDiffOverlay>(*overlay);
+                bool ok = true;
+                for (const auto& verified : snapshot.result.verifiedBlocks)
+                    if (prepared->AcceptWrite(verified.block, verified.readBack) != mem::AcceptWriteStatus::Ok)
+                        ok = false;
+                if (ok) { snapshot.preparedOverlay = std::move(prepared); snapshot.projectionPrepared = true; }
+            }
             // Only the exclusive worker invocation destroys I/O/identity state
             // and releases admission. The GUI may retain the immutable snapshot.
             operation.reset();
@@ -263,6 +278,7 @@ namespace ks::ui
             factories = {};
             writeLease.reset();
             cleanupLease.reset();
+            terminalSnapshot = snapshotStorage;
             terminal.store(true, std::memory_order_release);
             // If the durable allocator failed, keep this pure value owner for
             // process lifetime. Native context and shutdown leases are gone.
@@ -279,7 +295,10 @@ namespace ks::ui
             return value;
         }
 
-        const mem::FrozenWriteInput input;
+        mem::FrozenWriteInput input; // Blocks are materialized once, on worker.
+        std::optional<mem::MemoryDiffOverlay> overlay;
+        bool inputPrepared = false;
+        std::shared_ptr<const WritePhaseSnapshot> terminalSnapshot;
         std::shared_ptr<FrozenWorkbenchWriteLease> writeLease;
         const FrozenWriteCapture capture; // GUI-readable metadata; no write lease.
         FrozenWriteFactories factories;
@@ -298,7 +317,8 @@ namespace ks::ui
         std::shared_ptr<AsyncCleanupRegistry::Lease> cleanupLease;
         std::unique_ptr<WorkbenchFrozenWriteContext> context;
         std::unique_ptr<mem::MemoryWriteOperation> operation;
-        WritePhaseSnapshot snapshot;
+        std::shared_ptr<WritePhaseSnapshot> snapshotStorage = MakeWorkerValue<WritePhaseSnapshot>();
+        WritePhaseSnapshot& snapshot = *snapshotStorage;
         std::size_t flushedAudit = 0;
         std::size_t flushedVerified = 0;
         bool replayFinished = false;
@@ -313,7 +333,8 @@ namespace ks::ui
     std::shared_ptr<WorkbenchWriteOperationRunner> WorkbenchWriteOperationRunner::Create(
         mem::FrozenWriteInput input, FrozenWriteCapture capture, FrozenWriteFactories factories,
         std::shared_ptr<WorkbenchWriteLedger> ledger, std::optional<std::uint64_t> tick,
-        std::optional<WorkbenchWriteLedger::ReplayTicket> replay, std::string& reason)
+        std::optional<WorkbenchWriteLedger::ReplayTicket> replay, std::string& reason,
+        std::optional<mem::MemoryDiffOverlay> overlay)
     {
         reason.clear();
         if (!ledger || !capture.authorization || !capture.writeLease
@@ -321,9 +342,9 @@ namespace ks::ui
             || !mem::SameTarget(input.session, ledger->Session()))
         { reason = "frozen write runner capture is incomplete or changed"; return {}; }
         auto& stopQueue = State::StopQueue::Get(); // Thread startup can reject before acceptance.
-        auto runner = std::shared_ptr<WorkbenchWriteOperationRunner>(new WorkbenchWriteOperationRunner(
+        auto runner = OwnWorkerValue(new WorkbenchWriteOperationRunner(
             std::make_unique<State>(std::move(input), std::move(capture), std::move(factories),
-                std::move(ledger), tick, std::move(replay))));
+                std::move(ledger), tick, std::move(replay), std::move(overlay))));
         const std::weak_ptr<WorkbenchWriteOperationRunner> weak = runner;
         runner->state_->cleanupLease = AsyncCleanupRegistry::global().acquire([weak] {
             if (const auto owner = weak.lock()) owner->RequestStop();
@@ -351,6 +372,24 @@ namespace ks::ui
                 && (answer.operation != state.id || !state.operation)) return state.ValueSnapshot();
             if (!state.operation)
             {
+                if (!state.inputPrepared)
+                {
+                    state.inputPrepared = true;
+                    if (state.replay)
+                    {
+                        const auto& replay = state.replay->replay;
+                        mem::MemoryDiffOverlay scratch;
+                        if (scratch.LoadBaseline(mem::IdentityKey(state.input.session, 0, 0), replay.address,
+                                replay.expectedCurrent, std::vector<std::uint8_t>(replay.expectedCurrent.size(), 1))
+                            != mem::BaselineLoadStatus::Ok
+                            || scratch.Stage(replay.address, replay.restore) != mem::StageStatus::Ok)
+                            throw std::runtime_error("captured write blocks are invalid or overlap");
+                        state.input.baseAddress = scratch.BaseAddress();
+                        state.input.baselineSize = scratch.BaselineSize();
+                        state.input.blocks = scratch.DiffBlocks();
+                    }
+                    else if (state.overlay) state.input.blocks = state.overlay->DiffBlocks();
+                }
                 const auto current = state.Current();
                 if (state.input.blocks.empty()) state.InitialFailure(mem::CommitOutcome::NoChange, {});
                 else if (mem::Validate(state.input.session) != mem::SessionError::None)
@@ -422,6 +461,7 @@ namespace ks::ui
                 state.snapshot.terminal = true;
                 state.snapshot.receiptFailed = true;
                 state.snapshot.step = mem::MemoryWriteOperation::Step::Finished;
+                state.terminalSnapshot = state.snapshotStorage;
                 state.terminal.store(true, std::memory_order_release);
                 // The core may be the only complete authoritative value after
                 // repeated allocation failure. Its process self-keepalive must
@@ -433,6 +473,13 @@ namespace ks::ui
         return state.ValueSnapshot();
     }
 
+    std::shared_ptr<const WritePhaseSnapshot> WorkbenchWriteOperationRunner::RunPhaseShared(WritePhaseAnswer answer)
+    {
+        auto value = RunPhase(answer); // Any large value copy remains on worker.
+        if (const auto terminal = TryTerminalSnapshotShared()) return terminal;
+        return MakeWorkerValue<WritePhaseSnapshot>(std::move(value));
+    }
+
     std::optional<WritePhaseSnapshot> WorkbenchWriteOperationRunner::TryTerminalSnapshot() const
     {
         if (!state_->terminal.load(std::memory_order_acquire)) return {};
@@ -440,6 +487,16 @@ namespace ks::ui
         if (!lock) return {};
         return state_->ValueSnapshot();
     }
+
+    std::shared_ptr<const WritePhaseSnapshot> WorkbenchWriteOperationRunner::TryTerminalSnapshotShared() const noexcept
+    {
+        if (!state_->terminal.load(std::memory_order_acquire)) return {};
+        // Published once, before release terminal. No large value copy or wait.
+        return state_->terminalSnapshot;
+    }
+
+    const std::optional<mem::MemoryDiffOverlay>& WorkbenchWriteOperationRunner::OverlaySnapshot() const noexcept
+    { return state_->overlay; }
 
     void WorkbenchWriteOperationRunner::RequestStop(const bool ownerGone) noexcept
     {

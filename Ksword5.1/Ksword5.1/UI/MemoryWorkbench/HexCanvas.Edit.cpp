@@ -15,6 +15,7 @@
 
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QPointer>
 
 #include <algorithm>
 #include <limits>
@@ -132,6 +133,10 @@ namespace ks::ui
                 : QStringLiteral("写入范围超出了地址空间"));
         }
 
+        // A connected workbench validates captured baseline masks on its
+        // worker. Avoid a second per-byte scan on GUI for a large fill/paste.
+        if (m_stageSubmitter) return true;
+
         // 逐字节：缓存里读到了就放行；没读到但已有暂存补丁的字节仍然有值可显示（与 resolveCore 同一规则）。
         for (std::uint64_t offset = 0; offset < length; ++offset)
         {
@@ -161,17 +166,21 @@ namespace ks::ui
     }
 
     // 暂存一段字节：公开的唯一写入入口。
-    // 传入：起始地址、字节、原因输出（可为空指针）；传出：是否暂存成功。
-    // 失败时发 editRejected 并填 reasonOut；成功时清空 reasonOut、重绘、排队 contentChanged、发 editStaged。
-    bool HexCanvas::stageBytes(std::uint64_t address, const QByteArray& bytes, QString* reasonOut)
+    // 传入：起始地址、字节、同步原因输出、成功动作与实际结果回调；传出：是否接受请求。
+    // 独立宿主同步 Stage；工作台的值副本在 worker 处理，实际成功回投后再重绘并发 editStaged。
+    // reasonOut 只在当前调用栈内写入，异步回调绝不借用调用者的栈指针。
+    bool HexCanvas::stageBytes(std::uint64_t address, const QByteArray& bytes, QString* reasonOut,
+        std::function<void()> afterStaged, StageCompletion resolved)
     {
         // reject：统一的失败出口，原因同时写给调用方与信号订阅者。
-        const auto reject = [this, reasonOut](const QString& reason) {
+        const auto reject = [this, reasonOut, &resolved](const QString& reason) {
             if (reasonOut != nullptr)
             {
                 *reasonOut = reason;
             }
+            const QPointer<HexCanvas> self(this);
             rejectEdit(reason);
+            if (self && resolved) resolved(false, reason);
             return false;
         };
 
@@ -179,6 +188,56 @@ namespace ks::ui
         if (!precheckStage(address, static_cast<std::uint64_t>(bytes.size()), &reason))
         {
             return reject(reason);
+        }
+
+        if (m_stageSubmitter)
+        {
+            const QPointer<HexCanvas> self(this);
+            const auto submit = m_stageSubmitter;
+            const auto completed = [self, overlay = m_overlay, source = sourceRevision(), address, length = static_cast<quint64>(bytes.size()),
+                afterStaged = std::move(afterStaged), resolved](bool ok, const QString& failure)
+            {
+                if (!self) return;
+                const auto current = [self, overlay, source] {
+                    return self && self->m_overlay == overlay && self->sourceRevision() == source;
+                };
+                if (!current())
+                {
+                    if (resolved) resolved(false, QStringLiteral("操作已取消"));
+                    return;
+                }
+                if (!ok)
+                {
+                    QString visible = failure;
+                    if (failure.startsWith(QLatin1StringView("stage rejected (")))
+                    {
+                        const auto first = failure.lastIndexOf(u'(') + 1;
+                        const auto last = failure.lastIndexOf(u')');
+                        bool parsed = false;
+                        const auto status = failure.mid(first,last-first).toInt(&parsed);
+                        if (parsed && status >= static_cast<int>(ksword::memwb::StageStatus::Empty)
+                            && status <= static_cast<int>(ksword::memwb::StageStatus::TooLarge))
+                            visible = StageReasonText(static_cast<ksword::memwb::StageStatus>(status));
+                    }
+                    else if (failure == QLatin1StringView("timeout"))
+                        visible = StageReasonText(ksword::memwb::StageStatus::UnreadBytes);
+                    else if (failure == QLatin1StringView("cancelled"))
+                        visible = QStringLiteral("操作已取消");
+                    self->rejectEdit(visible);
+                    if (self && resolved) resolved(false,visible);
+                    return;
+                }
+                self->viewport()->update();
+                self->scheduleContentChanged();
+                emit self->editStaged(address, length);
+                if (current() && afterStaged) afterStaged();
+                if (self && resolved) resolved(current(), current() ? QString() : QStringLiteral("操作已取消"));
+            };
+            const bool accepted = submit(address, bytes, completed);
+            if (!self) return accepted;
+            if (!accepted) return reject(ReadOnlyReason());
+            if (reasonOut) reasonOut->clear();
+            return true;
         }
 
         // QByteArray -> vector<uint8_t>：MemoryDiffOverlay 是 Qt-free 的，这里做类型适配。
@@ -198,7 +257,10 @@ namespace ks::ui
         }
         viewport()->update();
         scheduleContentChanged();
+        const QPointer<HexCanvas> self(this);
         emit editStaged(address, static_cast<quint64>(bytes.size()));
+        if (self && afterStaged) afterStaged();
+        if (self && resolved) resolved(true,{});
         return true;
     }
 
@@ -251,10 +313,8 @@ namespace ks::ui
             const char value = static_cast<char>((m_nibbleHigh << 4) | digit);
             const std::uint64_t target = m_nibbleAddress;
             cancelNibble();
-            if (stageBytes(target, QByteArray(1, value)))
-            {
-                advanceAfterEdit();
-            }
+            const QPointer<HexCanvas> self(this);
+            stageBytes(target, QByteArray(1, value), nullptr, [self] { if (self) self->advanceAfterEdit(); });
             return true;
         }
 
@@ -270,10 +330,9 @@ namespace ks::ui
             rejectEdit(reason);
             return true;
         }
-        if (stageBytes(caret, QByteArray(1, static_cast<char>(code))))
-        {
-            advanceAfterEdit();
-        }
+        const QPointer<HexCanvas> self(this);
+        stageBytes(caret, QByteArray(1, static_cast<char>(code)), nullptr,
+            [self] { if (self) self->advanceAfterEdit(); });
         return true;
     }
 
@@ -303,6 +362,21 @@ namespace ks::ui
         m_viewport.MoveCaretByBytes(-1, false);
         applySelectionChange(before);
         const std::uint64_t target = m_viewport.GetSelection().caret;
+        if (m_discardSubmitter)
+        {
+            const QPointer<HexCanvas> self(this);
+            const auto* overlay = m_overlay;
+            const auto source = sourceRevision();
+            const auto submit = m_discardSubmitter;
+            submit(target, 1, [self, overlay, source, target](bool ok, std::uint64_t discarded) {
+                if (!self || !ok || !discarded || self->m_overlay != overlay || self->sourceRevision() != source) return;
+                self->viewport()->update();
+                self->scheduleContentChanged();
+                emit self->editDiscarded(target, discarded);
+            });
+            if (self) self->ensureCaretVisible();
+            return;
+        }
         if (m_overlay->Discard(target, 1) > 0)
         {
             // 丢弃成功：显示值回到基线，通知订阅者后再发 editDiscarded。
@@ -397,16 +471,15 @@ namespace ks::ui
             return;
         }
 
-        if (!stageBytes(start, raw))
+        const QPointer<HexCanvas> self(this);
+        stageBytes(start, raw, nullptr, [self, start, length]
         {
-            return;
-        }
-
-        // 选区改为刚粘贴的范围（锚点在起点，插入点在末字节）。
-        const ksword::memwb::HexViewport::Selection before = m_viewport.GetSelection();
-        m_viewport.SetCaret(start, false);
-        m_viewport.SetCaret(start + (length - 1ULL), true);
-        applySelectionChange(before);
-        ensureCaretVisible();
+            if (!self) return;
+            const auto before = self->m_viewport.GetSelection();
+            self->m_viewport.SetCaret(start, false);
+            self->m_viewport.SetCaret(start + (length - 1ULL), true);
+            self->applySelectionChange(before);
+            self->ensureCaretVisible();
+        });
     }
 }

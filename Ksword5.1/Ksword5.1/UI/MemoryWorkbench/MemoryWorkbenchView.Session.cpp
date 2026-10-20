@@ -287,7 +287,7 @@ namespace ks::ui
         {
             sessionBar_->setPendingPatches(
                 hexPane_->overlay().PendingByteCount(),
-                static_cast<quint64>(hexPane_->overlay().DiffBlocks().size()));
+                static_cast<quint64>(hexPane_->overlay().PendingBlockCount()));
         }
         updateUndoRedoActionsEnabled();
     }
@@ -434,7 +434,7 @@ namespace ks::ui
             writeController_->mode(),
             mode,
             hexPane_->overlay().PendingByteCount(),
-            static_cast<std::uint64_t>(hexPane_->overlay().DiffBlocks().size()));
+            static_cast<std::uint64_t>(hexPane_->overlay().PendingBlockCount()));
         if (!self)
         {
             return;
@@ -446,6 +446,7 @@ namespace ks::ui
                 {
                     self->sessionBar_->setWriteMode(mode);
                     self->refreshConfirmationsAndSuppression();
+                    if (self && self->hexPane_ && self->hexPane_->canvas()) self->hexPane_->canvas()->notifyOverlayChanged();
                 }
                 else if (result.status == ksword::memwb::ModeSwitchStatus::ApplyFailed && self->statusBar_ != nullptr)
                 {
@@ -477,20 +478,13 @@ namespace ks::ui
         {
             return;
         }
-        const bool hadPendingPatches = hexPane_->overlay().HasPendingPatches();
-        hexPane_->overlay().DiscardAll();
-        if (hadPendingPatches && target_ != nullptr)
-        {
-            target_->noteContentChanged();
-        }
-        if (hexPane_->canvas() != nullptr)
-        {
-            hexPane_->canvas()->notifyOverlayChanged();
-        }
-        if (sessionBar_ != nullptr)
-        {
-            sessionBar_->setPendingPatches(0, 0);
-        }
+        if (!writeController_) return;
+        const QPointer<MemoryWorkbenchView> self(this);
+        writeController_->beginPendingDiscard(0, 0, true, [self](bool ok, std::uint64_t) {
+            if (!self || !ok) return;
+            if (self->hexPane_ && self->hexPane_->canvas()) self->hexPane_->canvas()->notifyOverlayChanged();
+            self->refreshPendingPatchesDisplay();
+        });
     }
 
     // onSessionBarPickTargetRequested：转发给 Dock，本类不碰下拉框。

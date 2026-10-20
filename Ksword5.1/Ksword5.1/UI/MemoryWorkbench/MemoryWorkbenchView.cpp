@@ -919,7 +919,7 @@ namespace ks::ui
             // 丢弃并离开/取消"——没有"切换"这件事。
             pendingDecision = confirmations_->PromptLeaveWithPending(
                 hexPane_->overlay().PendingByteCount(),
-                static_cast<std::uint64_t>(hexPane_->overlay().DiffBlocks().size()),
+                static_cast<std::uint64_t>(hexPane_->overlay().PendingBlockCount()),
                 reasonText);
             if (!stillCurrent())
             {
@@ -983,22 +983,29 @@ namespace ks::ui
             leaveSequencePending_ = false;
             return attempt.status == CommitEntryStatus::Busy ? LeaveEntryStatus::Busy : LeaveEntryStatus::Rejected;
         }
-        if (!finishInt3() || !self || !stillCurrent()) return LeaveEntryStatus::Rejected;
-        // 丢弃并离开：叠加层清空后画布要重绘，会话条的"N 字节待写入"也要同步清掉
-        // （第二轮复核 B4：旧实现漏了后一步，芯片残留）。
-        const bool hadPendingPatches = hexPane_->overlay().HasPendingPatches();
-        hexPane_->overlay().DiscardAll();
-        if (hadPendingPatches && target_ != nullptr)
+        const auto ticket = ++leaveSequenceTicket_;
+        const auto source = leaveCapture.rev.source;
+        const auto discard = writeController_->beginPendingDiscard(0, 0, true,
+            [self, ticket, source, finishInt3, completion = std::move(completion)](bool ok, std::uint64_t) mutable {
+                if (!self || !self->leaveSequencePending_) return;
+                self->leaveSequencePending_ = false;
+                bool allowed = ok && ticket == self->leaveSequenceTicket_ && self->target_
+                    && self->target_->revisions().Source() == source && self->hexPane_
+                    && !self->hexPane_->overlay().HasPendingPatches();
+                if (allowed) allowed = finishInt3() && self && self->target_
+                    && self->target_->revisions().Source() == source;
+                if (!self) return;
+                if (self->hexPane_ && self->hexPane_->canvas()) self->hexPane_->canvas()->notifyOverlayChanged();
+                self->refreshPendingPatchesDisplay();
+                if (completion) completion(allowed);
+            });
+        if (!self) return LeaveEntryStatus::Rejected;
+        if (discard)
         {
-            // 真正丢弃会改变工作台显示内容；推进内容代次，让既有捕获能识别这次变化。
-            target_->noteContentChanged();
+            pendingReset.dismiss();
+            return LeaveEntryStatus::Pending;
         }
-        if (hexPane_->canvas() != nullptr)
-        {
-            hexPane_->canvas()->notifyOverlayChanged();
-        }
-        refreshPendingPatchesDisplay();
-        return LeaveEntryStatus::Completed;
+        return LeaveEntryStatus::Rejected;
     }
 
     // wireActions：对 WorkbenchActionId 的每一项挂快捷键；Redo 同时挂主键与候补

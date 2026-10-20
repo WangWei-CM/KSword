@@ -931,6 +931,7 @@
     <ClInclude Include="KernelDock\KernelPlatformAuditTab.h" />
     <ClInclude Include="KernelDock\KernelIoctlDecoderTab.h" />
     <ClInclude Include="KernelDock\KernelDockIpcTab.h" />
+    <ClInclude Include="UI\MemoryWorkbench\WorkbenchWorkerValue.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepTab.h" />
     <ClInclude Include="KernelDock\KernelObjectDirectoryDeepWorker.h" />
     <ClInclude Include="KernelDock\KernelObjectTypeMatrixTab.h" />

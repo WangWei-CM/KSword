@@ -197,7 +197,8 @@ namespace ks::ui
         hexPane_->setSourceRevisionProvider([this]() -> std::uint64_t {
             return target_ ? target_->revisions().Source() : 0ULL;
         });
-        connect(hexPane_->canvas(), &HexCanvas::editStaged, writeController_.get(), &WorkbenchWriteController::onEditCompleted);
+        // Connected canvas staging is completed by the controller value job;
+        // it notes content and enters immediate mode exactly once there.
 
         // DisasmBytesProviderAdapter 的完整类定义只在 MemoryWorkbenchView.cpp
         // 里（头文件只前置声明），本文件（.Ui.cpp）看不到它继承
@@ -731,7 +732,7 @@ namespace ks::ui
         }
         sessionBar_->setPendingPatches(
             hexPane_->overlay().PendingByteCount(),
-            static_cast<quint64>(hexPane_->overlay().DiffBlocks().size()));
+            static_cast<quint64>(hexPane_->overlay().PendingBlockCount()));
     }
 
     // clearScopeSwitchPrompt：见头文件声明处的注释。

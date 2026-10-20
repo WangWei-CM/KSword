@@ -1,4 +1,5 @@
 #include "WorkbenchWriteController.h"
+#include "WorkbenchWorkerValue.h"
 #include "../AsyncOperation.h"
 #include <QEvent>
 #include "../AsyncCleanupRegistry.h"
@@ -416,8 +417,8 @@ int main(int argc, char** argv)
             QObject::connect(h.controller.get(), &ui::WorkbenchWriteController::pendingStageResolved, &h.target,
                 [&](ui::WorkbenchWriteController::PendingStageTicket, bool ok, const QString&) { Check(ok, "covered pending-stage rejected"); ++staged; });
             const auto ticket = h.controller->beginPendingStage(0, QByteArray(1, char(2)));
-            Check(ticket != 0 && staged == 1 && h.state->landed == 0, "pending-stage ticket pretended to be physical completion");
-            Until([&] { return !h.controller->isCommitting(); });
+            Check(ticket != 0 && staged == 0 && h.state->landed == 0, "pending-stage ticket pretended to be synchronous staging or physical completion");
+            Until([&] { return !h.controller->isCommitting() && staged == 1; });
             Check(h.last.outcome == mem::CommitOutcome::Committed && h.state->bytes[0] == 2, "pending-stage immediate continuation failed");
         }
         {
@@ -425,6 +426,211 @@ int main(int argc, char** argv)
             h.state->delayMs = 0; h.Stage(1, {3}); h.Start(); h.Done();
             Check(ui::WorkbenchWriteLedger::RetainedLedgers().back()->GetSummary().undoCount == 1,
                 "slow operation admission time changed original completion-time undo coalescing");
+        }
+
+        {
+            // COW values may diverge, including equal-content mutations. The
+            // original's immutable storage and serial are the projection proof.
+            mem::MemoryDiffOverlay original(8);
+            Check(original.LoadBaseline("value", 100, {1,2,3,4}, {1,1,1,1}) == mem::BaselineLoadStatus::Ok, "value baseline");
+            auto snapshot = original;
+            auto candidate = snapshot;
+            Check(original.SameRevision(snapshot), "snapshot copied bulk state or lost revision");
+            Check(candidate.Stage(101, {9,8}) == mem::StageStatus::Ok, "value stage");
+            Check(original.EffectiveByte(101) == 2 && candidate.EffectiveByte(101) == 9, "COW stage mutated reader");
+            const auto pointer = &original;
+            Check(original.TryAdoptPrepared(snapshot, candidate) && &original == pointer, "projection replaced overlay object");
+            Check(original.PendingByteCount() == 2 && original.PendingBlockCount() == 1, "projection lost block metadata");
+            Check(!original.TryAdoptPrepared(snapshot, candidate), "duplicate projection accepted");
+            const auto current = original;
+            auto newer = current;
+            Check(newer.Stage(101, {7}) == mem::StageStatus::Ok, "new candidate stage");
+            original.DiscardAll();
+            Check(!original.TryAdoptPrepared(current, newer), "discard did not invalidate candidate");
+            auto beforeReload = original;
+            Check(original.RefreshBaseline("value",100,{1,2,3,4},{1,1,1,1}) == mem::BaselineLoadStatus::Ok, "reload failed");
+            Check(!original.TryAdoptPrepared(beforeReload, newer), "equal-content refresh ABA accepted candidate");
+            mem::MemoryDiffOverlay limit(1);
+            limit.LoadBaseline("limit",0,{1,1,1},{1,1,1}); limit.Stage(0,{2});
+            const auto beforeReject = limit;
+            Check(limit.Stage(2,{3}) == mem::StageStatus::TooLarge && limit.SameRevision(beforeReject), "rejected merged-size stage changed revision");
+            Check(limit.Stage(0,{}) == mem::StageStatus::Empty && limit.SameRevision(beforeReject), "empty stage changed revision");
+            Check(limit.LoadBaseline("bad",0,{1},{}) == mem::BaselineLoadStatus::MaskLengthMismatch && limit.SameRevision(beforeReject), "bad baseline changed revision");
+            Check(limit.AcceptWrite({0,{1},{2}}, {}) == mem::AcceptWriteStatus::ReadBackLengthMismatch && limit.SameRevision(beforeReject), "bad accept changed revision");
+            auto accepted = beforeReject;
+            Check(accepted.AcceptWrite({0,{1},{2}}, {2}) == mem::AcceptWriteStatus::Ok, "prepared accept failed");
+            Check(limit.EffectiveByte(0) == 2 && limit.BaselineByte(0) == 1 && accepted.BaselineByte(0) == 2, "prepared accept leaked baseline mutation");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool ok = true;
+            const auto ticket = h.controller->beginPendingStage(0, QByteArray(1024*1024, char(2)),
+                [&](bool success,const QString&) { ++calls; ok = success; });
+            // Bounds are absent: cancellation resolves the waiting ticket once.
+            Check(ticket != 0, "waiting stage not accepted"); h.controller->cancelPendingStage(ticket);
+            Check(calls == 1 && !ok && !h.overlay.HasPendingPatches(), "waiting cancellation lost or staged edit");
+            h.controller->notifyWindowMayCover(); Check(calls == 1, "cancelled waiting ticket revived");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool ok = true;
+            const auto ticket = h.controller->beginPendingStage(0, QByteArray(4, char(2)),
+                [&](bool success,const QString&) { ++calls; ok = success; });
+            Check(ticket != 0 && h.controller->isCommitting(), "stage did not hold busy admission");
+            h.controller->cancelPendingStage(ticket);
+            Until([&] { return !h.controller->isCommitting(); });
+            Check(calls == 1 && !ok && !h.overlay.HasPendingPatches() && h.state->writeCalls == 0, "active cancellation projected or wrote");
+            Check(h.readOnly == std::vector<bool>{true,false} && h.suspended == h.readOnly, "cancel stage hooks unbalanced");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool ok = true;
+            h.controller->beginPendingStage(0, QByteArray(4, char(2)),
+                [&](bool success,const QString&) { ++calls; ok = success; });
+            h.overlay.Stage(7,{9}); // Deliberately do not notify target: overlay serial alone must reject.
+            Until([&] { return !h.controller->isCommitting(); });
+            Check(calls == 1 && !ok && h.overlay.PendingByteCount() == 1 && h.overlay.EffectiveByte(7) == 9, "stage serial check overwrote newer patch");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool ok = true;
+            h.controller->beginPendingStage(0, QByteArray(4, char(2)),
+                [&](bool success,const QString&) { ++calls; ok = success; });
+            h.target.noteContentChanged();
+            Until([&] { return !h.controller->isCommitting(); });
+            Check(calls == 1 && !ok && !h.overlay.HasPendingPatches(), "content-only invalidation accepted stage");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool ok = true;
+            h.controller->beginPendingStage(0, QByteArray(4, char(2)),
+                [&](bool success,const QString&) { ++calls; ok = success; });
+            h.target.requestReload();
+            Until([&] { return !h.controller->isCommitting(); });
+            Check(calls == 1 && !ok && !h.overlay.HasPendingPatches(), "source invalidation accepted stage");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0;
+            h.controller->beginPendingStage(0, QByteArray(4,char(2)), [&](bool,const QString&) { ++calls; });
+            h.controller.reset(); QThreadPool::globalInstance()->waitForDone();
+            QCoreApplication::processEvents();
+            Check(calls == 0 && !h.overlay.HasPendingPatches() && h.state->writeCalls == 0, "closed staging owner received result or mutation");
+        }
+        {
+            // First source/identity mutation may be hidden by an external
+            // unlock hook. The new target must never get onEditCompleted().
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            bool changed = false; bool ok = true; int calls = 0;
+            h.controller->setCanvasReadOnlyHook([&](bool busy)
+            { if (!busy && !changed) { changed = true; h.target.requestReload(); } });
+            h.controller->beginPendingStage(0,QByteArray(4,char(2)),[&](bool success,const QString&) { ++calls;ok=success; });
+            Until([&] { return !h.controller->isCommitting(); });
+            Check(calls == 1 && !ok && h.state->writeCalls == 0, "unlock reentry approved stale staging");
+        }
+
+
+        {
+            mem::MemoryDiffOverlay a,b;
+            a.LoadBaseline("same",0,{1,2},{1,1}); b.LoadBaseline("same",0,{1,2},{1,1});
+            const auto original = a; auto prepared = a;
+            Check(a.MutationSerial() == b.MutationSerial() && !a.SameRevision(b),"same-serial distinct storage has no identity");
+            prepared.Stage(0,{3}); a=b;
+            Check(!a.TryAdoptPrepared(original,prepared),"copy-assignment same-serial ABA projected stale value");
+            const auto noChange = a; auto noChangePrepared = a;
+            Check(a.TryAdoptPrepared(noChange,noChangePrepared),"no-change projection rejected");
+            Check(!a.TryAdoptPrepared(noChange,noChangePrepared),"same-storage repeated no-change projection ignored serial");
+        }
+        {
+            // Remove only the shared controller delivery functor after the
+            // actual worker completes. Its independent value completion must
+            // reconcile busy and project the edit exactly once.
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int calls = 0; bool staged = false;
+            h.controller->beginPendingStage(0,QByteArray(4,char(2)),[&](bool ok,const QString&){++calls;staged=ok;});
+            QThreadPool::globalInstance()->waitForDone();
+            for (auto* child : h.controller->children())
+                if (dynamic_cast<ui::AsyncOperation*>(child)) QCoreApplication::removePostedEvents(child,QEvent::MetaCall);
+            Until([&]{return !h.controller->isCommitting();});
+            Check(calls == 1 && staged && h.overlay.PendingByteCount() == 4 && h.state->writeCalls == 0,"dropped stage receipt left busy or lost edit");
+            h.controller->beginPendingStage(8,QByteArray(2,char(3)),[&](bool ok,const QString&){++calls;staged=ok;});
+            Until([&]{return !h.controller->isCommitting();});
+            Check(calls == 2 && staged && h.overlay.PendingByteCount() == 6,"dropped stage prevented next explicit request");
+        }
+        {
+            Harness h; h.Stage(); h.controller->setUiConfirmSuppressed(true); h.Start();
+            QThreadPool::globalInstance()->waitForDone();
+            for (auto* child : h.controller->children())
+                if (dynamic_cast<ui::AsyncOperation*>(child)) QCoreApplication::removePostedEvents(child,QEvent::MetaCall);
+            h.Done();
+            Check(h.finished == 1 && h.completions == 1 && h.state->landed == 1 && !h.overlay.HasPendingPatches(),"dropped terminal delivery lost or repeated actual write");
+        }
+        {
+            Harness h; h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            bool once = false; bool staged = true; int calls = 0;
+            h.controller->setCanvasReadOnlyHook([&](bool busy)
+            { if (!busy && !once) { once=true; h.overlay.DiscardAll(); } });
+            h.controller->beginPendingStage(0,QByteArray(4,char(2)),[&](bool ok,const QString&){++calls;staged=ok;});
+            Until([&]{return !h.controller->isCommitting();});
+            Check(calls == 1 && !staged && !h.overlay.HasPendingPatches(),"unlock overlay mutation was reported as matching stage");
+        }
+        {
+            std::atomic<bool> destroyed{false}, onWorker{false};
+            struct Probe
+            {
+                std::atomic<bool>& destroyed; std::atomic<bool>& onWorker; std::thread::id gui;
+                ~Probe() { onWorker.store(std::this_thread::get_id()!=gui);destroyed.store(true); }
+            };
+            auto value=ui::MakeWorkerValue<Probe>(destroyed,onWorker,std::this_thread::get_id());
+            value.reset(); Until([&]{return destroyed.load();});
+            Check(onWorker.load(),"pure value final destruction ran on GUI");
+        }
+
+        for (const auto size : {std::size_t{64*1024}, std::size_t{1024*1024}, std::size_t{16*1024*1024}, std::size_t{64*1024*1024}})
+        {
+            Harness h;
+            h.state->bytes.assign(size,1);
+            Check(h.overlay.LoadBaseline(mem::IdentityKey(h.target.session(),0,size),0,h.state->bytes,
+                std::vector<std::uint8_t>(size,1)) == mem::BaselineLoadStatus::Ok,"scale baseline failed");
+            h.controller->requestModeSwitch(mem::WriteMode::StagedThenApply);
+            int stages = 0; bool staged = false;
+            QByteArray payload(static_cast<qsizetype>(size),char(2));
+            const int beats = heartbeat;
+            double maxDispatchMs = 0;
+            const auto wait = [&](const auto& ready)
+            {
+                QElapsedTimer deadline; deadline.start();
+                while (!ready())
+                {
+                    if (deadline.elapsed() >= 60000) Check(false,"scale timeout");
+                    const auto start = std::chrono::steady_clock::now();
+                    QCoreApplication::processEvents();
+                    const auto ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+                    maxDispatchMs = (std::max)(maxDispatchMs,ms);
+                    QThread::msleep(1);
+                }
+            };
+            auto start = std::chrono::steady_clock::now();
+            const auto ticket = h.controller->beginPendingStage(0,payload,[&](bool ok,const QString&) {++stages;staged=ok;});
+            const auto submitMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            Check(ticket != 0 && stages == 0,"scale staging was synchronous or rejected");
+            wait([&]{return stages == 1 && !h.controller->isCommitting();});
+            const auto stageMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            Check(staged && h.overlay.PendingByteCount() == size && h.overlay.PendingBlockCount() == 1,"scale stage lost bytes");
+            Check(h.overlay.BaselineByte(size-1) == 1 && h.overlay.EffectiveByte(size-1) == 2,"scale staging changed baseline or omitted tail");
+            Check(h.state->writeCalls == 0,"staged mode performed target write");
+            start = std::chrono::steady_clock::now();
+            Check(h.Start().status == ui::CommitEntryStatus::Pending,"scale commit not accepted");
+            const auto commitSubmitMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            wait([&]{return !h.controller->isCommitting() && h.completions == 1;});
+            const auto commitMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            Check(h.last.outcome == mem::CommitOutcome::Committed && h.last.bytesWritten == size && !h.overlay.HasPendingPatches(),"scale commit lost full verified projection");
+            Check(h.overlay.BaselineByte(size-1) == 2 && h.overlay.ChangeKind(size-1) == mem::ByteChangeKind::SelfWritten,"scale accept missing tail/selfwritten semantics");
+            Check(h.state->bytes.front() == 2 && h.state->bytes.back() == 2,"scale transport result truncated");
+            Check(h.controller->lastCommitProjectionMatched(),"scale projection refused matching immutable source");
+            std::printf("scale,size=%zu,stage_submit_ms=%.6f,commit_submit_ms=%.6f,stage_worker_wall_ms=%.3f,commit_worker_wall_ms=%.3f,max_gui_process_events_ms=%.3f,heartbeat=%d\n",
+                size,submitMs,commitSubmitMs,stageMs,commitMs,maxDispatchMs,heartbeat-beats);
+            AuditComplete(h);
         }
 
         {
@@ -441,16 +647,6 @@ int main(int argc, char** argv)
             Until([&]{return continuations == 2 && !h.controller->isCommitting();});
             Check(secondPending && second.outcome == mem::CommitOutcome::Committed && h.state->bytes[2] == 3
                 && h.state->landed == 2,"completion continuation returned false Pending then cancelled second write");
-        }
-
-        {
-            Harness h; h.Stage(); h.controller->setUiConfirmSuppressed(true); h.Start();
-            QThreadPool::globalInstance()->waitForDone();
-            for (auto* child : h.controller->children())
-                if (dynamic_cast<ui::AsyncOperation*>(child)) QCoreApplication::removePostedEvents(child,QEvent::MetaCall);
-            h.Done();
-            Check(h.finished == 1 && h.completions == 1 && h.state->landed == 1 && !h.overlay.HasPendingPatches(),
-                "dropped terminal delivery revoked the completed receipt");
         }
         Until([] { return ui::AsyncCleanupRegistry::global().pending() == 0; });
         std::printf("checks=%d heartbeat=%d boundary=QtCore actual controller/frozen worker; fake transport/identity/confirmation only\n", checks.load(), heartbeat);

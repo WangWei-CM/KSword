@@ -136,7 +136,7 @@
 //   未加载 / 在途 / 不可读都不行，早退，所以最坏耗时只与页缓存容量成正比）-> overlay->Stage
 //   （窗口、基线未读到字节、总量上限由叠加层判定）。
 // - 失败：发 editRejected(原因)，把同一原因写进 reasonOut（可传空指针），返回 false，叠加层不变。
-//   成功：重绘、排队 contentChanged、发 editStaged(address, length)，返回 true。
+//   默认同步暂存；连接工作台 submitter 后 true 只表示请求已接受，实际成功回投才重绘并发 editStaged。
 //   Stage 对"与现值相同"的写入是空操作，仍算成功（editStaged 照发，宿主的写事务看到空补丁自会跳过）。
 // - 与旧行为的差异：填充与粘贴现在也要求目标字节"屏幕上看得到值"（此前只靠叠加层的基线判断）。
 //   理由与复制一致：不覆盖从没看到过的数据；代价是跨越已被页缓存淘汰的区域（超过约 1 MiB）时被拒，
@@ -237,6 +237,7 @@
 #include <QTimer>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -436,10 +437,18 @@ namespace ks::ui
 
         // stageBytes：公开的暂存入口（键盘编辑、粘贴、填充、解释器行内编辑与宿主自己的暂存都走这里）。
         // 传入：起始地址、要写入的字节、原因输出（可为空指针）。
-        // 传出：true 表示已暂存（已发 editStaged）；false 表示被拒绝（已发 editRejected，reasonOut 是同一原因，
+        // 传出：true 表示已接受（默认同步；工作台在实际投影成功后发 editStaged）；false 表示被拒绝（已发 editRejected，reasonOut 是同一原因，
         //       叠加层不变）。检查顺序与"与现值相同也算成功"等细节见文件头"五、编辑"。
         // 只接受 UI 线程调用。本函数只落到 MemoryDiffOverlay::Stage，从不读写目标内存。
-        bool stageBytes(std::uint64_t address, const QByteArray& bytes, QString* reasonOut = nullptr);
+        using StageCompletion = std::function<void(bool, const QString&)>;
+        using StageSubmitter = std::function<bool(std::uint64_t, const QByteArray&, StageCompletion)>;
+        using DiscardSubmitter = std::function<bool(std::uint64_t, std::uint64_t, std::function<void(bool, std::uint64_t)>)>;
+        void setDiscardSubmitter(DiscardSubmitter submitter) { m_discardSubmitter = std::move(submitter); }
+        // A submitter returns request admission; editStaged is emitted only
+        // after the matching value revision has actually been projected.
+        void setStageSubmitter(StageSubmitter submitter) { m_stageSubmitter = std::move(submitter); }
+        bool stageBytes(std::uint64_t address, const QByteArray& bytes, QString* reasonOut = nullptr,
+            std::function<void()> afterStaged = {}, StageCompletion resolved = {});
 
         // setBytesPerRow：改每行字节数，只接受 8/16/32/48/64；返回 false 表示被拒绝。
         // 作用：插入点在屏幕上完整可见时以插入点为锚点（它停在同一屏幕行），否则以首行首地址所在行为锚点；
@@ -682,6 +691,8 @@ namespace ks::ui
         void focusOutEvent(QFocusEvent* event) override;
 
     private:
+        StageSubmitter m_stageSubmitter;
+        DiscardSubmitter m_discardSubmitter;
         // CellCore：绘制用的轻量单元格状态（不含字符串，避免逐格分配）。
         struct CellCore
         {

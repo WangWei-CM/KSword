@@ -1,4 +1,5 @@
 #include "WorkbenchWriteController.h"
+#include "WorkbenchWorkerValue.h"
 #include "../AsyncOperation.h"
 
 #include <QDebug>
@@ -36,18 +37,26 @@ namespace ks::ui
     WorkbenchWriteController::WorkbenchWriteController(QObject* parent) : QObject(parent)
     {
         async_ = new AsyncOperation(this);
+        stageAsync_ = new AsyncOperation(this);
         terminalPoll_ = new QTimer(this);
         terminalPoll_->setInterval(20);
         connect(terminalPoll_, &QTimer::timeout, this, [this]
         {
             // Shutdown or owner-side submission failure can finish through the
             // runner's independent cleanup path. This query never waits on I/O.
+            const QPointer<WorkbenchWriteController> self(this);
+            if (stageJob_ && stageJob_->completed.load(std::memory_order_acquire))
+            {
+                const auto stage = stageJob_;
+                consumeStage(stageTicket_, stage);
+                if (!self) return;
+            }
             const auto operation = operation_;
             if (!operation) return;
             try
             {
-                if (const auto terminal = operation->TryTerminalSnapshot())
-                    consumePhase(operation, *terminal);
+                if (const auto terminal = operation->TryTerminalSnapshotShared())
+                    consumePhase(operation, terminal);
             }
             catch (...) { qWarning() << "workbench terminal receipt projection allocation failed"; }
         });
@@ -58,6 +67,7 @@ namespace ks::ui
         // No GUI join and no raw-this worker cleanup. A paused confirmation is
         // finished by the runner too; its registry lease covers that interval.
         if (async_) async_->close();
+        if (stageAsync_) stageAsync_->close();
         if (authorization_) authorization_->ownerAlive.store(false, std::memory_order_release);
         if (operation_) operation_->RequestStop(true);
     }
@@ -144,7 +154,7 @@ namespace ks::ui
     void WorkbenchWriteController::setUiConfirmSuppressed(bool value)
     { pendingUiConfirmSuppressed_ = value; }
     bool WorkbenchWriteController::uiConfirmSuppressed() const { return pendingUiConfirmSuppressed_; }
-    bool WorkbenchWriteController::isCommitting() const { return accepting_ || operation_ != nullptr || (async_ && async_->isInFlight()); }
+    bool WorkbenchWriteController::isCommitting() const { return accepting_ || operation_ != nullptr || stageJob_ != nullptr || (async_ && async_->isInFlight()); }
 
     mem::ModeSwitchStatus WorkbenchWriteController::requestModeSwitch(mem::WriteMode desired)
     {
@@ -173,12 +183,16 @@ namespace ks::ui
         if (decision == mem::ModeSwitchDecision::DiscardThenSwitch)
         {
             const QPointer<WorkbenchWriteController> self(this);
-            const bool changed = overlay_ && overlay_->HasPendingPatches();
-            if (overlay_) overlay_->DiscardAll();
-            mode_ = desired;
-            if (changed && target_) target_->noteContentChanged();
-            if (self) emitPending();
-            return CommitEntryStatus::Started;
+            const auto ticket = beginPendingDiscard(0, 0, true,
+                [self, desired, completion = std::move(completion)](bool ok, std::uint64_t) {
+                    if (!self) return;
+                    mem::ModeSwitchResult result;
+                    if (ok && self->overlay_ && !self->overlay_->HasPendingPatches())
+                    { self->mode_ = desired; result.status = mem::ModeSwitchStatus::Switched; }
+                    else result.status = mem::ModeSwitchStatus::ApplyFailed;
+                    if (completion) completion(result);
+                });
+            return ticket ? CommitEntryStatus::Pending : CommitEntryStatus::Rejected;
         }
         if (decision != mem::ModeSwitchDecision::ApplyThenSwitch) return CommitEntryStatus::Rejected;
         const QPointer<WorkbenchWriteController> self(this);
@@ -259,7 +273,7 @@ namespace ks::ui
             input.revisions = captured.rev;
             input.baseAddress = overlay_->BaseAddress();
             input.baselineSize = overlay_->BaselineSize();
-            input.blocks = overlay_->DiffBlocks();
+            const auto overlaySnapshot = MakeWorkerValue<mem::MemoryDiffOverlay>(*overlay_);
             input.uiConfirmSuppressed = pendingUiConfirmSuppressed_;
             const std::string overlayIdentity = overlay_->IdentityKey();
             FrozenWriteCapture frozen;
@@ -276,23 +290,10 @@ namespace ks::ui
             if (!self) return {CommitEntryStatus::Rejected, {}, 0};
             if (!target || target_ != target || captured.rev != afterCapture.rev
                 || !mem::SameTarget(captured.session, afterCapture.session)
-                || overlay_->IdentityKey() != overlayIdentity || overlay_->DiffBlocks() != input.blocks)
+                || overlay_->IdentityKey() != overlayIdentity || !overlay_->SameRevision(*overlaySnapshot))
             { accepting_ = false; return {CommitEntryStatus::Rejected, {}, 0}; }
             if (!updateLedger(captured.session) || (replayTicket && replayTicket->ledger != ledger_->Id()))
             { accepting_ = false; return {CommitEntryStatus::Rejected, {}, 0}; }
-            if (replayTicket)
-            {
-                const auto& replay = replayTicket->replay;
-                mem::MemoryDiffOverlay scratch;
-                if (scratch.LoadBaseline(mem::IdentityKey(captured.session, 0, 0), replay.address,
-                        replay.expectedCurrent, std::vector<std::uint8_t>(replay.expectedCurrent.size(), 1))
-                    != mem::BaselineLoadStatus::Ok
-                    || scratch.Stage(replay.address, replay.restore) != mem::StageStatus::Ok)
-                { accepting_ = false; return {CommitEntryStatus::Rejected, {}, 0}; }
-                input.baseAddress = scratch.BaseAddress();
-                input.baselineSize = scratch.BaselineSize();
-                input.blocks = scratch.DiffBlocks();
-            }
             frozen.session = captured.session;
             frozen.historyReplay = replayTicket.has_value();
             frozen.writeLease = std::move(writeLease);
@@ -312,10 +313,10 @@ namespace ks::ui
             if (!target || target_ != target || beforeAccept.rev != captured.rev
                 || !mem::SameTarget(beforeAccept.session, captured.session)
                 || authorityRevision_ != authorityRevision || overlay_->IdentityKey() != overlayIdentity
-                || (!replayTicket && overlay_->DiffBlocks() != input.blocks))
+                || (!replayTicket && !overlay_->SameRevision(*overlaySnapshot)))
             { accepting_ = false; return {CommitEntryStatus::Rejected, {}, 0}; }
             auto operation = WorkbenchWriteOperationRunner::Create(std::move(input), std::move(frozen),
-                factories, ledger, tick, replayTicket, reason);
+                factories, ledger, tick, replayTicket, reason, *overlaySnapshot);
             if (!self) { if (operation) operation->RequestStop(true); return {CommitEntryStatus::Rejected, {}, 0}; }
             if (!operation) { accepting_ = false; return {CommitEntryStatus::Rejected, {}, 0}; }
             authorization_ = std::move(authorization);
@@ -358,9 +359,9 @@ namespace ks::ui
         struct Request { std::shared_ptr<WorkbenchWriteOperationRunner> operation; WritePhaseAnswer answer; };
         try
         {
-            const auto ticket = async_->submitTransaction<Request, WritePhaseSnapshot>(Request{operation, answer},
-                [](const Request& request) { return request.operation->RunPhase(request.answer); },
-                [self, operation](const WritePhaseSnapshot& phase, std::uint64_t)
+            const auto ticket = async_->submitTransaction<Request, std::shared_ptr<const WritePhaseSnapshot>>(Request{operation, answer},
+                [](const Request& request) { return request.operation->RunPhaseShared(request.answer); },
+                [self, operation](const std::shared_ptr<const WritePhaseSnapshot>& phase, std::uint64_t)
                 {
                     if (self) self->consumePhase(operation, phase);
                     return true;
@@ -380,11 +381,11 @@ namespace ks::ui
     }
 
     void WorkbenchWriteController::consumePhase(
-        const std::shared_ptr<WorkbenchWriteOperationRunner>& operation, const WritePhaseSnapshot& phase)
+        const std::shared_ptr<WorkbenchWriteOperationRunner>& operation, const std::shared_ptr<const WritePhaseSnapshot>& phase)
     {
-        if (operation_ != operation || phase.operation != operation->Id()) return;
-        if (phase.terminal) { finishOperation(operation, phase); return; }
-        pendingPhase_ = phase;
+        if (!phase || operation_ != operation || phase->operation != operation->Id()) return;
+        if (phase->terminal) { finishOperation(operation, *phase); return; }
+        pendingPhase_ = phase; // Shared worker-owned immutable value; no GUI copy.
         // AsyncOperation still owns this apply stack; resume after it releases
         // its per-phase busy admission. No nested event-loop wait is involved.
         QTimer::singleShot(0, this, [this] { resumePendingConfirmation(); });
@@ -399,8 +400,8 @@ namespace ks::ui
         catch (...) { if (self && operation_) operation_->RequestStop(); return; }
         if (!self || !operation_ || !pendingPhase_) return;
         const auto operation = operation_;
-        const auto phase = *pendingPhase_;
-        if (phase.operation != operation->Id()) return;
+        const auto phase = pendingPhase_;
+        if (phase->operation != operation->Id()) return;
         if (authorization_ && !authorization_->Allows(operation->Capture().authorizationEpoch))
         {
             pendingPhase_.reset();
@@ -410,19 +411,19 @@ namespace ks::ui
         prompting_ = true;
         pendingPhase_.reset();
         WritePhaseAnswer answer;
-        answer.operation = phase.operation;
-        answer.serial = phase.serial;
+        answer.operation = phase->operation;
+        answer.serial = phase->serial;
         try
         {
-            if (phase.step == mem::MemoryWriteOperation::Step::NeedUi)
+            if (phase->step == mem::MemoryWriteOperation::Step::NeedUi)
             {
                 answer.kind = WritePhaseAnswer::Kind::Ui;
-                answer.uiAccepted = confirmation_->ConfirmUi(phase.ui);
+                answer.uiAccepted = confirmation_->ConfirmUi(phase->ui);
             }
-            else if (phase.step == mem::MemoryWriteOperation::Step::NeedApproval)
+            else if (phase->step == mem::MemoryWriteOperation::Step::NeedApproval)
             {
                 answer.kind = WritePhaseAnswer::Kind::Approval;
-                answer.approval = confirmation_->ConfirmApproval(phase.approval);
+                answer.approval = confirmation_->ConfirmApproval(phase->approval);
             }
             else { operation->RequestStop(); }
         }
@@ -445,8 +446,8 @@ namespace ks::ui
         const auto& input = operation.Input();
         if (!mem::SameTarget(current.session, input.session) || current.rev != input.revisions) return false;
         if (historyReplay_) return true; // Scratch replay does not accept the live overlay.
-        return overlay_->BaseAddress() == input.baseAddress && overlay_->BaselineSize() == input.baselineSize
-            && overlay_->DiffBlocks() == input.blocks;
+        const auto& snapshot = operation.OverlaySnapshot();
+        return snapshot && overlay_->SameRevision(*snapshot);
     }
 
     void WorkbenchWriteController::finishOperation(
@@ -485,19 +486,13 @@ namespace ks::ui
         bool projected = matches && !phase.receiptFailed;
         if (matches && !replaying)
         {
-            // The durable ledger was already recorded on worker. Only verified
-            // exact pending blocks can be accepted into this live GUI overlay.
-            try
-            {
-                for (const auto& verified : phase.result.verifiedBlocks)
-                    if (overlay_->AcceptWrite(verified.block, verified.readBack) != mem::AcceptWriteStatus::Ok)
-                        projected = false;
-            }
-            catch (...) { projected = false; }
+            const auto& original = operation->OverlaySnapshot();
+            projected &= phase.projectionPrepared && phase.preparedOverlay && original
+                && overlay_->TryAdoptPrepared(*original, *phase.preparedOverlay);
         }
         // Bindings are value witnesses, including failed attempted spans. Never
         // overwrite definitions/bindings that changed during this operation.
-        const auto expectedPending = overlay_ ? overlay_->DiffBlocks() : std::vector<mem::DiffBlock>{};
+        const auto expectedOverlay = overlay_ ? std::optional{overlay_->CaptureRevision()} : std::nullopt;
         if (matches && bindings) bindings(phase.bindings);
         if (!self) return;
         if (matches)
@@ -508,7 +503,7 @@ namespace ks::ui
             matches = target && target_ == target && authorization_
                 && authorization_->Allows(operation->Capture().authorizationEpoch)
                 && mem::SameTarget(current.session, input.session) && current.rev == input.revisions
-                && overlay_ && overlay_->DiffBlocks() == expectedPending;
+                && overlay_ && expectedOverlay && overlay_->MatchesRevision(*expectedOverlay);
             projected &= matches;
         }
         if (matches && report.bytesWritten != 0 && target) target->noteContentChanged();
@@ -595,8 +590,7 @@ namespace ks::ui
     void WorkbenchWriteController::emitPending()
     {
         if (!overlay_) { emit pendingPatchesChanged(0, 0); return; }
-        const auto blocks = overlay_->DiffBlocks();
-        emit pendingPatchesChanged(overlay_->PendingByteCount(), static_cast<quint64>(blocks.size()));
+        emit pendingPatchesChanged(overlay_->PendingByteCount(), static_cast<quint64>(overlay_->PendingBlockCount()));
     }
     bool WorkbenchWriteController::canUndo() const
     { return !isCommitting() && target_ && ledger_ && ledger_->GetSummary().undoCount != 0; }

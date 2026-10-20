@@ -44,6 +44,8 @@ namespace ks::ui
         using RereadRangeFn = std::function<void(std::uint64_t, std::uint64_t)>;
         using TickProviderFn = std::function<std::uint64_t()>;
         using PendingStageTicket = std::uint64_t;
+        using StageCompletion = std::function<void(bool, const QString&)>;
+        using DiscardCompletion = std::function<void(bool, std::uint64_t)>;
         using CanvasReadOnlyHook = std::function<void(bool)>;
         using CommitSuspendHook = std::function<void(bool)>;
         using CommitCompletion = std::function<void(const ksword::memwb::CommitReport&)>;
@@ -94,7 +96,9 @@ namespace ks::ui
         CommitEntryStatus undo(CommitCompletion = {});
         CommitEntryStatus redo(CommitCompletion = {});
 
-        PendingStageTicket beginPendingStage(std::uint64_t, const QByteArray&);
+        PendingStageTicket beginPendingStage(std::uint64_t, const QByteArray&, StageCompletion = {});
+        PendingStageTicket beginPendingDiscard(std::uint64_t address, std::uint64_t length,
+            bool all, DiscardCompletion = {});
         void cancelPendingStage(PendingStageTicket);
         void notifyWindowMayCover();
         void FinalizePendingStageForTest(PendingStageTicket ticket, bool ok, const QString& reason)
@@ -114,21 +118,46 @@ namespace ks::ui
         struct PendingStageEntry
         {
             std::uint64_t address = 0;
-            std::vector<std::uint8_t> bytes;
+            PendingStageTicket ticket = 0;
+            QByteArray bytes;
+            StageCompletion completion;
+            DiscardCompletion discardCompletion;
+            bool discard = false, discardAll = false;
+            std::uint64_t discardLength = 0;
             QPointer<WorkbenchTarget> target;
             std::uint64_t sourceRevision = 0;
             QTimer* timer = nullptr;
         };
+        struct StageValueJob
+        {
+            StageValueJob(const ksword::memwb::MemoryDiffOverlay& value, std::uint64_t at, QByteArray data)
+                : original(value), prepared(value), address(at), bytes(std::move(data)) {}
+            ksword::memwb::MemoryDiffOverlay original, prepared;
+            std::optional<ksword::memwb::MemoryDiffOverlay::Revision> projected;
+            std::uint64_t address;
+            bool discard = false, discardAll = false;
+            std::uint64_t discardLength = 0, discardedBytes = 0;
+            std::uint64_t contentRevision = 0;
+            int waitingBudgetMs = 2000;
+            QByteArray bytes;
+            std::atomic<bool> completed{false};
+            bool failed = false;
+            ksword::memwb::StageStatus status = ksword::memwb::StageStatus::OutOfWindow;
+        };
         struct PendingStageAttempt { bool resolved = false, ok = false; QString reason; };
+        PendingStageTicket beginPendingOverlayValue(std::uint64_t, const QByteArray&,
+            StageCompletion, bool discard, bool all, std::uint64_t, DiscardCompletion);
         PendingStageAttempt TryStagePendingEntry(const PendingStageEntry&);
-        void FinalizePendingStage(PendingStageTicket, bool, const QString&);
+        void consumeStage(PendingStageTicket, const std::shared_ptr<StageValueJob>&);
+        void releaseStageHooks();
+        void FinalizePendingStage(PendingStageTicket, bool, const QString&, std::uint64_t discarded = 0);
         CommitAttempt beginCommit(CommitCompletion,
             std::optional<WorkbenchWriteLedger::ReplayTicket> = {});
         CommitEntryStatus replay(bool undo, CommitCompletion);
         void dispatchPhase(const std::shared_ptr<WorkbenchWriteOperationRunner>&,
             WritePhaseAnswer = {});
         void consumePhase(const std::shared_ptr<WorkbenchWriteOperationRunner>&,
-            const WritePhaseSnapshot&);
+            const std::shared_ptr<const WritePhaseSnapshot>&);
         void finishOperation(const std::shared_ptr<WorkbenchWriteOperationRunner>&,
             const WritePhaseSnapshot&);
         bool projectionMatches(const WorkbenchWriteOperationRunner&);
@@ -149,8 +178,11 @@ namespace ks::ui
         std::shared_ptr<FrozenWriteAuthorization> authorization_;
         std::shared_ptr<WorkbenchWriteLedger> ledger_;
         std::shared_ptr<WorkbenchWriteOperationRunner> operation_;
-        std::optional<WritePhaseSnapshot> pendingPhase_;
+        std::shared_ptr<const WritePhaseSnapshot> pendingPhase_;
         AsyncOperation* async_ = nullptr;
+        AsyncOperation* stageAsync_ = nullptr;
+        std::shared_ptr<StageValueJob> stageJob_;
+        PendingStageTicket stageTicket_ = 0;
         QTimer* terminalPoll_ = nullptr;
         CommitCompletion completion_;
         RereadRangeFn rereadRangeCallback_;
