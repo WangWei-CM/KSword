@@ -766,11 +766,11 @@ private:
     // 调用方式：由注入动作函数传入 actionEvent，以保证“动作+文件读取”日志链路一致。
     // 参数 filePath：文件路径；bufferOut：输出缓冲区；errorTextOut：错误信息；actionEvent：同链路日志事件对象。
     // 返回值：读取成功返回 true，失败返回 false。
-    bool readBinaryFile(
+    static bool readBinaryFile(
         const QString& filePath,
         std::vector<std::uint8_t>& bufferOut,
         std::string& errorTextOut,
-        const kLogEvent& actionEvent) const;
+        const kLogEvent& actionEvent, std::size_t maxBytes = 0);
     // showActionResultMessage 作用：统一记录动作结果（不弹框），并复用外层传入的同一 kLogEvent 维持调用链。
     // 调用方式：动作函数先创建 kLogEvent，再将该事件对象传入本函数。
     // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：同链路日志事件对象。

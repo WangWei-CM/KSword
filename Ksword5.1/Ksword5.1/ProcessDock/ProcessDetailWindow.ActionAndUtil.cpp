@@ -1030,144 +1030,68 @@ void ProcessDetailWindow::updateActionAffinityCoreButtons()
 void ProcessDetailWindow::executeInjectDllAction()
 {
     const QString dllPath = m_dllPathLineEdit->text().trimmed();
-    const bool useR0Injection =
-        m_injectionModeCombo != nullptr &&
-        m_injectionModeCombo->currentData().toInt() == 1;
+    const bool useR0Injection = m_injectionModeCombo != nullptr && m_injectionModeCombo->currentData().toInt() == 1;
     if (dllPath.isEmpty())
     {
-        kLogEvent injectDllEmptyPathEvent;
-        warn << injectDllEmptyPathEvent
-            << "[ProcessDetailWindow] executeInjectDllAction: DLL 路径为空。"
-            << eol;
         QMessageBox::warning(this, "DLL 注入", "请先选择 DLL 文件。");
         return;
     }
-
-    // DLL 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDetailWindow] executeInjectDllAction: pid="
-        << m_baseRecord.pid
-        << ", mode="
-        << (useR0Injection ? "R0" : "R3")
-        << ", dllPath="
-        << dllPath.toStdString()
-        << eol;
-
-    std::string detailText;
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    bool actionOk = false;
-    if (useR0Injection)
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const kLogEvent actionEvent;
+    submitDetailAction(useR0Injection ? QStringLiteral("DLL 注入(R0)") : QStringLiteral("DLL 注入"), actionEvent,
+        [pid, creationTime, useR0Injection, dllPath]
     {
-        ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessInjectResult injectResult =
-            driverClient.injectProcessDll(
-                static_cast<std::uint32_t>(m_baseRecord.pid),
-                dllPath.toStdWString());
-        detailText = injectResult.io.message;
-        actionOk =
-            injectResult.io.ok &&
-            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
-    }
-    else
-    {
-        const std::string dllPathUtf8 = dllPath.toStdString();
-        actionOk = invokeProcessActionForIdentity(
-            targetPid,
-            m_baseRecord.creationTime100ns,
-            [targetPid, dllPathUtf8](std::string* detailTextOut)
-            {
-                return ks::process::InjectDllByPath(targetPid, dllPathUtf8, detailTextOut);
-            },
-            &detailText);
-    }
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeInjectDllAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage(useR0Injection ? QStringLiteral("DLL 注入(R0)") : QStringLiteral("DLL 注入"), actionOk, detailText, actionEvent);
-    if (actionOk)
-    {
-        requestAsyncModuleRefresh(true);
-    }
+        DetailActionResult result;
+        if (useR0Injection)
+        {
+            const auto injected = ksword::ark::DriverClient().injectProcessDll(pid, dllPath.toStdWString());
+            result.detail = injected.io.message;
+            result.ok = injected.io.ok && injected.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+        }
+        else
+        {
+            result.ok = invokeProcessActionForIdentity(pid, creationTime,
+                [pid, dllPath](std::string* detail) { return ks::process::InjectDllByPath(pid, dllPath.toStdString(), detail); }, &result.detail);
+        }
+        return result;
+    }, true);
 }
 
 void ProcessDetailWindow::executeInjectShellcodeAction()
 {
     const QString shellcodePath = m_shellcodePathLineEdit->text().trimmed();
-    const bool useR0Injection =
-        m_injectionModeCombo != nullptr &&
-        m_injectionModeCombo->currentData().toInt() == 1;
+    const bool useR0Injection = m_injectionModeCombo != nullptr && m_injectionModeCombo->currentData().toInt() == 1;
     if (shellcodePath.isEmpty())
     {
-        kLogEvent injectShellcodeEmptyPathEvent;
-        warn << injectShellcodeEmptyPathEvent
-            << "[ProcessDetailWindow] executeInjectShellcodeAction: shellcode 路径为空。"
-            << eol;
         QMessageBox::warning(this, "Shellcode 注入", "请先选择 shellcode 文件。");
         return;
     }
-
-    // Shellcode 注入日志：同一动作只使用一个 kLogEvent，保证调用链可追踪。
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[ProcessDetailWindow] executeInjectShellcodeAction: pid="
-        << m_baseRecord.pid
-        << ", mode="
-        << (useR0Injection ? "R0" : "R3")
-        << ", filePath="
-        << shellcodePath.toStdString()
-        << eol;
-
-    std::vector<std::uint8_t> shellcodeBuffer;
-    std::string readErrorText;
-    if (!readBinaryFile(shellcodePath, shellcodeBuffer, readErrorText, actionEvent))
+    const auto pid = m_baseRecord.pid;
+    const auto creationTime = m_baseRecord.creationTime100ns;
+    const kLogEvent actionEvent;
+    submitDetailAction(useR0Injection ? QStringLiteral("Shellcode 注入(R0)") : QStringLiteral("Shellcode 注入"), actionEvent,
+        [pid, creationTime, useR0Injection, shellcodePath, actionEvent]
     {
-        err << actionEvent
-            << "[ProcessDetailWindow] executeInjectShellcodeAction: 读取文件失败, error="
-            << readErrorText
-            << eol;
-        showActionResultMessage("Shellcode 注入", false, readErrorText, actionEvent);
-        return;
-    }
-
-    std::string detailText;
-    const std::uint32_t targetPid = m_baseRecord.pid;
-    bool actionOk = false;
-    if (useR0Injection)
-    {
-        ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessInjectResult injectResult =
-            driverClient.injectProcessShellcode(
-                static_cast<std::uint32_t>(m_baseRecord.pid),
-                shellcodeBuffer);
-        detailText = injectResult.io.message;
-        actionOk =
-            injectResult.io.ok &&
-            injectResult.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
-    }
-    else
-    {
-        actionOk = invokeProcessActionForIdentity(
-            targetPid,
-            m_baseRecord.creationTime100ns,
-            [targetPid, &shellcodeBuffer](std::string* detailTextOut)
+        DetailActionResult result;
+        const auto execute = [pid, useR0Injection, shellcodePath, actionEvent](std::string* detail)
+        {
+            std::vector<std::uint8_t> bytes;
+            if (!readBinaryFile(shellcodePath, bytes, *detail, actionEvent,
+                useR0Injection ? KSWORD_ARK_PROCESS_INJECT_MAX_PAYLOAD_BYTES : 0U)) return false;
+            if (useR0Injection)
             {
-                return ks::process::InjectShellcodeBuffer(targetPid, shellcodeBuffer, detailTextOut);
-            },
-            &detailText);
-    }
-    (actionOk ? info : err) << actionEvent
-        << "[ProcessDetailWindow] executeInjectShellcodeAction: actionOk="
-        << (actionOk ? "true" : "false")
-        << ", shellcodeSize="
-        << shellcodeBuffer.size()
-        << ", detail="
-        << detailText
-        << eol;
-    showActionResultMessage(useR0Injection ? QStringLiteral("Shellcode 注入(R0)") : QStringLiteral("Shellcode 注入"), actionOk, detailText, actionEvent);
+                const auto injected = ksword::ark::DriverClient().injectProcessShellcode(pid, bytes);
+                *detail = injected.io.message;
+                return injected.io.ok && injected.status == KSWORD_ARK_PROCESS_INJECT_STATUS_INJECTED;
+            }
+            return ks::process::InjectShellcodeBuffer(pid, bytes, detail);
+        };
+        // R3 identity is held across both payload reading and the entire remote wait.
+        result.ok = useR0Injection ? execute(&result.detail)
+            : invokeProcessActionForIdentity(pid, creationTime, execute, &result.detail);
+        return result;
+    });
 }
 
 QIcon ProcessDetailWindow::resolveProcessIcon(const std::string& processPath, const int iconPixelSize)
@@ -1238,51 +1162,52 @@ QString ProcessDetailWindow::formatHexText(const std::uint64_t value) const
     return QString::fromStdString(stream.str());
 }
 
-bool ProcessDetailWindow::readBinaryFile(
-    const QString& filePath,
-    std::vector<std::uint8_t>& bufferOut,
-    std::string& errorTextOut,
-    const kLogEvent& actionEvent) const
+bool ProcessDetailWindow::readBinaryFile(const QString& filePath,
+    std::vector<std::uint8_t>& bufferOut, std::string& errorTextOut,
+    const kLogEvent& actionEvent, const std::size_t maxBytes)
 {
-    // 文件读取入口日志：沿用调用方的 actionEvent，确保动作链路 GUID 连续。
-    info << actionEvent
-        << "[ProcessDetailWindow] readBinaryFile: filePath="
-        << filePath.toStdString()
-        << eol;
-
     bufferOut.clear();
     errorTextOut.clear();
-
     QFile fileObject(filePath);
     if (!fileObject.open(QIODevice::ReadOnly))
     {
         errorTextOut = "Open file failed: " + fileObject.errorString().toStdString();
-        err << actionEvent
-            << "[ProcessDetailWindow] readBinaryFile: 打开失败, error="
-            << errorTextOut
-            << eol;
         return false;
     }
-
-    const QByteArray rawBytes = fileObject.readAll();
-    if (rawBytes.isEmpty())
+    const qint64 size = fileObject.size();
+    if (maxBytes != 0U && size > static_cast<qint64>(maxBytes))
+    {
+        errorTextOut = "shellcode payload is larger than R0 inject payload limit";
+        return false;
+    }
+    if (size > 0) bufferOut.reserve(static_cast<std::size_t>(size));
+    while (!fileObject.atEnd())
+    {
+        const QByteArray chunk = fileObject.read(64 * 1024);
+        if (chunk.isEmpty())
+        {
+            if (fileObject.error() != QFileDevice::NoError)
+            {
+                errorTextOut = fileObject.errorString().toStdString();
+                return false;
+            }
+            break;
+        }
+        const auto count = static_cast<std::size_t>(chunk.size());
+        if (maxBytes != 0U && (count > maxBytes || bufferOut.size() > maxBytes - count))
+        {
+            errorTextOut = "shellcode payload is larger than R0 inject payload limit";
+            return false;
+        }
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(chunk.constData());
+        bufferOut.insert(bufferOut.end(), begin, begin + count);
+    }
+    if (bufferOut.empty())
     {
         errorTextOut = "File is empty.";
-        warn << actionEvent
-            << "[ProcessDetailWindow] readBinaryFile: 文件为空。"
-            << eol;
         return false;
     }
-
-    bufferOut.resize(static_cast<std::size_t>(rawBytes.size()));
-    std::copy(
-        reinterpret_cast<const std::uint8_t*>(rawBytes.constData()),
-        reinterpret_cast<const std::uint8_t*>(rawBytes.constData()) + rawBytes.size(),
-        bufferOut.begin());
-    info << actionEvent
-        << "[ProcessDetailWindow] readBinaryFile: 读取成功, size="
-        << bufferOut.size()
-        << eol;
+    info << actionEvent << "[ProcessDetailWindow] readBinaryFile: size=" << bufferOut.size() << eol;
     return true;
 }
 
