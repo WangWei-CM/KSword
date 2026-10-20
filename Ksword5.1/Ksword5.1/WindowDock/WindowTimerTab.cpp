@@ -1,5 +1,6 @@
 #include "WindowTimerTab.h"
 #include "WindowSnapshotSupport.h"
+#include "WindowImmutableTableSupport.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
@@ -26,8 +27,6 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
-#include <QTableWidget>
-#include <QTableWidgetItem>
 #include <QVBoxLayout>
 
 #include <cstdint>
@@ -82,6 +81,7 @@ namespace
     {
         QVector<QStringList> rows;
         QString statusText;
+        ks::ui::ImmutableTableSource tableValues;
     };
 
     QString timerText(const char* contextKey, const QString& sourceText)
@@ -287,12 +287,6 @@ namespace
         return snapshot;
     }
 
-    QTableWidgetItem* readOnlyItem(const QString& text)
-    {
-        auto* item = new QTableWidgetItem(text);
-        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        return item;
-    }
     ks::window::SnapshotTexts freezeSnapshotTexts()
     {
         return {
@@ -369,26 +363,23 @@ void WindowTimerTab::initializeUi()
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
     rootLayout->addWidget(m_statusLabel);
 
-    m_table = new ks::ui::VisibleTableWidget(this);
-    // 系统定时器现场可跨刷新比较，保留完整操作栏。
+    m_table = new ks::ui::ImmutableValueTable(this, {
+        {QStringLiteral("window.timer.header.object"), QStringLiteral("定时器对象")},
+        {QStringLiteral("window.timer.header.interval"), QStringLiteral("间隔时间")},
+        {QStringLiteral("window.timer.header.flags"), QStringLiteral("Flag")},
+        {QStringLiteral("window.timer.header.callback"), QStringLiteral("函数地址")},
+        {QStringLiteral("window.timer.header.module"), QStringLiteral("模块名")},
+        {QStringLiteral("window.timer.header.pid"), QStringLiteral("PID")},
+        {QStringLiteral("window.timer.header.tid"), QStringLiteral("TID")},
+        {QStringLiteral("window.timer.header.path"), QStringLiteral("路径")},
+        {QStringLiteral("window.timer.header.timer_id"), QStringLiteral("Timer ID")},
+        {QStringLiteral("window.timer.header.window"), QStringLiteral("窗口对象")},
+        {QStringLiteral("window.timer.header.thread_info"), QStringLiteral("ThreadInfo")},
+        {QStringLiteral("window.timer.header.session"), QStringLiteral("Session")},
+        {QStringLiteral("window.timer.header.countdown"), QStringLiteral("剩余时间")},
+        {QStringLiteral("window.timer.header.tolerance"), QStringLiteral("容差")},
+        {QStringLiteral("window.timer.header.status"), QStringLiteral("状态")} });
     ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Full);
-    m_table->setColumnCount(ColumnCount);
-    m_table->setHorizontalHeaderLabels({
-        timerText("window.timer.header.object", QStringLiteral("定时器对象")),
-        timerText("window.timer.header.interval", QStringLiteral("间隔时间")),
-        timerText("window.timer.header.flags", QStringLiteral("Flag")),
-        timerText("window.timer.header.callback", QStringLiteral("函数地址")),
-        timerText("window.timer.header.module", QStringLiteral("模块名")),
-        timerText("window.timer.header.pid", QStringLiteral("PID")),
-        timerText("window.timer.header.tid", QStringLiteral("TID")),
-        timerText("window.timer.header.path", QStringLiteral("路径")),
-        timerText("window.timer.header.timer_id", QStringLiteral("Timer ID")),
-        timerText("window.timer.header.window", QStringLiteral("窗口对象")),
-        timerText("window.timer.header.thread_info", QStringLiteral("ThreadInfo")),
-        timerText("window.timer.header.session", QStringLiteral("Session")),
-        timerText("window.timer.header.countdown", QStringLiteral("剩余时间")),
-        timerText("window.timer.header.tolerance", QStringLiteral("容差")),
-        timerText("window.timer.header.status", QStringLiteral("状态")) });
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -398,11 +389,14 @@ void WindowTimerTab::initializeUi()
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
+    // Measure a bounded visible-source sample only when canonical data changes, never per key.
+    m_table->horizontalHeader()->setResizeContentsPrecision(100);
+    m_table->sourceReady = [this] { m_table->resizeColumnsToContents(); };
     rootLayout->addWidget(m_table, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&) { rebuildTable(); });
-    connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
+    connect(m_table, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
 }
 
 void WindowTimerTab::reconcileRefreshState()
@@ -435,10 +429,12 @@ void WindowTimerTab::refreshAsync()
     m_refreshOperation->submit<ks::window::SnapshotTexts, std::shared_ptr<const TimerSnapshot>>(
         freezeSnapshotTexts(),
         [](const ks::window::SnapshotTexts& texts, const ks::ui::AsyncOperationToken&) {
-            return ks::window::makeSnapshotValue<TimerSnapshot>(collectTimers(texts));
+            auto snapshot = collectTimers(texts);
+            snapshot.tableValues = ks::window::makeWindowTableSource(std::move(snapshot.rows), {ColumnObject, ColumnPid, ColumnTid, ColumnTimerId, ColumnWindow});
+            return ks::window::makeSnapshotValue<TimerSnapshot>(std::move(snapshot));
         },
         [this](const std::shared_ptr<const TimerSnapshot>& snapshot, std::uint64_t ticket) {
-            return applySnapshot(snapshot->rows, snapshot->statusText, ticket);
+            return applySnapshot(snapshot->tableValues, snapshot->statusText, ticket);
         },
         [this](std::exception_ptr) {
             const QPointer<WindowTimerTab> alive(this);
@@ -449,7 +445,7 @@ void WindowTimerTab::refreshAsync()
         });
 }
 
-bool WindowTimerTab::applySnapshot(QVector<QStringList> rows, const QString& statusText, std::uint64_t ticket)
+bool WindowTimerTab::applySnapshot(ks::ui::ImmutableTableSource rows, const QString& statusText, std::uint64_t ticket)
 {
     if (!m_refreshOperation->isCurrent(ticket)) return true;
     // 后台快照到达时先保护缓存和表格；QVector/QString 为隐式共享，
@@ -477,43 +473,19 @@ bool WindowTimerTab::applySnapshot(QVector<QStringList> rows, const QString& sta
     m_rows = std::move(rows);
     m_statusLabel->setText(statusText);
     if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
+    const auto source = m_rows;
+    m_table->setSourceFactory([source](const auto& translator) { return ks::window::formatWindowTableSource(source, translator); });
+    if (!safeThis) return true;
     rebuildTable();
     return true;
 }
 
 void WindowTimerTab::rebuildTable()
 {
-    const QPointer<WindowTimerTab> alive(this);
-    const QString keyword = m_filterEdit->text().trimmed();
-    m_table->setSortingEnabled(false);
-    if (!alive) return;
-    m_table->setRowCount(0);
-    if (!alive) return;
-    for (const QStringList& sourceRow : m_rows)
-    {
-        if (sourceRow.size() < ColumnCount)
-        {
-            continue;
-        }
-        if (!keyword.isEmpty() && !sourceRow.join(QLatin1Char(' ')).contains(keyword, Qt::CaseInsensitive))
-        {
-            continue;
-        }
-        const int tableRow = m_table->rowCount();
-        m_table->insertRow(tableRow);
-        if (!alive) return;
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            m_table->setItem(tableRow, column, readOnlyItem(sourceRow.at(column)));
-            if (!alive) return;
-        }
-    }
-    m_table->setSortingEnabled(true);
-    if (!alive) return;
-    m_table->resizeColumnsToContents();
+    m_table->setQuery(m_filterEdit->text().trimmed());
 }
 
-QString WindowTimerTab::rowClipboardText(QTableWidget* table, const int row, const bool includeHeader)
+QString WindowTimerTab::rowClipboardText(ks::ui::ImmutableValueTable* table, const int row, const bool includeHeader)
 {
     if (table == nullptr || row < 0 || row >= table->rowCount())
     {
@@ -525,14 +497,14 @@ QString WindowTimerTab::rowClipboardText(QTableWidget* table, const int row, con
         QStringList headers;
         for (int column = 0; column < table->columnCount(); ++column)
         {
-            headers << (table->horizontalHeaderItem(column) == nullptr ? QString() : table->horizontalHeaderItem(column)->text());
+            headers << table->model()->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString();
         }
         lines << headers.join(QLatin1Char('\t'));
     }
     QStringList values;
     for (int column = 0; column < table->columnCount(); ++column)
     {
-        values << (table->item(row, column) == nullptr ? QString() : table->item(row, column)->text());
+        values << table->cell(row, column).toString();
     }
     lines << values.join(QLatin1Char('\t'));
     return lines.join(QLatin1Char('\n'));
@@ -550,11 +522,8 @@ void WindowTimerTab::showCopyMenu(const QPoint& position)
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRow, ks::ui::TableContextActionRole::CopyRows);
     QAction* copyAll = menu.addAction(timerText("window.timer.copy.all", QStringLiteral("复制全部行")));
-    const QTableWidgetItem* processIdItem = row >= 0 ? m_table->item(row, ColumnPid) : nullptr;
     bool processIdOk = false;
-    const quint32 processId = processIdItem != nullptr
-        ? processIdItem->text().trimmed().toUInt(&processIdOk, 10)
-        : 0U;
+    const quint32 processId = row >= 0 ? m_table->cell(row, ColumnPid).toString().trimmed().toUInt(&processIdOk, 10) : 0U;
     QAction* openProcessAction = menu.addAction(
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
         QStringLiteral("转到进程详细信息"));
@@ -565,8 +534,7 @@ void WindowTimerTab::showCopyMenu(const QPoint& position)
     QAction* selected = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (selected == copyCell && index.isValid())
     {
-        const QTableWidgetItem* item = m_table->item(index.row(), index.column());
-        QApplication::clipboard()->setText(item == nullptr ? QString() : item->text());
+        QApplication::clipboard()->setText(m_table->cell(index.row(), index.column()).toString());
     }
     else if (selected == copyRow)
     {
