@@ -6,6 +6,7 @@
 #include "CksBackend.h"
 
 #include <QWidget>
+#include "../../UI/PageNavigationTabCatalog.h"
 #include <QByteArray>
 #include <array>
 
@@ -26,6 +27,9 @@ namespace ks::misc
     class CksPage final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const CksPage* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造时只建页面；真正的系统状态在首次显示时后台刷新。
         explicit CksPage(QWidget* parent = nullptr);
         ~CksPage() override;
@@ -37,6 +41,8 @@ namespace ks::misc
         void changeEvent(QEvent* event) override;
 
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         // initializeUi：建立共享状态区以及微软、SSDE、免重置研究三个子页。
         void initializeUi();
         // refresh：后台查询 Windows 许可、CI、SCM 和 CiTool，结果回到 UI 线程。

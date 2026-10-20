@@ -38,6 +38,14 @@
 
 #include <utility>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kCksPageNavigation[] = {
+    {"official", "", "misc.cks.official.tab", "微软现行流程", true},
+    {"ssde", "", "misc.cks.ssde.tab", "SSDE 实验流程", false},
+    {"research", "", "misc.cks.research.tab", "免重置研究", false}
+};
+}
+
 namespace
 {
     // T：页面的动态文字统一从双语语言包读取。
@@ -117,14 +125,15 @@ namespace
     }
 
     // AddRoutePage：只建普通子页；参数滚动与执行区由共享工作区统一拥有。
-    QVBoxLayout* AddRoutePage(QTabWidget* tabs, const QString& title)
+    QVBoxLayout* AddRoutePage(QTabWidget* tabs, const ks::ui::PageNavigationTabDefinition& definition,
+        ks::ui::PageNavigationTabCatalog& navigationTabs)
     {
         auto* content = new QWidget(tabs); // content：当前路径的参数正文。
         auto* layout = new QVBoxLayout(content); // layout：保持业务说明与文件选择顺序。
         layout->setContentsMargins(0, 0, 0, 0);
         ks::ui::StyleParameterCanvas(content); // 子页沿用参数卡片色，不再铺页根黑色底板。
         layout->setSpacing(12);
-        tabs->addTab(content, title);
+        navigationTabs.add(definition, tabs, content);
         return layout;
     }
 }
@@ -244,18 +253,9 @@ namespace ks::misc
         routes->setObjectName(QStringLiteral("ksCksRoutes"));
         ks::ui::StylePageTabsContentFrame(routes);
         workspace->parameters()->addWidget(routes);
-        auto* official = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.official.tab"), QStringLiteral("微软现行流程")));
-        auto* experimental = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.ssde.tab"), QStringLiteral("SSDE 实验流程")));
-        auto* research = AddRoutePage(routes,
-            T(QStringLiteral("misc.cks.research.tab"), QStringLiteral("免重置研究")));
-        language.bindTab(routes, routes->widget(0), QStringLiteral("misc.cks.official.tab"),
-            QStringLiteral("微软现行流程"));
-        language.bindTab(routes, routes->widget(1), QStringLiteral("misc.cks.ssde.tab"),
-            QStringLiteral("SSDE 实验流程"));
-        language.bindTab(routes, routes->widget(2), QStringLiteral("misc.cks.research.tab"),
-            QStringLiteral("免重置研究"));
+        auto* official = AddRoutePage(routes, kCksPageNavigation[0], m_navigationTabs);
+        auto* experimental = AddRoutePage(routes, kCksPageNavigation[1], m_navigationTabs);
+        auto* research = AddRoutePage(routes, kCksPageNavigation[2], m_navigationTabs);
         m_researchPlan = PopulateCksResearchPage(routes->widget(2), research, workspace);
         workspace->results()->addWidget(m_researchPlan, 1);
         m_researchPlan->hide();
@@ -791,3 +791,17 @@ namespace ks::misc
             .arg(DetailText(text)));
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::CksPage::navigationCatalog(const CksPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kCksPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::CksPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kCksPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::CksPage>(QStringLiteral("misc.cks")); }
