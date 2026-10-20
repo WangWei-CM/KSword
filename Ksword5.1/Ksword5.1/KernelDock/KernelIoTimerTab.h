@@ -17,6 +17,7 @@
 #include <vector>  // std::vector：后台快照与 UI 行缓存。
 
 #include "../UI/StructuredFieldView.h"
+namespace ks::ui { class AsyncOperation; }
 class QEvent;
 class QLabel;
 class QLineEdit;
@@ -30,6 +31,7 @@ class KernelIoTimerTab final : public QWidget
 {
 public:
     explicit KernelIoTimerTab(QWidget* parent = nullptr);
+    ~KernelIoTimerTab() override;
 
     // requestInitialRefresh：仅在用户第一次打开子页时触发昂贵的全 DriverObject 查询。
     void requestInitialRefresh();
@@ -94,6 +96,9 @@ private:
     static QString pointerText(std::uint64_t address);
     static QString normalizedCellText(const QString& text);
 
+    ks::ui::AsyncOperation* m_controlOperation = nullptr;
+    bool m_controlInFlight = false;
+    struct ControlRequest { std::uint32_t action; IoTimerRow row; };
     QPushButton* m_refreshButton = nullptr;
     QPushButton* m_startButton = nullptr;
     QPushButton* m_stopButton = nullptr;

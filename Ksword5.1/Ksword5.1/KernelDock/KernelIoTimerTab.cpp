@@ -1,4 +1,5 @@
 #include "KernelIoTimerTab.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -122,7 +123,13 @@ KernelIoTimerTab::KernelIoTimerTab(QWidget* parent)
     : QWidget(parent)
 {
     initializeUi();
+    m_controlOperation = new ks::ui::AsyncOperation(this);
     applyTranslatedText();
+}
+
+KernelIoTimerTab::~KernelIoTimerTab()
+{
+    if (m_controlOperation != nullptr) m_controlOperation->close();
 }
 
 void KernelIoTimerTab::requestInitialRefresh()
@@ -275,6 +282,7 @@ void KernelIoTimerTab::applyTranslatedText()
 
 void KernelIoTimerTab::refreshAsync()
 {
+    if (m_controlInFlight) return;
     bool expected = false;
     if (!m_refreshRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
@@ -583,7 +591,7 @@ const KernelIoTimerTab::IoTimerRow* KernelIoTimerTab::selectedRow() const
 
 void KernelIoTimerTab::updateControlActions()
 {
-    const bool enabled =
+    const bool enabled = !m_controlInFlight &&
         !m_refreshRunning.load(std::memory_order_relaxed) && selectedRow() != nullptr;
     if (m_startButton != nullptr)
     {
@@ -597,6 +605,7 @@ void KernelIoTimerTab::updateControlActions()
 
 void KernelIoTimerTab::runControlAction(const std::uint32_t action)
 {
+    if (m_controlInFlight || m_controlOperation->isBusy()) return;
     const IoTimerRow* selected = selectedRow();
     if (selected == nullptr)
     {
@@ -668,14 +677,20 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
         return;
     }
 
-    ksword::ark::DriverClient driverClient;
-    const ksword::ark::IoTimerControlResult result = driverClient.controlIoTimer(
-        action,
-        row.namespacePath.toStdWString(),
-        row.driverObjectAddress,
-        row.deviceObjectAddress,
-        row.timerAddress,
-        true);
+    m_controlInFlight = true;
+    m_refreshButton->setEnabled(false);
+    updateControlActions();
+    const auto ticket = m_controlOperation->submitTransaction<ControlRequest, ksword::ark::IoTimerControlResult>(
+        ControlRequest{action, row},
+        [](const ControlRequest& value) {
+            const ksword::ark::DriverClient client;
+            return client.controlIoTimer(value.action, value.row.namespacePath.toStdWString(),
+                value.row.driverObjectAddress, value.row.deviceObjectAddress, value.row.timerAddress, true);
+        },
+        [this, actionTitle, isStart](const ksword::ark::IoTimerControlResult& result, std::uint64_t) {
+            m_controlInFlight = false;
+            m_refreshButton->setEnabled(!m_refreshRunning.load());
+            updateControlActions();
     if (!result.io.ok)
     {
         const QString transportText = result.unsupported
@@ -687,7 +702,7 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 QStringLiteral("IoTimer 控制 IOCTL 失败。\n%1"))
                 .arg(QString::fromStdString(result.io.message));
         QMessageBox::critical(this, actionTitle, transportText);
-        return;
+        return true;
     }
 
     if (result.status != KSWORD_ARK_IO_TIMER_CONTROL_STATUS_OK)
@@ -708,7 +723,7 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 .arg(pointerText(result.observedDeviceObjectAddress))
                 .arg(pointerText(result.observedTimerAddress)));
         refreshAsync();
-        return;
+        return true;
     }
 
     QMessageBox::information(
@@ -722,6 +737,21 @@ void KernelIoTimerTab::runControlAction(const std::uint32_t action)
                 "因此此结果表示 API 已接受调用，不伪造“已验证运行态”。"))
             .arg(isStart ? QStringLiteral("IoStartTimer") : QStringLiteral("IoStopTimer")));
     refreshAsync();
+            return true;
+        },
+        [this](std::exception_ptr) {
+            m_controlInFlight = false;
+            m_refreshButton->setEnabled(!m_refreshRunning.load());
+            updateControlActions();
+            m_statusLabel->setText(ioTimerText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+        });
+    if (ticket == 0)
+    {
+        m_controlInFlight = false;
+        m_refreshButton->setEnabled(!m_refreshRunning.load());
+        updateControlActions();
+        m_statusLabel->setText(ioTimerText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
 }
 
 void KernelIoTimerTab::showContextMenu(const QPoint& localPosition)
@@ -759,7 +789,7 @@ void KernelIoTimerTab::showContextMenu(const QPoint& localPosition)
         ioTimerText("kernel.iotimer.menu.copy_row", QStringLiteral("复制当前行")));
     // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
     ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-    const bool canControl =
+    const bool canControl = !m_controlInFlight &&
         !m_refreshRunning.load(std::memory_order_relaxed) && selectedRow() != nullptr;
     startAction->setEnabled(canControl);
     stopAction->setEnabled(canControl);
