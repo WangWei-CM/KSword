@@ -452,16 +452,33 @@ namespace ks::ui
                 if (!v.isEmpty()) { m_payloadHexEdit->setText(v); }
             });
 
+        // 两个写入按钮并列：
+        // - "写入 payload"：分步模式，依赖第 2 步 Register 产生的 recordId，仅做 Write
+        // - "原子提交 (单次 IOCTL)"：Register+Change+Write+Unregister(SKIP) 全部在一次 R0 call
+        //   内完成，NX 窗口被压到驱动函数体内（纳秒级），避免高频 fetch 页在 GUI 分步点击
+        //   过程中被 CPU fetch 命中 BugCheck 0xFC。原子模式**不需要**第 2 步，可直接从第 1 步跳来。
+        auto* writeRow = new QHBoxLayout();
         m_writeBtn = new QPushButton(QStringLiteral("写入 payload"), page);
         ks::ui::ApplyFlatButtonTheme(m_writeBtn, ks::ui::FlatButtonTone::Accent);
         m_writeBtn->setMinimumHeight(36);
-        layout->addWidget(m_writeBtn);
+        m_writeBtn->setToolTip(QStringLiteral("分步模式：仅发 Write IOCTL，需要先在第 2 步完成 Register+Change；适用于低频 fetch 页"));
+        writeRow->addWidget(m_writeBtn);
+
+        m_atomicCommitBtn = new QPushButton(QStringLiteral("原子提交 (单次 IOCTL)"), page);
+        ks::ui::ApplyFlatButtonTheme(m_atomicCommitBtn, ks::ui::FlatButtonTone::Accent);
+        m_atomicCommitBtn->setMinimumHeight(36);
+        m_atomicCommitBtn->setToolTip(QStringLiteral("原子模式：R0 单次 IOCTL 做完 Register+Change(mode=2)+Write+Unregister(SKIP)；NX 窗口压到驱动函数内（纳秒级），不走第 2 步 Register；无 Backup 可恢复，payload 必须尽快自行还原否则 PatchGuard 蓝屏"));
+        writeRow->addWidget(m_atomicCommitBtn);
+        writeRow->addStretch();
+        layout->addLayout(writeRow);
 
         m_writeStatusLabel = new QLabel(QStringLiteral("状态：未执行"), page);
         layout->addWidget(m_writeStatusLabel);
 
         connect(m_writeBtn, &QPushButton::clicked,
             this, &KernelHookWizard::onWritePayloadClicked);
+        connect(m_atomicCommitBtn, &QPushButton::clicked,
+            this, &KernelHookWizard::onAtomicCommitClicked);
 
         layout->addStretch();
         return page;
@@ -576,6 +593,7 @@ namespace ks::ui
         m_busy = busy;
         if (m_prepareBtn) { m_prepareBtn->setEnabled(!busy); }
         if (m_writeBtn)   { m_writeBtn->setEnabled(!busy); }
+        if (m_atomicCommitBtn) { m_atomicCommitBtn->setEnabled(!busy); }
         if (m_keepBtn)    { m_keepBtn->setEnabled(!busy); }
         if (m_restoreBtn) { m_restoreBtn->setEnabled(!busy); }
         if (m_verifyBtn)  { m_verifyBtn->setEnabled(!busy); }
@@ -827,6 +845,115 @@ namespace ks::ui
                     "WARN: QueryBackup 失败，payload 已写入但 backup 为空，第 5 步无法原字节恢复");
             }
             return info;
+        }));
+    }
+
+    // ========================================================================
+    // onAtomicCommitClicked：R0 单次 IOCTL 完成 Register→Change(mode=2)→Write→
+    //                        Unregister(SKIP_BACKUP_RESTORE) 的原子路径。
+    //
+    // 为什么要有它：GUI 分步点击在 Change(mode=2) 到 Unregister 之间会把目标页
+    // 停在 NX 态数毫秒；高频被 fetch 的 .text 入口（例如 CI.dll+0x1598，fetch 间隔
+    // 微秒级）在 NX 窗口首个微秒内就会被 CPU 命中 BugCheck 0xFC。原子路径把
+    // 整条序列压缩到驱动函数内（纳秒级），让 CPU 没有空档。
+    //
+    // 与第 2/4 步的关系：不依赖 recordId——R0 自己 Register→Unregister 全走完；
+    // 用户可以直接从第 1 步跳到第 3 步点原子提交。
+    // ========================================================================
+    void KernelHookWizard::onAtomicCommitClicked()
+    {
+        // 前置：必须完成第 1 步得到 targetVa（页 0 的 updateVa 会填 moduleBase+offset）
+        if (m_plan.targetVa == 0ULL) {
+            appendTrace(QStringLiteral("请先在第 1 步选目标模块与偏移"));
+            return;
+        }
+
+        // 1) 解析 payload hex：空输入直接拒
+        const QByteArray payload = parseHexBytes(m_payloadHexEdit->text());
+        if (payload.isEmpty()) {
+            appendTrace(QStringLiteral("Payload hex 解析失败或为空"));
+            return;
+        }
+        // 原子协议 R0 侧上限 64 字节；GUI 显式拒绝 >64 避免 R3 backend 隐式截断
+        if (payload.size() > 64) {
+            appendTrace(QStringLiteral(
+                "原子提交 payload 最多 64 字节（协议上限），当前 %1 字节")
+                .arg(payload.size()));
+            return;
+        }
+
+        // 2) 解析用户指定的页内 offset：支持 0x 前缀 hex 与十进制
+        bool offsetOk = false;
+        const QString offsetText = m_payloadOffsetEdit->text().trimmed();
+        const QString normalizedOffsetText = offsetText.startsWith(QStringLiteral("0x"),
+            Qt::CaseInsensitive)
+            ? offsetText.mid(2)
+            : offsetText;
+        const int offsetBase = offsetText.startsWith(QStringLiteral("0x"),
+            Qt::CaseInsensitive)
+            ? 16
+            : 10;
+        const qulonglong parsedOffset = normalizedOffsetText.toULongLong(&offsetOk, offsetBase);
+        if (!offsetOk) {
+            appendTrace(QStringLiteral("Offset 解析失败：%1").arg(offsetText));
+            return;
+        }
+        // offset+length 越页 R0 会拒；GUI 侧提前拒以给用户立即反馈
+        if (parsedOffset + static_cast<qulonglong>(payload.size()) > 4096ULL) {
+            appendTrace(QStringLiteral(
+                "原子提交 offset(0x%1) + length(%2) 越页（>4096）")
+                .arg(static_cast<quint64>(parsedOffset), 0, 16)
+                .arg(payload.size()));
+            return;
+        }
+
+        // 3) 把本次选择塞进 plan（原子路径不走 Backup，recordId 保持 0）
+        m_plan.payload = payload;
+        m_plan.payloadOffset = static_cast<unsigned long>(parsedOffset & 0xFFFFFFFFULL);
+
+        setBusy(true);
+        m_writeStatusLabel->setText(QStringLiteral("状态：原子提交中..."));
+        appendTrace(QStringLiteral(
+            "AtomicCommit(va=0x%1, offset=0x%2, len=%3) bytes=%4")
+            .arg(m_plan.targetVa, 0, 16)
+            .arg(static_cast<quint64>(m_plan.payloadOffset), 0, 16)
+            .arg(payload.size())
+            .arg(bytesToHex(payload)));
+
+        // 4) Worker thread：一次 IOCTL 走完 Register+Change+Write+Unregister(SKIP)。
+        //    R3 backend 的 atomicCommit 签名 (targetVa, offset, bytes)，无 recordId。
+        const quint64 va = m_plan.targetVa;
+        const unsigned long offsetArg = m_plan.payloadOffset;
+        auto* w = new QFutureWatcher<rxpf::PageInfo>(this);
+        connect(w, &QFutureWatcher<rxpf::PageInfo>::finished, this,
+            [this, w]() {
+                const auto info = w->result();
+                w->deleteLater();
+                if (!info.ioSuccess) {
+                    appendTrace(QStringLiteral("AtomicCommit 失败：%1").arg(info.ioErrorText));
+                    m_writeStatusLabel->setText(QStringLiteral("状态：原子提交失败"));
+                } else if (info.lastStatus < 0) {
+                    // IOCTL 通了但 R0 返回失败 NTSTATUS（例如 CreateRecord 拒绝）
+                    appendTrace(QStringLiteral(
+                        "AtomicCommit NTSTATUS 失败 status=%1 reason=%2")
+                        .arg(formatHex4(static_cast<quint32>(info.lastStatus)))
+                        .arg(info.lastFailureReason));
+                    m_writeStatusLabel->setText(QStringLiteral(
+                        "状态：原子提交失败（R0 NTSTATUS）"));
+                } else {
+                    appendTrace(QStringLiteral(
+                        "AtomicCommit OK status=%1 pageBase=0x%2 origProt=0x%3 curProt=0x%4")
+                        .arg(formatHex4(static_cast<quint32>(info.lastStatus)))
+                        .arg(info.pageBase, 0, 16)
+                        .arg(info.originalProtection, 0, 16)
+                        .arg(info.currentProtection, 0, 16));
+                    m_writeStatusLabel->setText(QStringLiteral(
+                        "状态：原子提交成功 payload 已持久（PTE 已回 RX）"));
+                }
+                setBusy(false);
+            });
+        w->setFuture(QtConcurrent::run([va, offsetArg, payload]() -> rxpf::PageInfo {
+            return rxpf::atomicCommit(va, offsetArg, payload);
         }));
     }
 

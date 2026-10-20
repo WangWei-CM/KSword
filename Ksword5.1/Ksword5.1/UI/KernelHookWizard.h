@@ -107,6 +107,7 @@ namespace ks::ui
         void refreshModules();              // 枚举已加载内核模块填 m_moduleCombo
         void onPrepareClicked();            // 执行 Register+Change+QueryBackup
         void onWritePayloadClicked();       // 执行 Write(payload)
+        void onAtomicCommitClicked();       // 执行原子提交：R0 单次 call 做完 Register+Change+Write+Unregister(SKIP)
         void onKeepModifiedClicked();       // 执行 Unregister(SKIP_RESTORE)
         void onRestoreClicked();            // 执行 Register+Change+Write(backup)+Unregister
         void onFinalVerifyClicked();        // 执行 Register+Query 看 origProt + Unregister
@@ -142,6 +143,7 @@ namespace ks::ui
         QLineEdit* m_payloadHexEdit = nullptr;     // 用户任意 payload hex；不设 GUI 侧长度上限，由 driver 校验
         QLineEdit* m_payloadOffsetEdit = nullptr;  // 用户指定的页内写入偏移（hex / dec 均可）
         QPushButton* m_writeBtn = nullptr;
+        QPushButton* m_atomicCommitBtn = nullptr; // 原子提交（Register→Change→Write→Unregister(SKIP) 单次 IOCTL）
         QLabel* m_writeStatusLabel = nullptr;
 
         // 第 4 页：Keep + 等触发
