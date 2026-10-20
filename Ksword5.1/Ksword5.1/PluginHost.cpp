@@ -1,4 +1,4 @@
-﻿#include "PluginHost.h"
+#include "PluginHost.h"
 #include "UI/PageNavigationTabCatalog.h"
 #include "UI/FlatButtonTheme.h"
 #include "PluginHost.Upstream.h"
@@ -11,6 +11,8 @@
 #include "UI/ToolbarMetrics.h"
 #include "UI/SecondaryPageLayout.h"
 #include "UI/AsyncCleanupRegistry.h"
+#include "UI/AsyncOperation.h"
+#include <QFileSystemWatcher>
 
 #include "theme.h"
 #include "Internationalization/LanguageManager.h"
@@ -69,6 +71,7 @@
 #include <QWidget>
 
 #include <functional>
+#include <algorithm>
 #include <atomic>
 #include <memory>
 
@@ -941,7 +944,7 @@ namespace
             QDir(pluginRoot).filePath(pluginId), pluginId, descriptorOut, errorOut);
     }
 
-    bool discoverPlugins(PluginListResult* resultOut, QString* errorOut)
+    bool scanPlugins(PluginListResult* resultOut, QString* errorOut)
     {
         if (resultOut == nullptr || errorOut == nullptr)
         {
@@ -977,6 +980,98 @@ namespace
         }
         resultOut->pluginRoot = pluginRoot;
         return true;
+    }
+
+    struct PluginCatalogSnapshot
+    {
+        PluginListResult result;
+        QString error;
+        QStringList watchedPaths;
+    };
+    using PluginCatalogCallback = std::function<void(const PluginListResult&, const QString&)>;
+    struct PluginCatalogCache
+    {
+        std::shared_ptr<const PluginCatalogSnapshot> snapshot;
+        QPointer<ks::ui::AsyncOperation> operation;
+        QPointer<QFileSystemWatcher> watcher;
+        struct Listener { QPointer<QObject> owner; PluginCatalogCallback callback; };
+        QList<Listener> listeners; // GUI-only subscriptions; workers receive no QObject.
+        bool dirty = true;
+    };
+    PluginCatalogCache& pluginCatalogCache() { static PluginCatalogCache cache; return cache; }
+    void refreshPluginCatalog();
+    void invalidatePluginCatalog()
+    {
+        pluginCatalogCache().dirty = true;
+        refreshPluginCatalog();
+    }
+    void refreshPluginCatalog()
+    {
+        auto& cache = pluginCatalogCache();
+        if (!cache.dirty || !QCoreApplication::instance()) return;
+        if (!cache.operation)
+        {
+            cache.operation = new ks::ui::AsyncOperation(QCoreApplication::instance());
+            cache.watcher = new QFileSystemWatcher(QCoreApplication::instance());
+            QObject::connect(cache.watcher, &QFileSystemWatcher::directoryChanged, cache.watcher,
+                [](const QString&) { invalidatePluginCatalog(); });
+            QObject::connect(cache.watcher, &QFileSystemWatcher::fileChanged, cache.watcher,
+                [](const QString&) { invalidatePluginCatalog(); });
+        }
+        cache.dirty = false;
+        cache.operation->submit<int, std::shared_ptr<const PluginCatalogSnapshot>>(0,
+            [](int, const ks::ui::AsyncOperationToken& token) {
+                auto value = std::make_shared<PluginCatalogSnapshot>();
+                if (token.isCanceled()) return std::shared_ptr<const PluginCatalogSnapshot>(value);
+                scanPlugins(&value->result, &value->error);
+                value->watchedPaths << QCoreApplication::applicationDirPath();
+                if (!value->result.pluginRoot.isEmpty())
+                {
+                    value->watchedPaths << value->result.pluginRoot;
+                    const QDir root(value->result.pluginRoot);
+                    for (const auto& name : root.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+                    {
+                        value->watchedPaths << root.filePath(name);
+                        const auto manifest = root.filePath(name + QStringLiteral("/plugin.json"));
+                        if (QFileInfo::exists(manifest)) value->watchedPaths << manifest;
+                    }
+                }
+                const auto configured = qEnvironmentVariable("KSWORD_PLUGIN_ROOT");
+                if (!configured.isEmpty()) value->watchedPaths << QFileInfo(configured).absolutePath();
+                value->watchedPaths.removeDuplicates();
+                return std::shared_ptr<const PluginCatalogSnapshot>(value);
+            }, [](const std::shared_ptr<const PluginCatalogSnapshot>& value, std::uint64_t) {
+                auto& current = pluginCatalogCache();
+                current.snapshot = value;
+                if (current.watcher)
+                {
+                    const auto old = current.watcher->directories() + current.watcher->files();
+                    if (!old.isEmpty()) current.watcher->removePaths(old);
+                    current.watcher->addPaths(value->watchedPaths);
+                }
+                const auto listeners = current.listeners;
+                for (const auto& listener : listeners)
+                    if (listener.owner && listener.callback) listener.callback(value->result, value->error);
+                return true;
+            }, [](std::exception_ptr) { pluginCatalogCache().dirty = true; });
+    }
+    void requestPluginCatalog(QObject* owner, PluginCatalogCallback callback, bool force = false, bool deliverCached = true)
+    {
+        auto& cache = pluginCatalogCache();
+        for (auto it = cache.listeners.begin(); it != cache.listeners.end();)
+            if (!it->owner || it->owner == owner) it = cache.listeners.erase(it); else ++it;
+        cache.listeners.push_back({owner, callback});
+        if (force) cache.dirty = true;
+        if (deliverCached && cache.snapshot && !cache.dirty) callback(cache.snapshot->result, cache.snapshot->error);
+        refreshPluginCatalog();
+    }
+    bool discoverPlugins(PluginListResult* resultOut, QString* errorOut)
+    {
+        refreshPluginCatalog();
+        const auto value = pluginCatalogCache().snapshot;
+        if (!value) { *errorOut = QStringLiteral("正在扫描…"); return false; }
+        *resultOut = value->result; *errorOut = value->error;
+        return value->error.isEmpty();
     }
 
     QString targetName(const ks::plugin_host::TargetKind targetKind)
@@ -2323,7 +2418,7 @@ namespace
             ks::ui::NormalizeToolbarRow(footer);
             ks::ui::StyleSecondaryFooter(footerWidget);
             layout->addWidget(footerWidget);
-            connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshPlugins(); });
+            connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshPlugins(true); });
             connect(refreshMarketplaceButton, &QPushButton::clicked, this, [this]() { refreshMarketplace(); });
             connect(checkUpdatesButton, &QPushButton::clicked, this, [this]() { checkForUpdates(); });
             connect(detailButton, &QPushButton::clicked, this, [this]() { showSelectedDetails(); });
@@ -2347,15 +2442,20 @@ namespace
     private:
         using InstallCompletion = std::function<void(bool, const QString&)>;
 
-        void refreshPlugins()
+        void refreshPlugins(bool force = false)
         {
-            PluginListResult result;
-            QString errorText;
+            const QPointer<PluginManagerDialog> self(this);
+            requestPluginCatalog(this, [self](const PluginListResult& result, const QString& error) {
+                if (self) self->applyPluginCatalog(result, error);
+            }, force);
+        }
+        void applyPluginCatalog(const PluginListResult& result, const QString& errorText)
+        {
             m_table->setRowCount(0);
             m_plugins.clear();
             m_installedPluginsById.clear();
             m_pluginRoot.clear();
-            if (!discoverPlugins(&result, &errorText))
+            if (!errorText.isEmpty())
             {
                 m_status->setText(
                     QStringLiteral("插件目录不可用；详情已写入日志。"));
@@ -2383,7 +2483,7 @@ namespace
                 m_table->setItem(row, 3, new QTableWidgetItem(descriptor.description));
             }
             if (!m_plugins.isEmpty()) m_table->selectRow(0);
-            m_openFolderButton->setEnabled(QDir(m_pluginRoot).exists());
+            m_openFolderButton->setEnabled(!m_pluginRoot.isEmpty());
             QString status = QStringLiteral("已发现 %1 个有效插件。插件目录：%2")
                 .arg(m_plugins.size())
                 .arg(QDir::toNativeSeparators(m_pluginRoot));
@@ -3055,7 +3155,7 @@ namespace
                         completeMarketplaceInstall(completion, false, installError);
                         return;
                     }
-                    refreshPlugins();
+                    refreshPlugins(true);
                     populateMarketplaceTable();
                     selectMarketplaceEntry();
                     const auto message = QStringLiteral("上游插件 %1 已安装到：%2").arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
@@ -3181,7 +3281,7 @@ namespace
                             QStringLiteral("插件包已验证，但安装被拒绝：%1").arg(installError));
                         return;
                     }
-                    refreshPlugins();
+                    refreshPlugins(true);
                     const QString message = QStringLiteral("已一键安装并验证 %1 到 %2。")
                         .arg(plugin.name, QDir::toNativeSeparators(QDir(pluginRoot).filePath(plugin.installDirectory)));
                     m_status->setText(message);
@@ -3223,6 +3323,11 @@ namespace
 void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const InvocationContext& context)
 {
     if (menu == nullptr || owner == nullptr) return;
+    const QPointer<QMenu> catalogMenu(menu);
+    const QPointer<QWidget> catalogOwner(owner);
+    requestPluginCatalog(menu, [catalogMenu, catalogOwner, context](const PluginListResult&, const QString&) {
+        if (catalogMenu && catalogOwner) ks::plugin_host::populateTargetMenu(catalogMenu, catalogOwner, context);
+    }, false, false);
     menu->clear();
     menu->setToolTipsVisible(true);
     QString contextError;
@@ -3335,6 +3440,11 @@ int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
     {
         return 0;
     }
+    const QPointer<QTabWidget> catalogTabs(tabWidget);
+    const QPointer<QWidget> catalogOwner(owner);
+    requestPluginCatalog(tabWidget, [catalogTabs, catalogOwner](const PluginListResult&, const QString&) {
+        if (catalogTabs && catalogOwner) ks::plugin_host::populateTabPlugins(catalogTabs, catalogOwner);
+    }, false, false);
     PluginListResult result;
     QString errorText;
     if (!discoverPlugins(&result, &errorText))
@@ -3342,12 +3452,16 @@ int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
         return 0;
     }
     int addedTabs = 0;
+    QStringList existingIds;
+    for (int index = 0; index < tabWidget->count(); ++index)
+        existingIds << tabWidget->widget(index)->property("kswordPluginId").toString();
     for (const PluginDescriptor& descriptor : result.plugins)
     {
         if (!isTabNavigationPlugin(descriptor))
         {
             continue;
         }
+        if (existingIds.contains(descriptor.id)) continue;
         auto* page = new PluginTabPage(tabWidget, descriptor);
         page->setProperty("kswordPluginId", descriptor.id);
         if (auto* catalog = dynamic_cast<TabPluginCatalogContainer*>(owner))
@@ -3356,6 +3470,18 @@ int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
             tabWidget->addTab(page, QIcon(QStringLiteral(":/Icon/process_start.svg")), descriptor.tabPresentation.title);
         tabWidget->setTabToolTip(tabWidget->indexOf(page), descriptor.description);
         ++addedTabs;
+    }
+    if (addedTabs > 0)
+    {
+        for (int index = tabWidget->count() - 1; index >= 0; --index)
+        {
+            auto* page = tabWidget->widget(index);
+            if (page->objectName() != QStringLiteral("ksTabPluginEmptyState")) continue;
+            tabWidget->removeTab(index); page->deleteLater();
+        }
+        if (auto* catalog = dynamic_cast<TabPluginCatalogContainer*>(owner))
+            catalog->schema.erase(std::remove_if(catalog->schema.begin(), catalog->schema.end(),
+                [](const auto& page) { return page.id == QStringLiteral("overview"); }), catalog->schema.end());
     }
     return addedTabs;
 }
