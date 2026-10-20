@@ -36,6 +36,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QCheckBox;
@@ -46,6 +47,7 @@ class CodeEditorWidget;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class QTimer;
 
 namespace ks::ui
 {
@@ -113,6 +115,13 @@ namespace ksword::memory_dock
         void refreshChannelAvailability();
 
     private:
+        struct ChannelQueryJob;
+        void requestHvmAvailability();
+        void pollHvmAvailability();
+        std::shared_ptr<ChannelQueryJob> m_channelQueryJob;
+        QTimer* m_channelQueryPoll = nullptr;
+        QTimer* m_channelQueryDebounce = nullptr;
+        std::uint64_t m_channelQueryVersion = 0, m_channelPublishedVersion = 0, m_channelTargetEpoch = 0;
         void buildUi();
         void wireSignals();
         void startScan();

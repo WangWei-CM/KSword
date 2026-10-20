@@ -5,6 +5,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/FlowLayout.h"
 #include "../UI/CodeEditorWidget.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -33,6 +34,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 // ============================================================
@@ -364,16 +366,31 @@ namespace ksword::memory_dock
         }
     }
 
+    struct TamperDetectionPage::ChannelQueryJob
+    {
+        std::atomic_bool done{false},cancel{false};
+        std::uint64_t version=0,targetEpoch=0;
+        bool usable=false;
+        QString reason;
+    };
+
     TamperDetectionPage::TamperDetectionPage(QWidget* const parent)
         : QWidget(parent)
     {
         buildUi();
         wireSignals();
+        m_channelQueryPoll=new QTimer(this);m_channelQueryPoll->setInterval(25);
+        m_channelQueryDebounce=new QTimer(this);m_channelQueryDebounce->setSingleShot(true);m_channelQueryDebounce->setInterval(25);
+        connect(m_channelQueryPoll,&QTimer::timeout,this,[this]{pollHvmAvailability();});
+        connect(m_channelQueryDebounce,&QTimer::timeout,this,[this]{pollHvmAvailability();});
         refreshChannelAvailability();
         updateRunButtonState();
     }
 
-    TamperDetectionPage::~TamperDetectionPage() = default;
+    TamperDetectionPage::~TamperDetectionPage()
+    {
+        if(m_channelQueryJob)m_channelQueryJob->cancel.store(true,std::memory_order_relaxed);
+    }
 
     void TamperDetectionPage::buildUi()
     {
@@ -523,6 +540,7 @@ namespace ksword::memory_dock
     {
         m_attachedPid = processId;
         m_attachedProcessName = processName;
+        ++m_channelTargetEpoch;requestHvmAvailability();
         updateRunButtonState();
     }
 
@@ -551,39 +569,75 @@ namespace ksword::memory_dock
             ksword::memory_backend::currentDdmaSession(), &reason);
         m_useDmaCheck->setEnabled(ddmaUsable);
 
-        // HVM 的可用性与 DDMA 无关，单独问一次。窗口没标定出来时这条通道
-        // 仍会返回数据（回退 MmCopyMemory），但那时它与 R0 不再独立——
-        // 两者一致就不能用来排除内存管理器被挂钩，所以判为不可用而不是
-        // 让它带着一个悄悄失效的性质继续参与比对。
-        QString hvmReason;
-        const bool hvmUsable = ksword::memory_backend::isHvmMemoryUsable(&hvmReason);
-        m_useHvmCheck->setEnabled(hvmUsable);
-        if (!hvmUsable)
-        {
-            m_useHvmCheck->setChecked(false);
-            m_useHvmCheck->setToolTip(hvmReason);
-        }
-        else
-        {
-            m_useHvmCheck->setToolTip(QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。"));
-        }
+        // A DDMA broadcast never performs HVM IO on the GUI thread. Merge its
+        // latest request with any in-flight read; every actual probe remains an
+        // authoritative QUERY_WINDOW, with no capability TTL/cache conclusion.
+        requestHvmAvailability();
         if (ddmaUsable)
         {
-            m_channelHintLabel->setText(QStringLiteral("DDMA 通道就绪，本页可以判定 SLAT / EPT 级别的重定向。"));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+            const auto hint=ks::i18n::packedSourceText(QStringLiteral("DDMA 通道就绪，本页可以判定 SLAT / EPT 级别的重定向。"));
+            const auto style=QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex());
+            if(m_channelHintLabel->text()!=hint)m_channelHintLabel->setText(hint);
+            if(m_channelHintLabel->styleSheet()!=style)m_channelHintLabel->setStyleSheet(style);
         }
         else
         {
             // 这里必须说清楚"少了 DDMA 会少掉哪一类结论"，而不是只说它不可用。
             // 否则用户会以为没有 DDMA 时这一页照样能回答同一个问题。
             m_useDmaCheck->setChecked(false);
-            m_channelHintLabel->setText(
-                QStringLiteral("DDMA 暂不可用：%1。没有这条路径时，其余几条都经过 CPU 页表、会被同一个隐藏者一起骗过，本页只能发现普通补丁，无法判定 SLAT / EPT 重定向。").arg(reason));
-            m_channelHintLabel->setStyleSheet(
-                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            const auto hint=ks::i18n::packedSourceText(QStringLiteral("DDMA 暂不可用：%1。没有这条路径时，其余几条都经过 CPU 页表、会被同一个隐藏者一起骗过，本页只能发现普通补丁，无法判定 SLAT / EPT 重定向。").arg(reason));
+            const auto style=QStringLiteral("color:%1;").arg(KswordTheme::WarningHex());
+            if(m_channelHintLabel->text()!=hint)m_channelHintLabel->setText(hint);
+            if(m_channelHintLabel->styleSheet()!=style)m_channelHintLabel->setStyleSheet(style);
         }
         updateRunButtonState();
+    }
+
+    void TamperDetectionPage::requestHvmAvailability()
+    {
+        ++m_channelQueryVersion;
+        if(m_channelQueryJob)m_channelQueryJob->cancel.store(true,std::memory_order_relaxed);
+        // Keep the user's check preference while a new read is pending. The
+        // disabled path is excluded from new requests until its own IO returns.
+        m_useHvmCheck->setEnabled(false);
+        m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("正在查询 HVM 私有页表窗口。")));
+        m_channelQueryDebounce->start();m_channelQueryPoll->start();
+    }
+
+    void TamperDetectionPage::pollHvmAvailability()
+    {
+        if(m_channelQueryJob&&m_channelQueryJob->done.load(std::memory_order_acquire))
+        {
+            auto job=std::move(m_channelQueryJob);
+            if(!job->cancel.load(std::memory_order_relaxed)&&job->version==m_channelQueryVersion&&job->targetEpoch==m_channelTargetEpoch)
+            {
+                m_channelPublishedVersion=job->version;
+                const QPointer<TamperDetectionPage> guard(this);
+                m_useHvmCheck->setEnabled(job->usable);
+                if(!job->usable)
+                {
+                    m_useHvmCheck->setChecked(false);if(!guard)return;
+                    m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(job->reason));
+                }
+                else m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。")));
+                updateRunButtonState();if(!guard)return;
+            }
+        }
+        if(!m_channelQueryJob&&m_channelPublishedVersion!=m_channelQueryVersion&&!m_channelQueryDebounce->isActive())
+        {
+            auto job=std::make_shared<ChannelQueryJob>();job->version=m_channelQueryVersion;job->targetEpoch=m_channelTargetEpoch;m_channelQueryJob=job;
+            try
+            {
+                QThreadPool::globalInstance()->start([job]
+                {
+                    try { if(!job->cancel.load(std::memory_order_relaxed))job->usable=ksword::memory_backend::isHvmMemoryUsable(&job->reason); }
+                    catch (...) { job->reason=QStringLiteral("查询 HVM 私有页表窗口失败。"); }
+                    job->done.store(true,std::memory_order_release);
+                },-1);
+            }
+            catch (...) {job->reason=QStringLiteral("查询 HVM 私有页表窗口失败。");job->done.store(true,std::memory_order_release);}
+        }
+        if(!m_channelQueryJob&&m_channelPublishedVersion==m_channelQueryVersion)m_channelQueryPoll->stop();
     }
 
     void TamperDetectionPage::updateRunButtonState()
