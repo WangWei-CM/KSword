@@ -226,6 +226,7 @@ private:
     QTimer* m_refreshTimer = nullptr;                         // 定时刷新器。
 
     // ======== 刷新与过滤状态 ========
+    ks::log::RecentSnapshotToken m_recentSnapshotToken; // Query identity and last matching record.
     std::size_t m_lastRevision = 0;           // 上次渲染时的日志 revision。
 
     bool m_isTracking = false;                // 当前是否处于“按 GUID 追踪”模式。

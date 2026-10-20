@@ -242,12 +242,56 @@ namespace ks::log
         return formattedTime.str();
     }
 
+    std::size_t LogEntry::GuidLevelHash::operator()(const GuidLevelKey& key) const noexcept
+    {
+        std::size_t hash = 2166136261U;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&key.guid);
+        for (std::size_t index = 0; index < sizeof(GUID); ++index)
+        {
+            hash = (hash ^ bytes[index]) * 16777619U;
+        }
+        return (hash ^ key.level) * 16777619U;
+    }
+
+    bool LogEntry::GuidLevelEqual::operator()(
+        const GuidLevelKey& left, const GuidLevelKey& right) const noexcept
+    {
+        return left.level == right.level && std::memcmp(&left.guid, &right.guid, sizeof(GUID)) == 0;
+    }
+
     void LogEntry::add(Event eventItem)
     {
         std::lock_guard<std::mutex> lockGuard(m_mutex);
-        // recordSequence 在锁内分配，保证多线程写日志时每个归档记录都有稳定且唯一的 UI 键。
         eventItem.recordSequence = m_nextRecordSequence++;
-        m_events.emplace_back(std::move(eventItem));
+        const auto level = static_cast<unsigned int>(eventItem.level);
+        if (level < m_levelIndexes.size())
+        {
+            auto indexedGuid = m_guidLevelIndexes.try_emplace(GuidLevelKey{ eventItem.guid, level }).first;
+            auto& levelIndexes = m_levelIndexes[level];
+            auto& guidIndexes = indexedGuid->second;
+            const std::size_t oldLevelSize = levelIndexes.size();
+            const std::size_t oldGuidSize = guidIndexes.size();
+            try
+            {
+                levelIndexes.push_back(m_events.size());
+                guidIndexes.push_back(m_events.size());
+                m_events.emplace_back(std::move(eventItem));
+            }
+            catch (...)
+            {
+                // An allocation failure must not leave an index pointing past the
+                // archive or make a successfully archived record invisible to queries.
+                levelIndexes.resize(oldLevelSize);
+                guidIndexes.resize(oldGuidSize);
+                if (guidIndexes.empty()) m_guidLevelIndexes.erase(indexedGuid);
+                throw;
+            }
+        }
+        else
+        {
+            // Preserve full archive/export behavior for non-filterable enum values.
+            m_events.emplace_back(std::move(eventItem));
+        }
         ++m_revision;
     }
 
@@ -255,6 +299,8 @@ namespace ks::log
     {
         std::lock_guard<std::mutex> lockGuard(m_mutex);
         m_events.clear();
+        for (auto& indexes : m_levelIndexes) indexes.clear();
+        m_guidLevelIndexes.clear();
         ++m_epoch;
         ++m_revision;
     }
@@ -309,48 +355,84 @@ namespace ks::log
         const std::uint32_t enabledLevelMask,
         const GUID* const trackedGuid) const
     {
-        std::vector<Event> recentEvents;
-        if (maxCount == 0 || enabledLevelMask == 0)
-        {
-            return recentEvents;
-        }
+        return SnapshotRecentIfChanged(maxCount, enabledLevelMask, trackedGuid, nullptr).events;
+    }
 
+    RecentSnapshot LogEntry::SnapshotRecentIfChanged(
+        const std::size_t maxCount,
+        const std::uint32_t enabledLevelMask,
+        const GUID* const trackedGuid,
+        const RecentSnapshotToken* const previousToken) const
+    {
+        RecentSnapshot snapshot;
         std::lock_guard<std::mutex> lockGuard(m_mutex);
-        recentEvents.reserve(std::min(maxCount, m_events.size()));
+        snapshot.token.epoch = m_epoch;
+        snapshot.token.maxCount = maxCount;
+        snapshot.token.enabledLevelMask = enabledLevelMask;
+        snapshot.token.isTracking = trackedGuid != nullptr;
+        if (trackedGuid != nullptr) snapshot.token.trackedGuid = *trackedGuid;
 
-        // UI 只需要“最近 N 条”，但内部 m_events 必须继续保留全量历史。
-        // 因此这里从尾部倒序扫描，命中筛选条件后才复制；达到 maxCount 立即停止。
-        // 这样日志量很大时，日志 Dock 刷新不会为了显示 200 行而复制全部历史。
-        for (auto reverseIterator = m_events.rbegin(); reverseIterator != m_events.rend(); ++reverseIterator)
+        std::array<const std::vector<std::size_t>*, 32> tails{};
+        std::array<std::size_t, 32> positions{};
+        std::size_t matchingCount = 0;
+        if (maxCount != 0)
         {
-            const Event& singleEvent = *reverseIterator;
-            const unsigned int levelIndex = static_cast<unsigned int>(singleEvent.level);
-            if (levelIndex >= 32U)
+            for (std::size_t level = 0; level < tails.size(); ++level)
             {
-                continue;
-            }
-
-            const std::uint32_t levelBit = (std::uint32_t{ 1 } << levelIndex);
-            if ((enabledLevelMask & levelBit) == 0)
-            {
-                continue;
-            }
-
-            if (trackedGuid != nullptr && !::ks::log::IsSameGuid(singleEvent.guid, *trackedGuid))
-            {
-                continue;
-            }
-
-            recentEvents.push_back(singleEvent);
-            if (recentEvents.size() >= maxCount)
-            {
-                break;
+                if ((enabledLevelMask & (std::uint32_t{ 1 } << level)) == 0) continue;
+                if (trackedGuid == nullptr)
+                {
+                    tails[level] = &m_levelIndexes[level];
+                }
+                else
+                {
+                    const auto found = m_guidLevelIndexes.find(
+                        GuidLevelKey{ *trackedGuid, static_cast<std::uint32_t>(level) });
+                    if (found != m_guidLevelIndexes.end()) tails[level] = &found->second;
+                }
+                if (tails[level] != nullptr && !tails[level]->empty())
+                {
+                    positions[level] = tails[level]->size();
+                    matchingCount += positions[level];
+                    snapshot.token.newestRecordSequence = std::max(snapshot.token.newestRecordSequence,
+                        m_events[tails[level]->back()].recordSequence);
+                }
             }
         }
 
-        // 倒序扫描得到的是“新到旧”，表格仍按正常时间顺序“旧到新”显示。
-        std::reverse(recentEvents.begin(), recentEvents.end());
-        return recentEvents;
+        if (previousToken != nullptr
+            && previousToken->epoch == snapshot.token.epoch
+            && previousToken->newestRecordSequence == snapshot.token.newestRecordSequence
+            && previousToken->maxCount == maxCount
+            && previousToken->enabledLevelMask == enabledLevelMask
+            && previousToken->isTracking == snapshot.token.isTracking
+            && (trackedGuid == nullptr || ::ks::log::IsSameGuid(previousToken->trackedGuid, *trackedGuid)))
+        {
+            snapshot.changed = false;
+            return snapshot;
+        }
+
+        const std::size_t resultCount = std::min(maxCount, matchingCount);
+        snapshot.events.reserve(resultCount);
+        while (snapshot.events.size() < resultCount)
+        {
+            std::size_t newestLevel = tails.size();
+            std::size_t newestIndex = 0;
+            for (std::size_t level = 0; level < tails.size(); ++level)
+            {
+                if (positions[level] == 0) continue;
+                const std::size_t candidateIndex = (*tails[level])[positions[level] - 1];
+                if (newestLevel == tails.size() || candidateIndex > newestIndex)
+                {
+                    newestLevel = level;
+                    newestIndex = candidateIndex;
+                }
+            }
+            snapshot.events.push_back(m_events[newestIndex]);
+            --positions[newestLevel];
+        }
+        std::reverse(snapshot.events.begin(), snapshot.events.end());
+        return snapshot;
     }
 
     ArchiveCursor LogEntry::TailCursor() const
