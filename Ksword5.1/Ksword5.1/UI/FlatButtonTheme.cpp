@@ -22,44 +22,94 @@ namespace
     constexpr char beginMarker[] = "/*KSWORD_FLAT_BUTTON_BEGIN*/";
     constexpr char endMarker[] = "/*KSWORD_FLAT_BUTTON_END*/";
 
-    // 返回影响按钮颜色所有权的剩余 QSS，不修改真实样式或接管未知业务颜色。
-    // 只精确排除已登记的工具栏几何与主页面容器块；额外规则仍阻止跨层猜配色。
+    struct ButtonOwnershipStyle
+    {
+        QString rawStyle;
+        bool toolbarControl = false;
+        bool toolbarIconOnly = false;
+        std::array<QString, 4> surfaceBlocks;
+        QString colorStyle;
+        int tone = -1;
+        int appearance = -1;
+    };
+
+    QHash<const QWidget*, ButtonOwnershipStyle>& buttonOwnershipStyles()
+    {
+        static QHash<const QWidget*, ButtonOwnershipStyle> styles;
+        return styles;
+    }
+
+    // 只缓存按实际局部QSS/完整拥有块得出的结果，不缓存祖先结论。
+    // 每次查询仍读取真实输入，reparent或同QSS下角色块属性变化也不会漏失效。
+    const ButtonOwnershipStyle& buttonOwnershipStyle(const QWidget* owner)
+    {
+        const QString rawStyle = owner->styleSheet();
+        const bool toolbarControl = owner->property("ksword_toolbar_control").toBool();
+        const bool toolbarIconOnly = owner->property("ksword_toolbar_icon_only").toBool();
+        const std::array<QString, 4> blocks{
+            owner->property("ksword_primary_style_block").toString(),
+            owner->property("ksword_parameter_surface_style_block").toString(),
+            owner->property("ksword_secondary_style_block").toString(),
+            owner->property("ksword_dock_root_surface_style_block").toString()};
+        auto& styles = buttonOwnershipStyles();
+        auto found = styles.find(owner);
+        if (found == styles.end())
+        {
+            found = styles.insert(owner, ButtonOwnershipStyle{});
+            QObject::connect(owner, &QObject::destroyed, qApp, [owner]()
+            {
+                buttonOwnershipStyles().remove(owner);
+            });
+        }
+        else if (found->rawStyle == rawStyle && found->toolbarControl == toolbarControl
+            && found->toolbarIconOnly == toolbarIconOnly && found->surfaceBlocks == blocks)
+        {
+            return found.value();
+        }
+        auto& result = found.value();
+        result.rawStyle = rawStyle;
+        result.toolbarControl = toolbarControl;
+        result.toolbarIconOnly = toolbarIconOnly;
+        result.surfaceBlocks = blocks;
+        QString style = rawStyle;
+        if (toolbarControl) style.remove(ks::ui::ToolbarControlGeometryStyle().trimmed());
+        if (toolbarIconOnly) style.remove(ks::ui::ToolbarIconGeometryStyle().trimmed());
+        // 仍只排除精确登记的容器/几何块，未知业务QSS不能穿透到更远祖先。
+        for (const QString& block : blocks)
+        {
+            if (!block.isEmpty()) style.remove(block);
+        }
+        result.colorStyle = style.trimmed();
+        result.tone = -1;
+        result.appearance = -1;
+        qsizetype lastTone = -1;
+        qsizetype lastAppearance = -1;
+        for (int candidate = 0; candidate <= 3; ++candidate)
+        {
+            const qsizetype position = result.colorStyle.lastIndexOf(
+                QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/").arg(candidate));
+            if (position > lastTone)
+            {
+                lastTone = position;
+                result.tone = candidate;
+            }
+        }
+        for (int candidate = 0; candidate <= static_cast<int>(ks::ui::FlatButtonAppearance::Navigation); ++candidate)
+        {
+            const qsizetype position = result.colorStyle.lastIndexOf(
+                QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));
+            if (position > lastAppearance)
+            {
+                lastAppearance = position;
+                result.appearance = candidate;
+            }
+        }
+        return result;
+    }
+
     QString buttonColorOwnershipStyle(const QWidget* owner)
     {
-        QString style = owner->styleSheet(); // 当前控件真正拥有的完整局部样式。
-        if (owner->property("ksword_toolbar_control").toBool())
-        {
-            style.remove(ks::ui::ToolbarControlGeometryStyle().trimmed());
-        }
-        if (owner->property("ksword_toolbar_icon_only").toBool())
-        {
-            style.remove(ks::ui::ToolbarIconGeometryStyle().trimmed());
-        }
-        // 容器块由 PrimaryPageStyle 记录完整内容，不能只凭属性忽略整份祖先样式。
-        const QString primaryBlock = owner->property("ksword_primary_style_block").toString();
-        if (!primaryBlock.isEmpty())
-        {
-            style.remove(primaryBlock);
-        }
-        // 参数框架只绘容器底面/底栏分界，不拥有按钮配色；不能把该精确块当业务覆盖。
-        const QString parameterBlock = owner->property("ksword_parameter_surface_style_block").toString();
-        if (!parameterBlock.isEmpty())
-        {
-            style.remove(parameterBlock);
-        }
-        // 二级窗口/底栏仅拥有容器、分区和输入规则，不以中性容器块阻断共享按钮配色。
-        const QString secondaryBlock = owner->property("ksword_secondary_style_block").toString();
-        if (!secondaryBlock.isEmpty())
-        {
-            style.remove(secondaryBlock);
-        }
-        // Dock 根透明块只负责根表面，不能阻断子按钮明确声明的配色所有权。
-        const QString dockBlock = owner->property("ksword_dock_root_surface_style_block").toString();
-        if (!dockBlock.isEmpty())
-        {
-            style.remove(dockBlock);
-        }
-        return style.trimmed();
+        return buttonOwnershipStyle(owner).colorStyle;
     }
 
     QString replaceOwnedBlock(QString style, const QString& replacement)
@@ -243,6 +293,19 @@ namespace
             {
                 return false;
             }
+            // 已真正应用的完整局部规则具有自己的选择器优先级；没有输入变化时
+            // 无须每次Show再次剥容器块/解析marker，也不依赖StyleChange是否发出。
+            const QString appliedStyle = button->property("ksword_flat_button_applied_style").toString();
+            if (!button->property("ksword_flat_button_pending").toBool()
+                && button->property("ksword_flat_button_managed").toBool()
+                && !appliedStyle.isEmpty() && button->styleSheet() == appliedStyle
+                && button->property("ksword_flat_button_tone")
+                    == button->property("ksword_flat_button_applied_tone")
+                && button->property("ksword_flat_button_appearance")
+                    == button->property("ksword_flat_button_applied_appearance"))
+            {
+                return false;
+            }
             // 显式 API 尚未刷新时，旧的本地/父级 marker 不得把 Danger 降回 Neutral。
             // 尺寸归一可能在排队期间追加几何片段，不应因此放弃显式页面声明。
             if (button->property("ksword_flat_button_pending").toBool()
@@ -253,19 +316,9 @@ namespace
             }
             for (QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
             {
-                const QString style = buttonColorOwnershipStyle(owner);
-                int latestTone = -1; // 后声明的页面状态优先，不把首次 Neutral 锁成永久色调。
-                qsizetype latestPosition = -1;
-                for (int tone = 0; tone <= 3; ++tone)
-                {
-                    const qsizetype position = style.lastIndexOf(
-                        QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/").arg(tone));
-                    if (position > latestPosition)
-                    {
-                        latestPosition = position;
-                        latestTone = tone;
-                    }
-                }
+                const auto& ownership = buttonOwnershipStyle(owner);
+                const QString& style = ownership.colorStyle;
+                const int latestTone = ownership.tone;
                 // 未标记的本地或祖先覆盖属于页面，不跨过它猜更远父级/全局按钮归一。
                 // 例如数据颜色面板可在父 QWidget 给按钮定义底色，而按钮自身 QSS 为空。
                 if (!style.isEmpty() && latestTone < 0)
@@ -274,18 +327,8 @@ namespace
                 }
                 if (latestTone >= 0)
                 {
-                    int latestAppearance = 0; // 未声明时沿用 Auto；独立 Flat/Solid 由页面明确拥有。
-                    qsizetype appearancePosition = -1;
-                    for (int candidate = 0; candidate <= static_cast<int>(ks::ui::FlatButtonAppearance::Navigation); ++candidate)
-                    {
-                        const qsizetype position = style.lastIndexOf(
-                            QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));
-                        if (position > appearancePosition)
-                        {
-                            appearancePosition = position;
-                            latestAppearance = candidate;
-                        }
-                    }
+                    int latestAppearance = ownership.appearance < 0
+                        ? static_cast<int>(ks::ui::FlatButtonAppearance::Auto) : ownership.appearance;
                     // 旧工厂的 Auto 标记不能撤销页面明确选择；显式 API 调用仍能重新声明外观。
                     const QVariant declared = button->property("ksword_flat_button_appearance");
                     if (latestAppearance == static_cast<int>(ks::ui::FlatButtonAppearance::Auto)
@@ -514,18 +557,9 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     {
         for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
         {
-            const QString style = buttonColorOwnershipStyle(owner);
-            qsizetype latestPosition = -1;
-            for (int candidate = 0; candidate <= 3; ++candidate)
-            {
-                const qsizetype position = style.lastIndexOf(
-                    QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/").arg(candidate));
-                if (position > latestPosition)
-                {
-                    latestPosition = position;
-                    tone = candidate;
-                }
-            }
+            const auto& ownership = buttonOwnershipStyle(owner);
+            const QString& style = ownership.colorStyle;
+            if (ownership.tone >= 0) tone = ownership.tone;
             // 祖先未知 QSS 可能比应用基线更优先；必须和自动绑定使用相同所有权边界。
             if (!style.isEmpty() && tone < 0)
             {
@@ -548,20 +582,11 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
         }
         for (const QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
         {
-            const QString style = buttonColorOwnershipStyle(owner);
-            qsizetype latest = -1;
-            for (int candidate = 0; candidate <= static_cast<int>(FlatButtonAppearance::Navigation); ++candidate)
+            const auto& ownership = buttonOwnershipStyle(owner);
+            const QString& style = ownership.colorStyle;
+            if (ownership.appearance >= 0)
             {
-                const qsizetype position = style.lastIndexOf(
-                    QStringLiteral("/*KSWORD_FLAT_BUTTON_APPEARANCE_%1*/").arg(candidate));
-                if (position > latest)
-                {
-                    latest = position;
-                    appearance = static_cast<FlatButtonAppearance>(candidate);
-                }
-            }
-            if (latest >= 0)
-            {
+                appearance = static_cast<FlatButtonAppearance>(ownership.appearance);
                 break;
             }
             if (!style.isEmpty())
