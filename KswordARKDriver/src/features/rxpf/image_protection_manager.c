@@ -45,6 +45,16 @@ RtlPcToFileHeader(
 #define KSW_RXPF_22621_CHECKSUM      0x00B8C0BFUL
 #define KSW_RXPF_22621_MM_CHANGE_RVA 0x00736CF0UL
 
+/* Build 26300.9457 (Windows 11 24H2 + 1 refresh) profile — 本机 VM 实测。 */
+/* PE 元数据由 tools/pdb_offset_generator 读取 C:\WINDOWS\System32\ntoskrnl.exe 得到。 */
+/* MmChangeImageProtection RVA 由 memory_ioctl.c:change-image-protection */
+/*   的 resolvedFunctionVa 字段减去 ntoskrnl base 实测确认，与 PE 符号一致。 */
+#define KSW_RXPF_26300_NT_BUILD      26300UL
+#define KSW_RXPF_26300_TIMESTAMP     0xFDA9ED74UL
+#define KSW_RXPF_26300_IMAGE_SIZE    0x01450000UL
+#define KSW_RXPF_26300_CHECKSUM      0x00C817D5UL
+#define KSW_RXPF_26300_MM_CHANGE_RVA 0x00A5DDB0UL
+
 #define KSW_RXPF_RSDS_SIGNATURE 0x53445352UL
 
 /*
@@ -133,6 +143,15 @@ static const GUID g_KswRxpfPdbGuid22621 = {
     { 0x1CU, 0xB3U, 0x36U, 0x6BU, 0x64U, 0xBEU, 0x62U, 0xF9U }
 };
 
+/* Build 26300.9457 PDB: ntkrnlmp.pdb {C29EBFB0-6B78-B3C0-20DC-A66D99713F9E} age 1. */
+/* 该 GUID 从 VM 本机 ntoskrnl.exe (10.0.26300.9457) 的 CodeView RSDS 直接读得。 */
+static const GUID g_KswRxpfPdbGuid26300 = {
+    0xC29EBFB0UL,
+    0x6B78U,
+    0xB3C0U,
+    { 0x20U, 0xDCU, 0xA6U, 0x6DU, 0x99U, 0x71U, 0x3FU, 0x9EU }
+};
+
 static const UCHAR g_KswRxpfMmChangeSignature[64] = {
     0x48U, 0x8BU, 0xC4U, 0x48U, 0x89U, 0x58U, 0x08U, 0x48U,
     0x89U, 0x68U, 0x10U, 0x48U, 0x89U, 0x70U, 0x18U, 0x44U,
@@ -167,6 +186,21 @@ static const UCHAR g_KswRxpfMmChangeSignature22621[64] = {
     0x8BU, 0xC3U, 0x48U, 0x89U, 0x44U, 0x24U, 0x28U, 0x48U
 };
 
+/* Build 26300.9457 MmChangeImageProtection prologue (64 bytes at RVA 0x00A5DDB0). */
+/* 和 26220 几乎逐字节一致，仅 offset 0x36-0x37 处的 JA (0F 87) 相对偏移不同 */
+/* (26220: 0x41 0x02；26300: 0x2D 0x02)——函数内部条件跳转目标随 build 偏移。 */
+/* 直接读 VM 的 ntoskrnl.exe 文件内容抓到；mask 复用全 0xFF 策略。 */
+static const UCHAR g_KswRxpfMmChangeSignature26300[64] = {
+    0x48U, 0x8BU, 0xC4U, 0x48U, 0x89U, 0x58U, 0x08U, 0x48U,
+    0x89U, 0x68U, 0x10U, 0x48U, 0x89U, 0x70U, 0x18U, 0x44U,
+    0x89U, 0x48U, 0x20U, 0x57U, 0x41U, 0x54U, 0x41U, 0x55U,
+    0x41U, 0x56U, 0x41U, 0x57U, 0x48U, 0x83U, 0xECU, 0x30U,
+    0x83U, 0x60U, 0xC8U, 0x00U, 0x49U, 0x8BU, 0xD8U, 0x41U,
+    0x8DU, 0x41U, 0xFFU, 0x4CU, 0x8BU, 0xE2U, 0x48U, 0x8BU,
+    0xF9U, 0x83U, 0xF8U, 0x01U, 0x0FU, 0x87U, 0x2DU, 0x02U,
+    0x00U, 0x00U, 0x44U, 0x8BU, 0xEBU, 0x49U, 0x3BU, 0xDDU
+};
+
 static const KSW_RXPF_BUILD_PROFILE g_KswRxpfBuildProfiles[] = {
     {
         KSW_RXPF_EXPECTED_NT_BUILD,
@@ -197,10 +231,26 @@ static const KSW_RXPF_BUILD_PROFILE g_KswRxpfBuildProfiles[] = {
         g_KswRxpfMmChangeSignature22621,
         g_KswRxpfMmChangeSignatureMask,
         RTL_NUMBER_OF(g_KswRxpfMmChangeSignature22621)
+    },
+    {
+        /* Build 26300.9457 profile — 本机 VM 实测 build，补上让 Phase G 完整链能跑。 */
+        KSW_RXPF_26300_NT_BUILD,
+        KSW_RXPF_26300_TIMESTAMP,
+        KSW_RXPF_26300_IMAGE_SIZE,
+        KSW_RXPF_26300_CHECKSUM,
+        KSW_RXPF_26300_MM_CHANGE_RVA,
+        4UL,
+        KSW_RXPF_MM_CHANGE_OPERATION_RX,
+        KSW_RXPF_MM_CHANGE_OPERATION_READONLY_NX,
+        1UL,
+        &g_KswRxpfPdbGuid26300,
+        g_KswRxpfMmChangeSignature26300,
+        g_KswRxpfMmChangeSignatureMask,
+        RTL_NUMBER_OF(g_KswRxpfMmChangeSignature26300)
     }
 };
 
-C_ASSERT(RTL_NUMBER_OF(g_KswRxpfBuildProfiles) == 2U);
+C_ASSERT(RTL_NUMBER_OF(g_KswRxpfBuildProfiles) == 3U);
 C_ASSERT(sizeof(g_KswRxpfMmChangeSignature) == 64U);
 
 /*
