@@ -217,6 +217,42 @@ namespace
         bool m_forwarding = false;
     };
 
+    // 仅用于参数滚动正文：矩形、零圆角且由本模块对每个像素实填。
+    // 外部卡片仍承担8px圆角，不能把这个契约扩散到普通面板或透明画布。
+    class ParameterScrollCanvas final : public QWidget
+    {
+    public:
+        explicit ParameterScrollCanvas(QWidget* parent)
+            : QWidget(parent), m_surface(ks::ui::MainWindowSurfaceColors().content)
+        {
+            setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+        }
+        void setSurface(const QColor& surface)
+        {
+            const bool changed = m_surface != surface;
+            m_surface = surface;
+            setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+            if (changed) update();
+        }
+    protected:
+        bool event(QEvent* event) override
+        {
+            const bool handled = QWidget::event(event);
+            if (event->type() == QEvent::Polish || event->type() == QEvent::StyleChange)
+            {
+                setAttribute(Qt::WA_OpaquePaintEvent, m_surface.alpha() == 255);
+            }
+            return handled;
+        }
+        void paintEvent(QPaintEvent*) override
+        {
+            QPainter painter(this);
+            painter.fillRect(rect(), m_surface);
+        }
+    private:
+        QColor m_surface;
+    };
+
     // 参数框架的色块自身无描边，只在操作区与正文之间留一条低对比度分隔线。
     void bindWorkspaceSurface(QWidget* widget, bool footer = false, bool canvas = false)
     {
@@ -237,6 +273,11 @@ namespace
             if (target->styleSheet() != style)
             {
                 target->setStyleSheet(style); // 语言/重复palette通知不重写同一面板底色。
+            }
+            if (auto* scrollCanvas = dynamic_cast<ParameterScrollCanvas*>(target.data()))
+            {
+                // 与原有实底QSS使用同一颜色源；alpha不满时自动退出opaque快路径。
+                scrollCanvas->setSurface(surface);
             }
         });
     }
@@ -399,7 +440,7 @@ namespace ks::ui
         m_scroll->setWidgetResizable(true);
         m_scroll->setFrameShape(QFrame::NoFrame);
         m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        auto* form = new QWidget(m_scroll);
+        auto* form = new ParameterScrollCanvas(m_scroll);
         form->setProperty("ksword_parameter_body", true); // 默认组框据此选择分区结构，而非把结果卡片也当参数。
         form->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         form->setMinimumWidth(0);
