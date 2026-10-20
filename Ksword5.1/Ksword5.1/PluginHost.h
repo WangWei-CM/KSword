@@ -9,6 +9,7 @@
 // ============================================================
 
 #include <QString>
+#include "UI/PageNavigationCatalog.h"
 
 #include <QtGlobal>
 
@@ -18,6 +19,9 @@ class QWidget;
 
 namespace ks::plugin_host
 {
+    ks::ui::PageNavigationCatalog tabNavigationCatalog(QWidget* existing = nullptr);
+    QWidget* activateTabNavigationDescriptor(QWidget* existing, const QString& id);
+
     enum class TargetKind
     {
         File,

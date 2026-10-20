@@ -1,4 +1,5 @@
 ﻿#include "PluginHost.h"
+#include "UI/PageNavigationTabCatalog.h"
 #include "UI/FlatButtonTheme.h"
 #include "PluginHost.Upstream.h"
 #include "PluginHost.Archive.h"
@@ -3233,6 +3234,43 @@ void ks::plugin_host::populateTargetMenu(QMenu* menu, QWidget* owner, const Invo
     }
 }
 
+namespace
+{
+    bool isTabNavigationPlugin(const PluginDescriptor& descriptor)
+    {
+        return (descriptor.pluginType == QStringLiteral("tab") || descriptor.pluginType == QStringLiteral("hybrid"))
+            && descriptor.tabPresentation.enabled && descriptor.targets.contains(QStringLiteral("tab"));
+    }
+    ks::ui::PageNavigationDescriptor tabPluginNavigationDescriptor(const PluginDescriptor& descriptor, bool current)
+    {
+        return {QStringLiteral("plugin:") + descriptor.id, {}, descriptor.tabPresentation.title, {}, true, true, current};
+    }
+    const ks::ui::PageNavigationTabDefinition kEmptyPluginNavigation =
+        {"overview", "", "plugin.tab.empty.overview", "概览", true};
+    class TabPluginCatalogContainer final : public QWidget
+    {
+    public:
+        using QWidget::QWidget;
+        ks::ui::PageNavigationTabCatalog navigation;
+        ks::ui::PageNavigationCatalog schema;
+        void addPlugin(QTabWidget* tabs, QWidget* page, const PluginDescriptor& descriptor)
+        {
+            auto entry = tabPluginNavigationDescriptor(descriptor, schema.isEmpty());
+            const QByteArray id = entry.id.toUtf8();
+            const QByteArray title = entry.title.toUtf8();
+            navigation.add({id.constData(), "", "", title.constData(), entry.current}, tabs, page,
+                QIcon(QStringLiteral(":/Icon/process_start.svg")));
+            tabs->setTabText(tabs->indexOf(page), entry.title); // manifest自定义标题沿用原工厂原文，不按应用翻译别名改写。
+            schema.append(std::move(entry));
+        }
+        void addEmpty(QTabWidget* tabs, QWidget* page)
+        {
+            navigation.add(kEmptyPluginNavigation, tabs, page);
+            schema.append(ks::ui::PageNavigationTabDescriptor(kEmptyPluginNavigation));
+        }
+    };
+}
+
 int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
 {
     if (tabWidget == nullptr || owner == nullptr)
@@ -3248,19 +3286,16 @@ int ks::plugin_host::populateTabPlugins(QTabWidget* tabWidget, QWidget* owner)
     int addedTabs = 0;
     for (const PluginDescriptor& descriptor : result.plugins)
     {
-        if ((descriptor.pluginType != QStringLiteral("tab") &&
-             descriptor.pluginType != QStringLiteral("hybrid")) ||
-            !descriptor.tabPresentation.enabled ||
-            !descriptor.targets.contains(QStringLiteral("tab")))
+        if (!isTabNavigationPlugin(descriptor))
         {
             continue;
         }
         auto* page = new PluginTabPage(tabWidget, descriptor);
         page->setProperty("kswordPluginId", descriptor.id);
-        tabWidget->addTab(
-            page,
-            QIcon(QStringLiteral(":/Icon/process_start.svg")),
-            descriptor.tabPresentation.title);
+        if (auto* catalog = dynamic_cast<TabPluginCatalogContainer*>(owner))
+            catalog->addPlugin(tabWidget, page, descriptor);
+        else
+            tabWidget->addTab(page, QIcon(QStringLiteral(":/Icon/process_start.svg")), descriptor.tabPresentation.title);
         tabWidget->setTabToolTip(tabWidget->indexOf(page), descriptor.description);
         ++addedTabs;
     }
@@ -3328,7 +3363,7 @@ namespace
 
 QWidget* ks::plugin_host::createTabPluginContainer(QWidget* parent)
 {
-    auto* container = new QWidget(parent);
+    auto* container = new TabPluginCatalogContainer(parent);
     container->setObjectName(QStringLiteral("ksTabPluginContainer"));
 
     auto* rootLayout = new QVBoxLayout(container);
@@ -3449,9 +3484,7 @@ QWidget* ks::plugin_host::createTabPluginContainer(QWidget* parent)
         QObject::connect(manageButton, &QPushButton::clicked, emptyPage, [emptyPage]() {
             ks::plugin_host::showPluginManager(emptyPage);
         });
-        tabWidget->addTab(
-            emptyPage,
-            ks::i18n::text(QStringLiteral("plugin.tab.empty.overview"), QStringLiteral("概览")));
+        container->addEmpty(tabWidget, emptyPage);
     }
 
     return container;
@@ -3463,3 +3496,26 @@ void ks::plugin_host::showPluginManager(QWidget* owner, const QString& preselect
     dialog->raise();
     dialog->activateWindow();
 }
+
+ks::ui::PageNavigationCatalog ks::plugin_host::tabNavigationCatalog(QWidget* existing)
+{
+    if (auto* container = dynamic_cast<TabPluginCatalogContainer*>(existing))
+        return container->navigation.describe(container->schema);
+    // 只读取与真实工厂相同的manifest元数据；此路径没有PluginTabPage、QProcess或原生窗口构造。
+    PluginListResult plugins;
+    QString error;
+    ks::ui::PageNavigationCatalog schema;
+    if (discoverPlugins(&plugins, &error))
+        for (const auto& descriptor : plugins.plugins)
+            if (isTabNavigationPlugin(descriptor))
+                schema.append(tabPluginNavigationDescriptor(descriptor, schema.isEmpty()));
+    if (schema.isEmpty()) schema.append(ks::ui::PageNavigationTabDescriptor(kEmptyPluginNavigation));
+    return schema;
+}
+QWidget* ks::plugin_host::activateTabNavigationDescriptor(QWidget* existing, const QString& id)
+{
+    auto* container = dynamic_cast<TabPluginCatalogContainer*>(existing);
+    return container ? container->navigation.activate(id, tabNavigationCatalog(container)) : nullptr;
+}
+namespace { const bool kTabPluginNavigationRegistered = ks::ui::RegisterPageNavigationCatalog(QStringLiteral("misc.plugin"),
+    ks::plugin_host::tabNavigationCatalog, ks::plugin_host::activateTabNavigationDescriptor); }
