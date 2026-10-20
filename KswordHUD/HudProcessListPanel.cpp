@@ -8,6 +8,8 @@
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFrame>
+#include <QElapsedTimer>
+#include <QSignalBlocker>
 #include <QFont>
 #include <QHeaderView>
 #include <QHideEvent>
@@ -652,6 +654,9 @@ HudProcessListPanel::HudProcessListPanel(QWidget* parent)
     m_fileIconProvider = new QFileIconProvider();
     initializeUi();
 
+    m_applyTimer = new QTimer(this);
+    m_applyTimer->setInterval(0);
+    connect(m_applyTimer, &QTimer::timeout, this, &HudProcessListPanel::applyRefreshChunk);
     m_refreshWatcher = new QFutureWatcher<RefreshResult>(this);
     connect(m_refreshWatcher, &QFutureWatcher<RefreshResult>::finished, this, [this]() {
         m_refreshInProgress = false;
@@ -675,6 +680,7 @@ HudProcessListPanel::~HudProcessListPanel()
 void HudProcessListPanel::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    if (!m_pendingRows.isEmpty() || !m_pendingRemovals.isEmpty()) m_applyTimer->start();
     startRefreshing();
 }
 
@@ -682,6 +688,7 @@ void HudProcessListPanel::hideEvent(QHideEvent* event)
 {
     QWidget::hideEvent(event);
     stopRefreshing();
+    if (m_applyTimer) m_applyTimer->stop();
 }
 
 void HudProcessListPanel::initializeUi()
@@ -988,7 +995,7 @@ void HudProcessListPanel::stopRefreshing()
 
 void HudProcessListPanel::requestRefresh()
 {
-    if (m_refreshInProgress || m_refreshWatcher == nullptr)
+    if (m_refreshInProgress || m_refreshWatcher == nullptr || m_applyTimer->isActive())
     {
         return;
     }
@@ -1010,7 +1017,7 @@ void HudProcessListPanel::requestRefresh()
 
 void HudProcessListPanel::captureExpandedState()
 {
-    // Inputs: current QTreeWidget state before the refresh rebuild clears all items.
+    // Inputs: current QTreeWidget state before a successful delta projection.
     // Processing: recursively records expansion for every row that carries a stable expansion key.
     // Return behavior: no value is returned; m_expandedStateByKey is updated in place.
     if (m_treeWidget == nullptr)
@@ -1045,23 +1052,6 @@ void HudProcessListPanel::captureExpandedStateForItem(QTreeWidgetItem* itemPoint
     {
         captureExpandedStateForItem(itemPointer->child(childIndex));
     }
-}
-
-void HudProcessListPanel::restoreExpandedState(
-    QTreeWidgetItem* itemPointer,
-    const QString& stateKey,
-    const bool defaultExpanded)
-{
-    // Inputs: a newly-created tree item, its stable expansion key, and the default state for first appearance.
-    // Processing: stores the key on the row and applies a previously captured state when present.
-    // Return behavior: no value is returned; null rows are ignored.
-    if (itemPointer == nullptr)
-    {
-        return;
-    }
-
-    itemPointer->setData(NameColumn, kExpansionKeyRole, stateKey);
-    itemPointer->setExpanded(m_expandedStateByKey.value(stateKey, defaultExpanded));
 }
 
 HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
@@ -1236,264 +1226,172 @@ HudProcessListPanel::RefreshResult HudProcessListPanel::collectRefreshResult(
 
     ::CloseHandle(snapshotHandle);
     classifyProcessGroups(&result.entries, visibleWindowPidSet);
+    preparePresentationRows(result);
+    result.ok = true;
     return result;
+}
+
+void HudProcessListPanel::preparePresentationRows(RefreshResult& result)
+{
+    const auto sorter = [](const ProcessEntry& a, const ProcessEntry& b) {
+        const int order = a.processName.compare(b.processName, Qt::CaseInsensitive);
+        return order != 0 ? order < 0 : a.pid < b.pid;
+    };
+    const auto keyFor = [](const ProcessEntry& entry) {
+        const QString identity = buildProcessInstanceKey(entry.pid, entry.creationTime100ns);
+        return QStringLiteral("process:") + (identity.isEmpty()
+            ? QStringLiteral("%1|%2|%3").arg(entry.pid).arg(entry.processName, entry.imagePath) : identity);
+    };
+    const auto addRow = [&](const ProcessEntry& entry, const QString& key,
+                            const QString& parent, const QVector<ProcessEntry>& identities,
+                            bool aggregate) {
+        PresentationRow row;
+        row.key = key; row.parentKey = parent; row.entry = entry; row.aggregate = aggregate;
+        row.cells = {aggregate && identities.size() > 1
+                ? QStringLiteral("%1 (%2)").arg(entry.processName).arg(identities.size()) : entry.processName,
+            QString::number(entry.pid), formatPercent(entry.cpuPercent, 2), formatRamMB(entry.ramMB),
+            formatDiskMBps(entry.diskMBps), formatPercent(entry.gpuPercent, 1), formatNetKBps(entry.netKBps)};
+        for (int column = CpuColumn; column < ColumnCount; ++column)
+            row.ratios[column - CpuColumn] = usageRatioForEntry(entry, column, result.maxRamMB, result.maxDiskMBps, result.maxNetKBps);
+        for (const auto& identity : identities) {
+            if (identity.pid != 0 && identity.creationTime100ns != 0) {
+                QVariantList pair; pair << QVariant::fromValue(identity.pid) << QVariant::fromValue(identity.creationTime100ns);
+                row.terminateIdentities.append(QVariant(pair));
+            }
+        }
+        result.rows.append(std::move(row));
+    };
+    QHash<quint32, QVector<ProcessEntry>> applications;
+    QVector<ProcessEntry> background, system;
+    for (const auto& entry : result.entries) {
+        if (entry.groupType == ProcessGroupType::Application)
+            applications[entry.applicationRootPid ? entry.applicationRootPid : entry.pid].append(entry);
+        else if (entry.groupType == ProcessGroupType::WindowsSystem) system.append(entry);
+        else background.append(entry);
+    }
+    struct Bucket { ProcessEntry aggregate; QVector<ProcessEntry> entries; };
+    QVector<Bucket> buckets;
+    for (auto it = applications.cbegin(); it != applications.cend(); ++it) {
+        auto entries = it.value(); std::sort(entries.begin(), entries.end(), sorter);
+        buckets.append({aggregateApplicationEntry(entries), std::move(entries)});
+    }
+    std::sort(buckets.begin(), buckets.end(), [&](const Bucket& a, const Bucket& b) { return sorter(a.aggregate, b.aggregate); });
+    std::sort(background.begin(), background.end(), sorter);
+    std::sort(system.begin(), system.end(), sorter);
+    const auto group = [&](ProcessGroupType type, int count) {
+        PresentationRow row; row.key = expansionKeyForGroup(type); row.group = true;
+        row.groupOrder = processGroupOrder(type); row.cells = {processGroupTitle(type, count)};
+        result.rows.append(std::move(row));
+    };
+    const QString appGroup = expansionKeyForGroup(ProcessGroupType::Application);
+    group(ProcessGroupType::Application, buckets.size());
+    for (const auto& bucket : buckets) {
+        const QString appKey = QStringLiteral("app:") + keyFor(bucket.aggregate);
+        addRow(bucket.aggregate, appKey, appGroup, bucket.entries, true);
+        QHash<quint32, QVector<ProcessEntry>> children;
+        for (const auto& entry : bucket.entries) children[entry.parentPid].append(entry);
+        QSet<quint32> visited;
+        const auto append = [&](const auto& self, const ProcessEntry& entry, const QString& parent) -> void {
+            if (visited.contains(entry.pid)) return;
+            visited.insert(entry.pid);
+            const QString key = keyFor(entry); addRow(entry, key, parent, {entry}, false);
+            for (const auto& child : children.value(entry.pid)) self(self, child, key);
+        };
+        for (const auto& entry : bucket.entries) if (entry.pid == bucket.aggregate.pid) append(append, entry, appKey);
+        for (const auto& entry : bucket.entries) append(append, entry, appKey);
+    }
+    group(ProcessGroupType::Background, background.size());
+    for (const auto& entry : background) addRow(entry, keyFor(entry), expansionKeyForGroup(ProcessGroupType::Background), {entry}, false);
+    group(ProcessGroupType::WindowsSystem, system.size());
+    for (const auto& entry : system) addRow(entry, keyFor(entry), expansionKeyForGroup(ProcessGroupType::WindowsSystem), {entry}, false);
 }
 
 void HudProcessListPanel::applyRefreshResult(const RefreshResult& result)
 {
-    if (m_treeWidget == nullptr)
-    {
-        return;
-    }
-
-    if ((::GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0)
-    {
-        return;
-    }
-
-    captureExpandedState();
+    if (!m_treeWidget || !result.ok || !isVisible()
+        || (::GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0) return;
     m_previousSamples = result.nextSamples;
     updateHeaderSummary(result);
     m_imagePathByIdentity.clear();
-    m_itemByPid.clear();
+    for (const auto& entry : result.entries) {
+        const QString identity = buildProcessInstanceKey(entry.pid, entry.creationTime100ns);
+        if (!identity.isEmpty() && !entry.imagePath.isEmpty()) m_imagePathByIdentity.insert(identity, entry.imagePath);
+    }
+    captureExpandedState();
+    QSet<QString> live;
+    for (const auto& row : result.rows) live.insert(row.key);
+    m_pendingRemovals.clear();
+    for (auto it = m_itemByKey.cbegin(); it != m_itemByKey.cend(); ++it)
+        if (!live.contains(it.key())) m_pendingRemovals.append(it.key());
+    m_pendingRows = result.rows;
+    m_applyOffset = m_removeOffset = 0;
+    m_siblingIndex.clear();
+    m_treeWidget->setSortingEnabled(false);
+    m_applyTimer->start();
+}
 
+void HudProcessListPanel::applyRefreshChunk()
+{
+    if (!isVisible()) { m_applyTimer->stop(); return; }
+    if ((::GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0) { m_applyTimer->setInterval(30); return; }
+    m_applyTimer->setInterval(0);
+    QElapsedTimer elapsed; elapsed.start();
+    const QSignalBlocker blocker(m_treeWidget);
     m_treeWidget->setUpdatesEnabled(false);
-    m_treeWidget->setSortingEnabled(false);
-    m_treeWidget->clear();
-
-    const QVector<ProcessEntry> entries = result.entries;
-    QVector<ProcessEntry> applicationEntries;
-    QVector<ProcessEntry> backgroundEntries;
-    QVector<ProcessEntry> systemEntries;
-    applicationEntries.reserve(entries.size());
-    backgroundEntries.reserve(entries.size());
-    systemEntries.reserve(entries.size());
-
-    for (const ProcessEntry& entry : entries)
-    {
-        const QString processInstanceKey =
-            buildProcessInstanceKey(entry.pid, entry.creationTime100ns);
-        if (!processInstanceKey.isEmpty() && !entry.imagePath.isEmpty())
-        {
-            m_imagePathByIdentity.insert(processInstanceKey, entry.imagePath);
-        }
-        switch (entry.groupType)
-        {
-        case ProcessGroupType::Application:
-            applicationEntries.push_back(entry);
-            break;
-        case ProcessGroupType::WindowsSystem:
-            systemEntries.push_back(entry);
-            break;
-        case ProcessGroupType::Background:
-        default:
-            backgroundEntries.push_back(entry);
-            break;
-        }
+    int budget = 128;
+    while (budget-- > 0 && elapsed.elapsed() < 4 && m_removeOffset < m_pendingRemovals.size()) {
+        auto* item = m_itemByKey.take(m_pendingRemovals.at(m_removeOffset++));
+        if (!item) continue;
+        // Surviving descendants retain their objects until their new parent is projected.
+        const auto children = item->takeChildren();
+        for (auto* child : children) m_treeWidget->addTopLevelItem(child);
+        delete item;
     }
-
-    const auto processSorter = [](const ProcessEntry& left, const ProcessEntry& right)
-    {
-        // Inputs: two rows from the same visual group.
-        // Processing: sort by process/application name first so the default tree is alphabetic.
-        // Return: true when the left entry should appear before the right entry.
-        if (left.processName.compare(right.processName, Qt::CaseInsensitive) != 0)
-        {
-            return left.processName.compare(right.processName, Qt::CaseInsensitive) < 0;
-        }
-        return left.pid < right.pid;
-    };
-
-    std::sort(applicationEntries.begin(), applicationEntries.end(), processSorter);
-    std::sort(backgroundEntries.begin(), backgroundEntries.end(), processSorter);
-    std::sort(systemEntries.begin(), systemEntries.end(), processSorter);
-
-    QHash<quint32, QVector<ProcessEntry>> applicationEntriesByRootPid;
-    applicationEntriesByRootPid.reserve(applicationEntries.size());
-    for (const ProcessEntry& entry : applicationEntries)
-    {
-        const quint32 rootPidValue = entry.applicationRootPid != 0 ? entry.applicationRootPid : entry.pid;
-        applicationEntriesByRootPid[rootPidValue].push_back(entry);
-    }
-
-    QVector<QVector<ProcessEntry>> applicationBuckets;
-    applicationBuckets.reserve(applicationEntriesByRootPid.size());
-    for (auto bucketIterator = applicationEntriesByRootPid.cbegin();
-        bucketIterator != applicationEntriesByRootPid.cend();
-        ++bucketIterator)
-    {
-        applicationBuckets.push_back(bucketIterator.value());
-    }
-    std::sort(applicationBuckets.begin(), applicationBuckets.end(), [processSorter](const QVector<ProcessEntry>& left, const QVector<ProcessEntry>& right)
-        {
-            const ProcessEntry leftAggregate = aggregateApplicationEntry(left);
-            const ProcessEntry rightAggregate = aggregateApplicationEntry(right);
-            return processSorter(leftAggregate, rightAggregate);
-        });
-
-    QTreeWidgetItem* applicationGroupItem =
-        createProcessGroupItem(ProcessGroupType::Application, applicationBuckets.size());
-    if (applicationGroupItem != nullptr)
-    {
-        m_treeWidget->addTopLevelItem(applicationGroupItem);
-        restoreExpandedState(
-            applicationGroupItem,
-            expansionKeyForGroup(ProcessGroupType::Application),
-            true);
-        const bool expandApplicationSubtreeByDefault = applicationGroupItem->isExpanded();
-
-        for (QVector<ProcessEntry>& applicationBucket : applicationBuckets)
-        {
-            std::sort(applicationBucket.begin(), applicationBucket.end(), processSorter);
-            const ProcessEntry aggregateEntry = aggregateApplicationEntry(applicationBucket);
-            QTreeWidgetItem* applicationRootItem = createApplicationRootItem(
-                aggregateEntry,
-                applicationBucket,
-                applicationBucket.size(),
-                result.maxRamMB,
-                result.maxDiskMBps,
-                result.maxNetKBps);
-            if (applicationRootItem == nullptr)
-            {
-                continue;
-            }
-
-            applicationGroupItem->addChild(applicationRootItem);
-            restoreExpandedState(
-                applicationRootItem,
-                expansionKeyForApplication(aggregateEntry.pid),
-                expandApplicationSubtreeByDefault);
-            applicationRootItem->setExpanded(expandApplicationSubtreeByDefault);
-
-            QHash<quint32, QTreeWidgetItem*> childItemByPid;
-            childItemByPid.reserve(applicationBucket.size());
-            QHash<quint32, QVector<ProcessEntry>> childrenByParentPid;
-            childrenByParentPid.reserve(applicationBucket.size());
-            for (const ProcessEntry& childEntry : applicationBucket)
-            {
-                childrenByParentPid[childEntry.parentPid].push_back(childEntry);
-            }
-
-            const auto appendChildrenRecursive =
-                [&](const auto& self, const quint32 parentPidValue, QTreeWidgetItem* parentTreeItem) -> void
-            {
-                QVector<ProcessEntry> childEntries = childrenByParentPid.value(parentPidValue);
-                std::sort(childEntries.begin(), childEntries.end(), processSorter);
-                for (const ProcessEntry& childEntry : childEntries)
-                {
-                    if (childItemByPid.contains(childEntry.pid))
-                    {
-                        continue;
-                    }
-
-                    QTreeWidgetItem* childTreeItem = updateOrCreateRow(
-                        childEntry,
-                        parentTreeItem,
-                        result.maxRamMB,
-                        result.maxDiskMBps,
-                        result.maxNetKBps);
-                    if (childTreeItem == nullptr)
-                    {
-                        continue;
-                    }
-
-                    restoreExpandedState(
-                        childTreeItem,
-                        expansionKeyForProcess(childEntry.pid),
-                        expandApplicationSubtreeByDefault);
-                    childTreeItem->setExpanded(expandApplicationSubtreeByDefault);
-                    childItemByPid.insert(childEntry.pid, childTreeItem);
-                    self(self, childEntry.pid, childTreeItem);
-                }
-            };
-
-            const auto rootEntryIterator = std::find_if(
-                applicationBucket.cbegin(),
-                applicationBucket.cend(),
-                [&aggregateEntry](const ProcessEntry& childEntry)
-                {
-                    return childEntry.pid == aggregateEntry.pid;
-                });
-            if (rootEntryIterator != applicationBucket.cend())
-            {
-                QTreeWidgetItem* rootProcessItem = updateOrCreateRow(
-                    *rootEntryIterator,
-                    applicationRootItem,
-                    result.maxRamMB,
-                    result.maxDiskMBps,
-                    result.maxNetKBps);
-                if (rootProcessItem != nullptr)
-                {
-                    restoreExpandedState(
-                        rootProcessItem,
-                        expansionKeyForProcess(rootEntryIterator->pid),
-                        expandApplicationSubtreeByDefault);
-                    rootProcessItem->setExpanded(expandApplicationSubtreeByDefault);
-                    childItemByPid.insert(rootEntryIterator->pid, rootProcessItem);
-                    appendChildrenRecursive(appendChildrenRecursive, rootEntryIterator->pid, rootProcessItem);
-                }
-            }
-
-            for (const ProcessEntry& childEntry : applicationBucket)
-            {
-                if (childItemByPid.contains(childEntry.pid))
-                {
-                    continue;
-                }
-
-                QTreeWidgetItem* childTreeItem = updateOrCreateRow(
-                    childEntry,
-                    applicationRootItem,
-                    result.maxRamMB,
-                    result.maxDiskMBps,
-                    result.maxNetKBps);
-                if (childTreeItem == nullptr)
-                {
-                    continue;
-                }
-
-                restoreExpandedState(
-                    childTreeItem,
-                    expansionKeyForProcess(childEntry.pid),
-                    expandApplicationSubtreeByDefault);
-                childTreeItem->setExpanded(expandApplicationSubtreeByDefault);
-                childItemByPid.insert(childEntry.pid, childTreeItem);
-                appendChildrenRecursive(appendChildrenRecursive, childEntry.pid, childTreeItem);
+    while (m_removeOffset == m_pendingRemovals.size() && budget-- > 0 && elapsed.elapsed() < 4 && m_applyOffset < m_pendingRows.size()) {
+        const auto& row = m_pendingRows.at(m_applyOffset++);
+        auto* item = m_itemByKey.value(row.key);
+        const bool created = item == nullptr;
+        if (created) {
+            item = new QTreeWidgetItem(); m_itemByKey.insert(row.key, item);
+            item->setData(NameColumn, kExpansionKeyRole, row.key);
+            for (int col = PidColumn; col < ColumnCount; ++col) item->setTextAlignment(col, Qt::AlignRight | Qt::AlignVCenter);
+            QFont font = item->font(NameColumn); font.setBold(row.group || row.aggregate); item->setFont(NameColumn, font);
+            if (row.group) {
+                item->setData(NameColumn, Qt::UserRole + 8, row.groupOrder);
+                item->setFlags((item->flags() | Qt::ItemIsEnabled) & ~Qt::ItemIsSelectable);
+                item->setForeground(NameColumn, QColor(96, 165, 250));
+                item->setBackground(NameColumn, QColor(255, 255, 255, 12));
             }
         }
-    }
-
-    const struct GroupBucket
-    {
-        ProcessGroupType type;
-        const QVector<ProcessEntry>* entries;
-    } groupBuckets[] = {
-        { ProcessGroupType::Background, &backgroundEntries },
-        { ProcessGroupType::WindowsSystem, &systemEntries }
-    };
-
-    for (const GroupBucket& bucket : groupBuckets)
-    {
-        QTreeWidgetItem* groupItem = createProcessGroupItem(bucket.type, bucket.entries->size());
-        if (groupItem == nullptr)
-        {
-            continue;
+        auto* parent = m_itemByKey.value(row.parentKey);
+        const int desired = m_siblingIndex[row.parentKey]++;
+        const int current = item->parent() ? item->parent()->indexOfChild(item) : m_treeWidget->indexOfTopLevelItem(item);
+        if (created || item->parent() != parent || current != desired) {
+            const bool selected = item->isSelected();
+            const bool currentItem = m_treeWidget->currentItem() == item;
+            if (item->parent()) item->parent()->takeChild(item->parent()->indexOfChild(item));
+            else if (!created) m_treeWidget->takeTopLevelItem(m_treeWidget->indexOfTopLevelItem(item));
+            if (parent) parent->insertChild(desired, item); else m_treeWidget->insertTopLevelItem(desired, item);
+            if (selected) item->setSelected(true);
+            if (currentItem) m_treeWidget->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
         }
-        m_treeWidget->addTopLevelItem(groupItem);
-        restoreExpandedState(
-            groupItem,
-            expansionKeyForGroup(bucket.type),
-            true);
-
-        for (const ProcessEntry& entry : *bucket.entries)
-        {
-            updateOrCreateRow(entry, groupItem, result.maxRamMB, result.maxDiskMBps, result.maxNetKBps);
+        if (created && row.group) item->setFirstColumnSpanned(true);
+        for (int col = 0; col < row.cells.size(); ++col)
+            if (item->text(col) != row.cells.at(col)) item->setText(col, row.cells.at(col));
+        if (!row.group) {
+            const auto icon = resolveProcessIcon(row.entry);
+            if (item->icon(NameColumn).cacheKey() != icon.cacheKey()) item->setIcon(NameColumn, icon);
+            if (item->data(NameColumn, kTerminateProcessIdentityListRole).toList() != row.terminateIdentities)
+                item->setData(NameColumn, kTerminateProcessIdentityListRole, row.terminateIdentities);
+            for (int col = CpuColumn; col < ColumnCount; ++col)
+                if (item->data(col, kUsageRatioRole).toDouble() != row.ratios[col - CpuColumn]) item->setData(col, kUsageRatioRole, row.ratios[col - CpuColumn]);
         }
+        if (created) item->setExpanded(m_expandedStateByKey.value(row.key, parent ? parent->isExpanded() : true));
     }
-
-    m_treeWidget->setSortingEnabled(false);
     m_treeWidget->setUpdatesEnabled(true);
-    m_treeWidget->viewport()->update();
+    if (m_applyOffset == m_pendingRows.size() && m_removeOffset == m_pendingRemovals.size()) {
+        m_applyTimer->stop(); m_pendingRows.clear(); m_pendingRemovals.clear();
+    }
 }
 
 void HudProcessListPanel::updateHeaderSummary(const RefreshResult& result)
@@ -1671,7 +1569,7 @@ HudProcessListPanel::ProcessEntry HudProcessListPanel::aggregateApplicationEntry
 QString HudProcessListPanel::expansionKeyForGroup(const ProcessGroupType groupType)
 {
     // Inputs: one top-level process group type.
-    // Processing: map the enum to a stable string that survives full refresh rebuilds.
+    // Processing: map the enum to a stable group identity that survives delta projection.
     // Return: expansion-state key for the group row.
     switch (groupType)
     {
@@ -1683,22 +1581,6 @@ QString HudProcessListPanel::expansionKeyForGroup(const ProcessGroupType groupTy
     default:
         return QStringLiteral("group:background");
     }
-}
-
-QString HudProcessListPanel::expansionKeyForApplication(const quint32 rootPidValue)
-{
-    // Inputs: an application root PID.
-    // Processing: format a stable key for one Task-Manager-style application row.
-    // Return: expansion-state key for that application aggregate node.
-    return QStringLiteral("app:%1").arg(rootPidValue);
-}
-
-QString HudProcessListPanel::expansionKeyForProcess(const quint32 pidValue)
-{
-    // Inputs: a concrete process PID.
-    // Processing: format a stable key for process rows that may own child rows.
-    // Return: expansion-state key for that process node.
-    return QStringLiteral("pid:%1").arg(pidValue);
 }
 
 QString HudProcessListPanel::processGroupTitle(const ProcessGroupType groupType, const int entryCount)
@@ -1733,142 +1615,6 @@ int HudProcessListPanel::processGroupOrder(const ProcessGroupType groupType)
     default:
         return 2;
     }
-}
-
-QTreeWidgetItem* HudProcessListPanel::createProcessGroupItem(
-    const ProcessGroupType groupType,
-    const int entryCount)
-{
-    // Inputs: process group type and group size.
-    // Processing: create a non-process parent row with a bold blue caption and no PID role.
-    // Return: a heap-allocated tree item owned by QTreeWidget after insertion, or nullptr only on allocation failure.
-    auto* groupItem = new QTreeWidgetItem();
-    groupItem->setText(NameColumn, processGroupTitle(groupType, entryCount));
-    groupItem->setData(NameColumn, Qt::UserRole + 8, processGroupOrder(groupType));
-    groupItem->setFirstColumnSpanned(true);
-    groupItem->setFlags((groupItem->flags() | Qt::ItemIsEnabled) & ~Qt::ItemIsSelectable);
-
-    QFont groupFont = groupItem->font(NameColumn);
-    groupFont.setBold(true);
-    groupItem->setFont(NameColumn, groupFont);
-    groupItem->setForeground(NameColumn, QColor(96, 165, 250));
-    groupItem->setBackground(NameColumn, QColor(255, 255, 255, 12));
-    return groupItem;
-}
-
-QTreeWidgetItem* HudProcessListPanel::createApplicationRootItem(
-    const ProcessEntry& aggregateEntry,
-    const QVector<ProcessEntry>& applicationEntries,
-    const int childProcessCount,
-    const double maxRamMB,
-    const double maxDiskMBps,
-    const double maxNetKBps)
-{
-    // Inputs: aggregate metrics for one application tree, child count, and metric normalization maxima.
-    // Processing: create a virtual parent row that mirrors Task Manager's "App name (N)" row.
-    // Return: a heap-allocated tree item that the caller inserts under the Applications group.
-    auto* itemPointer = new QTreeWidgetItem();
-    itemPointer->setTextAlignment(PidColumn, Qt::AlignRight | Qt::AlignVCenter);
-    itemPointer->setTextAlignment(CpuColumn, Qt::AlignRight | Qt::AlignVCenter);
-    itemPointer->setTextAlignment(RamColumn, Qt::AlignRight | Qt::AlignVCenter);
-    itemPointer->setTextAlignment(DiskColumn, Qt::AlignRight | Qt::AlignVCenter);
-    itemPointer->setTextAlignment(GpuColumn, Qt::AlignRight | Qt::AlignVCenter);
-    itemPointer->setTextAlignment(NetColumn, Qt::AlignRight | Qt::AlignVCenter);
-
-    itemPointer->setText(
-        NameColumn,
-        childProcessCount > 1
-        ? QStringLiteral("%1 (%2)").arg(aggregateEntry.processName).arg(childProcessCount)
-        : aggregateEntry.processName);
-    itemPointer->setText(PidColumn, QString::number(aggregateEntry.pid));
-    itemPointer->setIcon(NameColumn, resolveProcessIcon(aggregateEntry));
-    itemPointer->setText(CpuColumn, formatPercent(aggregateEntry.cpuPercent, 2));
-    itemPointer->setText(RamColumn, formatRamMB(aggregateEntry.ramMB));
-    itemPointer->setText(DiskColumn, formatDiskMBps(aggregateEntry.diskMBps));
-    itemPointer->setText(GpuColumn, formatPercent(aggregateEntry.gpuPercent, 1));
-    itemPointer->setText(NetColumn, formatNetKBps(aggregateEntry.netKBps));
-    QVariantList terminateIdentityVariantList;
-    terminateIdentityVariantList.reserve(applicationEntries.size());
-    for (const ProcessEntry& entry : applicationEntries)
-    {
-        if (entry.pid != 0 && entry.creationTime100ns != 0)
-        {
-            QVariantList identityValues;
-            identityValues.push_back(entry.pid);
-            identityValues.push_back(entry.creationTime100ns);
-            terminateIdentityVariantList.push_back(identityValues);
-        }
-    }
-    itemPointer->setData(
-        NameColumn,
-        kTerminateProcessIdentityListRole,
-        terminateIdentityVariantList);
-    itemPointer->setData(CpuColumn, kUsageRatioRole, usageRatioForEntry(aggregateEntry, CpuColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(RamColumn, kUsageRatioRole, usageRatioForEntry(aggregateEntry, RamColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(DiskColumn, kUsageRatioRole, usageRatioForEntry(aggregateEntry, DiskColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(GpuColumn, kUsageRatioRole, usageRatioForEntry(aggregateEntry, GpuColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(NetColumn, kUsageRatioRole, usageRatioForEntry(aggregateEntry, NetColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-
-    QFont appFont = itemPointer->font(NameColumn);
-    appFont.setBold(true);
-    itemPointer->setFont(NameColumn, appFont);
-    return itemPointer;
-}
-
-QTreeWidgetItem* HudProcessListPanel::updateOrCreateRow(
-    const ProcessEntry& entry,
-    QTreeWidgetItem* parentItem,
-    const double maxRamMB,
-    const double maxDiskMBps,
-    const double maxNetKBps)
-{
-    QTreeWidgetItem* itemPointer = m_itemByPid.value(entry.pid, nullptr);
-    if (itemPointer == nullptr)
-    {
-        itemPointer = new QTreeWidgetItem();
-        itemPointer->setTextAlignment(PidColumn, Qt::AlignRight | Qt::AlignVCenter);
-        itemPointer->setTextAlignment(CpuColumn, Qt::AlignRight | Qt::AlignVCenter);
-        itemPointer->setTextAlignment(RamColumn, Qt::AlignRight | Qt::AlignVCenter);
-        itemPointer->setTextAlignment(DiskColumn, Qt::AlignRight | Qt::AlignVCenter);
-        itemPointer->setTextAlignment(GpuColumn, Qt::AlignRight | Qt::AlignVCenter);
-        itemPointer->setTextAlignment(NetColumn, Qt::AlignRight | Qt::AlignVCenter);
-        if (parentItem != nullptr)
-        {
-            parentItem->addChild(itemPointer);
-        }
-        else
-        {
-            m_treeWidget->addTopLevelItem(itemPointer);
-        }
-        m_itemByPid.insert(entry.pid, itemPointer);
-    }
-
-    itemPointer->setText(NameColumn, entry.processName);
-    itemPointer->setText(PidColumn, QString::number(entry.pid));
-    itemPointer->setIcon(NameColumn, resolveProcessIcon(entry));
-    itemPointer->setText(CpuColumn, formatPercent(entry.cpuPercent, 2));
-    itemPointer->setText(RamColumn, formatRamMB(entry.ramMB));
-    itemPointer->setText(DiskColumn, formatDiskMBps(entry.diskMBps));
-    itemPointer->setText(GpuColumn, formatPercent(entry.gpuPercent, 1));
-    itemPointer->setText(NetColumn, formatNetKBps(entry.netKBps));
-    QVariantList terminateIdentityVariantList;
-    if (entry.pid != 0 && entry.creationTime100ns != 0)
-    {
-        QVariantList identityValues;
-        identityValues.push_back(entry.pid);
-        identityValues.push_back(entry.creationTime100ns);
-        terminateIdentityVariantList.push_back(identityValues);
-    }
-    itemPointer->setData(
-        NameColumn,
-        kTerminateProcessIdentityListRole,
-        terminateIdentityVariantList);
-    itemPointer->setData(CpuColumn, kUsageRatioRole, usageRatioForEntry(entry, CpuColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(RamColumn, kUsageRatioRole, usageRatioForEntry(entry, RamColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(DiskColumn, kUsageRatioRole, usageRatioForEntry(entry, DiskColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(GpuColumn, kUsageRatioRole, usageRatioForEntry(entry, GpuColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    itemPointer->setData(NetColumn, kUsageRatioRole, usageRatioForEntry(entry, NetColumn, maxRamMB, maxDiskMBps, maxNetKBps));
-    return itemPointer;
 }
 
 QString HudProcessListPanel::buildProcessInstanceKey(
