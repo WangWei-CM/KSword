@@ -39,6 +39,8 @@ namespace ks::ui
         {
             std::function<bool()> attempt; // 强持纯值owner，不得持QObject或反持job。
             std::function<void()> requestStop; // 仅短原子/唤醒，不得I/O、join或持GUI。
+            std::function<bool()> readyToAttempt; // 非阻塞值谓词；false仅延后，不记清理失败。
+            std::mutex schedulingMutex;
             std::shared_ptr<AsyncCleanupRegistry::Lease> lease;
             int workerPriority = 0;
             std::atomic_bool ready{ false };
@@ -65,16 +67,17 @@ namespace ks::ui
             // 创建方与首次request共同消费一次初始调度机会；快失败不能重开该机会。
             bool scheduleAttempt(bool explicitRetry) noexcept
             {
-                if (!stopSignaled.load() || !ready.load() || complete.load()) return false;
-                if (initialScheduled.exchange(true) && (!explicitRetry || !failed.load())) return false;
-                bool idle = false;
-                if (!running.compare_exchange_strong(idle, true)) return false;
-                if (complete.load())
+                try
                 {
-                    running.store(false);
-                    return false;
+                    std::lock_guard<std::mutex> lock(schedulingMutex);
+                    if (!stopSignaled.load() || !ready.load() || complete.load() || running.load()) return false;
+                    if (initialScheduled.load() && (!explicitRetry || !failed.load())) return false;
+                    if (readyToAttempt && !readyToAttempt()) return false;
+                    initialScheduled.store(true);
+                    running.store(true);
+                    failed.store(false);
                 }
-                failed.store(false);
+                catch (...) { return false; } // 谓词不可抛；保留owner/lease供外部显式请求。
                 try
                 {
                     const auto self = shared_from_this();
@@ -115,8 +118,14 @@ namespace ks::ui
                     catch (...) {}
                     if (succeeded)
                     {
-                        attempt = {};
-                        requestStop = {};
+                        try
+                        {
+                            std::lock_guard<std::mutex> lock(schedulingMutex);
+                            attempt = {};
+                            requestStop = {};
+                            readyToAttempt = {};
+                        }
+                        catch (...) { succeeded = false; }
                     }
                 }
                 if (!succeeded)
@@ -136,13 +145,16 @@ namespace ks::ui
     // 在首次session Start前创建；create失败不能启动业务。
     // null也可能表示已接纳的旧epoch正在后台收尾，调用者必须废弃该owner/lifecycle，不能Reopen复用。
     // attempt只持值owner，必须后台证明STOP/consumer close/join/最终写入均完成才返回true。
+    // ReadyToAttempt只做短值检查；RequestStop先closing阻新reserve，最后reservation释放后在资源锁外通知就绪。
+    // reservation须持job使关页后仍可通知；值owner仅weak job且不持reservation，避免所有权环。
     class RetainedCleanupJob final
     {
     public:
         using Attempt = std::function<bool()>;
         using RequestStop = std::function<void()>;
+        using ReadyToAttempt = std::function<bool()>;
         static std::shared_ptr<RetainedCleanupJob> create(Attempt attempt, int workerPriority = 0,
-            RequestStop requestStop = {}) noexcept
+            RequestStop requestStop = {}, ReadyToAttempt readyToAttempt = {}) noexcept
         {
             if (!attempt) return {};
             std::shared_ptr<retained_cleanup_detail::State> state;
@@ -151,6 +163,7 @@ namespace ks::ui
                 state = std::make_shared<retained_cleanup_detail::State>();
                 state->attempt = std::move(attempt);
                 state->requestStop = std::move(requestStop);
+                state->readyToAttempt = std::move(readyToAttempt);
                 state->workerPriority = workerPriority;
                 {
                     auto& retained = retained_cleanup_detail::store();
@@ -190,6 +203,9 @@ namespace ks::ui
         RetainedCleanupJob(const RetainedCleanupJob&) = delete;
         RetainedCleanupJob& operator=(const RetainedCleanupJob&) = delete;
         bool requestCleanup() noexcept { return m_state->requestCleanup(); }
+        // 资源最后释放仅交接初始机会；迟到通知绝不能自动重试已失败的cleanup。
+        // 不启动尚未请求停止的业务；必须在资源gate外调用，不能代替显式Retry。
+        bool notifyReadyToAttempt() noexcept { return m_state->scheduleAttempt(false); }
         bool isCleanupRequested() const { return m_state->requested.load(); }
         bool isInFlight() const { return m_state->running.load(); }
         bool hasFailed() const { return m_state->failed.load(); }
