@@ -1451,6 +1451,57 @@ namespace
         }
         return sourceText;
     }
+    template <typename AcquirePack>
+    QString sourceForRenderedTextValue(const QString& activeLanguageId,
+        const QString& renderedText, const AcquirePack& acquirePack)
+    {
+        if (renderedText.isEmpty() || containsHanCharacters(renderedText))
+        {
+            return {};
+        }
+
+        // 只沿当前语言的 fallback 链反查：界面上呈现的译文只可能来自当前生效的包，
+        // 扫描未启用的语言既会把它们全部加载进内存，也不对应任何已显示的文本。
+        // 反查索引本身在各包第一次走到这里时才构建。
+        QStringList visitedLanguageIds;
+        QString languageId = activeLanguageId;
+        while (!languageId.trimmed().isEmpty())
+        {
+            const QString normalizedLanguageId = languageId.trimmed().toLower();
+            if (visitedLanguageIds.contains(normalizedLanguageId))
+            {
+                break;
+            }
+            visitedLanguageIds.append(normalizedLanguageId);
+
+            const auto pack = acquirePack(normalizedLanguageId);
+            if (!pack.found)
+            {
+                break;
+            }
+            if (pack.data)
+            {
+                const QStringView source = pack.data->renderedSource(renderedText);
+                if (!source.isEmpty())
+                {
+                    return source.toString();
+                }
+            }
+            languageId = pack.fallbackLanguageId;
+        }
+        return {};
+    }
+
+    template <typename TranslateSource, typename ReverseSource>
+    QString displayTextValue(const QString& value, const TranslateSource& translate,
+        const ReverseSource& reverse)
+    {
+        if (value.isEmpty()) return value;
+        if (containsHanCharacters(value)) return translate(value);
+        const QString canonical = reverse(value);
+        return canonical.isEmpty() ? value : translate(canonical);
+    }
+
 }
 
 // State 说明：
@@ -1503,16 +1554,25 @@ struct ks::i18n::SourceTextSnapshot::Data
     QString languageId;
     std::vector<FrozenPack> packs;
 
+    FrozenPack acquirePack(const QString& id) const
+    {
+        const auto found = std::find_if(packs.cbegin(), packs.cend(),
+            [&id](const FrozenPack& pack) { return pack.languageId == id; });
+        return found == packs.cend() ? FrozenPack{} : *found;
+    }
+
+    QString sourceForRenderedText(const QString& value) const
+    {
+        return sourceForRenderedTextValue(languageId, value,
+            [this](const QString& id) { return acquirePack(id); });
+    }
+
     QString translate(const QString& sourceText, const bool preserveHistoricalChineseSource) const
     {
         QStringList visitedLanguageIds;
         return resolveSourceTextValue(
             languageId, sourceText, &visitedLanguageIds, preserveHistoricalChineseSource,
-            [this](const QString& id) {
-                const auto found = std::find_if(packs.cbegin(), packs.cend(),
-                    [&id](const FrozenPack& pack) { return pack.languageId == id; });
-                return found == packs.cend() ? FrozenPack{} : *found;
-            },
+            [this](const QString& id) { return acquirePack(id); },
             // Captures use normal source semantics even for packed queries,
             // matching LanguageManager::resolveSourceText's nested behavior.
             [this](const QString& value) { return translate(value, true); });
@@ -1537,6 +1597,14 @@ QString ks::i18n::SourceTextSnapshot::sourceText(const QString& sourceText) cons
 QString ks::i18n::SourceTextSnapshot::packedSourceText(const QString& sourceText) const
 {
     return m_data ? m_data->translate(sourceText, false) : sourceText;
+}
+
+QString ks::i18n::SourceTextSnapshot::displayText(const QString& renderedOrSourceText) const
+{
+    if (!m_data) return renderedOrSourceText;
+    return displayTextValue(renderedOrSourceText,
+        [this](const QString& value) { return m_data->translate(value, true); },
+        [this](const QString& value) { return m_data->sourceForRenderedText(value); });
 }
 
 ks::i18n::LanguageManager::LanguageManager()
@@ -1888,7 +1956,9 @@ ks::i18n::SourceTextSnapshot ks::i18n::LanguageManager::sourceTextSnapshot() con
         // perform a lazy pack read or consult the manager's later state.
         const PackRef pack = acquirePack(normalizedLanguageId);
         frozen->packs.push_back({pack.found, normalizedLanguageId, pack.fallbackLanguageId, pack.data});
-        if (!pack.found || !pack.data)
+        // Reverse lookup follows registered fallback metadata even through a
+        // failed pack load. Normal source lookup still stops at that failure.
+        if (!pack.found)
         {
             break;
         }
@@ -1899,56 +1969,15 @@ ks::i18n::SourceTextSnapshot ks::i18n::LanguageManager::sourceTextSnapshot() con
 
 QString ks::i18n::LanguageManager::sourceForRenderedText(const QString& renderedText) const
 {
-    if (renderedText.isEmpty() || containsHanCharacters(renderedText))
-    {
-        return {};
-    }
-
-    // 只沿当前语言的 fallback 链反查：界面上呈现的译文只可能来自当前生效的包，
-    // 扫描未启用的语言既会把它们全部加载进内存，也不对应任何已显示的文本。
-    // 反查索引本身在各包第一次走到这里时才构建。
-    QStringList visitedLanguageIds;
-    QString languageId = m_currentLanguageId;
-    while (!languageId.trimmed().isEmpty())
-    {
-        const QString normalizedLanguageId = languageId.trimmed().toLower();
-        if (visitedLanguageIds.contains(normalizedLanguageId))
-        {
-            break;
-        }
-        visitedLanguageIds.append(normalizedLanguageId);
-
-        const PackRef pack = acquirePack(normalizedLanguageId);
-        if (!pack.found)
-        {
-            break;
-        }
-        if (pack.data)
-        {
-            const QStringView source = pack.data->renderedSource(renderedText);
-            if (!source.isEmpty())
-            {
-                return source.toString();
-            }
-        }
-        languageId = pack.fallbackLanguageId;
-    }
-    return {};
+    return sourceForRenderedTextValue(m_currentLanguageId, renderedText,
+        [this](const QString& id) { return acquirePack(id); });
 }
 
 QString ks::i18n::LanguageManager::displayText(const QString& renderedOrSourceText) const
 {
-    if (renderedOrSourceText.isEmpty())
-    {
-        return renderedOrSourceText;
-    }
-    if (containsHanCharacters(renderedOrSourceText))
-    {
-        return sourceText(renderedOrSourceText);
-    }
-
-    const QString canonicalSource = sourceForRenderedText(renderedOrSourceText);
-    return canonicalSource.isEmpty() ? renderedOrSourceText : sourceText(canonicalSource);
+    return displayTextValue(renderedOrSourceText,
+        [this](const QString& value) { return sourceText(value); },
+        [this](const QString& value) { return sourceForRenderedText(value); });
 }
 
 void ks::i18n::LanguageManager::bindText(

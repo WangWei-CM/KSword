@@ -38,6 +38,9 @@ namespace ks::i18n
         QString languageId() const;
         QString sourceText(const QString& sourceText) const;
         QString packedSourceText(const QString& sourceText) const;
+        // Same unique rendered-source reversal and normal source/template
+        // semantics as LanguageManager::displayText, using only frozen packs.
+        QString displayText(const QString& renderedOrSourceText) const;
 
     private:
         struct Data;

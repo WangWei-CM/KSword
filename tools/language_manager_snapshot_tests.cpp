@@ -104,22 +104,38 @@ namespace
             {QStringLiteral("换行实%1\n"), QStringLiteral("literal-newline[%1]")},
             {QStringLiteral("缺%1"), QStringLiteral("bad:%2")},
             {QStringLiteral("AB%1"), QStringLiteral("non-Han[%1]")},
-            {QStringLiteral("换代词"), QStringLiteral("generation-English")}}));
+            {QStringLiteral("换代词"), QStringLiteral("generation-English")},
+            {QStringLiteral("重名甲"), QStringLiteral("ambiguous-only")},
+            {QStringLiteral("重名乙"), QStringLiteral("ambiguous-only")},
+            {QStringLiteral("回退重名甲"), QStringLiteral("ambiguous-fallback")},
+            {QStringLiteral("回退重名乙"), QStringLiteral("ambiguous-fallback")},
+            {QStringLiteral("回退反查"), QStringLiteral("fallback-retranslated")},
+            {QStringLiteral("显示模板：%1"), QStringLiteral("Rendered %1")},
+            {QStringLiteral("identity"), QStringLiteral("identity")}}));
         requireTrue(QStringLiteral("write French fixture"), writePack(QStringLiteral("fr-FR"), QStringLiteral("en-US"), {
             {QStringLiteral("直接命中"), QStringLiteral("French-exact")},
             {QStringLiteral("法语独有"), QStringLiteral("French-only")},
-            {QStringLiteral("换代词"), QStringLiteral("generation-French")}}));
+            {QStringLiteral("换代词"), QStringLiteral("generation-French")},
+            {QStringLiteral("显示模板：%1"), QStringLiteral("French rendered %1")}}));
         requireTrue(QStringLiteral("write Chinese fixture"), writePack(QStringLiteral("zh-CN"), QString(), {
             {QStringLiteral("直接命中"), QStringLiteral("包内中文")},
             {QStringLiteral("English canonical"), QStringLiteral("中文强制")},
             {QStringLiteral("仅中文包"), QStringLiteral("Chinese-pack-only")},
             {QStringLiteral("状态：%1"), QStringLiteral("包状态：%1")},
             {QStringLiteral("安全模式"), QStringLiteral("包内安全模式")},
-            {QStringLiteral("缺%1"), QStringLiteral("fallback:%1")}}));
+            {QStringLiteral("缺%1"), QStringLiteral("fallback:%1")},
+            {QStringLiteral("回退反查"), QStringLiteral("ambiguous-fallback")}}));
         requireTrue(QStringLiteral("write cycle A fixture"), writePack(QStringLiteral("aa-AA"), QStringLiteral("bb-BB"), {
             {QStringLiteral("甲侧命中"), QStringLiteral("cycle-A")}}));
         requireTrue(QStringLiteral("write cycle B fixture"), writePack(QStringLiteral("bb-BB"), QStringLiteral("aa-AA"), {
             {QStringLiteral("环链词"), QStringLiteral("cycle-B")}}));
+        requireTrue(QStringLiteral("write failed-chain root fixture"), writePack(QStringLiteral("cc-CC"), QStringLiteral("dd-DD"), {}));
+        requireTrue(QStringLiteral("write later-failed fallback metadata fixture"), writePack(QStringLiteral("dd-DD"), QStringLiteral("zh-CN"), {
+            {QStringLiteral("失败回退"),QStringLiteral("unused-before-corruption")}}));
+        requireTrue(QStringLiteral("write concurrent reverse root fixture"), writePack(QStringLiteral("tt-TT"), QStringLiteral("uu-UU"), {
+            {QStringLiteral("并发反查"),QStringLiteral("Thread-root")}}));
+        requireTrue(QStringLiteral("write concurrent reverse fallback fixture"), writePack(QStringLiteral("uu-UU"), QString(), {
+            {QStringLiteral("并发反查"),QStringLiteral("Thread-rendered")}}));
     }
 
     template <typename Translator>
@@ -453,6 +469,87 @@ namespace
     }
 #endif
 
+
+    void runFrozenDisplayCases(ks::i18n::LanguageManager& manager)
+    {
+        QString error;
+        const ks::i18n::SourceTextSnapshot empty;
+        requireEqual(QStringLiteral("default display snapshot passes through"), empty.displayText(QStringLiteral("exact-hit")), QStringLiteral("exact-hit"));
+        const QStringList samples{QString(), QStringLiteral("直接命中"), QStringLiteral("exact-hit"),
+            QStringLiteral("French-exact"), QStringLiteral("Safe mode"), QStringLiteral("安全模式"),
+            QStringLiteral("状态：安全模式"), QStringLiteral("Status: Safe mode"),
+            QStringLiteral("Rendered %1"), QStringLiteral("显示模板：安全模式"),
+            QStringLiteral("French rendered %1"), QStringLiteral("ambiguous-only"),
+            QStringLiteral("ambiguous-fallback"), QStringLiteral("fallback-retranslated"),
+            QStringLiteral("Chinese-pack-only"), QStringLiteral("cycle-B"), QStringLiteral("identity"),
+            QStringLiteral("用户原始路径_安全模式"), QStringLiteral("unknown-English")};
+        struct Expected { ks::i18n::SourceTextSnapshot value; QStringList rendered; };
+        std::vector<Expected> frozen;
+        const QStringList languages{QStringLiteral("en-US"),QStringLiteral("fr-FR"),QStringLiteral("zh-CN"),QStringLiteral("aa-AA")};
+        for (const QString& language : languages)
+        {
+            requireTrue(QStringLiteral("activate display language ")+language, manager.setLanguage(language,&error));
+            Expected captured{manager.sourceTextSnapshot(),{}};
+            for (const QString& text : samples)
+            {
+                captured.rendered.append(manager.displayText(text));
+                requireEqual(QStringLiteral("frozen display equivalence ")+language+text,
+                    captured.value.displayText(text),captured.rendered.back());
+            }
+            frozen.push_back(std::move(captured));
+        }
+        requireEqual(QStringLiteral("French reverses fallback-rendered exact value"), frozen[1].value.displayText(QStringLiteral("exact-hit")),QStringLiteral("French-exact"));
+        requireEqual(QStringLiteral("ambiguous rendering without later unique source stays raw"),frozen[1].value.displayText(QStringLiteral("ambiguous-only")),QStringLiteral("ambiguous-only"));
+        requireEqual(QStringLiteral("ambiguity in one pack still permits unique fallback source"),frozen[1].value.displayText(QStringLiteral("ambiguous-fallback")),QStringLiteral("fallback-retranslated"));
+        requireEqual(QStringLiteral("rendered template identity is retranslated before arguments"),frozen[1].value.displayText(QStringLiteral("Rendered %1")),QStringLiteral("French rendered %1"));
+        requireEqual(QStringLiteral("source template retains nested capture rules"),frozen[1].value.displayText(QStringLiteral("显示模板：安全模式")),QStringLiteral("French rendered Safe mode"));
+        requireEqual(QStringLiteral("historical Chinese unique reverse returns canonical source"),frozen[2].value.displayText(QStringLiteral("Chinese-pack-only")),QStringLiteral("仅中文包"));
+
+        std::atomic<int> mismatches{0};
+        std::vector<std::thread> readers;
+        constexpr int repeats=100;
+        for (const Expected& value : frozen)
+            readers.emplace_back([value,samples,&mismatches]() {
+                for (int pass=0;pass!=repeats;++pass)
+                    for (qsizetype index=0;index!=samples.size();++index)
+                        if (value.value.displayText(samples[index])!=value.rendered[index]) ++mismatches;
+            });
+        for (int pass=0;pass!=32;++pass)
+            requireTrue(QStringLiteral("live activation during frozen display %1").arg(pass), manager.setLanguage(languages[pass%languages.size()],&error));
+        for (auto& reader:readers) reader.join();
+        checks+=static_cast<int>(frozen.size())*repeats*static_cast<int>(samples.size());
+        requireTrue(QStringLiteral("display readers ignore later language state"),mismatches.load()==0);
+
+        // No reverse index in either of these packs has been queried before.
+        // All workers race the same std::call_once index initialization while
+        // retaining only the immutable frozen translator value.
+        requireTrue(QStringLiteral("activate cold concurrent reverse pack"),manager.setLanguage(QStringLiteral("tt-TT"),&error));
+        const auto cold=manager.sourceTextSnapshot();
+        readers.clear(); mismatches=0;
+        for (int thread=0;thread!=8;++thread)
+            readers.emplace_back([cold,&mismatches]() {
+                for (int pass=0;pass!=1000;++pass)
+                    if (cold.displayText(QStringLiteral("Thread-rendered"))!=QStringLiteral("Thread-root")) ++mismatches;
+            });
+        requireTrue(QStringLiteral("switch live state after cold reverse capture"),manager.setLanguage(QStringLiteral("en-US"),&error));
+        for (auto& reader:readers) reader.join();
+        checks+=8000;
+        requireTrue(QStringLiteral("concurrent cold reverse index is stable"),mismatches.load()==0);
+
+        // The metadata was discovered at startup, but this fallback body has
+        // never loaded. Reverse lookup must continue through its failure while
+        // normal source lookup keeps its original stop-at-failure semantics.
+        QFile broken(QCoreApplication::applicationDirPath()+QStringLiteral("/languages/dd-DD.json"));
+        requireTrue(QStringLiteral("open isolated fallback corruption fixture"),broken.open(QIODevice::WriteOnly|QIODevice::Truncate));
+        requireTrue(QStringLiteral("write isolated fallback corruption fixture"),broken.write("invalid fixture pack")>0); broken.close();
+        requireTrue(QStringLiteral("activate failed-middle chain root"),manager.setLanguage(QStringLiteral("cc-CC"),&error));
+        const auto failedMiddle=manager.sourceTextSnapshot();
+        requireEqual(QStringLiteral("live reverse continues through failed pack"),manager.displayText(QStringLiteral("Chinese-pack-only")),QStringLiteral("仅中文包"));
+        requireEqual(QStringLiteral("frozen reverse retains metadata beyond failed pack"),failedMiddle.displayText(QStringLiteral("Chinese-pack-only")),QStringLiteral("仅中文包"));
+        requireEqual(QStringLiteral("frozen source still stops at failed pack"),failedMiddle.sourceText(QStringLiteral("仅中文包")),QStringLiteral("仅中文包"));
+        requireTrue(QStringLiteral("return English after frozen display cases"),manager.setLanguage(QStringLiteral("en-US"),&error));
+    }
+
     int writeReport(const QString& output)
     {
         const QJsonObject result{
@@ -530,6 +627,7 @@ int main(int argc, char** argv)
         const auto noPackSnapshot = manager.sourceTextSnapshot();
         requireEqual(QStringLiteral("no packs frozen normal fallback"), noPackSnapshot.sourceText(QStringLiteral("没有语言包")), QStringLiteral("没有语言包"));
         requireEqual(QStringLiteral("no packs frozen packed fallback"), noPackSnapshot.packedSourceText(QStringLiteral("没有语言包")), QStringLiteral("没有语言包"));
+        requireEqual(QStringLiteral("no packs frozen display fallback"),noPackSnapshot.displayText(QStringLiteral("没有语言包")),QStringLiteral("没有语言包"));
         return writeReport(output);
     }
     setupPacks();
@@ -544,6 +642,7 @@ int main(int argc, char** argv)
     requireTrue(QStringLiteral("initialize English"), manager.initialize(QStringLiteral("en-US"), &error));
     runSourceCases(manager);
     runSnapshotCases(manager);
+    runFrozenDisplayCases(manager);
 #ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
     runRuntimePolicyCases(manager);
 #endif
