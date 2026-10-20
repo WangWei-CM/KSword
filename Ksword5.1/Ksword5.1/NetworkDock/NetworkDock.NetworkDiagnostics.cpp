@@ -1459,83 +1459,112 @@ void NetworkDock::refreshDnsCacheTable()
     {
         return;
     }
-
+    if (m_dnsReadOperation == nullptr)
     {
-        kLogEvent event;
-        info << event
-            << "[NetworkDock] 开始刷新DNS缓存表。"
-            << eol;
+        m_dnsReadOperation = new ks::ui::AsyncOperation(this);
     }
-
-    using DnsGetCacheDataTableFn = BOOL(WINAPI*)(PVOID);
-    struct DnsCacheEntryRecord
+    struct Result
     {
-        DnsCacheEntryRecord* next = nullptr;
-        PWSTR name = nullptr;
-        WORD type = 0;
-        WORD dataLength = 0;
-        DWORD flags = 0;
+        std::vector<QStringList> rows;
+        QString errorText;
     };
+    m_dnsReadOperation->submit<int, Result>(0,
+        [](int, const ks::ui::AsyncOperationToken& token)
+        {
+            Result result;
+            using DnsGetCacheDataTableFn = BOOL(WINAPI*)(PVOID);
+            struct DnsCacheEntryRecord
+            {
+                DnsCacheEntryRecord* next = nullptr;
+                PWSTR name = nullptr;
+                WORD type = 0;
+                WORD dataLength = 0;
+                DWORD flags = 0;
+            };
+            HMODULE module = GetModuleHandleW(L"dnsapi.dll");
+            if (module == nullptr) module = LoadLibraryW(L"dnsapi.dll");
+            if (module == nullptr)
+            {
+                result.errorText = QStringLiteral("状态：dnsapi.dll 不可用");
+                return result;
+            }
+            const auto query = reinterpret_cast<DnsGetCacheDataTableFn>(
+                GetProcAddress(module, "DnsGetCacheDataTable"));
+            if (query == nullptr)
+            {
+                result.errorText = QStringLiteral("状态：DnsGetCacheDataTable 不可用");
+                return result;
+            }
+            DnsCacheEntryRecord rootEntry{};
+            if (token.isCanceled()) return result;
+            if (query(&rootEntry) == FALSE)
+            {
+                result.errorText = QStringLiteral("状态：读取DNS缓存失败");
+                return result;
+            }
+            // Retain the existing native enumeration ownership contract; only
+            // copy the value rows before returning to the GUI controller.
+            for (DnsCacheEntryRecord* node = rootEntry.next;
+                node != nullptr && !token.isCanceled(); node = node->next)
+            {
+                result.rows.push_back({
+                    node->name != nullptr ? QString::fromWCharArray(node->name) : QStringLiteral("<null>"),
+                    QString::number(node->type),
+                    toQString(ks::network::FormatDnsFlags(node->flags))
+                });
+            }
+            return result;
+        },
+        [this](const Result& result, const std::uint64_t generation)
+        {
+            if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_dnsTable}))
+            {
+                const auto pending = std::make_shared<Result>(result);
+                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                    QStringLiteral("network-dns-read"), {m_dnsTable},
+                    [this, pending, generation]()
+                    {
+                        if (m_dnsReadOperation->isCurrent(generation))
+                        {
+                            applyDnsTableRead(pending->rows, pending->errorText);
+                        }
+                        m_dnsReadOperation->completeDeferred(generation);
+                    }))
+                {
+                    return false;
+                }
+            }
+            applyDnsTableRead(result.rows, result.errorText);
+            return true;
+        },
+        [this](std::exception_ptr)
+        {
+            applyDnsTableRead({}, QStringLiteral("状态：读取DNS缓存失败"));
+        });
+}
 
-    HMODULE dnsapiModule = GetModuleHandleW(L"dnsapi.dll");
-    if (dnsapiModule == nullptr)
+void NetworkDock::applyDnsTableRead(
+    const std::vector<QStringList>& rows, const QString& errorText)
+{
+    if (!errorText.isEmpty())
     {
-        dnsapiModule = LoadLibraryW(L"dnsapi.dll");
-    }
-    if (dnsapiModule == nullptr)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：dnsapi.dll 不可用"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：dnsapi.dll不可用。"
-            << eol;
+        m_dnsStatusLabel->setText(errorText);
         return;
     }
-
-    auto dnsGetCacheDataTable = reinterpret_cast<DnsGetCacheDataTableFn>(
-        GetProcAddress(dnsapiModule, "DnsGetCacheDataTable"));
-    if (dnsGetCacheDataTable == nullptr)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：DnsGetCacheDataTable 不可用"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：DnsGetCacheDataTable不可用。"
-            << eol;
-        return;
-    }
-
-    DnsCacheEntryRecord rootEntry{};
-    const BOOL queryOk = dnsGetCacheDataTable(&rootEntry);
-    if (queryOk == FALSE)
-    {
-        m_dnsStatusLabel->setText(QStringLiteral("状态：读取DNS缓存失败"));
-        kLogEvent event;
-        err << event
-            << "[NetworkDock] DNS缓存刷新失败：读取缓存表失败。"
-            << eol;
-        return;
-    }
-
+    const bool updatesEnabled = m_dnsTable->updatesEnabled();
+    m_dnsTable->setUpdatesEnabled(false);
     m_dnsTable->setRowCount(0);
-    int count = 0;
-    for (DnsCacheEntryRecord* node = rootEntry.next; node != nullptr; node = node->next)
+    for (const QStringList& fields : rows)
     {
         const int row = m_dnsTable->rowCount();
         m_dnsTable->insertRow(row);
-        const QString nameText = node->name != nullptr ? QString::fromWCharArray(node->name) : QStringLiteral("<null>");
-        m_dnsTable->setItem(row, 0, new QTableWidgetItem(nameText));
-        m_dnsTable->setItem(row, 1, new QTableWidgetItem(QString::number(node->type)));
-        m_dnsTable->setItem(row, 2, new QTableWidgetItem(toQString(ks::network::FormatDnsFlags(node->flags))));
-        ++count;
+        for (int column = 0; column < fields.size(); ++column)
+        {
+            m_dnsTable->setItem(row, column, new QTableWidgetItem(fields.at(column)));
+        }
     }
-
-    m_dnsStatusLabel->setText(QString("状态：DNS缓存项 %1").arg(count));
-
-    kLogEvent event;
-    info << event
-        << "[NetworkDock] DNS缓存刷新完成, rowCount="
-        << count
-        << eol;
+    m_dnsTable->setUpdatesEnabled(updatesEnabled);
+    m_dnsStatusLabel->setText(QString("状态：DNS缓存项 %1").arg(m_dnsTable->rowCount()));
 }
 
 void NetworkDock::removeDnsCacheEntry()

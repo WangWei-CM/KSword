@@ -1432,8 +1432,10 @@ private:
     // ========================= Tab6：路由表 ====================
     void applyRouteTableRead(const std::vector<RouteRecord>& records, DWORD status);
     void applyArpTableRead(const std::vector<QStringList>& rows, bool success);
+    void applyDnsTableRead(const std::vector<QStringList>& rows, const QString& errorText);
     ks::ui::AsyncOperation* m_routeReadOperation = nullptr;
     ks::ui::AsyncOperation* m_arpReadOperation = nullptr;
+    ks::ui::AsyncOperation* m_dnsReadOperation = nullptr;
     QWidget* m_routeTablePage = nullptr;
     QVBoxLayout* m_routeTableLayout = nullptr;
     QHBoxLayout* m_routeTableControlLayout = nullptr;

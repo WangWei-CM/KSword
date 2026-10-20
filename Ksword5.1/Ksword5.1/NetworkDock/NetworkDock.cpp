@@ -158,6 +158,7 @@ NetworkDock::~NetworkDock()
     // Close delivery before member teardown; read workers only retain value state.
     if (m_routeReadOperation != nullptr) m_routeReadOperation->close();
     if (m_arpReadOperation != nullptr) m_arpReadOperation->close();
+    if (m_dnsReadOperation != nullptr) m_dnsReadOperation->close();
     m_monitorGeneration.fetch_add(1);
     m_monitorSource = TrafficMonitorSource::Stopped;
     // 析构必须先停用 R0 逐包数据面；仅停止轮询会让内核继续复制所有流量。
