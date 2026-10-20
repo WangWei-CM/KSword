@@ -2907,6 +2907,9 @@
     <ClInclude Include="UI\AsyncOperation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\AsyncCleanupRegistry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\FlatTableModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>

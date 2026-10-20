@@ -946,6 +946,7 @@
     <ClInclude Include="theme.h" />
     <ClInclude Include="UI\AsyncUiDispatcher.h" />
     <ClInclude Include="UI\AsyncOperation.h" />
+    <ClInclude Include="UI\AsyncCleanupRegistry.h" />
     <ClInclude Include="UI\FlatTableModel.h" />
     <ClInclude Include="UI\DockTabInteraction.h" />
     <ClInclude Include="UI\FlowLayout.h" />

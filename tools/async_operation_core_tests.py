@@ -5,6 +5,7 @@ import argparse, os, subprocess
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--repository-root', type=Path, default=Path(__file__).resolve().parents[1])
 p.add_argument('--source-root', type=Path)
+p.add_argument('--dependency-source-root', type=Path)
 p.add_argument('--output-dir', type=Path, required=True)
 a = p.parse_args()
 root = a.repository_root.resolve()
@@ -12,11 +13,14 @@ source = (a.source_root or root).resolve()
 out = a.output_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 ui = Path('Ksword5.1/Ksword5.1/UI')
-for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h'):
+for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h'):
     src = source / ui / name
+    if not src.exists() and a.dependency_source_root:
+        src = a.dependency_source_root.resolve() / ui / name
     (out / name).write_bytes((src if src.exists() else root / ui / name).read_bytes())
 fixture = r'''
 #include "AsyncOperation.h"
+#include "AsyncCleanupRegistry.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEvent>
@@ -81,6 +85,16 @@ static void transactionTests(){
   check(op.submitTransaction<int,int>(1,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome state){check(state==Outcome::OwnerClosed,"closed transaction rejection outcome");++settled;})==0&&settled==1,"closed controller rejects once");
  }
 }
+static void shutdownTests(){
+ using Registry=ks::ui::AsyncCleanupRegistry;using Wait=ks::ui::AsyncShutdownWait;using Op=ks::ui::AsyncOperation;using Outcome=ks::ui::AsyncOperationOutcome;
+ Registry registry;int stopped=0;auto first=registry.acquire([&]{++stopped;check(registry.pending()==2,"stop callback runs without registry lock");});auto second=registry.acquire();
+ check(registry.pending()==2,"leases counted once");registry.beginShutdown();check(stopped==1&&!registry.acquire(),"shutdown freezes new work and requests stop once");registry.beginShutdown();check(stopped==1,"repeated shutdown idempotent");first.reset();check(registry.pending()==1,"one lease released");registry.cancelShutdown();auto later=registry.acquire();check(bool(later)&&registry.pending()==2,"cancel exit permits later work");second.reset();later.reset();check(registry.pending()==0,"all leases returned");
+ Wait wait;wait.start(10,30);check(wait.poll(11,1)==Wait::Status::Waiting,"wait is nonblocking before deadline");check(wait.poll(40,1)==Wait::Status::TimedOut,"unfinished work reaches visible timeout policy");check(wait.poll(400,0)==Wait::Status::Ready,"completed work always permits ready");wait.start(50,30);check(wait.poll(60,1)==Wait::Status::Waiting,"retry resets deadline");
+ auto& global=Registry::global();check(global.pending()==0,"previous transaction leases drained");Op op(nullptr);QSemaphore entered,release;int cleaned=0;bool cleanupSawLease=false;
+ op.submitTransaction<int,int>(1,[&](int value){entered.release();release.acquire();return value;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome){cleanupSawLease=global.pending()==1;++cleaned;});check(entered.tryAcquire(1,5000),"shutdown transaction worker entered");check(global.pending()==1,"accepted transaction has exit lease");global.beginShutdown();Op rejected(nullptr);int rejectedCleanup=0;
+ check(rejected.submitTransaction<int,int>(2,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome state){if(state==Outcome::BusyRejected)++rejectedCleanup;})==0&&rejectedCleanup==1,"shutdown rejects new transaction without running it");op.close();check(global.pending()==1&&cleaned==0,"close cannot release unfinished transaction exit lease");release.release();pump([&]{return global.pending()==0;});check(cleaned==1&&cleanupSawLease,"lease returned only after final cleanup");global.cancelShutdown();
+ std::vector<std::thread> threads;std::atomic_int accepted=0;for(int i=0;i<4;++i)threads.emplace_back([&]{for(int n=0;n<1000;++n){auto lease=registry.acquire();if(lease)++accepted;}});for(auto& thread:threads)thread.join();check(accepted==4000&&registry.pending()==0,"concurrent value lease churn drains exactly");
+}
 struct ThrowCopyRequest {
  std::shared_ptr<std::atomic_int> copies;
  explicit ThrowCopyRequest(std::shared_ptr<std::atomic_int> value):copies(std::move(value)){}
@@ -109,7 +123,7 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(order.empty(),"tasks queue behind actual pool worker");release.release();
  pump([&]{return !low.isInFlight()&&!normal.isInFlight()&&!high.isInFlight();});
  check(order==std::vector<int>({1,0,-1}),"real pool executes high/default/low");check(applied==3&&cleaned==2&&errors==0,"legacy and priority callbacks settle normally");
- pool->waitForDone();transactionTests();launchFailureTests();pool->setMaxThreadCount(threads);
+ pool->waitForDone();transactionTests();launchFailureTests();shutdownTests();pool->setMaxThreadCount(threads);
  std::cout<<"ASYNC_CORE_CHECKS="<<checks<<"\nPOOL_ORDER=high,default,low\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
 '''

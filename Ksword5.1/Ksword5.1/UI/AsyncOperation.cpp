@@ -1,4 +1,5 @@
 #include "AsyncOperation.h"
+#include "AsyncCleanupRegistry.h"
 
 #include <QThread>
 #include <QPointer>
@@ -18,20 +19,22 @@ namespace ks::ui
         std::atomic_bool workerFinished{ false }; // 事务关闭时不能提前释放worker所借值资源。
         bool transaction = false; // 请求发布前写入，此后只读。
         AsyncOperation::Cleanup cleanup; // 只持值资源的最终回调。
+        std::shared_ptr<AsyncCleanupRegistry::Lease> shutdownLease;
 
         // 所有终态竞争同一个 CAS；收尾不能把异常带入 Qt functor 析构。
         void settle(const AsyncOperationOutcome outcome)
         {
-            if (!settled.exchange(true) && cleanup)
+            if (!settled.exchange(true))
             {
                 try
                 {
-                    cleanup(outcome);
+                    if (cleanup) cleanup(outcome);
                 }
                 catch (...)
                 {
                     // 用户值资源收尾失败也不得重复执行或越过析构边界。
                 }
+                shutdownLease.reset(); // 值收尾结束后才允许进程退出。
             }
         }
     };
@@ -150,6 +153,12 @@ namespace ks::ui
                 || (m_shared->active && m_shared->active->transaction))
             {
                 // 事务不排latest pending；普通查询也不能使已接受事务失效。
+                request->canceled.store(true);
+                rejection = AsyncOperationOutcome::BusyRejected;
+            }
+            else if (job.transaction &&
+                !(request->shutdownLease = AsyncCleanupRegistry::global().acquire()))
+            {
                 request->canceled.store(true);
                 rejection = AsyncOperationOutcome::BusyRejected;
             }
