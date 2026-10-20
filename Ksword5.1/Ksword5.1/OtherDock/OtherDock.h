@@ -25,6 +25,7 @@
 namespace ks::ui { class AsyncOperation; }
 namespace ks::windowlist { struct Snapshot; class SnapshotModel; }
 namespace ks::desktoplist { struct Snapshot; }
+namespace ks::window { struct WindowOperationProgress; }
 class QEvent;
 class QCheckBox;
 class CodeEditorWidget;
@@ -185,12 +186,12 @@ private:
     // - 传出：无，结果通过日志、消息框和列表刷新反馈。
     void setCaptureProtectionForSelectedWindows(bool protectedState);
 
-    // setCaptureProtectionForWindow：
-    // - 作用：对指定窗口快照执行防截图保护操作；
-    // - 调用：选区批量操作；批量时只记日志，完成后统一反馈。
-    // - 传入 info：目标窗口快照；
-    // - 传入 protectedState：true=启用，false=取消。
-    bool setCaptureProtectionForWindow(const WindowInfo& info, bool protectedState, bool showFeedback = true);
+    // Accepted actions use one serial value transaction; UI close never cancels
+    // a remote call or releases its still-executing code/parameter allocation.
+    void initializeWindowTransactions();
+    bool windowTransactionBusy() const;
+    void sendTestMessagesForWindows(const std::vector<WindowInfo>& windows);
+    void submitWindowTransaction(const std::vector<WindowInfo>& windows, bool protection, bool testMessage);
 
     // handleWindowPickerRelease：
     // - 作用：处理“准星拖拽拾取”释放事件，定位鼠标下窗口并弹出详情；
@@ -260,6 +261,10 @@ private:
     QLabel* m_visibleLabel = nullptr;             // 可见窗口数。
     QLabel* m_systemLabel = nullptr;              // 系统窗口数。
     QLabel* m_selectedLabel = nullptr;            // 当前选中项信息。
+
+    ks::ui::AsyncOperation* m_windowActionOperation = nullptr;
+    QTimer* m_windowActionTimer = nullptr;
+    std::shared_ptr<ks::window::WindowOperationProgress> m_windowActionProgress;
 
     // 缩略图节拍独立于窗口清单采样；像素缩放只携值进入后台。
     QTimer* m_previewTimer = nullptr;

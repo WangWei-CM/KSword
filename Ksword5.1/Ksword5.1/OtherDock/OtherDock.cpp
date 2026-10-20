@@ -3700,6 +3700,7 @@ OtherDock::OtherDock(QWidget* parent)
         if (m_previewWidget->isVisible()) scheduleWindowSelectionUi();
     });
     m_previewTimer->start();
+    initializeWindowTransactions();
     m_autoRefreshCheck->setChecked(true);
     applyViewMode();
     refreshWindowListAsync();
@@ -3708,6 +3709,7 @@ OtherDock::OtherDock(QWidget* parent)
 OtherDock::~OtherDock()
 {
     if (m_previewScaleOperation) m_previewScaleOperation->close();
+    if (m_windowActionOperation) m_windowActionOperation->close();
     if (m_windowRefreshOperation) m_windowRefreshOperation->close();
     if (m_desktopOperation) m_desktopOperation->close();
     if (m_desktopPresentationOperation) m_desktopPresentationOperation->close();
@@ -4844,8 +4846,8 @@ void OtherDock::updateWindowSelectionUi()
         m_selectedLabel->setText(QStringLiteral("选中: %1  %2")
             .arg(hwndToText(windows.front().hwndValue), windows.front().titleText));
     else m_selectedLabel->setText(QStringLiteral("选中: %1 个窗口").arg(windows.size()));
-    m_protectCaptureButton->setEnabled(!windows.empty());
-    m_unprotectCaptureButton->setEnabled(!windows.empty());
+    m_protectCaptureButton->setEnabled(!windows.empty() && !windowTransactionBusy());
+    m_unprotectCaptureButton->setEnabled(!windows.empty() && !windowTransactionBusy());
     m_captureButton->setEnabled(windows.size() == 1 && preview);
     m_windowInputButton->setEnabled(windows.size() == 1);
 }
@@ -4892,7 +4894,7 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     auto* processDetail = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     auto* windowDetail = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("在详细信息中打开"));
     auto* sendMessage = menu.addAction(QIcon(":/Icon/log_track.svg"), QStringLiteral("发送测试消息"));
-    sendMessage->setEnabled(!multiple);
+    sendMessage->setEnabled(!multiple && !windowTransactionBusy());
     const WindowInfo uploadSnapshot = windows.front();
     auto* upload = ks::online_scan::addVirusTotalSandboxMenu(&menu, this,
         [uploadSnapshot]() -> ks::online_scan::SandboxUploadTarget {
@@ -4906,11 +4908,19 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
     if (uploadMenu) uploadMenu->menuAction()->setEnabled(!multiple);
     menu.addSeparator();
     auto* terminate = menu.addAction(QIcon(":/Icon/process_terminate.svg"), QStringLiteral("结束进程"));
+    protect->setEnabled(!windowTransactionBusy());
+    unprotect->setEnabled(!windowTransactionBusy());
     auto* action = menu.exec(m_windowTree->viewport()->mapToGlobal(localPos));
     if (!action || (uploadMenu && uploadMenu->actions().contains(action))) return;
     if (action == protect || action == unprotect)
     {
         setCaptureProtectionForWindows(windows, action == protect);
+        return;
+    }
+
+    if (action == sendMessage)
+    {
+        sendTestMessagesForWindows(windows);
         return;
     }
 
@@ -4999,11 +5009,6 @@ void OtherDock::showWindowContextMenu(const QPoint& localPos)
         {
             const bool target = multiple ? action == enable : !::IsWindowEnabled(hwnd);
             ok = ks::window::setWindowEnabled(hwnd, target);
-        }
-        else if (ok && action == sendMessage)
-        {
-            DWORD_PTR result = 0;
-            ok = ::SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1200, &result) != 0;
         }
         if (ok) ++succeeded;
         else if (failures.size() == failureCountBefore)

@@ -1,4 +1,5 @@
 #include "OtherDock.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/CodeTextEdit.h"
 #include "WindowCaptureProtection.h"
 #include "WindowListInteraction.h"
@@ -18,6 +19,10 @@
 #include <QTreeWidgetItem>
 
 #include <iomanip>
+#include <atomic>
+#include <thread>
+#include <QStatusBar>
+#include <QPushButton>
 
 namespace
 {
@@ -80,128 +85,260 @@ namespace
     }
 }
 
+
+namespace ks::window
+{
+    struct WindowOperationProgress
+    {
+        std::atomic_size_t completed{0};
+        std::atomic_bool waitingForRemote{false};
+        size_t total = 0;
+    };
+}
+namespace
+{
+    std::atomic_bool& windowActionGate()
+    { static std::atomic_bool busy{false}; return busy; }
+    struct WindowActionAdmission
+    {
+        bool acquired = false;
+        std::atomic_bool released{false};
+        WindowActionAdmission()
+        {
+            bool expected = false;
+            acquired = windowActionGate().compare_exchange_strong(expected, true);
+        }
+        void release()
+        {
+            if (acquired && !released.exchange(true)) windowActionGate().store(false);
+        }
+        ~WindowActionAdmission() { release(); }
+    };
+    struct WindowActionCompletion
+    {
+        std::shared_ptr<WindowActionAdmission> admission;
+        ~WindowActionCompletion() { if (admission) admission->release(); }
+    };
+    struct WindowActionDesktop
+    {
+        HDESK handle = nullptr;
+        DWORD error = ERROR_INVALID_HANDLE;
+        ~WindowActionDesktop() { if (handle) ::CloseDesktop(handle); }
+    };
+    struct WindowActionTarget
+    {
+        OtherDock::WindowInfo info;
+        ks::window::CaptureProtectionIdentity identity;
+        bool admitted = false;
+    };
+    struct WindowActionRequest
+    {
+        std::vector<WindowActionTarget> targets;
+        std::shared_ptr<WindowActionAdmission> admission;
+        std::shared_ptr<WindowActionDesktop> desktop;
+        std::shared_ptr<ks::window::WindowOperationProgress> progress;
+        bool protection = false, testMessage = false;
+        size_t selectedCount = 0;
+    };
+    struct WindowActionReply
+    {
+        std::vector<ks::window::CaptureProtectionResult> results;
+        bool testMessage = false;
+        size_t selectedCount = 0;
+    };
+    quint64 actionProcessCreated(DWORD pid)
+    {
+        HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process) return 0;
+        FILETIME start{}, end{}, kernel{}, user{};
+        const bool ready = ::GetProcessTimes(process, &start, &end, &kernel, &user) != FALSE;
+        ::CloseHandle(process);
+        return ready ? (static_cast<quint64>(start.dwHighDateTime) << 32) | start.dwLowDateTime : 0;
+    }
+    WindowActionReply runWindowAction(const WindowActionRequest& request)
+    {
+        WindowActionCompletion completion{request.admission};
+        WindowActionReply reply;
+        reply.results.reserve(request.targets.size());
+        reply.testMessage = request.testMessage;
+        reply.selectedCount = request.selectedCount;
+        // A new OS thread can bind the frozen caller desktop. Thread-pool
+        // workers may already own native message windows and must not rebind.
+        std::exception_ptr failure;
+        std::thread native([&] {
+            const HDESK previous = ::GetThreadDesktop(::GetCurrentThreadId());
+            const bool bound = request.desktop && request.desktop->handle &&
+                ::SetThreadDesktop(request.desktop->handle) != FALSE;
+            const DWORD bindError = bound ? ERROR_SUCCESS :
+                (request.desktop && request.desktop->handle ? ::GetLastError() :
+                    request.desktop ? request.desktop->error : ERROR_INVALID_HANDLE);
+            try {
+                for (const auto& target : request.targets) {
+                    ks::window::CaptureProtectionResult result;
+                    result.requestedHwnd = target.info.hwndValue;
+                    result.appliedHwnd = target.identity.rootHwnd;
+                    result.processId = target.identity.rootPid;
+                    result.requestedProtection = request.protection;
+                    if (!bound) {
+                        result.win32Error = bindError ? bindError : ERROR_INVALID_HANDLE;
+                        result.detail = "caller desktop binding failed";
+                    } else if (!target.admitted || !ks::window::windowIdentityMatches(
+                        target.info.hwndValue, target.info.processId, target.info.threadId,
+                        target.info.processCreationTime100ns)) {
+                        result.win32Error = ERROR_INVALID_WINDOW_HANDLE;
+                        result.detail = "frozen selected window identity changed";
+                    } else if (request.testMessage) {
+                        DWORD_PTR messageResult = 0;
+                        ::SetLastError(ERROR_SUCCESS);
+                        result.success = ::SendMessageTimeoutW(
+                            reinterpret_cast<HWND>(static_cast<quintptr>(target.info.hwndValue)),
+                            WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1200, &messageResult) != 0;
+                        result.win32Error = result.success ? ERROR_SUCCESS : ::GetLastError();
+                        if (!result.success && !result.win32Error) result.win32Error = ERROR_TIMEOUT;
+                        result.detail = result.success ? "WM_NULL completed" : "WM_NULL failed or timed out";
+                    } else {
+                        result = ks::window::SetWindowCaptureProtection(target.info.hwndValue,
+                            request.protection, target.identity, [progress=request.progress] {
+                                progress->waitingForRemote.store(true, std::memory_order_relaxed);
+                            });
+                    }
+                    // The native API result is the transaction receipt. A
+                    // later identity change cannot undo or invent its success.
+                    if (result.success && !ks::window::windowIdentityMatches(
+                        target.info.hwndValue, target.info.processId, target.info.threadId,
+                        target.info.processCreationTime100ns))
+                        result.detail += "; target identity changed after native completion";
+                    reply.results.push_back(std::move(result));
+                    request.progress->waitingForRemote.store(false, std::memory_order_relaxed);
+                    request.progress->completed.fetch_add(1, std::memory_order_relaxed);
+                }
+            } catch (...) { failure = std::current_exception(); }
+            if (bound) ::SetThreadDesktop(previous);
+        });
+        native.join(); // only the pool worker waits, never the GUI owner
+        if (failure) std::rethrow_exception(failure);
+        return reply;
+    }
+}
+
+void OtherDock::initializeWindowTransactions()
+{
+    m_windowActionOperation = new ks::ui::AsyncOperation(this);
+    m_windowActionTimer = new QTimer(this);
+    m_windowActionTimer->setInterval(100);
+    connect(m_windowActionTimer, &QTimer::timeout, this, [this] {
+        if (!m_windowActionProgress) return;
+        const auto& progress = *m_windowActionProgress;
+        m_statusBar->showMessage(progress.waitingForRemote.load(std::memory_order_relaxed)
+            ? QStringLiteral("操作仍在目标中执行，正在等待安全收尾…")
+            : QStringLiteral("正在执行窗口操作：%1/%2")
+                .arg(progress.completed.load(std::memory_order_relaxed)).arg(progress.total));
+    });
+    m_windowActionOperation->setStateChangedCallback([this] {
+        if (m_windowActionOperation->isBusy()) m_windowActionTimer->start();
+        else { m_windowActionTimer->stop(); m_windowActionProgress.reset(); }
+        scheduleWindowSelectionUi();
+    });
+}
+
+bool OtherDock::windowTransactionBusy() const
+{ return windowActionGate().load() || (m_windowActionOperation && m_windowActionOperation->isBusy()); }
+
 void OtherDock::setCaptureProtectionForSelectedWindows(const bool protectedState)
 {
     const auto windows = selectedWindowSnapshots();
-    if (windows.empty())
-    {
-        QMessageBox::information(this, QStringLiteral("窗口防截图保护"),
-            QStringLiteral("请先选中一个窗口。"));
+    if (windows.empty()) {
+        QMessageBox::information(this, QStringLiteral("窗口防截图保护"), QStringLiteral("请先选中一个窗口。"));
         return;
     }
     setCaptureProtectionForWindows(windows, protectedState);
 }
 
-void OtherDock::setCaptureProtectionForWindows(
-    const std::vector<WindowInfo>& windows, const bool protectedState)
+void OtherDock::setCaptureProtectionForWindows(const std::vector<WindowInfo>& windows, bool protectedState)
+{ submitWindowTransaction(windows, protectedState, false); }
+
+void OtherDock::sendTestMessagesForWindows(const std::vector<WindowInfo>& windows)
+{ submitWindowTransaction(windows, false, true); }
+
+void OtherDock::submitWindowTransaction(const std::vector<WindowInfo>& windows, bool protection, bool testMessage)
 {
-    QSet<quint64> processedRoots;
-    int succeeded = 0;
-    QStringList failures;
-    for (const auto& window : windows)
-    {
-        if (!window.valid || !ks::window::windowIdentityMatches(
-            window.hwndValue, window.processId, window.threadId, window.processCreationTime100ns))
-        {
-            failures.push_back(formatHwndText(window.hwndValue));
-            continue;
-        }
-        const HWND hwnd = reinterpret_cast<HWND>(static_cast<quintptr>(window.hwndValue));
-        const HWND root = ::GetAncestor(hwnd, GA_ROOT);
-        const quint64 rootValue = root
-            ? static_cast<quint64>(reinterpret_cast<quintptr>(root)) : window.hwndValue;
-        if (processedRoots.contains(rootValue)) continue;
-        processedRoots.insert(rootValue);
-        // Keep the single-window diagnostic dialog, but batch feedback only once.
-        const bool ok = setCaptureProtectionForWindow(window, protectedState, windows.size() == 1);
-        if (ok) ++succeeded;
-        else failures.push_back(formatHwndText(window.hwndValue));
+    if (windows.empty()) return;
+    if (windowTransactionBusy()) {
+        m_statusBar->showMessage(QStringLiteral("已有窗口操作正在执行，请等待安全收尾。"));
+        return;
     }
-    refreshWindowListAsync();
-    if (windows.size() > 1 || processedRoots.isEmpty())
-    {
-        const QString message = QStringLiteral("操作：%1\n成功：%2\n失败或已失效：%3\n%4")
-            .arg(protectedState ? QStringLiteral("启用防截图保护") : QStringLiteral("取消防截图保护"))
-            .arg(succeeded).arg(failures.size()).arg(failures.join('\n'));
-        if (failures.empty()) QMessageBox::information(this, QStringLiteral("窗口防截图保护"), message);
-        else QMessageBox::warning(this, QStringLiteral("窗口防截图保护"), message);
+    WindowActionRequest request;
+    request.admission = std::make_shared<WindowActionAdmission>();
+    if (!request.admission->acquired) return;
+    request.protection = protection; request.testMessage = testMessage; request.selectedCount = windows.size();
+    request.progress = std::make_shared<ks::window::WindowOperationProgress>();
+    request.desktop = std::make_shared<WindowActionDesktop>();
+    HANDLE duplicate = nullptr;
+    if (::DuplicateHandle(::GetCurrentProcess(), ::GetThreadDesktop(::GetCurrentThreadId()),
+        ::GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        request.desktop->handle = static_cast<HDESK>(duplicate);
+    else request.desktop->error = ::GetLastError();
+    QSet<quint64> roots;
+    for (const auto& window : windows) {
+        WindowActionTarget target; target.info = window;
+        auto& identity = target.identity;
+        identity.requestedPid = window.processId; identity.requestedTid = window.threadId;
+        identity.requestedCreated = window.processCreationTime100ns;
+        target.admitted = window.valid && ks::window::windowIdentityMatches(window.hwndValue,
+            window.processId, window.threadId, window.processCreationTime100ns);
+        const HWND selected = reinterpret_cast<HWND>(static_cast<quintptr>(window.hwndValue));
+        const HWND root = target.admitted ? ::GetAncestor(selected, GA_ROOT) : nullptr;
+        identity.rootHwnd = root ? static_cast<quint64>(reinterpret_cast<quintptr>(root)) : window.hwndValue;
+        if (!testMessage && target.admitted && roots.contains(identity.rootHwnd)) continue;
+        if (target.admitted) roots.insert(identity.rootHwnd);
+        DWORD pid = 0;
+        identity.rootTid = target.admitted ? ::GetWindowThreadProcessId(root ? root : selected, &pid) : 0;
+        identity.rootPid = pid;
+        identity.rootCreated = pid == window.processId && window.processCreationTime100ns
+            ? window.processCreationTime100ns : actionProcessCreated(pid);
+        target.admitted = target.admitted && identity.rootTid != 0;
+        request.targets.push_back(std::move(target));
     }
-}
-
-bool OtherDock::setCaptureProtectionForWindow(
-    const WindowInfo& windowInfo,
-    const bool protectedState,
-    const bool showFeedback)
-{
-    kLogEvent actionEvent;
-    info << actionEvent
-        << "[OtherDock] 开始窗口防截图保护操作, hwnd="
-        << formatHwndText(windowInfo.hwndValue).toStdString()
-        << ", pid="
-        << windowInfo.processId
-        << ", targetProtected="
-        << (protectedState ? "true" : "false")
-        << eol;
-
-    const ks::window::CaptureProtectionResult result =
-        ks::window::SetWindowCaptureProtection(windowInfo.hwndValue, protectedState);
-    const QString messageText = buildProtectionMessage(result);
-
-    if (result.success)
-    {
-        info << actionEvent
-            << "[OtherDock] 窗口防截图保护操作成功, requestedHwnd="
-            << formatHwndText(result.requestedHwnd).toStdString()
-            << ", appliedHwnd="
-            << formatHwndText(result.appliedHwnd).toStdString()
-            << ", remote="
-            << (result.usedRemoteThread ? "true" : "false")
-            << ", affinity=0x"
-            << std::hex
-            << result.appliedAffinity
-            << std::dec
-            << eol;
-        if (showFeedback) QMessageBox::information(
-            this,
-            QStringLiteral("窗口防截图保护"),
-            messageText);
-    }
-    else
-    {
-        // privilegePromptHandled：先消费结构化 Win32 错误，未命中时再检查文字详情。
-        bool privilegePromptHandled = showFeedback && ks::ui::promptForPrivilegeFailure(
-            this,
-            result.requestedProtection ? QStringLiteral("启用窗口防截图保护") : QStringLiteral("取消窗口防截图保护"),
-            result.win32Error);
-        if (showFeedback && !privilegePromptHandled)
-        {
-            privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                this,
-                result.requestedProtection ? QStringLiteral("启用窗口防截图保护") : QStringLiteral("取消窗口防截图保护"),
-                QString::fromStdString(result.detail));
-        }
-        err << actionEvent
-            << "[OtherDock] 窗口防截图保护操作失败, requestedHwnd="
-            << formatHwndText(result.requestedHwnd).toStdString()
-            << ", appliedHwnd="
-            << formatHwndText(result.appliedHwnd).toStdString()
-            << ", remote="
-            << (result.usedRemoteThread ? "true" : "false")
-            << ", error="
-            << result.win32Error
-            << ", detail="
-            << result.detail
-            << eol;
-        if (showFeedback && !privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("窗口防截图保护"),
-                messageText);
-        }
-    }
-
-    return result.success;
+    request.progress->total = request.targets.size();
+    m_windowActionProgress = request.progress;
+    m_windowActionOperation->submitTransaction<WindowActionRequest, WindowActionReply>(std::move(request),
+        runWindowAction,
+        [this](const WindowActionReply& reply, std::uint64_t) {
+            int succeeded = 0; QStringList failures;
+            for (const auto& result : reply.results) {
+                if (result.success) ++succeeded;
+                else failures.push_back(formatHwndText(result.requestedHwnd));
+                kLogEvent event;
+                info << event << "[OtherDock] accepted window operation completed, hwnd="
+                    << result.requestedHwnd << ", success=" << result.success
+                    << ", error=" << result.win32Error << ", detail=" << result.detail << eol;
+            }
+            const QPointer<OtherDock> alive(this);
+            refreshWindowListAsync();
+            if (!alive) return true;
+            if (!reply.testMessage && reply.selectedCount == 1 && reply.results.size() == 1) {
+                const auto& result = reply.results.front();
+                bool handled = !result.success && ks::ui::promptForPrivilegeFailure(this,
+                    result.requestedProtection ? QStringLiteral("启用窗口防截图保护") : QStringLiteral("取消窗口防截图保护"), result.win32Error);
+                if (!alive) return true;
+                if (!result.success && !handled) handled = ks::ui::promptForPrivilegeFailure(this,
+                    result.requestedProtection ? QStringLiteral("启用窗口防截图保护") : QStringLiteral("取消窗口防截图保护"), QString::fromStdString(result.detail));
+                if (!alive || handled) return true;
+                if (result.success) QMessageBox::information(this, QStringLiteral("窗口防截图保护"), buildProtectionMessage(result));
+                else QMessageBox::warning(this, QStringLiteral("窗口防截图保护"), buildProtectionMessage(result));
+            } else {
+                const QString action = reply.testMessage ? QStringLiteral("发送测试消息")
+                    : (!reply.results.empty() && reply.results.front().requestedProtection
+                        ? QStringLiteral("启用防截图保护") : QStringLiteral("取消防截图保护"));
+                const QString message = QStringLiteral("操作：%1\n成功：%2\n失败或已失效：%3\n%4")
+                    .arg(action).arg(succeeded).arg(failures.size()).arg(failures.join('\n'));
+                if (failures.empty()) QMessageBox::information(this, action, message);
+                else QMessageBox::warning(this, action, message);
+            }
+            return true;
+        }, [this](std::exception_ptr) {
+            QMessageBox::warning(this, QStringLiteral("窗口防截图保护"), QStringLiteral("刷新失败"));
+        });
 }
 
 // WindowLayerDiagnostics.inl is intentionally included here so the feature is

@@ -70,6 +70,24 @@ namespace
         HANDLE m_handle = nullptr; // m_handle：当前托管的 Win32 句柄。
     };
 
+    bool processMatchesCreated(HANDLE process, std::uint64_t created)
+    {
+        if (!created) return true;
+        FILETIME start{}, exit{}, kernel{}, user{};
+        return ::GetProcessTimes(process, &start, &exit, &kernel, &user) &&
+            (((static_cast<std::uint64_t>(start.dwHighDateTime) << 32) | start.dwLowDateTime) == created);
+    }
+    bool frozenWindowMatches(HWND hwnd, DWORD pid, DWORD tid, std::uint64_t created)
+    {
+        if (!pid && !tid && !created) return true; // legacy optional caller
+        DWORD actualPid = 0;
+        const DWORD actualTid = ::GetWindowThreadProcessId(hwnd, &actualPid);
+        if (!actualTid || actualTid != tid || actualPid != pid) return false;
+        if (!created) return true;
+        HandleGuard process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, actualPid));
+        return process.get() && processMatchesCreated(process.get(), created);
+    }
+
     // appendDetail 作用：
     // - 拼接诊断文本；
     // - 传入 partText：单段诊断；
@@ -371,7 +389,7 @@ namespace
         const HANDLE processHandle,
         const DWORD pid,
         const HWND windowHandle,
-        const DWORD affinityValue)
+        const DWORD affinityValue, const std::function<void()>& onSoftTimeout)
     {
         RemoteAffinityCallResult callResult;
         std::string resolveDetail;
@@ -454,13 +472,23 @@ namespace
             return callResult;
         }
 
-        const DWORD waitResult = ::WaitForSingleObject(remoteThread.get(), 3000);
+        DWORD waitResult = ::WaitForSingleObject(remoteThread.get(), 3000);
         if (waitResult != WAIT_OBJECT_0)
         {
-            callResult.detail = waitResult == WAIT_TIMEOUT
-                ? "remote affinity thread timed out"
-                : formatWin32Error("WaitForSingleObject(remote affinity)", ::GetLastError());
-            return callResult;
+            // The UI transaction is already asynchronous. A soft deadline must
+            // never free code/parameter memory still executing remotely, nor
+            // report a finished transaction while it can mutate the target.
+            if (onSoftTimeout) { try { onSoftTimeout(); } catch (...) {} }
+            for (;;)
+            {
+                // Thread exit also covers target process termination. Waiting
+                // on this existing handle needs no extra process access rights.
+                waitResult = ::WaitForSingleObject(remoteThread.get(), INFINITE);
+                if (waitResult == WAIT_OBJECT_0) break;
+                // An unexpected wait failure cannot authorize releasing code
+                // which might still execute; retain both owned handles.
+                ::Sleep(100);
+            }
         }
 
         SIZE_T bytesRead = 0;
@@ -526,7 +554,8 @@ namespace
         const bool enableProtection,
         DWORD& appliedAffinity,
         DWORD& win32Error,
-        std::string& detailText)
+        std::string& detailText, std::uint64_t expectedCreated,
+        const std::function<void()>& onSoftTimeout)
     {
         HandleGuard processHandle(::OpenProcess(
             PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
@@ -536,6 +565,13 @@ namespace
         {
             win32Error = ::GetLastError();
             appendDetail(detailText, formatWin32Error("OpenProcess(remote affinity)", win32Error));
+            return false;
+        }
+
+        if (!processMatchesCreated(processHandle.get(), expectedCreated))
+        {
+            win32Error = ERROR_INVALID_PARAMETER;
+            appendDetail(detailText, "frozen process creation identity changed");
             return false;
         }
 
@@ -552,7 +588,7 @@ namespace
             processHandle.get(),
             pid,
             windowHandle,
-            appliedAffinity);
+            appliedAffinity, onSoftTimeout);
         if (!remoteCall.infrastructureOk)
         {
             appendDetail(detailText, remoteCall.detail);
@@ -577,7 +613,7 @@ namespace
             processHandle.get(),
             pid,
             windowHandle,
-            appliedAffinity);
+            appliedAffinity, onSoftTimeout);
         if (!remoteCall.infrastructureOk)
         {
             appendDetail(detailText, remoteCall.detail);
@@ -600,7 +636,8 @@ namespace ks::window
 {
     CaptureProtectionResult SetWindowCaptureProtection(
         const std::uint64_t hwndValue,
-        const bool enableProtection)
+        const bool enableProtection, const CaptureProtectionIdentity& expected,
+        const std::function<void()>& onSoftTimeout)
     {
         CaptureProtectionResult result;
         result.requestedProtection = enableProtection;
@@ -618,12 +655,28 @@ namespace ks::window
             return result;
         }
 
+        if (!frozenWindowMatches(requestedWindowHandle, expected.requestedPid,
+            expected.requestedTid, expected.requestedCreated))
+        {
+            result.win32Error = ERROR_INVALID_WINDOW_HANDLE;
+            result.detail = "frozen selected window identity changed";
+            return result;
+        }
+
         bool usedRootWindow = false;
         HWND targetWindowHandle = queryRootWindow(requestedWindowHandle, usedRootWindow);
         if (targetWindowHandle == nullptr || ::IsWindow(targetWindowHandle) == FALSE)
         {
             result.win32Error = ERROR_INVALID_WINDOW_HANDLE;
             result.detail = "root HWND invalid";
+            return result;
+        }
+
+        if ((expected.rootHwnd && hwndToValue(targetWindowHandle) != expected.rootHwnd) ||
+            !frozenWindowMatches(targetWindowHandle, expected.rootPid, expected.rootTid, expected.rootCreated))
+        {
+            result.win32Error = ERROR_INVALID_WINDOW_HANDLE;
+            result.detail = "frozen root window identity changed";
             return result;
         }
 
@@ -652,7 +705,7 @@ namespace ks::window
                 enableProtection,
                 appliedAffinity,
                 win32Error,
-                result.detail);
+                result.detail, expected.rootCreated, onSoftTimeout);
         }
 
         result.appliedAffinity = appliedAffinity;
