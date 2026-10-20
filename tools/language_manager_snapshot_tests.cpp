@@ -1,6 +1,12 @@
 #include "LanguageManager.h"
 
 #include <QCoreApplication>
+#include <QAbstractTableModel>
+#include <QIdentityProxyModel>
+
+#ifdef KSWORD_I18N_TEST_MODEL_PRESERVE
+extern "C" bool ksword_i18n_test_preserve_model_data(const QObject*, const QAbstractItemModel*);
+#endif
 #include <QEvent>
 #include <QDir>
 #include <QFile>
@@ -645,6 +651,44 @@ namespace
         requireTrue(QStringLiteral("return English after frozen display cases"),manager.setLanguage(QStringLiteral("en-US"),&error));
     }
 
+#ifdef KSWORD_I18N_TEST_MODEL_PRESERVE
+    class MarkerModel final : public QAbstractTableModel
+    {
+    public:
+        mutable int counts = 0, reads = 0;
+        int rowCount(const QModelIndex& = {}) const override { ++counts; return 100001; }
+        int columnCount(const QModelIndex& = {}) const override { ++counts; return 10; }
+        QVariant data(const QModelIndex&, int) const override { ++reads; return {}; }
+    };
+    void runModelPreservePolicyCases()
+    {
+        QObject combo, other;
+        MarkerModel source;
+        QIdentityProxyModel inner, outer;
+        inner.setSourceModel(&source); outer.setSourceModel(&inner);
+        source.counts = source.reads = 0;
+        requireTrue(QStringLiteral("unmanaged model retains compatibility translation"), !ksword_i18n_test_preserve_model_data(&combo, &source));
+        combo.setProperty("ks_i18n_preserve_model_data", true);
+        requireTrue(QStringLiteral("virtual combo marker skips model items"), ksword_i18n_test_preserve_model_data(&combo, &source));
+        requireTrue(QStringLiteral("view marker works without a model"), ksword_i18n_test_preserve_model_data(&combo, nullptr));
+        requireTrue(QStringLiteral("unrelated view does not inherit marker"), !ksword_i18n_test_preserve_model_data(&other, &source));
+        combo.setProperty("ks_i18n_preserve_model_data", false);
+        source.setProperty("ks_i18n_preserve_model_data", true);
+        requireTrue(QStringLiteral("canonical model marker protects combo"), ksword_i18n_test_preserve_model_data(&combo, &source));
+        requireTrue(QStringLiteral("source marker protects popup proxy chain"), ksword_i18n_test_preserve_model_data(&other, &outer));
+        source.setProperty("ks_i18n_preserve_model_data", false);
+        inner.setProperty("ks_i18n_preserve_model_data", true);
+        requireTrue(QStringLiteral("intermediate proxy marker protects data"), ksword_i18n_test_preserve_model_data(&other, &outer));
+        inner.setProperty("ks_i18n_preserve_model_data", false);
+        outer.setProperty("ks_i18n_preserve_model_data", true);
+        requireTrue(QStringLiteral("outer model marker protects data"), ksword_i18n_test_preserve_model_data(nullptr, &outer));
+        outer.setProperty("ks_i18n_preserve_model_data", false);
+        requireTrue(QStringLiteral("cleared model policy restores compatibility"), !ksword_i18n_test_preserve_model_data(&combo, &outer));
+        requireTrue(QStringLiteral("empty model policy remains compatibility"), !ksword_i18n_test_preserve_model_data(nullptr, nullptr));
+        requireTrue(QStringLiteral("model policy never enumerates virtual100001x10 data"), source.counts == 0 && source.reads == 0);
+    }
+#endif
+
     int writeReport(const QString& output)
     {
         const QJsonObject result{
@@ -739,6 +783,9 @@ int main(int argc, char** argv)
     runSourceCases(manager);
     runSnapshotCases(manager);
     runFrozenContextCases(manager);
+#ifdef KSWORD_I18N_TEST_MODEL_PRESERVE
+    runModelPreservePolicyCases();
+#endif
     runFrozenDisplayCases(manager);
 #ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
     runRuntimePolicyCases(manager);

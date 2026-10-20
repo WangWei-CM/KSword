@@ -44,6 +44,8 @@ def main() -> int:
                         help="Count actual runtime traversal over QObject-only trees in a test-only source copy")
     parser.add_argument("--rediscover", action="store_true",
                         help="Make initialize rediscover fixture packs in a test-only source copy; does not add a production reload API")
+    parser.add_argument("--model-preserve-policy", action="store_true",
+                        help="Expose only the actual pure marker/proxy policy to QCore real-model probes")
     args = parser.parse_args()
     repository = find_repository_root()
     source_dir = (args.source_dir or repository / "Ksword5.1" / "Ksword5.1" / "Internationalization").resolve()
@@ -107,6 +109,11 @@ def main() -> int:
         hook_bytes = hook_bytes[:point] + b"if (QCoreApplication::instance() != nullptr)" + hook_bytes[point + len(condition):]
         compile_source = out_dir / "LanguageManager.rediscover-hook.cpp"
         compile_source.write_bytes(hook_bytes)
+    if args.model_preserve_policy:
+        hook_bytes = compile_source.read_bytes()
+        hook_bytes += b'\nextern "C" bool ksword_i18n_test_preserve_model_data(const QObject* owner, const QAbstractItemModel* model)\n{ return preserveModelDataText(owner, model); }\n'
+        compile_source = out_dir / "LanguageManager.model-policy-hook.cpp"
+        compile_source.write_bytes(hook_bytes)
     exe = out_dir / "language_manager_snapshot_tests.exe"
     result = out_dir / "results.json"
     flags = [
@@ -121,6 +128,8 @@ def main() -> int:
         "/link", "/LIBPATH:" + str(qt_dir / "lib"),
         "Qt6Widgets.lib", "Qt6Gui.lib", "Qt6Core.lib", "user32.lib",
     ]
+    if args.model_preserve_policy:
+        flags.insert(1, "/DKSWORD_I18N_TEST_MODEL_PRESERVE")
     if args.generation_race:
         flags.insert(1, "/DKSWORD_I18N_TEST_GENERATION_HOOK")
     if args.runtime_policy:
@@ -143,6 +152,7 @@ def main() -> int:
         "source_sha256": hashlib.sha256(original_bytes).hexdigest(),
         "compiled_source_sha256": hashlib.sha256(compile_source.read_bytes()).hexdigest(),
         "test_only_generation_hook": args.generation_race,
+        "test_only_model_preserve_hook": args.model_preserve_policy,
         "test_only_runtime_policy_hook": args.runtime_policy,
         "test_only_rediscovery_hook": args.rediscover,
         "header_sha256": hashlib.sha256((source_dir / "LanguageManager.h").read_bytes()).hexdigest(),

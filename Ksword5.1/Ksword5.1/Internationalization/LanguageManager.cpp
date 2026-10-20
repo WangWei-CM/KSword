@@ -1,6 +1,7 @@
 #include "LanguageManager.h"
 
 #include <QAbstractItemModel>
+#include <QAbstractProxyModel>
 #include <QAbstractItemView>
 #include <QAbstractButton>
 #include <QAction>
@@ -53,6 +54,22 @@
 
 namespace
 {
+    // Explicit model-data ownership is shared by ordinary item views and
+    // virtual combo models. Query only marker/proxy metadata, never row data.
+    bool preserveModelDataText(const QObject* owner, const QAbstractItemModel* model)
+    {
+        if (owner && owner->property("ks_i18n_preserve_model_data").toBool()) return true;
+        QSet<const QAbstractItemModel*> visited;
+        while (model && !visited.contains(model))
+        {
+            if (model->property("ks_i18n_preserve_model_data").toBool()) return true;
+            visited.insert(model);
+            const auto* proxy = qobject_cast<const QAbstractProxyModel*>(model);
+            model = proxy ? proxy->sourceModel() : nullptr;
+        }
+        return false;
+    }
+
     constexpr auto kLanguagePackSchema = "ksword-language-pack";
     constexpr int kLanguagePackFormatVersion = 1;
     constexpr qint64 kMaximumLanguagePackBytes = 32 * 1024 * 1024;
@@ -2808,29 +2825,32 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                 kRuntimePlaceholderAppliedProperty,
                 comboBox->placeholderText(),
                 [comboBox](const QString& value) { comboBox->setPlaceholderText(value); });
-            for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
+            if (!preserveModelDataText(comboBox, comboBox->model()))
             {
-                const ManagedTextResult result = resolveManagedText(
-                    *this,
-                    comboBox->itemText(itemIndex),
-                    comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
-                    comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
-                if (result.clearMetadata)
+                for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
                 {
-                    comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
-                    comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
-                    continue;
+                    const ManagedTextResult result = resolveManagedText(
+                        *this,
+                        comboBox->itemText(itemIndex),
+                        comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
+                        comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
+                    if (result.clearMetadata)
+                    {
+                        comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
+                        comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
+                        continue;
+                    }
+                    if (!result.updateMetadata)
+                    {
+                        continue;
+                    }
+                    if (result.setText)
+                    {
+                        comboBox->setItemText(itemIndex, result.appliedText);
+                    }
+                    comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
+                    comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
                 }
-                if (!result.updateMetadata)
-                {
-                    continue;
-                }
-                if (result.setText)
-                {
-                    comboBox->setItemText(itemIndex, result.appliedText);
-                }
-                comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
-                comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
             }
         }
 
@@ -2930,7 +2950,7 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                         model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
                     }
                 }
-                bool preserveModelData = itemView->property("ks_i18n_preserve_model_data").toBool();
+                bool preserveModelData = preserveModelDataText(itemView, model);
                 if (itemView->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool())
                 {
                     // Frozen panes are children of their canonical table and
@@ -3045,12 +3065,15 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
 
     if (QComboBox* comboBox = qobject_cast<QComboBox*>(object))
     {
-        for (int index = 0; index < comboBox->count(); ++index)
+        if (!preserveModelDataText(comboBox, comboBox->model()))
         {
-            const QString itemKey = comboBox->itemData(index, kComboKeyRole).toString();
-            if (!itemKey.isEmpty())
+            for (int index = 0; index < comboBox->count(); ++index)
             {
-                comboBox->setItemText(index, text(itemKey, comboBox->itemData(index, kComboFallbackRole).toString()));
+                const QString itemKey = comboBox->itemData(index, kComboKeyRole).toString();
+                if (!itemKey.isEmpty())
+                {
+                    comboBox->setItemText(index, text(itemKey, comboBox->itemData(index, kComboFallbackRole).toString()));
+                }
             }
         }
     }
