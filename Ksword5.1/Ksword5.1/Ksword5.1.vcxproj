@@ -952,6 +952,7 @@
     <ClInclude Include="UI\AsyncOperation.h" />
     <ClInclude Include="UI\AsyncCleanupRegistry.h" />
     <ClInclude Include="UI\CoordinatedApplicationQuit.h" />
+    <ClInclude Include="UI\RetainedCleanupJob.h" />
     <ClInclude Include="UI\FlatTableModel.h" />
     <ClInclude Include="UI\DockTabInteraction.h" />
     <ClInclude Include="UI\FlowLayout.h" />

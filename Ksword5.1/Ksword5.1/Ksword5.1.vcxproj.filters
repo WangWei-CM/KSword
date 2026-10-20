@@ -2931,6 +2931,9 @@
     <ClInclude Include="UI\CoordinatedApplicationQuit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\RetainedCleanupJob.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\FlatTableModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
