@@ -2475,6 +2475,13 @@ namespace ks::misc
 
     void ApplicationControlPage::refreshAsync()
     {
+        // Read-only refresh is replaceable state: one running collection and one latest request.
+        if (m_refreshInFlight)
+        {
+            m_refreshPending = true;
+            return;
+        }
+        m_refreshInFlight = true;
         if (m_refreshButton != nullptr)
         {
             m_refreshButton->setEnabled(false);
@@ -3008,6 +3015,13 @@ namespace ks::misc
         // 只允许最后发起的任务写回；该检查也覆盖右键菜单延迟后再次进入的提交。
         if (refreshGeneration != m_refreshGeneration)
         {
+            return;
+        }
+        m_refreshInFlight = false;
+        if (m_refreshPending)
+        {
+            m_refreshPending = false;
+            refreshAsync();
             return;
         }
 

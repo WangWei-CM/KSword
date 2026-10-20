@@ -315,6 +315,8 @@ namespace ks::misc
         QVector<AppLockerRuleRecord> m_appLockerRules;  // m_appLockerRules：最近一次 AppLocker 规则快照。
         QVector<EventRecord> m_eventRows;               // m_eventRows：最近一次完整事件日志缓存。
         QVector<KeyValueRecord> m_platformRows;         // m_platformRows：最近一次平台安全诊断缓存。
+        bool m_refreshInFlight = false;               // One complete read-only collection at a time.
+        bool m_refreshPending = false;                // Coalesced latest event-limit/refresh request.
         std::uint64_t m_refreshGeneration = 0;           // m_refreshGeneration：UI 线程维护的刷新代次，阻止旧结果回写。
         int m_pendingMutationCount = 0;                  // m_pendingMutationCount：正在执行的配置写入任务数。
         bool m_appLockerModuleAvailable = false;         // m_appLockerModuleAvailable：当前系统是否提供 AppLocker 管理模块。
