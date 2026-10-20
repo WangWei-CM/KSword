@@ -617,11 +617,15 @@ namespace
     class ProcessPerformanceHistoryChartWidget final : public QWidget
     {
     public:
+        using Sample = ProcessDetailWindow::PerformanceHistorySample;
+        using History = std::vector<Sample>;
+        using HistorySnapshot = std::shared_ptr<const History>;
+
         struct Series
         {
             QString label;
             QColor color;
-            std::vector<double> values;
+            double Sample::*valueMember = nullptr;
         };
 
         explicit ProcessPerformanceHistoryChartWidget(QWidget* parent = nullptr)
@@ -644,42 +648,93 @@ namespace
             });
         }
 
+        const HistorySnapshot& historySnapshot() const
+        {
+            return m_history;
+        }
+
+        // 比较规范样本本身，不能只用首尾时间判断：历史替换可修正中间样本。
+        static bool historyMatches(const HistorySnapshot& snapshot, const std::deque<Sample>& history)
+        {
+            if (!snapshot || snapshot->size() != history.size())
+            {
+                return false;
+            }
+            const auto sameValue = [](const double left, const double right) {
+                return left == right || (std::isnan(left) && std::isnan(right));
+            };
+            for (std::size_t index = 0; index < history.size(); ++index)
+            {
+                const Sample& left = (*snapshot)[index];
+                const Sample& right = history[index];
+                if (left.unixMilliseconds != right.unixMilliseconds
+                    || !sameValue(left.cpuPercent, right.cpuPercent)
+                    || !sameValue(left.cpuCorePercent, right.cpuCorePercent)
+                    || !sameValue(left.memoryMB, right.memoryMB)
+                    || !sameValue(left.diskMBps, right.diskMBps)
+                    || !sameValue(left.networkRxKBps, right.networkRxKBps)
+                    || !sameValue(left.networkTxKBps, right.networkTxKBps)
+                    || !sameValue(left.gpuPercent, right.gpuPercent))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         void setChartData(
-            std::vector<qint64> timestamps,
+            HistorySnapshot history,
             std::vector<Series> series,
             const QString& unitText,
             const double fixedMaximum,
             const QString& emptyText,
             const QString& timeHeader,
             const QString& copyLatestText,
-            const QString& copyHistoryText)
+            const QString& copyHistoryText,
+            const double axisStep = 0.0)
         {
-            m_previousPointCount = m_timestamps.size();
-            m_historyWindowShifted =
-                m_previousPointCount == timestamps.size()
-                && m_previousPointCount > 1U
-                && timestamps.front() > m_timestamps.front();
-            m_timestamps = std::move(timestamps);
-            m_previousLatestValueByLabel.clear();
-            for (const Series& oldSeries : m_series)
+            bool projectionChanged = m_history != history || m_series.size() != series.size()
+                || m_fixedMaximum != fixedMaximum || m_axisStep != axisStep;
+            for (std::size_t index = 0; !projectionChanged && index < series.size(); ++index)
             {
-                if (!oldSeries.values.empty())
+                projectionChanged = m_series[index].valueMember != series[index].valueMember;
+            }
+            if (projectionChanged)
+            {
+                m_previousPointCount = pointCount();
+                m_historyWindowShifted = m_history && history
+                    && m_previousPointCount == history->size()
+                    && m_previousPointCount > 1U
+                    && history->front().unixMilliseconds > m_history->front().unixMilliseconds;
+                m_previousLatestValues.clear();
+                for (const Series& oldSeries : m_series)
                 {
-                    m_previousLatestValueByLabel.insert(oldSeries.label, oldSeries.values.back());
+                    if (m_previousPointCount > 0U && oldSeries.valueMember != nullptr)
+                    {
+                        m_previousLatestValues.push_back(m_history->back().*oldSeries.valueMember);
+                    }
                 }
+                m_history = std::move(history);
             }
             m_series = std::move(series);
-            m_linePathsValid = false;
             m_unitText = unitText;
             m_fixedMaximum = fixedMaximum;
-            m_axisMaximum = chartMaximum();
+            m_axisStep = axisStep;
             m_emptyText = emptyText;
             m_timeHeader = timeHeader;
             m_copyLatestText = copyLatestText;
             m_copyHistoryText = copyHistoryText;
+            if (!projectionChanged)
+            {
+                // 主题/语言只更新画笔与文案；不复制历史、不改横轴、不重启采样插值。
+                update();
+                return;
+            }
+            m_axisMaximum = chartMaximum();
+            m_linePathsValid = false;
             m_seriesAnimation->stop();
             // 隐藏和空图只保存完整历史，避免无可见帧时仍启动260ms动画计时器。
-            if (isVisible() && !m_timestamps.empty())
+            if (isVisible() && pointCount() > 0U)
             {
                 m_animationProgress = 0.0;
                 m_seriesAnimation->start();
@@ -717,7 +772,7 @@ namespace
             painter.setBrush(Qt::NoBrush);
             painter.drawRect(plotRect);
 
-            if (m_timestamps.empty() || m_series.empty())
+            if (pointCount() == 0U || m_series.empty())
             {
                 painter.setPen(textColor);
                 painter.drawText(plotRect, Qt::AlignCenter, m_emptyText);
@@ -733,7 +788,7 @@ namespace
 
         void contextMenuEvent(QContextMenuEvent* eventPointer) override
         {
-            if (eventPointer == nullptr || m_timestamps.empty() || m_series.empty())
+            if (eventPointer == nullptr || pointCount() == 0U || m_series.empty())
             {
                 return;
             }
@@ -758,6 +813,11 @@ namespace
         }
 
     private:
+        std::size_t pointCount() const
+        {
+            return m_history ? m_history->size() : 0U;
+        }
+
         QRectF chartRect() const
         {
             return QRectF(rect()).adjusted(62.0, 24.0, -12.0, -29.0);
@@ -773,10 +833,18 @@ namespace
             double maximum = 0.0;
             for (const Series& series : m_series)
             {
-                for (const double value : series.values)
+                if (series.valueMember == nullptr || !m_history)
                 {
-                    maximum = std::max(maximum, std::max(0.0, value));
+                    continue;
                 }
+                for (const Sample& sample : *m_history)
+                {
+                    maximum = std::max(maximum, std::max(0.0, sample.*series.valueMember));
+                }
+            }
+            if (m_axisStep > 0.0)
+            {
+                return std::max(m_axisStep, std::ceil(maximum / m_axisStep) * m_axisStep);
             }
             if (maximum <= 0.0)
             {
@@ -866,29 +934,31 @@ namespace
             m_cachedPixelRatio = pixelRatio;
             m_cachedAnimationProgress = m_animationProgress;
             m_linePathsValid = true;
-            const std::size_t pointCount = m_timestamps.size();
+            const std::size_t pointCount = this->pointCount();
             if (pointCount == 0U)
             {
                 return;
             }
 
-            for (const Series& series : m_series)
+            for (std::size_t seriesIndex = 0; seriesIndex < m_series.size(); ++seriesIndex)
             {
+                const Series& series = m_series[seriesIndex];
                 m_cachedLinePaths.emplace_back();
                 QPainterPath& linePath = m_cachedLinePaths.back();
-                if (series.values.empty())
+                if (series.valueMember == nullptr)
                 {
                     continue;
                 }
-                const std::size_t seriesPointCount = std::min(pointCount, series.values.size());
+                const std::size_t seriesPointCount = pointCount;
                 for (std::size_t pointIndex = 0; pointIndex < seriesPointCount; ++pointIndex)
                 {
                     const double x = plotRect.left()
                         + plotRect.width() * animatedXRatio(pointIndex, seriesPointCount);
-                    double displayValue = series.values[pointIndex];
+                    double displayValue = (*m_history)[pointIndex].*series.valueMember;
                     if (pointIndex + 1U == seriesPointCount && m_animationProgress < 1.0)
                     {
-                        const double startValue = m_previousLatestValueByLabel.value(series.label, displayValue);
+                        const double startValue = seriesIndex < m_previousLatestValues.size()
+                            ? m_previousLatestValues[seriesIndex] : displayValue;
                         displayValue = startValue + (displayValue - startValue) * m_animationProgress;
                     }
                     const double valueRatio = std::min(
@@ -937,30 +1007,30 @@ namespace
 
         void drawTimeRange(QPainter& painter, const QRectF& plotRect, const QColor& textColor) const
         {
-            if (m_timestamps.empty())
+            if (pointCount() == 0U)
             {
                 return;
             }
             painter.setPen(textColor);
             const QRectF leftTextRect(plotRect.left(), plotRect.bottom() + 5.0, 120.0, 18.0);
             const QRectF rightTextRect(plotRect.right() - 120.0, plotRect.bottom() + 5.0, 120.0, 18.0);
-            painter.drawText(leftTextRect, Qt::AlignLeft | Qt::AlignVCenter, timeText(m_timestamps.front()));
-            painter.drawText(rightTextRect, Qt::AlignRight | Qt::AlignVCenter, timeText(m_timestamps.back()));
+            painter.drawText(leftTextRect, Qt::AlignLeft | Qt::AlignVCenter, timeText(m_history->front().unixMilliseconds));
+            painter.drawText(rightTextRect, Qt::AlignRight | Qt::AlignVCenter, timeText(m_history->back().unixMilliseconds));
         }
 
         QString latestValuesText() const
         {
-            if (m_timestamps.empty())
+            if (pointCount() == 0U)
             {
                 return QString();
             }
             QStringList lines;
-            lines << (m_timeHeader + QStringLiteral(": ") + timeText(m_timestamps.back()));
+            lines << (m_timeHeader + QStringLiteral(": ") + timeText(m_history->back().unixMilliseconds));
             for (const Series& series : m_series)
             {
-                if (!series.values.empty())
+                if (series.valueMember != nullptr)
                 {
-                    lines << (series.label + QStringLiteral(": ") + valueText(series.values.back()));
+                    lines << (series.label + QStringLiteral(": ") + valueText(m_history->back().*series.valueMember));
                 }
             }
             return lines.join(QLatin1Char('\n'));
@@ -977,20 +1047,20 @@ namespace
 
             QStringList lines;
             lines << headerFields.join(QLatin1Char('\t'));
-            for (std::size_t pointIndex = 0; pointIndex < m_timestamps.size(); ++pointIndex)
+            for (std::size_t pointIndex = 0; pointIndex < pointCount(); ++pointIndex)
             {
                 QStringList rowFields;
-                rowFields << timeText(m_timestamps[pointIndex]);
+                rowFields << timeText((*m_history)[pointIndex].unixMilliseconds);
                 for (const Series& series : m_series)
                 {
-                    rowFields << valueText(pointIndex < series.values.size() ? series.values[pointIndex] : 0.0);
+                    rowFields << valueText(series.valueMember != nullptr ? (*m_history)[pointIndex].*series.valueMember : 0.0);
                 }
                 lines << rowFields.join(QLatin1Char('\t'));
             }
             return lines.join(QLatin1Char('\n'));
         }
 
-        std::vector<qint64> m_timestamps;
+        HistorySnapshot m_history;
         std::vector<Series> m_series;
         QString m_unitText;
         QString m_emptyText;
@@ -998,6 +1068,7 @@ namespace
         QString m_copyLatestText;
         QString m_copyHistoryText;
         double m_fixedMaximum = 0.0;
+        double m_axisStep = 0.0;
         double m_axisMaximum = 1.0;
         std::vector<QPainterPath> m_cachedLinePaths;
         QRectF m_cachedPlotRect;
@@ -1005,7 +1076,7 @@ namespace
         double m_cachedAnimationProgress = 1.0;
         qreal m_cachedPixelRatio = 0.0;
         bool m_linePathsValid = false;
-        QHash<QString, double> m_previousLatestValueByLabel;
+        std::vector<double> m_previousLatestValues;
         std::size_t m_previousPointCount = 0U;
         bool m_historyWindowShifted = false;
         QVariantAnimation* m_seriesAnimation = nullptr;
@@ -3978,57 +4049,42 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
     const auto text = [](const QString& key) {
         return ks::i18n::text(key, QString());
     };
-    std::vector<qint64> timestamps;
-    std::vector<double> cpuValues;
-    std::vector<double> cpuCoreValues;
-    std::vector<double> memoryValues;
-    std::vector<double> diskValues;
-    std::vector<double> networkRxValues;
-    std::vector<double> networkTxValues;
-    std::vector<double> gpuValues;
-    timestamps.reserve(m_performanceHistory.size());
-    cpuValues.reserve(m_performanceHistory.size());
-    cpuCoreValues.reserve(m_performanceHistory.size());
-    memoryValues.reserve(m_performanceHistory.size());
-    diskValues.reserve(m_performanceHistory.size());
-    networkRxValues.reserve(m_performanceHistory.size());
-    networkTxValues.reserve(m_performanceHistory.size());
-    gpuValues.reserve(m_performanceHistory.size());
-    for (const PerformanceHistorySample& sample : m_performanceHistory)
+    using Chart = ProcessPerformanceHistoryChartWidget;
+    const auto* primaryChart = static_cast<Chart*>(m_performanceCpuChart);
+    Chart::HistorySnapshot history = primaryChart != nullptr
+        ? primaryChart->historySnapshot() : Chart::HistorySnapshot{};
+    if (!Chart::historyMatches(history, m_performanceHistory))
     {
-        timestamps.push_back(sample.unixMilliseconds);
-        cpuValues.push_back(sample.cpuPercent);
-        cpuCoreValues.push_back(sample.cpuCorePercent);
-        memoryValues.push_back(sample.memoryMB);
-        diskValues.push_back(sample.diskMBps);
-        networkRxValues.push_back(sample.networkRxKBps);
-        networkTxValues.push_back(sample.networkTxKBps);
-        gpuValues.push_back(sample.gpuPercent);
+        // 六图共用一份完整不可变快照，不再分解成八向量和六份时间轴。
+        history = std::make_shared<const Chart::History>(
+            m_performanceHistory.cbegin(), m_performanceHistory.cend());
     }
 
     const QString timeHeader = text(QStringLiteral("process.detail.performance.header.time"));
     const QString emptyText = text(QStringLiteral("process.detail.performance.chart.empty"));
     const QString copyLatestText = text(QStringLiteral("process.detail.performance.action.copy_current"));
     const QString copyHistoryText = text(QStringLiteral("process.detail.performance.action.copy_history"));
-    const auto setChartData = [&timestamps, &emptyText, &timeHeader, &copyLatestText, &copyHistoryText](
+    const auto setChartData = [&history, &emptyText, &timeHeader, &copyLatestText, &copyHistoryText](
         QWidget* chartWidget,
         std::vector<ProcessPerformanceHistoryChartWidget::Series> series,
         const QString& unitText,
-        const double fixedMaximum) {
+        const double fixedMaximum,
+        const double axisStep = 0.0) {
         auto* chart = static_cast<ProcessPerformanceHistoryChartWidget*>(chartWidget);
         if (chart == nullptr)
         {
             return;
         }
         chart->setChartData(
-            timestamps,
+            history,
             std::move(series),
             unitText,
             fixedMaximum,
             emptyText,
             timeHeader,
             copyLatestText,
-            copyHistoryText);
+            copyHistoryText,
+            axisStep);
     };
 
     setChartData(
@@ -4036,28 +4092,24 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.cpu")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
-            std::move(cpuValues) } },
+            &Chart::Sample::cpuPercent } },
         QStringLiteral("%"),
         100.0);
-    const double cpuCoreMaximum = cpuCoreValues.empty()
-        ? 100.0
-        : std::max(
-            100.0,
-            std::ceil(*std::max_element(cpuCoreValues.cbegin(), cpuCoreValues.cend()) / 100.0) * 100.0);
     setChartData(
         m_performanceCpuCoreChart,
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.cpu_core")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu),
-            std::move(cpuCoreValues) } },
+            &Chart::Sample::cpuCorePercent } },
         QStringLiteral("%"),
-        cpuCoreMaximum);
+        0.0,
+        100.0);
     setChartData(
         m_performanceMemoryChart,
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.memory")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Memory),
-            std::move(memoryValues) } },
+            &Chart::Sample::memoryMB } },
         QStringLiteral("MB"),
         0.0);
     setChartData(
@@ -4065,7 +4117,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.disk")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
-            std::move(diskValues) } },
+            &Chart::Sample::diskMBps } },
         QStringLiteral("MB/s"),
         0.0);
     setChartData(
@@ -4074,11 +4126,11 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
             ProcessPerformanceHistoryChartWidget::Series{
                 text(QStringLiteral("process.detail.performance.series.network_rx")),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
-                std::move(networkRxValues) },
+                &Chart::Sample::networkRxKBps },
             ProcessPerformanceHistoryChartWidget::Series{
                 text(QStringLiteral("process.detail.performance.series.network_tx")),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write),
-                std::move(networkTxValues) }
+                &Chart::Sample::networkTxKBps }
         },
         QStringLiteral("KB/s"),
         0.0);
@@ -4087,18 +4139,18 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
         { ProcessPerformanceHistoryChartWidget::Series{
             text(QStringLiteral("process.detail.performance.series.gpu")),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
-            std::move(gpuValues) } },
+            &Chart::Sample::gpuPercent } },
         QStringLiteral("%"),
         100.0);
 
     // 空历史同样已经提交到六个图表，避免身份切换/清空后残留上一对象的曲线。
-    if (timestamps.empty())
+    if (history->empty())
     {
         m_performanceHistoryStatusLabel->setText(text(QStringLiteral("process.detail.performance.status.empty")));
         return;
     }
-    const QString beginTime = QDateTime::fromMSecsSinceEpoch(timestamps.front()).toString(QStringLiteral("HH:mm:ss"));
-    const QString endTime = QDateTime::fromMSecsSinceEpoch(timestamps.back()).toString(QStringLiteral("HH:mm:ss"));
+    const QString beginTime = QDateTime::fromMSecsSinceEpoch(history->front().unixMilliseconds).toString(QStringLiteral("HH:mm:ss"));
+    const QString endTime = QDateTime::fromMSecsSinceEpoch(history->back().unixMilliseconds).toString(QStringLiteral("HH:mm:ss"));
     m_performanceHistoryStatusLabel->setText(
         text(QStringLiteral("process.detail.performance.status.samples"))
             .arg(static_cast<qulonglong>(m_performanceHistory.size()))
