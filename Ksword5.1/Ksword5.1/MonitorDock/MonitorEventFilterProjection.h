@@ -116,10 +116,11 @@ namespace ks::monitor
             // whose complete business hide/reset/clear paths use canonical identities.
             ks::ui::SetTableRowFilterBusinessOwnership(table,
                 ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+            m_suspended = !table->isVisible();
             m_timer.setSingleShot(true); m_timer.setInterval(16);
             connect(&m_timer, &QTimer::timeout, this, [this]() { launch(); });
             m_operation->setStateChangedCallback([this]() {
-                if (!m_closed && !m_operation->isBusy() && !m_operation->isInFlight()
+                if (!m_closed && !m_suspended && !m_operation->isBusy() && !m_operation->isInFlight()
                     && m_filter && !m_filter->spec.matchesAll() && (m_allDirty || !m_pending.isEmpty())) schedule();
                 notify();
             });
@@ -154,13 +155,46 @@ namespace ks::monitor
         }
 
         ~EventFilterProjection() override { close(); }
-        void close() { m_closed = true; m_timer.stop(); m_operation->close(); }
+        void close()
+        {
+            if (m_closed) return;
+            m_closed = true; ++m_revision; m_timer.stop(); m_operation->close();
+        }
+
+        // GUI-only publication of a pure immutable condition. A null value means
+        // the controller has not yet received a condition and excludes no row.
+        std::shared_ptr<const CompiledEventFilter> currentCompiledFilter() const { return m_filter; }
+
+        // The display owner controls this independently from capture/archive.
+        // In-flight/deferred old results cannot commit after suspension. Values
+        // and the latest condition remain available to canonical export workers.
+        void setSuspended(const bool suspended)
+        {
+            if (m_closed || suspended == m_suspended) return;
+            m_suspended = suspended; ++m_revision;
+            if (m_suspended)
+            {
+                m_timer.stop();
+                if (m_filter) m_allDirty = true;
+                m_operation->cancel();
+            }
+            else if (m_filter && m_filter->spec.matchesAll())
+            {
+                m_pending.clear(); m_allDirty = false; m_excluded.clear();
+                ks::ui::ApplyTableRowFilterIncrementally(m_table, m_excluded);
+            }
+            else if (m_filter) { m_allDirty = true; schedule(); }
+            notify();
+        }
+        bool isSuspended() const { return m_suspended; }
 
         void setFilter(EventFilterSpec spec)
         {
+            if (m_closed) return;
             if (m_filter && m_filter->spec == spec) { notify(); return; }
             m_filter = std::make_shared<CompiledEventFilter>(std::move(spec));
             ++m_revision;
+            if (m_suspended) { m_allDirty = true; notify(); return; }
             if (m_filter->spec.matchesAll())
             {
                 m_operation->cancel(); m_pending.clear(); m_allDirty = false; m_excluded.clear();
@@ -172,7 +206,7 @@ namespace ks::monitor
 
         void trackRow(const int row)
         {
-            if (row < 0 || row >= m_table->rowCount()) return;
+            if (m_closed || row < 0 || row >= m_table->rowCount()) return;
             const QPersistentModelIndex index(m_table->model()->index(row, 0, m_table->rootIndex()));
             auto found = m_ids.find(index);
             quint64 id = found == m_ids.end() ? ++m_nextId : found.value();
@@ -191,6 +225,8 @@ namespace ks::monitor
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
+            if (watched == m_table && (event->type() == QEvent::Show || event->type() == QEvent::Hide))
+                setSuspended(!m_table->isVisible());
             if (event->type() == QEvent::DynamicPropertyChange
                 && static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::TableRowFilterRevisionProperty) notify();
             return QObject::eventFilter(watched, event);
@@ -205,12 +241,12 @@ namespace ks::monitor
         };
         struct Matches { quint64 revision = 0; std::vector<std::tuple<quint64, quint64, bool>> rows; };
 
-        void schedule() { if (!m_timer.isActive()) m_timer.start(); }
+        void schedule() { if (!m_closed && !m_suspended && !m_timer.isActive()) m_timer.start(); }
         void notify() { if (m_status) m_status(static_cast<int>(static_cast<int>(m_records.size()) - static_cast<int>(m_excluded.size())), static_cast<int>(m_records.size()), isPending()); }
 
         void launch()
         {
-            if (!m_filter || m_filter->spec.matchesAll()) return;
+            if (m_closed || m_suspended || !m_filter || m_filter->spec.matchesAll()) return;
             Work work; work.revision = m_revision; work.filter = m_filter;
             if (m_allDirty)
             {
@@ -239,21 +275,22 @@ namespace ks::monitor
                     return result;
                 },
                 [this](const Matches& result, const std::uint64_t ticket) {
-                    if (result.revision != m_revision) return true;
+                    if (m_closed || m_suspended || result.revision != m_revision) return true;
                     const auto values = std::make_shared<const Matches>(result);
                     auto deferred = [this, ticket, values]() {
-                        if (m_operation->isCurrent(ticket) && values->revision == m_revision) apply(*values);
+                        if (!m_closed && !m_suspended && m_operation->isCurrent(ticket) && values->revision == m_revision) apply(*values);
                         m_operation->completeDeferred(ticket);
                     };
                     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
                         QStringLiteral("monitor-event-filter-apply"), {m_table}, deferred)) return false;
                     apply(result); return true;
                 },
-                [this](std::exception_ptr) { m_allDirty = true; notify(); });
+                [this](std::exception_ptr) { if (!m_closed) { m_allDirty = true; notify(); } });
         }
 
         void apply(const Matches& result)
         {
+            if (m_closed || m_suspended || result.revision != m_revision) return;
             for (const auto& [id, version, matched] : result.rows)
             {
                 const auto found = m_indexes.find(id);
@@ -273,7 +310,7 @@ namespace ks::monitor
         QTimer m_timer;
         std::shared_ptr<const CompiledEventFilter> m_filter;
         quint64 m_revision = 0, m_nextId = 0;
-        bool m_allDirty = false, m_closed = false;
+        bool m_allDirty = false, m_suspended = false, m_closed = false;
         QHash<QPersistentModelIndex, quint64> m_ids;
         std::unordered_map<quint64, QPersistentModelIndex> m_indexes;
         std::unordered_map<quint64, std::shared_ptr<const EventFilterRow>> m_records;
