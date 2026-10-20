@@ -66,7 +66,7 @@ namespace
     // - BootEditorTab 构造函数直接调用 refreshBcdEntries()，而构造函数与 refreshBcdEntries()
     //   都位于 BootEditorTab.cpp，不在本次可修改范围内，无法把首轮枚举整体挪出构造期；
     // - 因此改在 runBcdEdit 内部拦截“刷新专用只读枚举”：真正的 bcdedit 交给线程池执行，
-    //   调用方立刻拿到由上一轮缓存文本组成的占位结果，后台结果回投 UI 线程后再刷新一次；
+    //   调用方立刻拿到 pending 状态并保留界面，后台结果回投 UI 线程后才提交一次；
     // - 跨调用状态用 QObject 动态属性承载，既避开不可修改的头文件，
     //   又保证控件析构时状态随对象一起消失，不会留下文件级残留。
 
@@ -1073,32 +1073,11 @@ BootEditorTab::BcdCommandResult BootEditorTab::runBcdEdit(
                 });
         }
 
-        // 第三步：立刻返回占位结果。
-        // - 沿用上一轮原始枚举文本，等待期间表格与编辑区保持既有内容，不会闪成空表；
-        // - 标记占位日志归属，避免把缓存文本重复写进“原始输出”区。
-        result.startSucceeded = true;
-        result.timeout = false;
-        result.exitCode = 0;
-        result.standardOutputText = m_lastEnumRawText;
-        result.mergedOutputText = m_lastEnumRawText;
-        g_placeholderLogOwnerObject = this;
-
+        // 尚未收到真实回执时不把旧文本伪装成新快照；调用方保留表格、选择与编辑参数。
+        result.pending = true;
         if (m_lastEnumRawText.trimmed().isEmpty() && m_statusLabel != nullptr)
         {
-            // 首轮加载没有历史数据可沿用，refreshBcdEntries 会写出“总条目 0”的摘要；
-            // 这里在下一轮事件循环把状态栏改回“尚未加载”，避免被误读成系统真的没有引导项。
-            QTimer::singleShot(0, this, [this]()
-                {
-                    if (m_statusLabel == nullptr)
-                    {
-                        return;
-                    }
-                    if (property(kEnumPendingGenerationProperty).toULongLong() == 0)
-                    {
-                        return;
-                    }
-                    m_statusLabel->setText(QStringLiteral("状态：尚未加载 BCD 数据"));
-                });
+            m_statusLabel->setText(QStringLiteral("状态：尚未加载 BCD 数据"));
         }
         return result;
     }

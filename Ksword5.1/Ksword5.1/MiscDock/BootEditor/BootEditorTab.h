@@ -69,6 +69,7 @@ private:
     // - 作用：承接单条 bcdedit 执行结果，统一反馈到 UI 与日志。
     struct BcdCommandResult
     {
+        bool pending = false;         // pending：只读枚举尚在后台执行，保留当前界面状态。
         bool startSucceeded = false;  // startSucceeded：进程是否成功启动。
         bool timeout = false;         // timeout：命令是否超时。
         int exitCode = -1;            // exitCode：bcdedit 进程退出码。

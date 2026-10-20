@@ -633,6 +633,10 @@ void BootEditorTab::refreshBcdEntries()
         QStringList{ QStringLiteral("/enum"), QStringLiteral("all"), QStringLiteral("/v") },
         kDefaultCommandTimeoutMs,
         QStringLiteral("枚举全部 BCD 条目"));
+    if (enumResult.pending)
+    {
+        return;
+    }
     appendCommandLog(QStringLiteral("bcdedit /enum all /v"), enumResult);
 
     if (!enumResult.startSucceeded || enumResult.timeout || enumResult.exitCode != 0)
