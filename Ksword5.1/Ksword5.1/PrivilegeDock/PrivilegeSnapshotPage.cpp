@@ -117,7 +117,7 @@ namespace ks::privilege
 
         Projection projectDifferences(const Differences& source, const QString& query,
             const QStringList& kinds, const QString& currentKey, const ks::ui::ValueTableSelection& selection,
-            const std::function<bool()>& cancelled)
+            int sortColumn, Qt::SortOrder sortOrder, const std::function<bool()>& cancelled)
         {
             auto projection = std::make_shared<DifferenceProjection>();
             projection->source = source;
@@ -132,19 +132,38 @@ namespace ks::privilege
                 allKeys->push_back(change.key);
                 if (query.isEmpty() || kinds.value(static_cast<int>(change.kind)).contains(query, Qt::CaseInsensitive)
                     || change.key.contains(query, Qt::CaseInsensitive) || change.before.contains(query, Qt::CaseInsensitive)
-                    || change.after.contains(query, Qt::CaseInsensitive))
-                {
-                    if (change.key == currentKey) projection->currentRow = static_cast<int>(projection->rows.size());
-                    const int projectedRow = static_cast<int>(projection->rows.size());
-                    if (projection->selected->contains(change.key))
+                    || change.after.contains(query, Qt::CaseInsensitive)) projection->rows.push_back(row);
+            }
+            if (source && sortColumn >= 0 && sortColumn < 4)
+            {
+                const auto text = [&source, &kinds, sortColumn](int row) -> QString {
+                    const auto& value = (*source)[row];
+                    switch (sortColumn)
                     {
-                        auto& ranges = projection->selectedRanges;
-                        if (!ranges.isEmpty() && ranges.last().last + 1 == projectedRow) ranges.last().last = projectedRow;
-                        else ranges.push_back({projectedRow, projectedRow});
+                    case 0: return kinds.value(static_cast<int>(value.kind));
+                    case 1: return value.key;
+                    case 2: return value.before;
+                    default: return value.after;
                     }
-                    keys->push_back(change.key);
-                    projection->rows.push_back(row);
+                };
+                std::stable_sort(projection->rows.begin(), projection->rows.end(), [&text, sortOrder](int left, int right) {
+                    const int result = QString::localeAwareCompare(text(left), text(right));
+                    return sortOrder == Qt::AscendingOrder ? result < 0 : result > 0;
+                });
+            }
+            if (cancelled()) return {};
+            for (int row = 0; row < projection->rows.size(); ++row)
+            {
+                if ((row & 127) == 0 && cancelled()) return {};
+                const auto& change = (*source)[projection->rows[row]];
+                if (change.key == currentKey) projection->currentRow = row;
+                if (projection->selected->contains(change.key))
+                {
+                    auto& ranges = projection->selectedRanges;
+                    if (!ranges.isEmpty() && ranges.last().last + 1 == row) ranges.last().last = row;
+                    else ranges.push_back({row, row});
                 }
+                keys->push_back(change.key);
             }
             projection->keys = std::move(keys);
             projection->allKeys = std::move(allKeys);
@@ -155,6 +174,9 @@ namespace ks::privilege
         {
         public:
             explicit DifferenceModel(QObject* parent) : QAbstractTableModel(parent) {}
+            std::function<void(int, Qt::SortOrder)> sortRequested;
+            void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override
+            { if (sortRequested) { const auto callback = sortRequested; callback(column, order); } }
             ~DifferenceModel() override { retireValues(std::move(m_projection)); }
             void setProjection(Projection projection)
             {
@@ -362,6 +384,15 @@ namespace ks::privilege
                 m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
                 m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
                 m_table->horizontalHeader()->setStretchLastSection(true);
+                m_model->sortRequested = [this](int column, Qt::SortOrder order) {
+                    if (column < -1 || column >= 4 || (m_sortColumn == column && m_sortOrder == order)) return;
+                    m_sortColumn = column;
+                    m_sortOrder = order;
+                    requestFilter();
+                };
+                // Keep initial canonical order, then let native header clicks request worker projections.
+                m_table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
+                m_table->setSortingEnabled(true);
                 layout->addWidget(m_table, 1);
                 connect(m_search, &QLineEdit::textChanged, this, [this] { requestFilter(); });
                 connect(m_table->selectionModel(), &QItemSelectionModel::currentChanged, this,
@@ -550,6 +581,8 @@ namespace ks::privilege
                 const auto query = m_search->text();
                 const auto currentKey = m_currentKey;
                 const auto selection = m_selection;
+                const int sortColumn = m_sortColumn;
+                const auto sortOrder = m_sortOrder;
                 QStringList kinds;
                 for (int kind = 0; kind < 6; ++kind)
                     kinds.push_back(snapshotText(kindSource(static_cast<SnapshotDifference::Kind>(kind))));
@@ -600,8 +633,8 @@ namespace ks::privilege
                     if (m_filterDirty && isVisible()) launchFilter();
                 });
                 watcher->setFuture(promise->future());
-                QThreadPool::globalInstance()->start(QRunnable::create([promise, source, query, kinds, revision, ticket, currentKey, selection] {
-                    promise->addResult(projectDifferences(source, query, kinds, currentKey, selection,
+                QThreadPool::globalInstance()->start(QRunnable::create([promise, source, query, kinds, revision, ticket, currentKey, selection, sortColumn, sortOrder] {
+                    promise->addResult(projectDifferences(source, query, kinds, currentKey, selection, sortColumn, sortOrder,
                         [ticket, revision] { return ticket->load() != revision; }));
                     promise->finish();
                 }));
@@ -716,6 +749,8 @@ namespace ks::privilege
             ks::ui::ValueTableSelection::Keys m_projectedKeys, m_allKeys;
             quint64 m_restoreRevision = 0;
             int m_currentColumn = 0;
+            int m_sortColumn = -1;
+            Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
             bool m_clearSelectionPending = false, m_bulkSelecting = false;
             DifferenceTable* m_table = nullptr;
             DifferenceModel* m_model = nullptr;
