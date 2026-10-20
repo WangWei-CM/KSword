@@ -3493,26 +3493,9 @@ void WindowDock::initializeConnections()
 
 void WindowDock::setRefreshingPlaceholderRows()
 {
-    // 这些即时行只说明当前正在采集，不替代后续真实 R0/R3 行。
-    // 目的：避免后台查询期间，GUI/Session 与热键/钩子页出现完全空表。
-    // 处理：窗口/GUI线程/Session 先用本地 Win32 只读枚举生成具体行，
-    //       热键/Hook 暂无纯 R3 安全枚举路径时至少生成明确诊断行。
+    // Loading rows describe state only. R0/R3 discovery remains in the worker;
+    // invoking the final row builders here also invokes their EnumWindows fallback.
     const QString pendingDetailText = QStringLiteral("正在收集窗口信息，请稍候...");
-
-    ksword::ark::Win32kWindowsResult localWindowsResult;
-    localWindowsResult.io.message = "R0 refresh is pending; showing local EnumWindows fallback rows.";
-
-    ksword::ark::Win32kGuiThreadsResult localGuiThreadsResult;
-    localGuiThreadsResult.io.message = "R0 refresh is pending; showing local GetGUIThreadInfo fallback rows.";
-
-    ksword::ark::Win32kProfileStatusResult localProfileResult;
-    localProfileResult.io.message = "R0 refresh is pending; showing local session fallback row.";
-
-    ksword::ark::Win32kHotkeysPdbResult pendingHotkeyResult;
-    pendingHotkeyResult.io.message = "R0 hotkey snapshot is still refreshing; no pure R3 system hotkey table is available.";
-
-    ksword::ark::Win32kHooksPdbResult pendingHookResult;
-    pendingHookResult.io.message = "R0 hook snapshot is still refreshing; no pure R3 global hook chain is available.";
 
     m_cachedSessionSummary =
         ks::ui::FieldDocument{}.note(QStringLiteral("[win32k GUI/session]\n正在刷新结构化窗口、GUI线程和Session审计行...\n"));
@@ -3521,11 +3504,26 @@ void WindowDock::setRefreshingPlaceholderRows()
     m_cachedDisplaySummary =
         ks::ui::FieldDocument{}.note(QStringLiteral("[GPU / Display / Watchdog]\n正在刷新显示设备只读审计行...\n"));
 
-    m_cachedWindowsRows = buildWindowsRows(localWindowsResult);
-    m_cachedGuiThreadRows = buildGuiThreadRows(localGuiThreadsResult);
-    m_cachedSessionRows = buildSessionRows(localProfileResult);
-    m_cachedHotkeyRows = buildHotkeyRows(pendingHotkeyResult, nullptr);
-    m_cachedHookRows = buildHookRows(pendingHookResult, nullptr);
+    m_cachedWindowsRows = buildPendingRows(
+        m_windowsTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedGuiThreadRows = buildPendingRows(
+        m_guiThreadsTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedSessionRows = buildPendingRows(
+        m_sessionTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedHotkeyRows = buildPendingRows(
+        m_hotkeysTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
+    m_cachedHookRows = buildPendingRows(
+        m_hooksTable,
+        QStringLiteral("<采集中>"),
+        pendingDetailText);
     m_cachedClipboardRows = buildPendingRows(
         m_clipboardTable,
         QStringLiteral("<采集中>"),
