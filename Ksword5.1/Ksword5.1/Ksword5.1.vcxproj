@@ -869,6 +869,7 @@
     <ClInclude Include="FileDock\IrpFileSystemParser.h" />
     <ClInclude Include="FileDock\FileHandleUsageScanner.h" />
     <ClInclude Include="FileDock\FileMappedProcessWindow.h" />
+    <ClInclude Include="FileDock\FilePropertyTableModel.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h" />
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.Internal.h" />
     <ClInclude Include="Framework\LogDockWidget.h" />

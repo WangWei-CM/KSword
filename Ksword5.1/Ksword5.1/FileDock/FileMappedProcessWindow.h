@@ -15,13 +15,15 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
+
+namespace ks::fileui { struct PropertyTableSnapshot; }
 #include <vector>
 
 class QHBoxLayout;
 class QLabel;
 class QPushButton;
-class QTreeWidget;
-class QTreeWidgetItem;
+class QTableView;
 class QVBoxLayout;
 
 class FileMappedProcessWindow final : public QDialog
@@ -56,6 +58,7 @@ private:
     struct RefreshResult
     {
         std::vector<MappedProcessRow> rows; // rows：展示行。
+        std::shared_ptr<const ks::fileui::PropertyTableSnapshot> displayRows;
         QString diagnosticText;             // diagnosticText：状态栏诊断。
         std::uint64_t elapsedMs = 0;        // elapsedMs：后台耗时。
     };
@@ -82,9 +85,7 @@ private:
     // requestRefresh 作用：异步调用 R0 文件映射反查。
     void requestRefresh(bool forceRefresh);
     // applyRefreshResult 作用：主线程回填表格和状态栏。
-    void applyRefreshResult(std::uint64_t refreshTicket, const RefreshResult& refreshResult);
-    // rebuildTable 作用：根据 m_rows 重建 QTreeWidget。
-    void rebuildTable();
+    void applyRefreshResult(std::uint64_t refreshTicket, std::shared_ptr<const RefreshResult> refreshResult);
     // selectedRow 作用：返回当前选中行缓存。
     const MappedProcessRow* selectedRow() const;
     // openCurrentProcessDetail 作用：跳转当前行 PID 的进程详情。
@@ -100,7 +101,7 @@ private:
 
 private:
     std::vector<QString> m_targetPaths;              // m_targetPaths：待扫描文件。
-    std::vector<MappedProcessRow> m_rows;            // m_rows：结果缓存。
+    std::shared_ptr<const RefreshResult> m_rows;            // m_rows：结果缓存。
     OpenProcessDetailCallback m_openProcessDetailCallback; // m_openProcessDetailCallback：进程详情桥接。
 
     QVBoxLayout* m_rootLayout = nullptr;             // 根布局。
@@ -109,7 +110,7 @@ private:
     QPushButton* m_openProcessButton = nullptr;      // 跳转进程详情按钮。
     QLabel* m_targetLabel = nullptr;                 // 目标路径标签。
     QLabel* m_statusLabel = nullptr;                 // 状态标签。
-    QTreeWidget* m_resultTable = nullptr;            // 结果表格。
+    QTableView* m_resultTable = nullptr;            // 结果表格。
 
     bool m_refreshInProgress = false;                // 是否正在刷新。
     bool m_refreshPending = false;                   // 是否有排队刷新。

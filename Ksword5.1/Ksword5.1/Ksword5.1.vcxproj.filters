@@ -3384,6 +3384,9 @@
     <ClInclude Include="FileDock\FileMappedProcessWindow.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="FileDock\FilePropertyTableModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="FileDock\FilePropertyPeAnalyzer.h">
       <Filter>Header Files</Filter>
     </ClInclude>

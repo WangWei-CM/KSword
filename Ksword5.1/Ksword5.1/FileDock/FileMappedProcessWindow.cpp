@@ -1,4 +1,6 @@
 #include "FileMappedProcessWindow.h"
+#include "FilePropertyTableModel.h"
+#include "../UI/VisibleTableWidget.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
@@ -17,6 +19,7 @@
 #include "../UI/DetailDialogChrome.h"
 #include "../ksword/log/log.h"
 #include "../theme.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -33,8 +36,7 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QThreadPool>
-#include <QTreeWidget>
-#include <QTreeWidgetItem>
+#include <QTableView>
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QVBoxLayout>
@@ -319,9 +321,9 @@ void FileMappedProcessWindow::initializeUi()
     m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
-    m_resultTable = new QTreeWidget(this);
-    m_resultTable->setColumnCount(static_cast<int>(TableColumn::Count));
-    m_resultTable->setHeaderLabels(QStringList{
+    m_resultTable = new ks::ui::TableActionTableView(this);
+    ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::None);
+    auto* model = new ks::fileui::PropertyTableModel(QStringList{
         QStringLiteral("目标文件"),
         QStringLiteral("Section"),
         QStringLiteral("PID"),
@@ -331,19 +333,23 @@ void FileMappedProcessWindow::initializeUi()
         QStringLiteral("End"),
         QStringLiteral("大小"),
         QStringLiteral("ControlArea")
-        });
-    m_resultTable->setRootIsDecorated(false);
-    m_resultTable->setItemsExpandable(false);
+        }, m_resultTable, [](const QString& value) { return ks::i18n::displayText(value); });
+    m_resultTable->setModel(model);
+    new ks::fileui::PropertyTableCommitHost(m_resultTable, model, this, QStringLiteral("file-mapped-process-snapshot"));
+    m_resultTable->setProperty("ksword_detail_preserve_model_data", true);
+    m_resultTable->setProperty("ks_i18n_preserve_model_data", true);
+    m_resultTable->verticalHeader()->hide();
+    m_resultTable->setWordWrap(false);
     m_resultTable->setAlternatingRowColors(true);
     m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_resultTable->setSortingEnabled(true);
     m_resultTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    if (m_resultTable->header() != nullptr)
+    if (m_resultTable->horizontalHeader() != nullptr)
     {
-        m_resultTable->header()->setSectionResizeMode(QHeaderView::Interactive);
-        m_resultTable->header()->setStretchLastSection(false);
+        m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+        m_resultTable->horizontalHeader()->setStretchLastSection(false);
     }
 
     m_toolbarLayout->addWidget(m_refreshButton);
@@ -366,7 +372,7 @@ void FileMappedProcessWindow::initializeConnections()
         {
             openCurrentProcessDetail();
         });
-    connect(m_resultTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition)
+    connect(m_resultTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition)
         {
             showTableContextMenu(localPosition);
         });
@@ -385,6 +391,7 @@ void FileMappedProcessWindow::requestRefresh(const bool forceRefresh)
 
     const std::uint64_t currentTicket = ++m_refreshTicket;
     m_refreshInProgress = true;
+    static_cast<ks::fileui::PropertyTableModel*>(m_resultTable->model())->invalidateRequest();
     m_statusLabel->setText(QStringLiteral("● 正在通过 R0 查询 Section/ControlArea 映射..."));
     m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:700;").arg(KswordTheme::PrimaryBlueHex));
 
@@ -501,143 +508,73 @@ void FileMappedProcessWindow::requestRefresh(const bool forceRefresh)
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - beginTime).count());
 
-            if (guardThis == nullptr)
+            auto display = ks::fileui::makePropertyTableSnapshot();
+            display->rows.reserve(refreshResult.rows.size());
+            for (std::size_t index = 0; index < refreshResult.rows.size(); ++index)
             {
-                return;
+                const auto& row = refreshResult.rows.at(index);
+                const auto sizeBytes = row.map.endVa > row.map.startVa ? row.map.endVa - row.map.startVa : 0ULL;
+                display->append({ks::fileui::propertyRowKey({row.targetPath, QString::number(row.map.sectionKind),
+                    QString::number(row.map.viewMapType), QString::number(row.map.processId), QString::number(row.map.controlAreaAddress),
+                    QString::number(row.map.startVa), QString::number(row.map.endVa)}),
+                    {QDir::toNativeSeparators(row.targetPath), sectionKindText(row.map.sectionKind), QString::number(row.map.processId),
+                        row.processName, viewMapTypeText(row.map.viewMapType), formatHex(row.map.startVa), formatHex(row.map.endVa),
+                        QString::number(static_cast<qulonglong>(sizeBytes)), formatHex(row.map.controlAreaAddress)},
+                    {{Qt::UserRole, static_cast<qulonglong>(index)}}});
             }
-            QMetaObject::invokeMethod(
-                guardThis,
-                [guardThis, currentTicket, refreshResult]()
+            refreshResult.displayRows = display;
+            const auto snapshot = std::shared_ptr<RefreshResult>(new RefreshResult(std::move(refreshResult)), [](RefreshResult* value)
+                { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+            QMetaObject::invokeMethod(qApp, [guardThis, currentTicket, snapshot]()
                 {
-                    if (guardThis == nullptr)
-                    {
-                        return;
-                    }
-                    guardThis->applyRefreshResult(currentTicket, refreshResult);
-                },
-                Qt::QueuedConnection);
+                    if (guardThis) guardThis->applyRefreshResult(currentTicket, snapshot);
+                }, Qt::QueuedConnection);
         });
     refreshTask->setAutoDelete(true);
     QThreadPool::globalInstance()->start(refreshTask);
 }
 
 void FileMappedProcessWindow::applyRefreshResult(
-    const std::uint64_t refreshTicket,
-    const RefreshResult& refreshResult)
+    const std::uint64_t refreshTicket, std::shared_ptr<const RefreshResult> refreshResult)
 {
-    if (refreshTicket < m_refreshTicket)
-    {
-        return;
-    }
-
-    if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({ m_resultTable }))
-    {
-        const auto refreshSnapshot = std::make_shared<RefreshResult>(refreshResult);
-        const QPointer<FileMappedProcessWindow> safeThis(this);
-        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("file-mapped-process-snapshot"),
-            { m_resultTable },
-            [safeThis, refreshTicket, refreshSnapshot]()
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->applyRefreshResult(refreshTicket, *refreshSnapshot);
-                }
-            }))
+    if (refreshTicket != m_refreshTicket) return;
+    const QPointer<FileMappedProcessWindow> guard(this);
+    static_cast<ks::fileui::PropertyTableModel*>(m_resultTable->model())->setSnapshot(refreshResult->displayRows,
+        [guard, refreshTicket, refreshResult]()
         {
-            return;
-        }
-    }
-
-    m_rows = refreshResult.rows;
-    rebuildTable();
+            if (!guard || refreshTicket != guard->m_refreshTicket) return;
+            guard->m_rows = refreshResult;
+            QString status = QStringLiteral("● 扫描完成 %1 ms | 映射行:%2").arg(refreshResult->elapsedMs).arg(refreshResult->rows.size());
+            if (!refreshResult->diagnosticText.trimmed().isEmpty())
+                status += QStringLiteral(" | 存在诊断；详情已写入日志。");
+            guard->m_statusLabel->setText(status);
+            if (!guard) return;
+            guard->m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;")
+                .arg((refreshResult->rows.empty() ? KswordTheme::WarningColor() : KswordTheme::SuccessColor()).name(QColor::HexRgb)));
+        });
+    if (!guard) return;
     m_refreshInProgress = false;
     kPro.set(m_refreshProgressPid, "文件映射进程扫描完成", 0, 100.0f);
-
-    QString statusText = QStringLiteral("● 扫描完成 %1 ms | 映射行:%2")
-        .arg(refreshResult.elapsedMs)
-        .arg(m_rows.size());
-    if (!refreshResult.diagnosticText.trimmed().isEmpty())
+    if (!refreshResult->diagnosticText.trimmed().isEmpty())
     {
-        statusText += QStringLiteral(" | 存在诊断；详情已写入日志。");
         kLogEvent diagnosticEvent;
-        warn << diagnosticEvent
-            << "[FileMappedProcessWindow] scan completed with diagnostics, targetCount="
-            << m_targetPaths.size()
-            << ", rowCount=" << m_rows.size()
-            << ", detail=" << refreshResult.diagnosticText.toStdString()
-            << eol;
+        warn << diagnosticEvent << "[FileMappedProcessWindow] scan completed with diagnostics, targetCount="
+            << m_targetPaths.size() << ", rowCount=" << refreshResult->rows.size()
+            << ", detail=" << refreshResult->diagnosticText.toStdString() << eol;
     }
-    m_statusLabel->setText(statusText);
-    m_statusLabel->setStyleSheet(
-        QStringLiteral("color:%1;font-weight:600;")
-        .arg((m_rows.empty() ? KswordTheme::WarningColor() : KswordTheme::SuccessColor())
-            .name(QColor::HexRgb)));
-
     if (m_refreshPending)
     {
         m_refreshPending = false;
-        QMetaObject::invokeMethod(this, [this]()
-            {
-                requestRefresh(true);
-            }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [guard]() { if (guard) guard->requestRefresh(true); }, Qt::QueuedConnection);
     }
-}
-
-void FileMappedProcessWindow::rebuildTable()
-{
-    m_resultTable->setSortingEnabled(false);
-    m_resultTable->clear();
-
-    for (std::size_t rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex)
-    {
-        const MappedProcessRow& row = m_rows[rowIndex];
-        auto* item = new QTreeWidgetItem();
-        const std::uint64_t sizeBytes = (row.map.endVa > row.map.startVa)
-            ? (row.map.endVa - row.map.startVa)
-            : 0ULL;
-
-        item->setText(static_cast<int>(TableColumn::TargetPath), QDir::toNativeSeparators(row.targetPath));
-        item->setText(static_cast<int>(TableColumn::SectionKind), sectionKindText(row.map.sectionKind));
-        item->setText(static_cast<int>(TableColumn::ProcessId), QString::number(row.map.processId));
-        item->setText(static_cast<int>(TableColumn::ProcessName), row.processName);
-        item->setText(static_cast<int>(TableColumn::ViewMapType), viewMapTypeText(row.map.viewMapType));
-        item->setText(static_cast<int>(TableColumn::BaseAddress), formatHex(row.map.startVa));
-        item->setText(static_cast<int>(TableColumn::EndAddress), formatHex(row.map.endVa));
-        item->setText(static_cast<int>(TableColumn::Size), QString::number(static_cast<qulonglong>(sizeBytes)));
-        item->setText(static_cast<int>(TableColumn::ControlArea), formatHex(row.map.controlAreaAddress));
-        item->setData(static_cast<int>(TableColumn::ProcessId), Qt::UserRole, static_cast<qulonglong>(rowIndex));
-        m_resultTable->addTopLevelItem(item);
-    }
-
-    if (m_resultTable->topLevelItemCount() > 0)
-    {
-        m_resultTable->setCurrentItem(m_resultTable->topLevelItem(0));
-    }
-
-    applyAdaptiveColumnWidths();
-    m_resultTable->setSortingEnabled(true);
 }
 
 const FileMappedProcessWindow::MappedProcessRow* FileMappedProcessWindow::selectedRow() const
 {
-    if (m_resultTable == nullptr || m_resultTable->currentItem() == nullptr)
-    {
-        return nullptr;
-    }
-    const QVariant rowIndexValue =
-        m_resultTable->currentItem()->data(static_cast<int>(TableColumn::ProcessId), Qt::UserRole);
-    if (!rowIndexValue.isValid())
-    {
-        return nullptr;
-    }
-    const std::size_t rowIndex = static_cast<std::size_t>(rowIndexValue.toULongLong());
-    if (rowIndex >= m_rows.size())
-    {
-        return nullptr;
-    }
-    return &m_rows[rowIndex];
+    if (!m_resultTable || !m_rows || !m_resultTable->currentIndex().isValid()) return nullptr;
+    const auto index = m_resultTable->model()->index(m_resultTable->currentIndex().row(), 0);
+    const auto row = static_cast<std::size_t>(index.data(Qt::UserRole).toULongLong());
+    return row < m_rows->rows.size() ? &m_rows->rows.at(row) : nullptr;
 }
 
 void FileMappedProcessWindow::openCurrentProcessDetail()
@@ -663,7 +600,7 @@ void FileMappedProcessWindow::openCurrentProcessDetail()
 
 void FileMappedProcessWindow::copyCurrentRow()
 {
-    if (m_resultTable == nullptr || m_resultTable->currentItem() == nullptr)
+    if (m_resultTable == nullptr || !m_resultTable->currentIndex().isValid())
     {
         return;
     }
@@ -671,7 +608,7 @@ void FileMappedProcessWindow::copyCurrentRow()
     QStringList fields;
     for (int columnIndex = 0; columnIndex < static_cast<int>(TableColumn::Count); ++columnIndex)
     {
-        fields.push_back(m_resultTable->currentItem()->text(columnIndex));
+        fields.push_back(m_resultTable->model()->index(m_resultTable->currentIndex().row(), columnIndex).data().toString());
     }
     QApplication::clipboard()->setText(fields.join('\t'));
 }
@@ -682,14 +619,12 @@ void FileMappedProcessWindow::showTableContextMenu(const QPoint& localPosition)
     {
         return;
     }
-    QTreeWidgetItem* clickedItem = m_resultTable->itemAt(localPosition);
-    if (clickedItem == nullptr)
-    {
-        return;
-    }
-    m_resultTable->setCurrentItem(clickedItem);
-
-    QMenu menu(this);
+    const QModelIndex clicked = m_resultTable->indexAt(localPosition);
+    if (!clicked.isValid()) return;
+    m_resultTable->setCurrentIndex(clicked);
+    const QPointer<FileMappedProcessWindow> guard(this);
+    QMenu menu;
+    connect(this, &QObject::destroyed, &menu, &QMenu::close);
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* openProcessAction = menu.addAction(QIcon(":/Icon/process_details.svg"), QStringLiteral("转到进程详细信息"));
     QAction* copyRowAction = menu.addAction(QIcon(":/Icon/handle_copy_row.svg"), QStringLiteral("复制整行"));
@@ -697,7 +632,7 @@ void FileMappedProcessWindow::showTableContextMenu(const QPoint& localPosition)
     ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
 
     QAction* selectedAction = menu.exec(m_resultTable->viewport()->mapToGlobal(localPosition));
-    if (selectedAction == nullptr)
+    if (!guard || selectedAction == nullptr)
     {
         return;
     }
@@ -714,12 +649,12 @@ void FileMappedProcessWindow::showTableContextMenu(const QPoint& localPosition)
 
 void FileMappedProcessWindow::applyAdaptiveColumnWidths()
 {
-    if (m_resultTable == nullptr || m_resultTable->header() == nullptr)
+    if (m_resultTable == nullptr || m_resultTable->horizontalHeader() == nullptr)
     {
         return;
     }
 
-    QHeaderView* header = m_resultTable->header();
+    QHeaderView* header = m_resultTable->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Interactive);
 
     const int viewportWidth = m_resultTable->viewport()->width();
