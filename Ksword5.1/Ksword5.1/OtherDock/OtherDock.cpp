@@ -12,6 +12,7 @@
 #include "../Framework/DestructiveActionConfirmation.h"
 #include "../Internationalization/LanguageManager.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableHeaderSortingSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/AdaptivePageScroll.h"
 #include "../UI/DetailDialogChrome.h"
@@ -38,6 +39,7 @@
 #include "../UI/CodeEditorWidget.h"
 
 #include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
 #include <QItemSelectionModel>
 #include <QApplication>
 #include <QAbstractItemView>
@@ -2402,6 +2404,12 @@ private:
         // 消息表：按行展示捕获数据，接近 Spy++ 的消息流视角。
         m_messageTable = new ks::ui::TableActionTableView(hookPage);
         m_messageModel = new WindowMessageModel(m_messageTable);
+        m_messageDisplayModel = new QSortFilterProxyModel(m_messageTable);
+        m_messageDisplayModel->setSortRole(Qt::DisplayRole);
+        m_messageDisplayModel->setSortCaseSensitivity(Qt::CaseSensitive);
+        m_messageDisplayModel->setSortLocaleAware(true);
+        m_messageDisplayModel->setDynamicSortFilter(false);
+        m_messageDisplayModel->setSourceModel(m_messageModel);
         m_messageTable->setProperty("ks_i18n_preserve_model_data", true);
         // 消息流的顺序由采集器记录，已有启停/清理动作；保留复制导出而非通用快照对比。
         ks::ui::SetTableActionBarMode(m_messageTable, ks::ui::TableActionBarMode::Compact);
@@ -2417,11 +2425,12 @@ private:
         };
         ks::ui::ResultTableCapabilities messageCapabilities;
         messageCapabilities.actionBar = ks::ui::TableActionBarMode::Compact;
-        messageCapabilities.headerClickSorting = false;
-        ks::ui::ResultTableHost::ensure(m_messageTable)->bindModel(m_messageModel,
+        messageCapabilities.headerClickSorting = true;
+        ks::ui::ResultTableHost::ensure(m_messageTable)->bindModel(m_messageDisplayModel,
             {{0, QStringLiteral("time")}, {1, QStringLiteral("channel")}, {2, QStringLiteral("hwnd")},
              {3, QStringLiteral("message_id")}, {4, QStringLiteral("message_name")}, {5, QStringLiteral("wparam")},
              {6, QStringLiteral("lparam")}, {7, QStringLiteral("result")}}, messageCapabilities);
+        ks::ui::InstallTableHeaderClickSorting(m_messageTable);
         m_messageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_messageTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
         m_messageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -2459,7 +2468,7 @@ private:
             {
                 QStringList singleRow;
                 for (int col = 0; col < m_messageModel->columnCount(); ++col)
-                    singleRow << m_messageModel->index(index.row(), col).data().toString();
+                    singleRow << index.siblingAtColumn(col).data().toString();
                 rowTexts << singleRow.join('\t');
             }
             if (!rowTexts.isEmpty())
@@ -3117,15 +3126,21 @@ private:
                         // Preserve selection using sequence ranges, not one index
                         // for each of up to 50000 selected rows.
                         std::vector<std::pair<quint64, quint64>> ranges;
-                        for (const auto& range : m_messageTable->selectionModel()->selection())
+                        const auto sourceSelection = m_messageDisplayModel->mapSelectionToSource(
+                            m_messageTable->selectionModel()->selection());
+                        for (const auto& range : sourceSelection)
                             ranges.emplace_back(m_messageModel->sequenceAt(range.top()), m_messageModel->sequenceAt(range.bottom()));
                         const auto currentIndex = m_messageTable->currentIndex();
-                        const quint64 currentSequence = m_messageModel->sequenceAt(currentIndex.row());
+                        const quint64 currentSequence = m_messageModel->sequenceAt(m_messageDisplayModel->mapToSource(currentIndex).row());
                         const int currentColumn = currentIndex.column();
                         const auto topIndex = m_messageTable->indexAt(QPoint(0, 0));
-                        const quint64 topSequence = m_messageModel->sequenceAt(topIndex.row());
+                        const quint64 topSequence = m_messageModel->sequenceAt(m_messageDisplayModel->mapToSource(topIndex).row());
                         const int topOffset = topIndex.isValid() ? m_messageTable->visualRect(topIndex).top() : 0;
                         const QPointer<WindowDetailDialog> alive(this);
+                        // A fresh capture invalidated the old widget's one-shot
+                        // sort too. Keep canonical FIFO and reset only its view.
+                        m_messageDisplayModel->sort(-1);
+                        if (!alive) return;
                         m_messagePrepared = snapshot;
                         m_messageModel->publish(snapshot);
                         if (!alive) return;
@@ -3141,18 +3156,18 @@ private:
                                         m_messageModel->index(m_messageModel->rowForSequence(to), 7));
                             }
                         }
-                        m_messageTable->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                        m_messageTable->selectionModel()->select(m_messageDisplayModel->mapSelectionFromSource(selection), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
                         if (!alive) return;
                         const int currentRow = m_messageModel->rowForSequence(currentSequence);
                         if (currentRow >= 0) m_messageTable->selectionModel()->setCurrentIndex(
-                            m_messageModel->index(currentRow, std::max(0, currentColumn)), QItemSelectionModel::NoUpdate);
+                            m_messageDisplayModel->mapFromSource(m_messageModel->index(currentRow, std::max(0, currentColumn))), QItemSelectionModel::NoUpdate);
                         if (!alive) return;
                         m_messagePublishedRevision = snapshot->revision;
                         if (m_messageAutoScrollCheck->isChecked()) m_messageTable->scrollToBottom();
                         else if (!snapshot->rows.empty())
                         {
                             const int top = std::max(0, m_messageModel->rowForSequence(topSequence));
-                            m_messageTable->scrollTo(m_messageModel->index(top, 0), QAbstractItemView::PositionAtTop);
+                            m_messageTable->scrollTo(m_messageDisplayModel->mapFromSource(m_messageModel->index(top, 0)), QAbstractItemView::PositionAtTop);
                             if (m_messageTable->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
                                 m_messageTable->verticalScrollBar()->setValue(m_messageTable->verticalScrollBar()->value() - topOffset);
                         }
@@ -3509,6 +3524,7 @@ private:
     QLabel* m_messageCountLabel = nullptr;         // 已记录/丢弃计数标签。
     QTableView* m_messageTable = nullptr;
     WindowMessageModel* m_messageModel = nullptr;
+    QSortFilterProxyModel* m_messageDisplayModel = nullptr;
     std::shared_ptr<WindowMessageArchive> m_messageArchive = makeWindowBackgroundValue<WindowMessageArchive>();
     std::shared_ptr<WindowMessagePort> m_messagePort;
     std::shared_ptr<const WindowMessageSnapshot> m_messagePrepared;

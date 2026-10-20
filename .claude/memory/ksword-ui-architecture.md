@@ -434,3 +434,9 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 同次收缩：首次 Qt 业务窗口创建前的自动 UAC/缩放重启只保留 privilege marker 与业务 argv，并剥离继承的 runtime wait PID；这些简单启动不接入运行期清理/严格父进程接管。主入口只在显式 wait-PID 请求存在时执行严格失败门禁。运行期重启仍等待已接受清理和旧进程退出。
 
 - 主窗口全部内存许可、accepted cleanup及SCM完成后的唯一终点必须在UI线程调用`QCoreApplication::exit(0)`。Qt6.9.3的`quit()`发送Quit事件，QApplication会再次closeAllWindows；此时`m_shutdownFinalizing=true`的主窗口Close守卫会ignore，从而否决Quit。timer已停后所有后续Close仍被否决，形成永久关不掉。不能靠删资源等待或强制计时退出修复；前置守卫/Retry/Cancel保持。
+
+## 窗口快照清单与一次性排序（2026-10-20）
+
+- `QTableWidget::setSortingEnabled(false)` 仅关闭持续排序，旧共享入口仍可安装一次性表头点击；迁移为普通 `QTableView`/只读源模型时不能据此删除该交互。当前 `ConfigureResultTableInteractions` 的旧分支仍向 `QTableWidget` 转型，普通 view 须在 `bindModel` 后显式使用共享 `InstallTableHeaderClickSorting(QTableView*)`。视图排序可用既有 `QSortFilterProxyModel`；字符串表沿旧 DisplayRole/case/locale 规则，dynamic sorting 关闭。
+- 消息规范 FIFO 与用户的一次性显示排序是不同职责。新采样依旧撤销旧手动排序；选区范围、当前单元格和滚动锚点必须在 proxy/source 间映射后按 sequence 身份恢复，不能把 view 行号交给源模型。右键复制读选中 view index 的 sibling，完整导出继续读取唯一规范归档。
+- 本批按用户要求仅静态落地，最后统一构建与实际 GUI 排序/采集/复制组合由 root 和用户分别验收，不以候选或历史 TU 声称已实机通过。
