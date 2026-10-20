@@ -14282,6 +14282,9 @@ struct FileDock::FileOplockAccessRecord
 
 struct FileDock::FileOplockEntry
 {
+    // Declared first so the lease is the last member destroyed: native handles,
+    // joined waiter and complete attribution values retire before exit admission.
+    std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> cleanupLease;
     QString path;
     FileOplockLevel level = FileOplockLevel::Level1;
     HANDLE fileHandle = INVALID_HANDLE_VALUE;
@@ -19625,7 +19628,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
     const QPointer<FileDock> safeThis(this);
     const auto dispatcher = m_uiDispatcher;
     const std::weak_ptr<FileOplockEntry> weakEntry(oplockEntry);
-    auto cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire(
+    oplockEntry->cleanupLease = ks::ui::AsyncCleanupRegistry::global().acquire(
         [weakEntry, safeThis, dispatcher]()
         {
             if (const auto entry = weakEntry.lock())
@@ -19658,7 +19661,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
                     });
             });
         });
-    if (!cleanupLease) return; // Shutdown rejected admission; no native request entered.
+    if (!oplockEntry->cleanupLease) return; // Shutdown rejected admission; no native request entered.
 
     std::wstring nativePath = normalizedPath.toStdWString();
     HANDLE fileHandle = ::CreateFileW(
@@ -19757,8 +19760,7 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
         m_activeOplocks.push_back(oplockEntry);
     }
 
-    oplockEntry->waitThread = std::thread(
-        [safeThis, dispatcher, oplockEntry, cleanupLease = std::move(cleanupLease)]() mutable {
+    oplockEntry->waitThread = std::thread([safeThis, dispatcher, oplockEntry]() {
         for (;;)
         {
             bool completionOk = false;
@@ -19871,15 +19873,6 @@ void FileDock::addOplockToSelectedFile(FilePanelWidgets& panel, const FileOplock
                 break;
             }
         }
-        // The waiter is now past every native I/O, acknowledgment and attribution
-        // use. Retire handles before returning its shutdown lease; the background
-        // reaper still joins this actual thread before dropping OVERLAPPED storage.
-        {
-            std::lock_guard<std::mutex> lock(oplockEntry->ioMutex);
-            closeWin32Handle(oplockEntry->fileHandle);
-            closeWin32Handle(oplockEntry->eventHandle);
-        }
-        cleanupLease.reset();
     });
 
     QMessageBox::information(
