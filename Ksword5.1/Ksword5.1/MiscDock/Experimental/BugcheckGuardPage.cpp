@@ -2,6 +2,8 @@
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/ToolbarMetrics.h"
+#include "../../UI/AsyncOperation.h"
+#include "../../UI/AsyncCleanupRegistry.h"
 
 #include "../../ArkDriverClient/ArkDriverClient.h"
 #include "../../Internationalization/LanguageManager.h"
@@ -23,6 +25,8 @@
 #include <Windows.h>
 
 #include <limits>
+#include <chrono>
+#include <thread>
 
 namespace
 {
@@ -156,7 +160,22 @@ namespace ks::misc
     BugcheckGuardPage::BugcheckGuardPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_screenshotOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
+        m_screenshotOperation->setStateChangedCallback([this]() {
+            if (!m_screenshotOperation->isInFlight() && m_screenshotWatcherArmed
+                && !m_screenshotAttempted && !m_busy)
+            {
+                startScreenshotWatcher();
+            }
+        });
+    }
+
+    BugcheckGuardPage::~BugcheckGuardPage()
+    {
+        m_screenshotWatcherArmed = false;
+        stopScreenshotWatcher();
+        m_screenshotOperation->close();
     }
 
     void BugcheckGuardPage::showEvent(QShowEvent* event)
@@ -314,9 +333,6 @@ namespace ks::misc
                     "也无法确认截图是否保存。")));
         controlLayout->addWidget(m_screenshotOnTriggerCheck);
 
-        m_screenshotPollTimer = new QTimer(this);
-        m_screenshotPollTimer->setInterval(10);
-        m_screenshotPollTimer->setTimerType(Qt::PreciseTimer);
 
         auto* actionLayout = workspace->actions();
         m_refreshButton = new QPushButton(
@@ -395,11 +411,6 @@ namespace ks::misc
             &QCheckBox::toggled,
             this,
             [this](const bool) { updateButtons(); });
-        connect(
-            m_screenshotPollTimer,
-            &QTimer::timeout,
-            this,
-            [this]() { pollForScreenshot(); });
         updateButtons();
     }
 
@@ -453,9 +464,8 @@ namespace ks::misc
                     QStringLiteral("请先保存工作并勾选风险确认。")));
             return;
         }
-        m_screenshotPollTimer->stop();
-        m_screenshotDriverHandle.reset();
         m_screenshotWatcherArmed = false;
+        stopScreenshotWatcher();
         setBusy(true);
         ksword::ark::DriverClient client;
         const auto result = client.configureBugcheckGuard(
@@ -475,8 +485,7 @@ namespace ks::misc
             m_screenshotAttempted = false;
             m_screenshotInputAccepted = false;
             if (m_screenshotWatcherArmed) {
-                m_screenshotDriverHandle = client.open();
-                m_screenshotPollTimer->start();
+                startScreenshotWatcher();
             }
         }
         if (!result.io.ok ||
@@ -521,49 +530,68 @@ namespace ks::misc
         refreshStatus();
     }
 
-    void BugcheckGuardPage::pollForScreenshot()
+    void BugcheckGuardPage::stopScreenshotWatcher()
     {
-        if (!m_screenshotWatcherArmed || m_screenshotAttempted) {
-            m_screenshotPollTimer->stop();
-            m_screenshotDriverHandle.reset();
-            return;
+        if (m_screenshotStop)
+        {
+            m_screenshotStop->store(true, std::memory_order_release);
         }
+        m_screenshotOperation->cancel();
+    }
 
-        ksword::ark::DriverClient client;
-        if (!m_screenshotDriverHandle.isValid()) {
-            m_screenshotDriverHandle = client.open();
-        }
-        if (!m_screenshotDriverHandle.isValid()) {
-            return;
-        }
-        const auto result = client.configureBugcheckGuard(
-            KSWORD_ARK_BUGCHECK_GUARD_ACTION_QUERY,
-            0UL,
-            false,
-            false,
-            &m_screenshotDriverHandle);
-        if (!result.io.ok) {
-            m_screenshotDriverHandle.reset();
-            return;
-        }
-
-        const bool fired =
-            (result.response.stateFlags &
-             KSWORD_ARK_BUGCHECK_GUARD_STATE_FIRED) != 0UL;
-        if (fired) {
-            attemptScreenshot();
-            updateFromResponse(result.response);
-            return;
-        }
-
-        const bool active =
-            (result.response.stateFlags &
-             KSWORD_ARK_BUGCHECK_GUARD_STATE_ACTIVE) != 0UL;
-        if (!active) {
-            m_screenshotPollTimer->stop();
-            m_screenshotDriverHandle.reset();
-            m_screenshotWatcherArmed = false;
-        }
+    void BugcheckGuardPage::startScreenshotWatcher()
+    {
+        if (!m_screenshotWatcherArmed || m_screenshotAttempted
+            || m_screenshotOperation->isInFlight()) return;
+        const auto stop = std::make_shared<std::atomic_bool>(false);
+        const std::weak_ptr<std::atomic_bool> weakStop = stop;
+        const auto lease = ks::ui::AsyncCleanupRegistry::global().acquire([weakStop]() {
+            if (const auto state = weakStop.lock()) state->store(true, std::memory_order_release);
+        });
+        if (!lease) return;
+        m_screenshotStop = stop;
+        m_screenshotOperation->submit<std::shared_ptr<std::atomic_bool>, ksword::ark::BugcheckGuardResult>(stop,
+            [](const std::shared_ptr<std::atomic_bool>& stopping, const ks::ui::AsyncOperationToken& token) {
+                ksword::ark::DriverClient client;
+                ksword::ark::DriverHandle driverHandle;
+                while (!token.isCanceled() && !stopping->load(std::memory_order_acquire))
+                {
+                    if (!driverHandle.isValid()) driverHandle = client.open();
+                    if (driverHandle.isValid())
+                    {
+                        auto result = client.configureBugcheckGuard(
+                            KSWORD_ARK_BUGCHECK_GUARD_ACTION_QUERY, 0UL, false, false, &driverHandle);
+                        if (result.io.ok)
+                        {
+                            const auto flags = result.response.stateFlags;
+                            if ((flags & KSWORD_ARK_BUGCHECK_GUARD_STATE_FIRED) != 0UL
+                                || (flags & KSWORD_ARK_BUGCHECK_GUARD_STATE_ACTIVE) == 0UL)
+                            {
+                                return result;
+                            }
+                        }
+                        else
+                        {
+                            driverHandle.reset();
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                return ksword::ark::BugcheckGuardResult{};
+            },
+            [this](const ksword::ark::BugcheckGuardResult& result, std::uint64_t) {
+                if (m_screenshotWatcherArmed && !m_screenshotAttempted && result.io.ok)
+                {
+                    updateFromResponse(result.response);
+                }
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_screenshotWatcherArmed = false;
+                m_statusLabel->setText(ks::i18n::text(
+                    QStringLiteral("misc.experimental.bugcheck.status.invalid"), QStringLiteral("无法读取状态")));
+            },
+            [lease](ks::ui::AsyncOperationOutcome) {});
     }
 
     void BugcheckGuardPage::attemptScreenshot()
@@ -573,8 +601,7 @@ namespace ks::misc
         }
         m_screenshotAttempted = true;
         m_screenshotInputAccepted = sendWinPrintScreen();
-        m_screenshotPollTimer->stop();
-        m_screenshotDriverHandle.reset();
+        stopScreenshotWatcher();
     }
 
     void BugcheckGuardPage::updateFromResponse(
@@ -616,14 +643,13 @@ namespace ks::misc
         if (m_screenshotWatcherArmed &&
             !m_screenshotAttempted &&
             m_active) {
-            m_screenshotPollTimer->start();
+            startScreenshotWatcher();
         }
         else if (m_screenshotAttempted ||
                  (!m_active && !fired && !executing)) {
-            m_screenshotPollTimer->stop();
+            stopScreenshotWatcher();
         }
         if (!m_active && !fired && !executing) {
-            m_screenshotDriverHandle.reset();
             m_screenshotWatcherArmed = false;
         }
 
