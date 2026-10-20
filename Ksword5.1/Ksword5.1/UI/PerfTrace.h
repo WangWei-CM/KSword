@@ -25,7 +25,7 @@ namespace ks::ui
     void RecordPerfSpanWithCount(const char* operationToken, const QString& targetLabel,
         qint64 durationMs, qint64 itemCount);
 
-    // 记录一次标记（不计时），用于把后续停顿对齐到用户操作，例如按下某个页签。
+    // 记录一个观察时间点；它不能为此前的心跳区间提供因果归因。
     void RecordPerfMark(const char* operationToken, const QString& targetLabel);
 
     // 获取全局单调时钟经过的毫秒数；分片计时需要与日志时间轴对齐时使用。
@@ -36,7 +36,7 @@ namespace ks::ui
     void RecordPerfSpanNs(const char* operationToken, const QString& targetLabel,
         qint64 durationNs, qint64 itemCount = -1);
 
-    // 由宿主注册上下文提供者：返回当前聚焦的 dock/页签描述，供停顿记录携带现场。
+    // GUI 宿主注册现场提供者；只在注册/焦点改变时刷新缓存，记录和 writer 不查询 UI。
     void SetPerfTraceContextProvider(std::function<QString()> provider);
 
     // 作用域计时器：构造时开始计时，析构时自动记录，允许提前结束或补充计数。

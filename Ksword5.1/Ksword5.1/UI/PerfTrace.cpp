@@ -1,29 +1,31 @@
 #include "./PerfTrace.h"
 
-// 采集实现整体只在开启时参与编译；关闭时头文件提供内联空实现，本翻译单元为空。
 #if KSWORD_PERF_TRACE_ENABLED
 
 #include <QByteArray>
 #include <QCoreApplication>
-#include <QDir>
+#include <QCryptographicHash>
 #include <QDateTime>
+#include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMutex>
-#include <QMutexLocker>
+#include <QMetaObject>
 #include <QObject>
-#include <QString>
+#include <QThread>
 #include <QTimer>
-#include <QVector>
 #include <QUuid>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 namespace
 {
-    // 全局单调时钟：日志时间轴、分片计时与停顿记录共用同一基准，保证跨模块时间可比。
     const QElapsedTimer& referenceClock()
     {
         static const QElapsedTimer clock = []()
@@ -35,24 +37,157 @@ namespace
         return clock;
     }
 
-    // 批量落盘间隔：两秒一次，避免逐条写入把 UI 线程当成 I/O 线程使用。
-    constexpr int kFlushIntervalMs = 2000;
-    // 缓冲上限：达到即提前落盘，避免长时间没有定时器回调时丢数据。
-    constexpr int kBufferFlushThreshold = 256;
-    // 心跳间隔：事件循环在空闲时应当达到的响应周期。
     constexpr int kHeartbeatIntervalMs = 25;
-    // 停顿阈值：心跳晚于理论间隔超过该值，记一次 UI 停顿。
-    constexpr int kStallThresholdMs = 50;
-    // 超大“停顿”更像系统休眠或进程挂起，不作为 UI 卡顿记录。
-    constexpr qint64 kStallIgnoreMs = 10000;
-    // 向上查找页签栏时的最大父级层数，避免在超深控件树里长时间遍历。
+    constexpr qint64 kStallThresholdNs = 50000000;
+    constexpr qint64 kStallIgnoreNs = 10000000000;
     constexpr int kMaxAncestorWalk = 16;
+    constexpr size_t kPendingRecordLimit = 2048;
+
+    // Only values cross to the writer. No QObject, context provider or widget is captured.
+    struct TraceRecord
+    {
+        QString event;
+        QString operation;
+        QString target;
+        QString context;
+        qint64 atNs = 0;
+        qint64 beginNs = -1;
+        qint64 endNs = -1;
+        qint64 durationNs = -1;
+        qint64 count = -1;
+        quint64 scopeId = 0;
+    };
+
+    struct TraceWriterState
+    {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<TraceRecord> records;
+        bool closed = false;
+        quint64 dropped = 0;
+        QString path;
+        QString fallbackPath;
+        QString sessionId;
+        QString executable;
+        QString applicationVersion;
+        QString utc;
+    };
+
+    // The existing trace gets one value-owned writer, not a second UI service.
+    // It owns QFile/JSON/hash work, including shutdown drain. GUI never waits for disk.
+    void writeTrace(const std::shared_ptr<TraceWriterState>& state)
+    {
+        QFile file(state->path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+        {
+            file.setFileName(state->fallbackPath);
+            file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        }
+        const auto writeRecord = [&file](const QJsonObject& record)
+        {
+            if (!file.isOpen())
+                return;
+            const QByteArray line = QJsonDocument(record).toJson(QJsonDocument::Compact) + '\n';
+            qint64 offset = 0;
+            while (offset < line.size())
+            {
+                const qint64 written = file.write(line.constData() + offset, line.size() - offset);
+                if (written <= 0)
+                {
+                    file.close();
+                    return;
+                }
+                offset += written;
+            }
+        };
+
+        QJsonObject session;
+        session.insert(QStringLiteral("event"), QStringLiteral("session"));
+        session.insert(QStringLiteral("op"), QStringLiteral("perf_session_start"));
+        session.insert(QStringLiteral("session_id"), state->sessionId);
+        session.insert(QStringLiteral("utc"), state->utc);
+        session.insert(QStringLiteral("qt"), QString::fromLatin1(qVersion()));
+        session.insert(QStringLiteral("build_stamp"), QStringLiteral(__DATE__ " " __TIME__));
+        session.insert(QStringLiteral("version"), state->applicationVersion);
+        session.insert(QStringLiteral("exe"), state->executable);
+        session.insert(QStringLiteral("writer_thread"), QString::number(
+            reinterpret_cast<quintptr>(QThread::currentThreadId())));
+        QFile executable(state->executable);
+        if (executable.open(QIODevice::ReadOnly))
+        {
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            if (hash.addData(&executable))
+                session.insert(QStringLiteral("exe_sha256"), QString::fromLatin1(hash.result().toHex()));
+        }
+        writeRecord(session);
+
+        for (;;)
+        {
+            std::deque<TraceRecord> records;
+            quint64 dropped = 0;
+            bool closed = false;
+            {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                state->ready.wait(lock, [&state]()
+                {
+                    return state->closed || !state->records.empty() || state->dropped != 0;
+                });
+                records.swap(state->records);
+                dropped = std::exchange(state->dropped, 0);
+                closed = state->closed;
+            }
+            if (dropped != 0)
+            {
+                QJsonObject loss;
+                loss.insert(QStringLiteral("event"), QStringLiteral("dropped"));
+                loss.insert(QStringLiteral("session_id"), state->sessionId);
+                loss.insert(QStringLiteral("count"), QString::number(dropped));
+                writeRecord(loss);
+            }
+            for (const TraceRecord& value : records)
+            {
+                QJsonObject record;
+                record.insert(QStringLiteral("session_id"), state->sessionId);
+                record.insert(QStringLiteral("event"), value.event);
+                record.insert(QStringLiteral("op"), value.operation);
+                record.insert(QStringLiteral("t"), value.atNs / 1000000.0);
+                record.insert(QStringLiteral("t_ns"), static_cast<double>(value.atNs));
+                if (!value.target.isEmpty())
+                    record.insert(QStringLiteral("target"), value.target);
+                if (!value.context.isEmpty())
+                    record.insert(QStringLiteral("cached_context_at_record_end"), value.context);
+                if (value.scopeId != 0)
+                    record.insert(QStringLiteral("scope_id"), QString::number(value.scopeId));
+                if (value.beginNs >= 0)
+                    record.insert(QStringLiteral("begin_ns"), static_cast<double>(value.beginNs));
+                if (value.endNs >= 0)
+                    record.insert(QStringLiteral("end_ns"), static_cast<double>(value.endNs));
+                if (value.durationNs >= 0)
+                {
+                    record.insert(QStringLiteral("duration_ns"), static_cast<double>(value.durationNs));
+                    record.insert(QStringLiteral("ms"), value.durationNs / 1000000.0);
+                    record.insert(QStringLiteral("measurement"), QStringLiteral("elapsed_wall"));
+                }
+                if (value.count >= 0)
+                    record.insert(QStringLiteral("count"), static_cast<double>(value.count));
+                if (value.event == QStringLiteral("stall"))
+                {
+                    record.insert(QStringLiteral("measurement"), QStringLiteral("heartbeat_overrun"));
+                    record.insert(QStringLiteral("attribution"), QStringLiteral("unattributed_interval"));
+                    record.insert(QStringLiteral("interval_ns"), static_cast<double>(value.endNs - value.beginNs));
+                }
+                writeRecord(record);
+            }
+            if (file.isOpen())
+                file.flush();
+            if (closed)
+                return;
+        }
+    }
 }
 
 namespace ks::ui
 {
-    // PerfTrace 作用：采集数据的单例宿主，负责缓冲、批量落盘、心跳停顿检测与页签按下探针。
-    // 它不做任何界面改动，也不在热路径上做同步文件写入。
     class PerfTrace final : public QObject
     {
     public:
@@ -62,240 +197,192 @@ namespace ks::ui
             return trace;
         }
 
-        // 记录一次操作边界耗时；itemCount 为负表示不写入计数字段。
-        void recordSpan(const char* operationToken, const QString& targetLabel,
-            qint64 durationNs, qint64 itemCount, quint64 scopeId = 0, qint64 startedAtNs = -1)
+        void recordSpan(const char* operation, const QString& target, qint64 durationNs,
+            qint64 count, quint64 scopeId = 0, qint64 startedAtNs = -1)
         {
-            const qint64 endedAtNs = referenceClock().nsecsElapsed();
-            QJsonObject record;
-            fillCommon(record, operationToken, targetLabel);
-            record.insert(QStringLiteral("event"), QStringLiteral("span"));
-            record.insert(QStringLiteral("ms"), durationNs / 1000000.0);
-            record.insert(QStringLiteral("duration_ns"), static_cast<double>(durationNs));
-            record.insert(QStringLiteral("begin_ns"), static_cast<double>(
-                startedAtNs >= 0 ? startedAtNs : endedAtNs - durationNs));
-            record.insert(QStringLiteral("end_ns"), static_cast<double>(endedAtNs));
-            record.insert(QStringLiteral("measurement"), QStringLiteral("elapsed_wall"));
-            if (scopeId != 0)
-                record.insert(QStringLiteral("scope_id"), QString::number(scopeId));
-            if (itemCount >= 0)
-            {
-                record.insert(QStringLiteral("count"), static_cast<double>(itemCount));
-            }
-            enqueue(record);
+            TraceRecord record = makeRecord("span", operation, target);
+            record.beginNs = startedAtNs >= 0 ? startedAtNs : record.atNs - durationNs;
+            record.endNs = record.atNs;
+            record.durationNs = startedAtNs >= 0 ? record.atNs - startedAtNs : durationNs;
+            record.scopeId = scopeId;
+            record.count = count;
+            enqueue(std::move(record));
         }
 
-        quint64 beginScope(const char* operationToken, const QString& targetLabel, qint64 atNs)
+        quint64 beginScope(const char* operation, const QString& target, qint64 atNs)
         {
             const quint64 id = m_nextScopeId.fetch_add(1, std::memory_order_relaxed);
-            QJsonObject record;
-            fillCommon(record, operationToken, targetLabel);
-            record.insert(QStringLiteral("event"), QStringLiteral("scope_begin"));
-            record.insert(QStringLiteral("scope_id"), QString::number(id));
-            record.insert(QStringLiteral("begin_ns"), static_cast<double>(atNs));
-            enqueue(record);
+            TraceRecord record = makeRecord("scope_begin", operation, target);
+            record.scopeId = id;
+            record.beginNs = atNs;
+            enqueue(std::move(record));
             return id;
         }
 
-        // 标记仅表示该时间点观察到的状态，不能归因此前整个心跳区间。
-        void recordMark(const char* operationToken, const QString& targetLabel)
+        void recordMark(const char* operation, const QString& target)
         {
-            QJsonObject record;
-            fillCommon(record, operationToken, targetLabel);
-            record.insert(QStringLiteral("event"), QStringLiteral("mark"));
-            enqueue(record);
+            enqueue(makeRecord("mark", operation, target));
         }
 
+        // Called by the existing GUI host. Refresh only on focus change, never per record.
         void setContextProvider(std::function<QString()> provider)
         {
-            QMutexLocker locker(&m_mutex);
+            Q_ASSERT(QThread::currentThread() == thread());
             m_contextProvider = std::move(provider);
-        }
-
-        void flush()
-        {
-            QMutexLocker locker(&m_mutex);
-            flushLocked();
+            refreshContext();
         }
 
     protected:
-        // 只观察鼠标按下：页签切换的入口边界在这里，其它事件一律立即放行。
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            if (event != nullptr && watched != nullptr &&
-                event->type() == QEvent::MouseButtonPress)
+            if (event && watched && event->type() == QEvent::FocusIn && !m_contextRefreshPending)
+            {
+                m_contextRefreshPending = true;
+                QTimer::singleShot(0, this, [this]()
+                {
+                    m_contextRefreshPending = false;
+                    refreshContext();
+                });
+            }
+            if (event && watched && event->type() == QEvent::MouseButtonPress)
             {
                 const QString label = tabBarLabelFor(watched);
                 if (!label.isEmpty())
-                {
                     recordMark("perf_tab_press", label);
-                }
             }
             return QObject::eventFilter(watched, event);
         }
 
     private:
-        PerfTrace()
+        PerfTrace() : m_writer(std::make_shared<TraceWriterState>())
         {
+            m_writer->path = qEnvironmentVariable("KSWORD_PERF_TRACE");
+            if (m_writer->path.isEmpty())
+                m_writer->path = QCoreApplication::applicationDirPath() + QStringLiteral("/ksword_perf_trace.jsonl");
+            m_writer->fallbackPath = QDir::tempPath() + QStringLiteral("/ksword_perf_trace.jsonl");
+            m_writer->sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_writer->executable = QCoreApplication::applicationFilePath();
+            m_writer->applicationVersion = QCoreApplication::applicationVersion();
+            m_writer->utc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            (void)referenceClock();
+            try
+            {
+                std::thread([state = m_writer]()
+                {
+                    try { writeTrace(state); }
+                    catch (...)
+                    {
+                        std::lock_guard<std::mutex> lock(state->mutex);
+                        state->closed = true;
+                    }
+                }).detach();
+            }
+            catch (...)
+            {
+                m_writer->closed = true; // Diagnostics must not fail a product operation.
+            }
+            m_heartbeat.setParent(this);
             if (QCoreApplication* application = QCoreApplication::instance())
             {
-                application->installEventFilter(this);
-                QObject::connect(application, &QCoreApplication::aboutToQuit,
-                    this, [this]() { flush(); });
+                if (thread() != application->thread())
+                    moveToThread(application->thread());
+                if (QThread::currentThread() == thread())
+                    startGuiProbes();
+                else
+                    QMetaObject::invokeMethod(this, [this]() { startGuiProbes(); }, Qt::QueuedConnection);
             }
+        }
 
-            m_flushTimer.setTimerType(Qt::CoarseTimer);
-            m_flushTimer.setInterval(kFlushIntervalMs);
-            QObject::connect(&m_flushTimer, &QTimer::timeout, this, [this]() { flush(); });
-            m_flushTimer.start();
+        ~PerfTrace() override { closeWriter(); }
 
+        void startGuiProbes()
+        {
+            QCoreApplication* application = QCoreApplication::instance();
+            if (!application)
+                return;
+            application->installEventFilter(this);
+            connect(application, &QCoreApplication::aboutToQuit, this, [this]()
+            {
+                m_heartbeat.stop();
+                closeWriter();
+            });
             m_previousHeartbeatNs = referenceClock().nsecsElapsed();
             m_heartbeat.setTimerType(Qt::PreciseTimer);
             m_heartbeat.setInterval(kHeartbeatIntervalMs);
-            QObject::connect(&m_heartbeat, &QTimer::timeout, this, [this]() { onHeartbeat(); });
+            connect(&m_heartbeat, &QTimer::timeout, this, [this]() { onHeartbeat(); });
             m_heartbeat.start();
-
-            // 会话头：把进程版本和采集起点写进文件，便于把多份日志区分开。
-            QJsonObject session;
-            session.insert(QStringLiteral("t"), 0.0);
-            session.insert(QStringLiteral("event"), QStringLiteral("session"));
-            session.insert(QStringLiteral("op"), QStringLiteral("perf_session_start"));
-            session.insert(QStringLiteral("session_id"), m_sessionId);
-            session.insert(QStringLiteral("utc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
-            session.insert(QStringLiteral("qt"), QString::fromLatin1(qVersion()));
-            session.insert(QStringLiteral("build_stamp"), QStringLiteral(__DATE__ " " __TIME__));
-            session.insert(QStringLiteral("exe"), QCoreApplication::applicationFilePath());
-            if (QCoreApplication::instance() != nullptr)
-            {
-                session.insert(QStringLiteral("target"),
-                    QCoreApplication::applicationVersion());
-            }
-            enqueue(session);
         }
 
-        // 心跳回调：事件循环被长时间占住时，定时器的实际间隔会明显超出理论值。
+        void closeWriter()
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_writer->mutex);
+                m_writer->closed = true;
+            }
+            m_writer->ready.notify_one();
+        }
+
         void onHeartbeat()
         {
             const qint64 endedAtNs = referenceClock().nsecsElapsed();
             const qint64 startedAtNs = std::exchange(m_previousHeartbeatNs, endedAtNs);
-            const qint64 overrun = (endedAtNs - startedAtNs) / 1000000 - kHeartbeatIntervalMs;
-            if (overrun < kStallThresholdMs || overrun > kStallIgnoreMs)
-            {
+            const qint64 overrunNs = endedAtNs - startedAtNs - kHeartbeatIntervalMs * 1000000LL;
+            if (overrunNs < kStallThresholdNs || overrunNs > kStallIgnoreNs)
                 return;
-            }
-            QJsonObject record;
-            fillCommon(record, "perf_ui_stall", QString());
-            record.insert(QStringLiteral("event"), QStringLiteral("stall"));
-            record.insert(QStringLiteral("ms"), static_cast<double>(overrun));
-            record.insert(QStringLiteral("begin_ns"), static_cast<double>(startedAtNs));
-            record.insert(QStringLiteral("end_ns"), static_cast<double>(endedAtNs));
-            record.insert(QStringLiteral("interval_ns"), static_cast<double>(endedAtNs - startedAtNs));
-            record.insert(QStringLiteral("measurement"), QStringLiteral("heartbeat_overrun"));
-            record.insert(QStringLiteral("attribution"), QStringLiteral("unattributed_interval"));
-            enqueue(record);
+            TraceRecord record = makeRecord("stall", "perf_ui_stall", QString());
+            record.beginNs = startedAtNs;
+            record.endNs = endedAtNs;
+            record.durationNs = overrunNs;
+            enqueue(std::move(record));
         }
 
-        // 填充公共字段：时间轴、操作记号、目标与现场上下文。
-        void fillCommon(QJsonObject& record, const char* operationToken, const QString& targetLabel)
+        void refreshContext()
         {
-            record.insert(QStringLiteral("t"), static_cast<double>(referenceClock().elapsed()));
-            record.insert(QStringLiteral("t_ns"), static_cast<double>(referenceClock().nsecsElapsed()));
-            record.insert(QStringLiteral("session_id"), m_sessionId);
-            record.insert(QStringLiteral("op"), QString::fromUtf8(operationToken));
-            if (!targetLabel.isEmpty())
-            {
-                record.insert(QStringLiteral("target"), targetLabel);
-            }
-
-            std::function<QString()> provider;
-            {
-                QMutexLocker locker(&m_mutex);
-                provider = m_contextProvider;
-            }
-            // 上下文提供者可能读取界面状态，必须在释放锁之后再调用，避免反向加锁。
-            if (provider)
-            {
-                const QString context = provider();
-                if (!context.isEmpty())
-                {
-                    record.insert(QStringLiteral("context_at_record_end"), context);
-                }
-            }
+            const QString context = m_contextProvider ? m_contextProvider() : QString();
+            std::lock_guard<std::mutex> lock(m_contextMutex);
+            m_cachedContext = context;
         }
 
-        // 把记录转成单行 JSON 并存入缓冲；缓冲达到上限时提前落盘。
-        void enqueue(const QJsonObject& record)
+        TraceRecord makeRecord(const char* event, const char* operation, const QString& target)
         {
-            const QByteArray line = QJsonDocument(record).toJson(QJsonDocument::Compact) + '\n';
-            QMutexLocker locker(&m_mutex);
-            m_lines.append(line);
-            if (m_lines.size() >= kBufferFlushThreshold)
+            TraceRecord record;
+            record.atNs = referenceClock().nsecsElapsed();
+            record.event = QString::fromLatin1(event);
+            record.operation = QString::fromUtf8(operation);
+            record.target = target;
             {
-                flushLocked();
+                std::lock_guard<std::mutex> lock(m_contextMutex);
+                record.context = m_cachedContext;
             }
+            return record;
         }
 
-        // 落盘：调用方必须已持有锁。文件只打开一次，持续以追加方式写入。
-        void flushLocked()
+        void enqueue(TraceRecord record)
         {
-            if (m_lines.isEmpty())
             {
-                return;
+                std::lock_guard<std::mutex> lock(m_writer->mutex);
+                if (m_writer->closed)
+                    return;
+                if (m_writer->records.size() >= kPendingRecordLimit)
+                    ++m_writer->dropped;
+                else
+                    m_writer->records.push_back(std::move(record));
             }
-            if (!ensureFileOpen())
-            {
-                m_lines.clear();
-                return;
-            }
-            for (const QByteArray& line : m_lines)
-            {
-                m_file.write(line);
-            }
-            m_file.flush();
-            m_lines.clear();
+            m_writer->ready.notify_one();
         }
 
-        bool ensureFileOpen()
-        {
-            if (m_file.isOpen())
-            {
-                return true;
-            }
-            // 允许用环境变量指定采集文件位置，便于把多次采集分开归档。
-            QString path = qEnvironmentVariable("KSWORD_PERF_TRACE");
-            if (path.isEmpty())
-            {
-                path = QCoreApplication::applicationDirPath()
-                    + QStringLiteral("/ksword_perf_trace.jsonl");
-            }
-            m_file.setFileName(path);
-            if (m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-            {
-                return true;
-            }
-            // 主程序目录不可写时退回临时目录，保证采集不中断。
-            m_file.setFileName(QDir::tempPath() + QStringLiteral("/ksword_perf_trace.jsonl"));
-            return m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
-        }
-
-        // 从事件接收者向上寻找页签栏；普通 QTabBar 与 ADS 页签栏都要识别。
-        // 用类名比较而不是包含 ADS 头，避免采集模块依赖停靠系统实现。
         QString tabBarLabelFor(QObject* watched)
         {
             QObject* object = watched;
-            for (int depth = 0; object != nullptr && depth < kMaxAncestorWalk; ++depth)
+            for (int depth = 0; object && depth < kMaxAncestorWalk; ++depth)
             {
                 const QByteArray className = object->metaObject()->className();
-                const bool isPlainTabBar = (className == QByteArrayLiteral("QTabBar"));
-                const bool isDockTabBar = className.startsWith(QByteArrayLiteral("ads::CDockAreaTabBar"));
-                if (isPlainTabBar || isDockTabBar)
+                if (className == QByteArrayLiteral("QTabBar") ||
+                    className.startsWith(QByteArrayLiteral("ads::CDockAreaTabBar")))
                 {
                     QString label = QString::fromUtf8(className);
-                    const QString objectName = object->objectName();
-                    if (!objectName.isEmpty())
-                    {
-                        label += QLatin1Char('/') + objectName;
-                    }
+                    if (!object->objectName().isEmpty())
+                        label += QLatin1Char('/') + object->objectName();
                     return label;
                 }
                 object = object->parent();
@@ -303,77 +390,60 @@ namespace ks::ui
             return QString();
         }
 
-        QMutex m_mutex;                 // 保护缓冲、文件与现场字段，允许后台线程记录。
-        QVector<QByteArray> m_lines;    // 待落盘的 JSONL 行。
-        QFile m_file;                   // 采集文件，首次落盘时打开并持续追加。
-        QTimer m_flushTimer;            // 定时批量落盘。
-        QTimer m_heartbeat;             // 事件循环心跳，用于检测 UI 停顿。
+        const std::shared_ptr<TraceWriterState> m_writer;
+        std::mutex m_contextMutex;
+        QString m_cachedContext;
+        std::function<QString()> m_contextProvider;
+        QTimer m_heartbeat;
         qint64 m_previousHeartbeatNs = 0;
-        const QString m_sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         std::atomic<quint64> m_nextScopeId{1};
-        std::function<QString()> m_contextProvider; // 现场上下文提供者。
+        bool m_contextRefreshPending = false;
     };
 
-    void RecordPerfSpan(const char* operationToken, const QString& targetLabel, qint64 durationMs)
+    void RecordPerfSpan(const char* operation, const QString& target, qint64 durationMs)
     {
-        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs * 1000000, -1);
+        PerfTrace::instance().recordSpan(operation, target, durationMs * 1000000, -1);
     }
 
-    void RecordPerfSpanWithCount(const char* operationToken, const QString& targetLabel,
-        qint64 durationMs, qint64 itemCount)
+    void RecordPerfSpanWithCount(const char* operation, const QString& target, qint64 durationMs, qint64 count)
     {
-        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationMs * 1000000, itemCount);
+        PerfTrace::instance().recordSpan(operation, target, durationMs * 1000000, count);
     }
 
-    void RecordPerfSpanNs(const char* operationToken, const QString& targetLabel,
-        qint64 durationNs, qint64 itemCount)
+    void RecordPerfSpanNs(const char* operation, const QString& target, qint64 durationNs, qint64 count)
     {
-        PerfTrace::instance().recordSpan(operationToken, targetLabel, durationNs, itemCount);
+        PerfTrace::instance().recordSpan(operation, target, durationNs, count);
     }
 
-    qint64 PerfTraceNowNs()
+    void RecordPerfMark(const char* operation, const QString& target)
     {
-        return referenceClock().nsecsElapsed();
+        PerfTrace::instance().recordMark(operation, target);
     }
 
-    void RecordPerfMark(const char* operationToken, const QString& targetLabel)
-    {
-        PerfTrace::instance().recordMark(operationToken, targetLabel);
-    }
-
-    qint64 PerfTraceNowMs()
-    {
-        return referenceClock().elapsed();
-    }
+    qint64 PerfTraceNowMs() { return referenceClock().elapsed(); }
+    qint64 PerfTraceNowNs() { return referenceClock().nsecsElapsed(); }
 
     void SetPerfTraceContextProvider(std::function<QString()> provider)
     {
         PerfTrace::instance().setContextProvider(std::move(provider));
     }
 
-    PerfScope::PerfScope(const char* operationToken, QString targetLabel)
-        : m_operationToken(operationToken), m_targetLabel(std::move(targetLabel))
+    PerfScope::PerfScope(const char* operation, QString target)
+        : m_operationToken(operation), m_targetLabel(std::move(target))
     {
         m_startedAtNs = referenceClock().nsecsElapsed();
         m_scopeId = PerfTrace::instance().beginScope(m_operationToken, m_targetLabel, m_startedAtNs);
     }
 
-    PerfScope::~PerfScope()
-    {
-        finish();
-    }
+    PerfScope::~PerfScope() { finish(); }
 
     void PerfScope::finish()
     {
         if (m_finished)
-        {
             return;
-        }
         m_finished = true;
-        PerfTrace::instance().recordSpan(
-            m_operationToken, m_targetLabel, referenceClock().nsecsElapsed() - m_startedAtNs,
-            m_itemCount, m_scopeId, m_startedAtNs);
+        PerfTrace::instance().recordSpan(m_operationToken, m_targetLabel,
+            referenceClock().nsecsElapsed() - m_startedAtNs, m_itemCount, m_scopeId, m_startedAtNs);
     }
 }
-
 #endif
