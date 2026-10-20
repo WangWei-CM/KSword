@@ -135,3 +135,29 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
     }
 
 }
+
+// 新控件只准备自身；数据采样tick不再刷新全域图表主题。
+void HardwareDock::prepareNewUtilizationChartTheme(QChartView* const view,
+    const KswordTheme::PerformanceRole primaryRole, const KswordTheme::PerformanceRole secondaryRole)
+{
+    QWidget* const page = m_utilizationFloatingPage.data();
+    QWidget* const window = m_utilizationFloatingWindow.data();
+    if (view == nullptr || page == nullptr || window == nullptr
+        || (view != page && !page->isAncestorOf(view)))
+    {
+        return;
+    }
+    const QPalette palette = window->palette();
+    const QPalette* const localPalette = m_utilizationFloatingThemeMode == QStringLiteral("follow_main")
+        ? nullptr : &palette;
+    ks::ui::RefreshPerformanceChartTheme(view->chart(), primaryRole, secondaryRole, localPalette);
+}
+
+void HardwareDock::prepareNewUtilizationEngineChartTheme(QChartView* const view, const QString& engineKey)
+{
+    using Role = KswordTheme::PerformanceRole;
+    const auto role = engineKey == QStringLiteral("copy") ? Role::Copy
+        : engineKey == QStringLiteral("video_encode") ? Role::VideoEncode
+        : engineKey == QStringLiteral("video_decode") ? Role::VideoDecode : Role::Gpu;
+    prepareNewUtilizationChartTheme(view, role, role);
+}

@@ -6789,6 +6789,7 @@ void HardwareDock::initializeUtilizationDiskSubTab()
     }
 
     m_diskUtilChartView = createPlotBackgroundChartView(diskChart, m_utilizationDiskSubPage);
+    prepareNewUtilizationChartTheme(m_diskUtilChartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     diskSubLayout->addWidget(m_diskUtilChartView, 1);
 
     m_diskUtilDetailLabel = new QLabel(
@@ -6890,6 +6891,7 @@ void HardwareDock::initializeUtilizationNetworkSubTab()
     }
 
     m_networkUtilChartView = createPlotBackgroundChartView(networkChart, m_utilizationNetworkSubPage);
+    prepareNewUtilizationChartTheme(m_networkUtilChartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     networkSubLayout->addWidget(m_networkUtilChartView, 1);
 
     m_networkUtilDetailLabel = new QLabel(
@@ -7008,6 +7010,7 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             }
 
             QChartView* chartView = createPlotBackgroundChartView(chartPointer, cellWidget);
+            prepareNewUtilizationEngineChartTheme(chartView, engineKeyText);
             cellLayout->addWidget(chartView, 1);
             m_gpuEngineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
 
@@ -7101,6 +7104,9 @@ void HardwareDock::initializeUtilizationGpuSubTab()
             if (chartViewOut != nullptr)
             {
                 *chartViewOut = createPlotBackgroundChartView(chartPointer, m_utilizationGpuSubPage);
+                const auto role = chartViewOut == &m_gpuDedicatedMemoryChartView
+                    ? KswordTheme::PerformanceRole::DedicatedMemory : KswordTheme::PerformanceRole::SharedMemory;
+                prepareNewUtilizationChartTheme(*chartViewOut, role, role);
             }
         };
 
@@ -7596,6 +7602,7 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.areaSeries->attachAxis(chartEntry.axisY);
 
         chartEntry.chartView = createPlotBackgroundChartView(chart, chartEntry.containerWidget);
+        prepareNewUtilizationChartTheme(chartEntry.chartView, KswordTheme::PerformanceRole::Cpu, KswordTheme::PerformanceRole::Cpu);
         containerLayout->addWidget(chartEntry.chartView, 1);
 
         const int rowIndex = coreIndex / gridShape.columnCount;
@@ -7990,6 +7997,7 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
         devicePointer->writeAreaSeries->attachAxis(devicePointer->axisY);
     }
     devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+    prepareNewUtilizationChartTheme(devicePointer->chartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     pageLayout->addWidget(devicePointer->chartView, 1);
 
     devicePointer->detailLabel = new QLabel(
@@ -8111,6 +8119,7 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
         devicePointer->txAreaSeries->attachAxis(devicePointer->axisY);
     }
     devicePointer->chartView = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+    prepareNewUtilizationChartTheme(devicePointer->chartView, KswordTheme::PerformanceRole::Read, KswordTheme::PerformanceRole::Write);
     if (!devicePointer->physical)
     {
         devicePointer->chartView->setFixedHeight(135);
@@ -8227,6 +8236,7 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
                 chartEntry.areaSeries->attachAxis(chartEntry.axisY);
             }
             chartEntry.chartView = createPlotBackgroundChartView(chart, cellWidget);
+            prepareNewUtilizationEngineChartTheme(chartEntry.chartView, keyText);
             cellLayout->addWidget(chartEntry.chartView, 1);
 
             devicePointer->engineGridLayout->addWidget(cellWidget, rowIndex, columnIndex);
@@ -8283,6 +8293,9 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
                 (*areaSeriesOut)->attachAxis(*axisYOut);
             }
             *chartViewOut = createPlotBackgroundChartView(chart, devicePointer->pageWidget);
+            const auto role = chartViewOut == &devicePointer->dedicatedMemoryChartView
+                ? KswordTheme::PerformanceRole::DedicatedMemory : KswordTheme::PerformanceRole::SharedMemory;
+            prepareNewUtilizationChartTheme(*chartViewOut, role, role);
         };
 
     createMemoryChart(
@@ -8682,11 +8695,6 @@ void HardwareDock::refreshAllViews()
         networkRxAverageBytesPerSec,
         networkTxAverageBytesPerSec,
         gpuUsageAveragePercent);
-    if (m_utilizationFloatingMode == UtilizationFloatingMode::Detail)
-    {
-        // Device discovery can add chart views after the page has been floated.
-        applyUtilizationFloatingTheme();
-    }
     // 高度重排只在 resize/tab 切换时执行，避免每秒重算导致核心图容器抖动。
 
     // 周期刷新策略：

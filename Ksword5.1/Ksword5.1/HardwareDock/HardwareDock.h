@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>   // std::vector：保存每核图表与采样数据。
 
+namespace KswordTheme { enum class PerformanceRole; }
+
 class DiskMonitorPage;
 class MemoryCompositionHistoryWidget;
 class HardwarePowerPage;
@@ -416,6 +418,9 @@ private:
     void scheduleUtilizationThemeRefresh();
     void refreshUtilizationThemeColors();
     void refreshUtilizationChartThemeColors(const QPalette* floatingPalette = nullptr);
+    void prepareNewUtilizationChartTheme(QChartView* view,
+        KswordTheme::PerformanceRole primaryRole, KswordTheme::PerformanceRole secondaryRole);
+    void prepareNewUtilizationEngineChartTheme(QChartView* view, const QString& engineKey);
     void applyInitialUtilizationSplitterSize();
     void syncUtilizationSidebarCardWidths();
     void syncUtilizationSidebarSelection(int selectedRowIndex);
