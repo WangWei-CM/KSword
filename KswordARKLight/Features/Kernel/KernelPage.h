@@ -22,14 +22,7 @@ struct KernelObjectNamespaceTreeNodeState;
 // KernelR0EvidenceSnapshot is the immutable result of a client-side R0
 // evidence projection. Worker tasks own this value completely before the UI
 // applies it to the owner-data ListView.
-struct KernelR0EvidenceSnapshot {
-    KernelFeatureId featureId = KernelFeatureId::CpuHardwareSnapshot;
-    std::vector<std::wstring> columns;
-    Ksword::Ui::ImmutableTextRows rows;
-    std::wstring statusText;
-    std::wstring selectedRowSignature;
-    int topRow = 0;
-};
+
 
 enum class CallbackFileIoOperation {
     ImportConfig,
@@ -129,7 +122,6 @@ private:
     void ScheduleCachedFilter(KernelFeatureId featureId);
     void ApplyCachedFilter(KernelFeatureId featureId);
     void RequestR0EvidenceRebuild(KernelFeatureId featureId);
-    void ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot);
     const KernelFeatureDescriptor* CurrentDescriptor() const;
     const KernelFeatureDescriptor* FeatureById(KernelFeatureId featureId) const;
     void RebuildSecondLevelTabs();
@@ -436,7 +428,6 @@ private:
     std::unique_ptr<CallbackEventReceiver> callbackEventReceiver_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> callbackAnswerTask_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>> callbackFileIoTask_;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>> r0EvidenceFilterTask_;
     std::vector<CallbackEventSnapshot> callbackPendingEvents_;
     std::uint32_t nextCallbackGroupId_ = 2;
     std::uint32_t nextCallbackRuleId_ = 1;

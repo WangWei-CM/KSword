@@ -88,7 +88,6 @@ constexpr UINT kMsgKernelQueryCompleted = WM_APP + 605;
 constexpr UINT kMsgKernelActionCompleted = WM_APP + 606;
 constexpr UINT kMsgCallbackEventReceived = WM_APP + 607;
 constexpr UINT kMsgCallbackAnswerCompleted = WM_APP + 608;
-constexpr UINT kMsgR0EvidenceFilterCompleted = WM_APP + 609;
 constexpr UINT kMsgCallbackFileIoCompleted = WM_APP + 610;
 constexpr UINT kMsgKernelSortCompleted = WM_APP + 611;
 constexpr UINT kMsgCachedProjectionCompleted = WM_APP + 612;
@@ -1499,7 +1498,7 @@ bool KernelUsesValueProjection(const KernelFeatureId featureId) {
     case KernelFeatureId::ThreadCrossView:
     case KernelFeatureId::DriverIntegrity:
     case KernelFeatureId::KernelCpuIntegrity: return true;
-    default: return IsKernelHookFeature(featureId);
+    default: return IsKernelHookFeature(featureId) || IsR0EvidenceFeature(featureId);
     }
 }
 }
@@ -1577,7 +1576,6 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
         callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
-        r0EvidenceFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelR0EvidenceSnapshot>>(hwnd, kMsgR0EvidenceFilterCompleted);
         callbackEventReceiver_ = std::make_unique<CallbackEventReceiver>(hwnd, kMsgCallbackEventReceived);
         CreateChildControls();
         PopulateTabs();
@@ -1623,11 +1621,6 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         break;
     case kMsgCallbackFileIoCompleted:
         if (callbackFileIoTask_ && callbackFileIoTask_->consume(hwnd, wParam, lParam)) {
-            return 0;
-        }
-        break;
-    case kMsgR0EvidenceFilterCompleted:
-        if (r0EvidenceFilterTask_ && r0EvidenceFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
         }
         break;
@@ -2507,9 +2500,6 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         }
         if (callbackFileIoTask_) {
             callbackFileIoTask_->cancel();
-        }
-        if (r0EvidenceFilterTask_) {
-            r0EvidenceFilterTask_->cancel();
         }
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
@@ -6974,163 +6964,7 @@ void KernelPage::RebuildIntegrityEvidenceListFromCache(const KernelFeatureId fea
 // BuildR0EvidenceSnapshot projects an immutable raw R0 table without touching
 // Win32 controls. It runs on the filter worker, allowing large driver audits to
 // remain responsive while the user edits the local search text.
-KernelR0EvidenceSnapshot BuildR0EvidenceSnapshot(
-    const KernelFeatureId featureId,
-    std::wstring pageName,
-    const std::vector<std::wstring>& rawColumns,
-    const KernelRawRows& rawRows,
-    std::wstring filterText,
-    const bool riskOnly,
-    std::wstring selectedRowSignature,
-    const int topRow) {
-    KernelR0EvidenceSnapshot snapshot{};
-    snapshot.featureId = featureId;
-    snapshot.selectedRowSignature = std::move(selectedRowSignature);
-    snapshot.topRow = topRow;
 
-    const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
-        return RowFieldByName(row, rawColumns, names);
-    };
-    const auto addColumnIfMissing = [](std::vector<std::wstring>& columns, const wchar_t* name) {
-        if (!HasColumn(columns, name)) {
-            columns.push_back(name);
-        }
-    };
-    const auto displayValue = [&](const std::vector<std::wstring>& row, const std::wstring& columnName) -> std::wstring {
-        std::vector<std::wstring> aliases = ColumnAliases(featureId, columnName);
-        if (aliases.empty()) {
-            aliases.push_back(columnName);
-        }
-        for (const std::wstring& alias : aliases) {
-            const std::wstring value = rawValue(row, { alias.c_str() });
-            if (!value.empty()) {
-                return value;
-            }
-        }
-        return {};
-    };
-    const auto isDataRow = [&](const std::vector<std::wstring>& row) {
-        switch (featureId) {
-        case KernelFeatureId::CpuHardwareSnapshot:
-            return HasNonEmptyField(row, rawColumns, { L"Brand", L"Vendor", L"FeatureMask", L"Leaf1ECX", L"项目" });
-        case KernelFeatureId::PhysicalMemoryLayout:
-            return HasNonEmptyField(row, rawColumns, { L"Ranges", L"TotalBytes", L"HighestAddress", L"范围" });
-        case KernelFeatureId::MutationAudit:
-            return HasNonEmptyField(row, rawColumns, { L"Seq", L"Tx", L"Operation", L"TargetKind", L"Address" });
-        case KernelFeatureId::KeyboardHotkeys:
-            return HasNonEmptyField(row, rawColumns, { L"PID", L"TID", L"热键", L"Object", L"WindowObject" });
-        case KernelFeatureId::KeyboardHooks:
-            return HasNonEmptyField(row, rawColumns, { L"PID", L"TID", L"Hook类型", L"Procedure", L"Object" });
-        case KernelFeatureId::DynDataCapabilities:
-            return HasNonEmptyField(row, rawColumns, { L"Capability", L"CapabilityMask", L"StatusFlags", L"字段" });
-        case KernelFeatureId::MinifilterBypassPids:
-            return HasNonEmptyField(row, rawColumns, { L"PID", L"Process", L"Index" });
-        case KernelFeatureId::KernelTimerDpc:
-            return HasNonEmptyField(row, rawColumns, { L"Timer", L"TimerAddress", L"DPC", L"DpcAddress" });
-        case KernelFeatureId::IoctlRegistry:
-            return HasNonEmptyField(row, rawColumns, { L"IOCTL", L"IoControlCode", L"Name", L"FunctionNumber" });
-        default:
-            return false;
-        }
-    };
-
-    snapshot.columns.push_back(L"#");
-    for (const std::wstring& column : CanonicalColumnNames(featureId)) {
-        addColumnIfMissing(snapshot.columns, column.c_str());
-    }
-    for (const std::wstring& column : rawColumns) {
-        addColumnIfMissing(snapshot.columns, column.c_str());
-    }
-    addColumnIfMissing(snapshot.columns, L"Detail");
-
-    std::size_t reportedTotalRows = 0;
-    std::size_t reportedReturnedRows = 0;
-    std::size_t totalRows = 0;
-    std::size_t riskRows = 0;
-    std::wstring queryStatus;
-    std::wstring unsupportedText;
-    std::wstring protocolVersion;
-    std::wstring lastStatus;
-    for (const std::vector<std::wstring>& rawRow : rawRows) {
-        const std::uint64_t total = FirstNonZeroField(rawRow, rawColumns, { L"Total", L"TotalCount" });
-        const std::uint64_t returned = FirstNonZeroField(rawRow, rawColumns, { L"Returned", L"ReturnedCount" });
-        if (total != 0) {
-            reportedTotalRows = static_cast<std::size_t>(total);
-        }
-        if (returned != 0) {
-            reportedReturnedRows = static_cast<std::size_t>(returned);
-        }
-        if (queryStatus.empty()) {
-            queryStatus = rawValue(rawRow, { L"Status", L"状态" });
-        }
-        if (unsupportedText.empty()) {
-            unsupportedText = rawValue(rawRow, { L"Unsupported" });
-        }
-        if (protocolVersion.empty()) {
-            protocolVersion = rawValue(rawRow, { L"Version", L"Protocol" });
-        }
-        if (lastStatus.empty()) {
-            lastStatus = rawValue(rawRow, { L"LastStatus" });
-        }
-    }
-    snapshot.rows.reserve(rawRows.size());
-    for (const std::vector<std::wstring>& rawRow : rawRows) {
-        if (!isDataRow(rawRow)) {
-            continue;
-        }
-        ++totalRows;
-        const std::wstring risk = rawValue(rawRow, { L"RiskText", L"Risk", L"FlagsText", L"Flags", L"状态", L"Status" });
-        const bool risky = ContainsCaseInsensitive(risk, L"风险") ||
-            ContainsCaseInsensitive(risk, L"异常") ||
-            ContainsCaseInsensitive(risk, L"failed") ||
-            ContainsCaseInsensitive(risk, L"失败") ||
-            ContainsCaseInsensitive(risk, L"rejected");
-        if (risky) {
-            ++riskRows;
-        }
-        if (riskOnly && !risky) {
-            continue;
-        }
-        if (!filterText.empty() && !ContainsCaseInsensitive(MergeRowText(rawRow), filterText)) {
-            continue;
-        }
-        std::vector<std::wstring> cells(snapshot.columns.size());
-        for (std::size_t column = 0; column < snapshot.columns.size(); ++column) {
-            const std::wstring& name = snapshot.columns[column];
-            if (name == L"#") {
-                cells[column] = std::to_wstring(snapshot.rows.size());
-            } else if (name == L"Detail") {
-                cells[column] = rawValue(rawRow, { L"Detail" });
-            } else {
-                cells[column] = displayValue(rawRow, name);
-            }
-        }
-        snapshot.rows.push_back(std::move(cells));
-    }
-
-    const std::size_t effectiveTotal = reportedTotalRows == 0 ? totalRows : reportedTotalRows;
-    const std::size_t effectiveReturned = reportedReturnedRows == 0 ? totalRows : reportedReturnedRows;
-    std::wostringstream status;
-    status << L"状态：" << pageName << L"已刷新，显示 " << snapshot.rows.size()
-           << L"，返回 " << effectiveReturned << L"/" << effectiveTotal;
-    if (riskRows != 0) {
-        status << L"，风险/异常 " << riskRows;
-    }
-    if (!queryStatus.empty()) {
-        status << L"，Query " << queryStatus;
-    }
-    if (!unsupportedText.empty()) {
-        status << L"，Unsupported " << unsupportedText;
-    }
-    if (!protocolVersion.empty()) {
-        status << L"，Ver " << protocolVersion;
-    }
-    if (!lastStatus.empty()) {
-        status << L"，Last " << lastStatus;
-    }
-    snapshot.statusText = status.str();
-    return snapshot;
-}
 
 void KernelPage::RebuildR0EvidenceListFromCache(const KernelFeatureId featureId) {
     // RebuildR0EvidenceListFromCache projects remaining R0-only KernelDock pages
@@ -7204,104 +7038,10 @@ void KernelPage::ScheduleCachedFilter(const KernelFeatureId featureId) {
 }
 
 void KernelPage::RequestR0EvidenceRebuild(const KernelFeatureId featureId) {
-    if (!resultList_ || !IsR0EvidenceFeature(featureId)) {
-        return;
-    }
-    const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
-    if (descriptor == nullptr || descriptor->id != featureId) {
-        return;
-    }
-    std::vector<std::wstring> rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const auto rawRows = !currentRawRows_->empty() || currentRows_.empty() ? currentRawRows_ :
-        currentRows_.contiguousSnapshot();
-    const std::wstring filterText = WindowText(filterEdit_);
-    const bool riskOnly = riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED;
-    const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
-    std::wstring selectedSignature = selected >= 0 && selected < static_cast<int>(currentRows_.size())
-        ? MergeRowText(currentRows_[static_cast<std::size_t>(selected)])
-        : std::wstring{};
-    const int topRow = std::max(0, ListView_GetTopIndex(resultList_));
-    std::wstring pageName = descriptor->title;
-    if (!r0EvidenceFilterTask_) {
-        ApplyR0EvidenceSnapshot(BuildR0EvidenceSnapshot(featureId, pageName, rawColumns, *rawRows, filterText,
-            riskOnly, selectedSignature, topRow));
-        return;
-    }
-    ::SetWindowTextW(statusText_, (L"状态：正在后台筛选 " + pageName + L"…").c_str());
-    r0EvidenceFilterTask_->request(
-        [featureId, pageName = std::move(pageName), rawColumns = std::move(rawColumns), rawRows,
-            filterText = std::move(filterText), riskOnly, selectedSignature = std::move(selectedSignature), topRow]() mutable {
-            return BuildR0EvidenceSnapshot(featureId, std::move(pageName), rawColumns, *rawRows,
-                std::move(filterText), riskOnly, std::move(selectedSignature), topRow);
-        },
-        [this](std::uint64_t, std::optional<KernelR0EvidenceSnapshot>&& snapshot, std::exception_ptr error) {
-            if (error || !snapshot.has_value()) {
-                ::SetWindowTextW(statusText_, L"状态：R0 证据后台筛选异常结束，保留当前结果。");
-                return;
-            }
-            const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
-            if (descriptor == nullptr || descriptor->id != snapshot->featureId) {
-                return;
-            }
-            ApplyR0EvidenceSnapshot(std::move(*snapshot));
-        });
+    RequestCachedValueProjection(featureId);
 }
 
-void KernelPage::ApplyR0EvidenceSnapshot(KernelR0EvidenceSnapshot snapshot) {
-    if (!resultList_ || !IsR0EvidenceFeature(snapshot.featureId)) {
-        return;
-    }
-    const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
-    if (descriptor == nullptr || descriptor->id != snapshot.featureId) {
-        return;
-    }
-    const bool schemaChanged = currentColumns_ != snapshot.columns;
-    currentColumns_ = std::move(snapshot.columns);
-    currentRows_ = std::move(snapshot.rows);
-    currentRowIndents_.clear();
-    if (schemaChanged) {
-        ClearResultGridOnly();
-        const std::vector<std::wstring> canonical = CanonicalColumnNames(snapshot.featureId);
-        for (std::size_t index = 0; index < currentColumns_.size(); ++index) {
-            const std::wstring& name = currentColumns_[index];
-            int width = (name != L"#" && !HasColumn(canonical, name)) ? 0 : ColumnWidth(name);
-            if (name == L"对象") width = 180;
-            else if (name == L"热键ID" || name == L"进程ID" || name == L"线程ID" || name == L"Flags") width = 80;
-            else if (name == L"热键" || name == L"类型" || name == L"范围" || name == L"VK/Mod") width = 130;
-            else if (name == L"函数/偏移") width = 170;
-            else if (name == L"详情") width = 300;
-            else if (name == L"项目" || name == L"Capability") width = 170;
-            else if (name == L"值" || name == L"摘要" || name == L"Features" || name == L"字段" || name == L"原因") width = 260;
-            else if (name == L"Tx" || name == L"Address" || name == L"回调") width = 165;
-            else if (name == L"PID" || name == L"TID" || name == L"Bytes") width = 72;
-            else if (name == L"进程" || name == L"Process") width = 180;
-            else if (name == L"Detail") width = 320;
-            AddResultTableColumn(static_cast<int>(index), name, width);
-        }
-    }
-    SyncResultListVirtualRows();
-    ::SetWindowTextW(statusText_, snapshot.statusText.c_str());
-    if (currentRows_.empty()) {
-        ::SetWindowTextW(detailEdit_, L"当前过滤条件下没有 R0 证据记录。");
-        InvalidateCurrentFeatureViewCache();
-        return;
-    }
-    int selectedRow = 0;
-    if (!snapshot.selectedRowSignature.empty()) {
-        const auto found = std::find_if(currentRows_.begin(), currentRows_.end(), [&snapshot](const auto& row) {
-            return MergeRowText(row) == snapshot.selectedRowSignature;
-        });
-        if (found != currentRows_.end()) {
-            selectedRow = static_cast<int>(std::distance(currentRows_.begin(), found));
-        }
-    }
-    const int topRow = std::max(0, std::min(snapshot.topRow, static_cast<int>(currentRows_.size()) - 1));
-    ListView_SetItemState(resultList_, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_SetItemState(resultList_, selectedRow, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_EnsureVisible(resultList_, topRow > 0 ? topRow : selectedRow, FALSE);
-    UpdateSelectedRowDetail();
-    InvalidateCurrentFeatureViewCache();
-}
+
 
 void KernelPage::SortResultRowsByColumn(const int columnIndex) {
     // SortResultRowsByColumn sorts the current result cache by one visible

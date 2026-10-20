@@ -22,6 +22,15 @@ public:
         result_->requestId=requestId;
         const auto feature=input_->source->featureId;
         switch(feature) {
+        case KernelFeatureId::CpuHardwareSnapshot:
+        case KernelFeatureId::PhysicalMemoryLayout:
+        case KernelFeatureId::MutationAudit:
+        case KernelFeatureId::KeyboardHotkeys:
+        case KernelFeatureId::KeyboardHooks:
+        case KernelFeatureId::DynDataCapabilities:
+        case KernelFeatureId::MinifilterBypassPids:
+        case KernelFeatureId::KernelTimerDpc:
+        case KernelFeatureId::IoctlRegistry: RebuildR0ValueProjection(feature); break;
         case KernelFeatureId::DynData:
         case KernelFeatureId::DriverStatus: RebuildDiagnosticDualTableFromCache(feature); break;
         case KernelFeatureId::CallbackEnumeration: RebuildCallbackEnumerationListFromCache(); break;
@@ -43,6 +52,13 @@ public:
         return result_;
     }
 private:
+    struct R0Values {
+        KernelFeatureId featureId=KernelFeatureId::CpuHardwareSnapshot;
+        std::vector<std::wstring> columns;
+        Ksword::Ui::ImmutableTextRows rows;
+        std::wstring statusText,selectedRowSignature;
+        int topRow=0;
+    };
     struct InsensitiveLess {
         bool operator()(const std::wstring& left,const std::wstring& right) const {return ::_wcsicmp(left.c_str(),right.c_str())<0;}
     };
@@ -103,7 +119,7 @@ private:
     std::shared_ptr<KernelValueProjection> result_;
     std::vector<std::wstring> currentColumns_,currentRawColumns_;
     std::shared_ptr<const KernelRawRows> currentRawRows_;
-    std::vector<std::vector<std::wstring>> currentRows_;
+    Ksword::Ui::ImmutableTextRows currentRows_;
     std::vector<int> currentRowIndents_;
     using ColumnIndex=std::map<std::wstring,std::vector<std::size_t>,InsensitiveLess>;
     std::unordered_map<const std::vector<std::wstring>*,ColumnIndex> columnIndexes_;
@@ -1807,5 +1823,188 @@ std::wstring NormalizeCallbackModulePath(const std::wstring& modulePath) const {
     }
     return path;
 }
+
+R0Values BuildR0Values(
+    const KernelFeatureId featureId,
+    std::wstring pageName,
+    const std::vector<std::wstring>& rawColumns,
+    const KernelRawRows& rawRows,
+    std::wstring filterText,
+    const bool riskOnly,
+    std::wstring selectedRowSignature,
+    const int topRow) {
+    R0Values snapshot{};
+    snapshot.featureId = featureId;
+    snapshot.selectedRowSignature = std::move(selectedRowSignature);
+    snapshot.topRow = topRow;
+
+    const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
+        return ReadField(row, rawColumns, names);
+    };
+    const auto addColumnIfMissing = [](std::vector<std::wstring>& columns, const wchar_t* name) {
+        if (!HasColumn(columns, name)) {
+            columns.push_back(name);
+        }
+    };
+    const auto displayValue = [&](const std::vector<std::wstring>& row, const std::wstring& columnName) -> std::wstring {
+        const auto& aliases = Aliases(featureId, columnName);
+        for (const std::wstring& alias : aliases) {
+            const std::wstring value = rawValue(row, { alias.c_str() });
+            if (!value.empty()) {
+                return value;
+            }
+        }
+        return {};
+    };
+    const auto isDataRow = [&](const std::vector<std::wstring>& row) {
+        switch (featureId) {
+        case KernelFeatureId::CpuHardwareSnapshot:
+            return HasValue(row, rawColumns, { L"Brand", L"Vendor", L"FeatureMask", L"Leaf1ECX", L"项目" });
+        case KernelFeatureId::PhysicalMemoryLayout:
+            return HasValue(row, rawColumns, { L"Ranges", L"TotalBytes", L"HighestAddress", L"范围" });
+        case KernelFeatureId::MutationAudit:
+            return HasValue(row, rawColumns, { L"Seq", L"Tx", L"Operation", L"TargetKind", L"Address" });
+        case KernelFeatureId::KeyboardHotkeys:
+            return HasValue(row, rawColumns, { L"PID", L"TID", L"热键", L"Object", L"WindowObject" });
+        case KernelFeatureId::KeyboardHooks:
+            return HasValue(row, rawColumns, { L"PID", L"TID", L"Hook类型", L"Procedure", L"Object" });
+        case KernelFeatureId::DynDataCapabilities:
+            return HasValue(row, rawColumns, { L"Capability", L"CapabilityMask", L"StatusFlags", L"字段" });
+        case KernelFeatureId::MinifilterBypassPids:
+            return HasValue(row, rawColumns, { L"PID", L"Process", L"Index" });
+        case KernelFeatureId::KernelTimerDpc:
+            return HasValue(row, rawColumns, { L"Timer", L"TimerAddress", L"DPC", L"DpcAddress" });
+        case KernelFeatureId::IoctlRegistry:
+            return HasValue(row, rawColumns, { L"IOCTL", L"IoControlCode", L"Name", L"FunctionNumber" });
+        default:
+            return false;
+        }
+    };
+
+    snapshot.columns.push_back(L"#");
+    for (const std::wstring& column : CanonicalColumnNames(featureId)) {
+        addColumnIfMissing(snapshot.columns, column.c_str());
+    }
+    for (const std::wstring& column : rawColumns) {
+        addColumnIfMissing(snapshot.columns, column.c_str());
+    }
+    addColumnIfMissing(snapshot.columns, L"Detail");
+
+    std::size_t reportedTotalRows = 0;
+    std::size_t reportedReturnedRows = 0;
+    std::size_t totalRows = 0;
+    std::size_t riskRows = 0;
+    std::wstring queryStatus;
+    std::wstring unsupportedText;
+    std::wstring protocolVersion;
+    std::wstring lastStatus;
+    for (const std::vector<std::wstring>& rawRow : rawRows) {
+        const std::uint64_t total = ReadNonZero(rawRow, rawColumns, { L"Total", L"TotalCount" });
+        const std::uint64_t returned = ReadNonZero(rawRow, rawColumns, { L"Returned", L"ReturnedCount" });
+        if (total != 0) {
+            reportedTotalRows = static_cast<std::size_t>(total);
+        }
+        if (returned != 0) {
+            reportedReturnedRows = static_cast<std::size_t>(returned);
+        }
+        if (queryStatus.empty()) {
+            queryStatus = rawValue(rawRow, { L"Status", L"状态" });
+        }
+        if (unsupportedText.empty()) {
+            unsupportedText = rawValue(rawRow, { L"Unsupported" });
+        }
+        if (protocolVersion.empty()) {
+            protocolVersion = rawValue(rawRow, { L"Version", L"Protocol" });
+        }
+        if (lastStatus.empty()) {
+            lastStatus = rawValue(rawRow, { L"LastStatus" });
+        }
+    }
+    snapshot.rows.reserve(rawRows.size());
+    for (const std::vector<std::wstring>& rawRow : rawRows) {
+        if (!isDataRow(rawRow)) {
+            continue;
+        }
+        ++totalRows;
+        const std::wstring risk = rawValue(rawRow, { L"RiskText", L"Risk", L"FlagsText", L"Flags", L"状态", L"Status" });
+        const bool risky = ContainsCaseInsensitive(risk, L"风险") ||
+            ContainsCaseInsensitive(risk, L"异常") ||
+            ContainsCaseInsensitive(risk, L"failed") ||
+            ContainsCaseInsensitive(risk, L"失败") ||
+            ContainsCaseInsensitive(risk, L"rejected");
+        if (risky) {
+            ++riskRows;
+        }
+        if (riskOnly && !risky) {
+            continue;
+        }
+        if (!filterText.empty() && !ContainsCaseInsensitive(MergeRowText(rawRow), filterText)) {
+            continue;
+        }
+        std::vector<std::wstring> cells(snapshot.columns.size());
+        for (std::size_t column = 0; column < snapshot.columns.size(); ++column) {
+            const std::wstring& name = snapshot.columns[column];
+            if (name == L"#") {
+                cells[column] = std::to_wstring(snapshot.rows.size());
+            } else if (name == L"Detail") {
+                cells[column] = rawValue(rawRow, { L"Detail" });
+            } else {
+                cells[column] = displayValue(rawRow, name);
+            }
+        }
+        snapshot.rows.push_back(std::move(cells));
+    }
+
+    const std::size_t effectiveTotal = reportedTotalRows == 0 ? totalRows : reportedTotalRows;
+    const std::size_t effectiveReturned = reportedReturnedRows == 0 ? totalRows : reportedReturnedRows;
+    std::wostringstream status;
+    status << L"状态：" << pageName << L"已刷新，显示 " << snapshot.rows.size()
+           << L"，返回 " << effectiveReturned << L"/" << effectiveTotal;
+    if (riskRows != 0) {
+        status << L"，风险/异常 " << riskRows;
+    }
+    if (!queryStatus.empty()) {
+        status << L"，Query " << queryStatus;
+    }
+    if (!unsupportedText.empty()) {
+        status << L"，Unsupported " << unsupportedText;
+    }
+    if (!protocolVersion.empty()) {
+        status << L"，Ver " << protocolVersion;
+    }
+    if (!lastStatus.empty()) {
+        status << L"，Last " << lastStatus;
+    }
+    snapshot.statusText = status.str();
+    return snapshot;
+}
+
+    void RebuildR0ValueProjection(const KernelFeatureId featureId) {
+        auto snapshot=BuildR0Values(featureId,input_->descriptor.title,currentRawColumns_,*currentRawRows_,input_->filter,input_->riskOnly,{},0);
+        currentColumns_=std::move(snapshot.columns);currentRows_=std::move(snapshot.rows);currentRowIndents_.clear();
+        ClearTables();
+        const std::vector<std::wstring> canonical = CanonicalColumnNames(featureId);
+        for (std::size_t index = 0; index < currentColumns_.size(); ++index) {
+            const std::wstring& name = currentColumns_[index];
+            int width = (name != L"#" && !HasColumn(canonical, name)) ? 0 : ColumnWidth(name);
+            if (name == L"对象") width = 180;
+            else if (name == L"热键ID" || name == L"进程ID" || name == L"线程ID" || name == L"Flags") width = 80;
+            else if (name == L"热键" || name == L"类型" || name == L"范围" || name == L"VK/Mod") width = 130;
+            else if (name == L"函数/偏移") width = 170;
+            else if (name == L"详情") width = 300;
+            else if (name == L"项目" || name == L"Capability") width = 170;
+            else if (name == L"值" || name == L"摘要" || name == L"Features" || name == L"字段" || name == L"原因") width = 260;
+            else if (name == L"Tx" || name == L"Address" || name == L"回调") width = 165;
+            else if (name == L"PID" || name == L"TID" || name == L"Bytes") width = 72;
+            else if (name == L"进程" || name == L"Process") width = 180;
+            else if (name == L"Detail") width = 320;
+            SetColumn(static_cast<int>(index), name, width);
+        }
+
+        WriteText(statusText_,snapshot.statusText.c_str());
+        if(currentRows_.empty())WriteText(detailEdit_,L"当前过滤条件下没有 R0 证据记录。");
+        else {result_->selectFirst=true;SelectionDetail();}
+    }
+
 };
 } // namespace
