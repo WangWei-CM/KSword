@@ -334,6 +334,8 @@ private:
 
     // Hidden diagnostics retain their page identities but do not query global state.
     void initializeVisibleDiagnosticPage();
+    bool isPacketProjectionVisible() const;
+    void synchronizeVisiblePacketProjection();
     void loadHostsFileEditor();
 
     // initializeTrafficMonitorTab：
@@ -1567,6 +1569,8 @@ private:
     std::uint64_t m_packetTimelineAccumulatedActive100ns = 0; // 已完成会话累计监控时长，停机时不增加。
     std::uint64_t m_packetTimelineLastHeartbeatSecond = 0; // 时间轴空闲刷新秒号，用于空流量时补零速率。
     qint64 m_lastPacketTimelineRefreshMs = 0; // 上次把完整点集复制到时间轴控件的时间，用于限制高频全量复制。
+    bool m_packetTableProjectionDirty = false;
+    bool m_packetTimelineProjectionDirty = false;
     bool m_packetTimelineUserSelectionActive = false;      // 用户是否已启用流量时间轴框选过滤。
     bool m_packetTimelineSessionActive = false;            // 是否存在正在运行的时间轴监控会话。
 

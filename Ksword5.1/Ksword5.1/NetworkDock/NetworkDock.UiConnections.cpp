@@ -168,6 +168,7 @@ void NetworkDock::initializeConnections()
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
         {
             initializeVisibleDiagnosticPage();
+            synchronizeVisiblePacketProjection();
             QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
             if (currentPage == m_firewallPage && m_firewallPage != nullptr)
             {

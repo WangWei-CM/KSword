@@ -308,6 +308,32 @@ namespace
     }
 }
 
+bool NetworkDock::isPacketProjectionVisible() const
+{
+    return isVisible() && m_trafficMonitorPage != nullptr && m_trafficMonitorPage->isVisible();
+}
+
+void NetworkDock::synchronizeVisiblePacketProjection()
+{
+    if (!isPacketProjectionVisible())
+    {
+        return;
+    }
+    // Canonical packets, rate buckets and NIDS continue to advance while hidden.
+    // Apply the current range before rebuilding a timeline-filtered packet view.
+    if (m_packetTimelineProjectionDirty)
+    {
+        refreshPacketTimelineRange();
+        refreshPacketTimelinePoints();
+        refreshPacketTimelineRatePoints();
+        m_packetTimelineProjectionDirty = false;
+    }
+    if (m_packetTableProjectionDirty)
+    {
+        rebuildMonitorTableByFilter();
+    }
+}
+
 void NetworkDock::onPacketCaptured(const ks::network::PacketRecord& packetRecord)
 {
     // timelineTime100ns 是“只统计监控开启时间”的压缩时间：
@@ -333,7 +359,11 @@ void NetworkDock::onPacketCaptured(const ks::network::PacketRecord& packetRecord
     processNidsPacket(packetRecord);
 
     // 当前报文若通过“组合过滤条件”才追加到主表（过滤关闭时默认全部通过）。
-    if (packetPassesMonitorFilter(packetRecord.sequenceId, packetRecord))
+    if (!isPacketProjectionVisible() || m_packetTableProjectionDirty)
+    {
+        m_packetTableProjectionDirty = true;
+    }
+    else if (packetPassesMonitorFilter(packetRecord.sequenceId, packetRecord))
     {
         appendPacketToMonitorTable(packetRecord);
     }
@@ -412,7 +442,8 @@ void NetworkDock::flushPendingPacketsToUi()
     }
 
     // 批量更新表格期间临时关闭重绘，减少 UI 抖动与卡顿。
-    const bool tableUpdateDisabled = !packetBatch.empty() && m_packetTable != nullptr;
+    const bool tableUpdateDisabled = !packetBatch.empty() && m_packetTable != nullptr
+        && isPacketProjectionVisible() && !m_packetTableProjectionDirty;
     const bool tableUpdatesEnabled = tableUpdateDisabled && m_packetTable->updatesEnabled();
     if (tableUpdateDisabled)
     {
@@ -786,6 +817,11 @@ void NetworkDock::applyDomainResolutionResult(
     {
         return;
     }
+    if (!isPacketProjectionVisible() || m_packetTableProjectionDirty)
+    {
+        m_packetTableProjectionDirty = true;
+        return;
+    }
     const int domainColumn = toPacketColumn(PacketTableColumn::RemoteDomain);
     for (int rowIndex = 0; rowIndex < m_packetTable->rowCount(); ++rowIndex)
     {
@@ -803,6 +839,11 @@ void NetworkDock::applyDomainResolutionResult(
 
 void NetworkDock::rebuildMonitorTableByFilter()
 {
+    if (!isPacketProjectionVisible())
+    {
+        m_packetTableProjectionDirty = true;
+        return;
+    }
     if (m_packetTable == nullptr)
     {
         return;
@@ -879,6 +920,7 @@ void NetworkDock::rebuildMonitorTableByFilter()
     {
         m_packetTable->scrollToBottom();
     }
+    m_packetTableProjectionDirty = false;
 }
 
 void NetworkDock::applyPacketTimelineSelection(
@@ -930,11 +972,6 @@ void NetworkDock::resetPacketTimelineToCurrentRange()
 
 void NetworkDock::refreshPacketTimelineRange()
 {
-    if (m_packetTimelineWidget == nullptr)
-    {
-        return;
-    }
-
     std::uint64_t rangeStart100ns = 0;
     // 当前累计监控时长始终不早于已缓存报文的压缩时间戳，
     // 因此不必在每个刷新周期扫描整个报文缓存来重算右边界。
@@ -953,6 +990,15 @@ void NetworkDock::refreshPacketTimelineRange()
 
     m_packetTimelineRangeStart100ns = rangeStart100ns;
     m_packetTimelineRangeEnd100ns = rangeEnd100ns;
+    if (!isPacketProjectionVisible())
+    {
+        m_packetTimelineProjectionDirty = true;
+        return;
+    }
+    if (m_packetTimelineWidget == nullptr)
+    {
+        return;
+    }
     m_packetTimelineWidget->setCaptureRange(rangeStart100ns, rangeEnd100ns);
     m_packetTimelineSelectionStart100ns = m_packetTimelineWidget->selectionStart100ns();
     m_packetTimelineSelectionEnd100ns = m_packetTimelineWidget->selectionEnd100ns();
@@ -960,6 +1006,11 @@ void NetworkDock::refreshPacketTimelineRange()
 
 void NetworkDock::refreshPacketTimelinePoints()
 {
+    if (!isPacketProjectionVisible())
+    {
+        m_packetTimelineProjectionDirty = true;
+        return;
+    }
     if (m_packetTimelineWidget == nullptr)
     {
         return;
@@ -970,6 +1021,11 @@ void NetworkDock::refreshPacketTimelinePoints()
 
 void NetworkDock::refreshPacketTimelineRatePoints()
 {
+    if (!isPacketProjectionVisible())
+    {
+        m_packetTimelineProjectionDirty = true;
+        return;
+    }
     if (m_packetTimelineWidget == nullptr)
     {
         return;
@@ -1327,6 +1383,13 @@ void NetworkDock::trimOldestPacketWhenNeeded()
         m_packetTimelineEventPoints.erase(
             m_packetTimelineEventPoints.begin(),
             m_packetTimelineEventPoints.begin() + static_cast<std::ptrdiff_t>(timelineEraseCount));
+    }
+
+    if (!isPacketProjectionVisible() || m_packetTableProjectionDirty)
+    {
+        m_packetTableProjectionDirty = true;
+        m_packetTimelineProjectionDirty = true;
+        return;
     }
 
     // 仅在当前表确有可见裁剪时才删除行，减少不必要的 UI 操作。
