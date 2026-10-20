@@ -15,6 +15,9 @@
 #include <QAction>
 #include <QMenu>
 
+#include <functional>
+#include <utility>
+
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
 
@@ -161,6 +164,34 @@ namespace ksword::driver_dock_internal
 
 namespace
 {
+    // 只观察对象页宿主；隐藏期间保留 dirty，重新显示时在首帧前消费当前子页。
+    class DriverObjectEvidenceShowObserver final : public QObject
+    {
+    public:
+        DriverObjectEvidenceShowObserver(QWidget* page, std::function<void()> refresh)
+            : QObject(page), m_refresh(std::move(refresh))
+        {
+            page->installEventFilter(this);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event != nullptr && event->type() == QEvent::Show)
+            {
+                const QPointer<QObject> guardWatched(watched);
+                const auto refresh = m_refresh;
+                refresh();
+                // 回调可能触发宿主销毁，此时不能再把 Show 送给已销毁对象。
+                return guardWatched.isNull();
+            }
+            return false;
+        }
+
+    private:
+        std::function<void()> m_refresh;
+    };
+
     QString driverTableCellText(QTableWidget* table, const int rowIndex, const int columnIndex)
     {
         // driverTableCellText：
@@ -248,6 +279,14 @@ void DriverDock::changeEvent(QEvent* event)
         // 签名缓存只保存语义；切换语言时同步重建行文本、筛选结果、详情和摘要。
         rebuildLoadedModuleTable();
         updateLoadedModuleEvidenceStatusText();
+        ++m_driverObjectLanguageRevision;
+        refreshDriverObjectQueryPresentation();
+        rebuildDriverObjectEvidenceViews();
+    }
+    else if (event != nullptr &&
+        (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange))
+    {
+        refreshFastIoEvidenceTheme();
     }
 }
 
@@ -1231,6 +1270,14 @@ void DriverDock::initializeObjectInfoTab()
         m_objectDetailTabWidget->setCurrentIndex(0);
     }
 
+    const QPointer<DriverDock> guardThis(this);
+    new DriverObjectEvidenceShowObserver(m_objectInfoPage, [guardThis]()
+        {
+            if (guardThis != nullptr)
+            {
+                guardThis->rebuildDriverObjectEvidenceViews();
+            }
+        });
     rebuildDriverObjectEvidenceViews();
 
     m_tabWidget->addTab(
@@ -1416,6 +1463,8 @@ void DriverDock::initializeConnections()
         });
     connect(m_objectEvidenceRefreshButton, &QPushButton::clicked, this, [this]()
         {
+            // 显式刷新继续重新投影完整缓存；隐藏子页在首次可见时消费同一最新代次。
+            ++m_driverObjectEvidenceRevision;
             rebuildDriverObjectEvidenceViews();
         });
     connect(m_objectDetailTabWidget, &QTabWidget::currentChanged, this, [this](int)

@@ -19,6 +19,7 @@
 #include <QPointer>
 #include <QWidget>
 
+#include <array>    // std::array：五个对象投影各自记录已消费的快照与语言代次。
 #include <atomic>   // std::atomic_bool：调试捕获线程运行标记。
 #include <deque>    // 最近调试记录按固定容量保留，避免头删搬移。
 #include <mutex>    // 捕获线程只接纳值数据，文档仍由 GUI 线程拥有。
@@ -315,6 +316,12 @@ private:
     // - 处理逻辑：只做本地表格投影，不重新访问驱动；
     // - 返回：无。
     void rebuildDriverObjectEvidenceViews();
+
+    // refreshDriverObjectQueryPresentation：只更新已接受快照的查询状态与公共摘要，不改变查询生命周期。
+    void refreshDriverObjectQueryPresentation();
+
+    // refreshFastIoEvidenceTheme：保留表项和地址身份，只在真实主题变化后更新已存在行的风险刷子。
+    void refreshFastIoEvidenceTheme(bool freshlyProjected = false);
 
     // fillObjectDriverNameFromSelection：
     // - 从概览页当前选中服务名推导 \Driver\Name；
@@ -717,6 +724,22 @@ private:
     QLabel* m_fastIoStatusLabel = nullptr;            // FastIo 页状态标签。
     bool m_objectInfoQuerying = false;                // 查询中标记。
     std::uint64_t m_objectInfoQueryTicket = 0;        // 查询序号。
+
+    struct DriverObjectProjectionRevision
+    {
+        std::uint64_t object = 0;
+        std::uint64_t integrity = 0;
+        std::uint64_t language = 0;
+    };
+    // 顺序与现有五个页面指针映射对应；只消费当前可见页，不替换原表格或其模型。
+    std::array<DriverObjectProjectionRevision, 5> m_driverObjectProjectionRevisions{};
+    std::uint64_t m_driverObjectEvidenceRevision = 1;
+    std::uint64_t m_driverIntegrityEvidenceRevision = 1;
+    std::uint64_t m_driverObjectLanguageRevision = 1;
+    bool m_driverObjectEvidenceProjecting = false;
+    std::array<std::uint32_t, 4> m_fastIoRiskThemeColors{};
+    bool m_fastIoRiskThemeDarkMode = false;
+    bool m_hasFastIoRiskTheme = false;
 
     // ========================= 页签5：模块 Cross-View =========================
     QWidget* m_moduleCrossViewPage = nullptr;         // 模块 Cross-View 页容器。

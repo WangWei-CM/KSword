@@ -499,6 +499,8 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
 
             guardThis->m_lastDriverIntegrityResult = result;
             guardThis->m_driverIntegrityCache = result.entries;
+            ++guardThis->m_driverIntegrityEvidenceRevision;
+            guardThis->rebuildDriverObjectEvidenceViews();
             guardThis->rebuildDriverIntegrityTable();
             guardThis->rebuildModuleCrossViewTable();
             guardThis->showSelectedDriverIntegrityDetail();
@@ -553,7 +555,7 @@ void DriverDock::refreshDriverIntegrityAsync(const bool cpuOnly)
             if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
                 guardThis.data(),
                 QStringLiteral("driver-integrity-cross-view-apply"),
-                { guardThis->m_integrityTable, guardThis->m_moduleCrossViewTable },
+                { guardThis->m_integrityTable, guardThis->m_moduleCrossViewTable, guardThis->m_fastIoEvidenceTable },
                 commitIntegrity))
             {
                 return;

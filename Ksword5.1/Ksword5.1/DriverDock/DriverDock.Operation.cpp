@@ -1,6 +1,9 @@
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "DriverDock.Internal.h"
+
+#include <QScopedValueRollback>
+#include <QScrollBar>
 #include "DriverDock.ModuleDumpFile.h"
 #include "../MemoryDock/MemoryAccessBackend.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
@@ -203,6 +206,9 @@ namespace
     // integrityClassText / integrityRiskText 已收口到 UI/IntegrityRiskPresentation（此处不再自带一份，
     // 调用点直接用 ks::ui::integrity::classText / riskText），避免新增风险位只补进别处时，
     // 本页的风险单元格显示为空。
+
+    constexpr int kFastIoEvidenceRiskRole = Qt::UserRole + 1;
+    constexpr int kDriverObjectEvidenceIdentityRole = Qt::UserRole + 2;
 
     // appendEvidenceRow：
     // - 输入：通用证据表、行号和字段内容；
@@ -3584,7 +3590,7 @@ void DriverDock::querySelectedDriverObjectInfo()
 
 void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQueryResult& result)
 {
-    // DriverObject 查询会一次重建对象、派遣、设备、扩展、Fast I/O 五张证据表。
+    // 保留五张对象表的菜单提交屏障；接受快照后由当前可见页消费新的投影代次。
     const QPointer<DriverDock> guardThis(this);
     const auto deferredResult =
         std::make_shared<ksword::ark::DriverObjectQueryResult>(result);
@@ -3620,7 +3626,20 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
         m_queryObjectInfoButton->setEnabled(true);
     }
 
-    if (m_objectInfoStatusLabel != nullptr)
+    ++m_driverObjectEvidenceRevision;
+    refreshDriverObjectQueryPresentation();
+    rebuildDriverObjectEvidenceViews();
+}
+
+void DriverDock::refreshDriverObjectQueryPresentation()
+{
+    if (!m_hasDriverObjectQueryResult)
+    {
+        return;
+    }
+    const auto& result = m_lastDriverObjectQueryResult;
+    // 语言变化不能把仍在执行的新查询状态改成上一次查询的状态。
+    if (!m_objectInfoQuerying && m_objectInfoStatusLabel != nullptr)
     {
         const QString readableIoText = describeDriverCollection(result.io);
         m_objectInfoStatusLabel->setText(
@@ -3655,40 +3674,101 @@ void DriverDock::applyDriverObjectQueryResult(const ksword::ark::DriverObjectQue
         summary.field(QStringLiteral("TotalDeviceObjects"), QString::number(result.totalDeviceCount));
         m_objectInfoSummaryEdit->setDocument(summary);
     }
-    rebuildDriverObjectEvidenceViews();
 }
 
 void DriverDock::rebuildDriverObjectEvidenceViews()
 {
     // 输入：当前 DriverObject 缓存与完整性缓存。
     // 处理：仅在 UI 线程投影为只读表格，不重新访问驱动。
-    // 返回：无。
+    // 返回：无；无数据/语言变化的热切不触碰文档、表项、排序、选区或滚动位置。
+    if (m_driverObjectEvidenceProjecting || m_objectInfoPage == nullptr ||
+        !m_objectInfoPage->isVisible() || m_objectDetailTabWidget == nullptr)
+    {
+        return;
+    }
+    QWidget* const currentPage = m_objectDetailTabWidget->currentWidget();
+    const std::array<QWidget*, 5> pages = {
+        m_driverObjectPage, m_deviceObjectPage, m_driverExtensionPage, m_majorFunctionPage, m_fastIoPage
+    };
+    const auto page = std::find(pages.begin(), pages.end(), currentPage);
+    if (page == pages.end())
+    {
+        return;
+    }
+    const std::size_t pageIndex = static_cast<std::size_t>(page - pages.begin());
+    const DriverObjectProjectionRevision revision = {
+        m_driverObjectEvidenceRevision,
+        pageIndex == 4 ? m_driverIntegrityEvidenceRevision : 0,
+        m_driverObjectLanguageRevision
+    };
+    const auto& applied = m_driverObjectProjectionRevisions[pageIndex];
+    if (applied.object == revision.object && applied.integrity == revision.integrity &&
+        applied.language == revision.language)
+    {
+        if (pageIndex == 4)
+        {
+            refreshFastIoEvidenceTheme();
+        }
+        return;
+    }
+
+    const std::array<QTableWidget*, 5> tables = {
+        m_driverObjectEvidenceTable, m_deviceObjectTable, m_driverExtensionEvidenceTable,
+        m_majorFunctionTable, m_fastIoEvidenceTable
+    };
+    const QPointer<DriverDock> guardThis(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+        this, QStringLiteral("driver-object-evidence-projection"), { tables[pageIndex] },
+        [guardThis]()
+        {
+            if (guardThis != nullptr)
+            {
+                guardThis->rebuildDriverObjectEvidenceViews();
+            }
+        }))
+    {
+        return;
+    }
+    const QScopedValueRollback<bool> projecting(m_driverObjectEvidenceProjecting, true);
+    QTableWidget* const currentTable = tables[pageIndex];
+    const int previousColumn = currentTable != nullptr ? currentTable->currentColumn() : -1;
+    const bool previouslySorting = currentTable != nullptr && currentTable->isSortingEnabled();
+    const int previousSortColumn = currentTable != nullptr ? currentTable->horizontalHeader()->sortIndicatorSection() : -1;
+    const Qt::SortOrder previousSortOrder = currentTable != nullptr
+        ? currentTable->horizontalHeader()->sortIndicatorOrder() : Qt::AscendingOrder;
+    const QTableWidgetItem* const previousItem = currentTable != nullptr
+        ? currentTable->item(currentTable->currentRow(), 0) : nullptr;
+    const QVariant previousIdentity = previousItem != nullptr
+        ? previousItem->data(kDriverObjectEvidenceIdentityRole) : QVariant();
+    const int previousVerticalScroll = currentTable != nullptr ? currentTable->verticalScrollBar()->value() : 0;
+    const int previousHorizontalScroll = currentTable != nullptr ? currentTable->horizontalScrollBar()->value() : 0;
     if (!m_hasDriverObjectQueryResult)
     {
-        if (m_driverObjectPageSummaryEdit != nullptr)
+        if (pageIndex == 0 && m_driverObjectPageSummaryEdit != nullptr)
         {
             m_driverObjectPageSummaryEdit->setDocument(ks::ui::FieldDocument{}.note(
                 QStringLiteral("请先执行 DriverObject 查询。")));
         }
-        if (m_driverExtensionStatusLabel != nullptr)
+        if (pageIndex == 2 && m_driverExtensionStatusLabel != nullptr)
         {
             m_driverExtensionStatusLabel->setText(
                 driverText(
                     "driver.object.driver_extension.status.waiting",
                     QStringLiteral("状态：等待 DriverObject 查询。")));
         }
-        if (m_fastIoStatusLabel != nullptr)
+        if (pageIndex == 4 && m_fastIoStatusLabel != nullptr)
         {
             m_fastIoStatusLabel->setText(
                 driverText(
                     "driver.object.fast_io.status.waiting",
                     QStringLiteral("状态：等待 Driver Integrity 证据。")));
         }
+        m_driverObjectProjectionRevisions[pageIndex] = revision;
         return;
     }
 
     const ksword::ark::DriverObjectQueryResult& result = m_lastDriverObjectQueryResult;
-    if (m_driverObjectPageSummaryEdit != nullptr)
+    if (pageIndex == 0 && m_driverObjectPageSummaryEdit != nullptr)
     {
         ks::ui::FieldDocument summary;
         summary.field(QStringLiteral("DriverObject"), formatCompactAddress(result.driverObjectAddress));
@@ -3706,7 +3786,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_driverObjectPageSummaryEdit->setDocument(summary);
     }
 
-    if (m_driverObjectEvidenceTable != nullptr)
+    if (pageIndex == 0 && m_driverObjectEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_driverObjectEvidenceTable);
         m_driverObjectEvidenceTable->setSortingEnabled(false);
@@ -3756,11 +3836,13 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 index == startIoRowIndex
                     ? driverStartIoStateText(result.startIo, result.io.ok)
                     : readOnlySummaryText);
+            m_driverObjectEvidenceTable->item(index, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), rows[index] });
         }
         m_driverObjectEvidenceTable->setSortingEnabled(true);
     }
 
-    if (m_majorFunctionTable != nullptr)
+    if (pageIndex == 3 && m_majorFunctionTable != nullptr)
     {
         const QSignalBlocker blocker(m_majorFunctionTable);
         m_majorFunctionTable->setSortingEnabled(false);
@@ -3804,6 +3886,8 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
              */
             majorItem->setData(Qt::UserRole + 1,
                 static_cast<qulonglong>(majorEntry.slotAddress));
+            majorItem->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), majorEntry.majorFunction });
             m_majorFunctionTable->setItem(rowIndex, 0, majorItem);
             m_majorFunctionTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(majorEntry.dispatchAddress)));
             m_majorFunctionTable->setItem(rowIndex, 2, createReadOnlyItem(QString::fromStdWString(majorEntry.moduleName).isEmpty()
@@ -3836,6 +3920,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             m_majorFunctionTable->insertRow(rowIndex);
             QTableWidgetItem* const startIoItem = createReadOnlyItem(QStringLiteral("DriverStartIo"));
             startIoItem->setData(Qt::UserRole, static_cast<qulonglong>(startIo.address));
+            startIoItem->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)),
+                    std::numeric_limits<quint32>::max() });
             m_majorFunctionTable->setItem(rowIndex, 0, startIoItem);
             m_majorFunctionTable->setItem(rowIndex, 1, createReadOnlyItem(
                 present ? formatCompactAddress(startIo.address) : QStringLiteral("-")));
@@ -3850,7 +3937,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_majorFunctionTable->setSortingEnabled(true);
     }
 
-    if (m_deviceObjectTable != nullptr)
+    if (pageIndex == 1 && m_deviceObjectTable != nullptr)
     {
         const QSignalBlocker blocker(m_deviceObjectTable);
         m_deviceObjectTable->setSortingEnabled(false);
@@ -3862,6 +3949,9 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             m_deviceObjectTable->setItem(rowIndex, 0, createReadOnlyItem(deviceEntry.relationDepth == 0U
                 ? QStringLiteral("Root")
                 : QStringLiteral("Attached +%1").arg(deviceEntry.relationDepth)));
+            m_deviceObjectTable->item(rowIndex, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(deviceEntry.rootDeviceObjectAddress)),
+                    QVariant::fromValue(static_cast<qulonglong>(deviceEntry.deviceObjectAddress)), deviceEntry.relationDepth });
             m_deviceObjectTable->setItem(rowIndex, 1, createReadOnlyItem(formatCompactAddress(deviceEntry.deviceObjectAddress)));
             QTableWidgetItem* nameItem = createReadOnlyItem(QString::fromStdWString(deviceEntry.deviceName).isEmpty()
                 ? QStringLiteral("(unnamed)")
@@ -3879,14 +3969,14 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
         m_deviceObjectTable->setSortingEnabled(true);
     }
 
-    if (m_driverExtensionStatusLabel != nullptr)
+    if (pageIndex == 2 && m_driverExtensionStatusLabel != nullptr)
     {
         m_driverExtensionStatusLabel->setText(
             driverText(
                 "driver.object.driver_extension.status.projected",
                 QStringLiteral("状态：DriverExtension 未直接暴露；当前仅展示 DriverObject / DeviceChain / FastIo 关联证据。")));
     }
-    if (m_driverExtensionEvidenceTable != nullptr)
+    if (pageIndex == 2 && m_driverExtensionEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_driverExtensionEvidenceTable);
         m_driverExtensionEvidenceTable->setSortingEnabled(false);
@@ -3923,11 +4013,13 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 driverText("driver.evidence.status.unknown", QStringLiteral("未知")),
                 QStringLiteral("0"),
                 detailTexts[index]);
+            m_driverExtensionEvidenceTable->item(index, 0)->setData(kDriverObjectEvidenceIdentityRole,
+                QVariantList{ QVariant::fromValue(static_cast<qulonglong>(result.driverObjectAddress)), evidenceNames[index] });
         }
         m_driverExtensionEvidenceTable->setSortingEnabled(true);
     }
 
-    if (m_fastIoStatusLabel != nullptr)
+    if (pageIndex == 4 && m_fastIoStatusLabel != nullptr)
     {
         m_fastIoStatusLabel->setText(
             driverText(
@@ -3935,7 +4027,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 QStringLiteral("状态：FastIo 关联证据由 Driver Integrity 页回填，当前记录数 %1。"))
             .arg(m_driverIntegrityCache.size()));
     }
-    if (m_fastIoEvidenceTable != nullptr)
+    if (pageIndex == 4 && m_fastIoEvidenceTable != nullptr)
     {
         const QSignalBlocker blocker(m_fastIoEvidenceTable);
         m_fastIoEvidenceTable->setSortingEnabled(false);
@@ -3979,6 +4071,10 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
             {
                 classItem->setData(Qt::UserRole,
                     static_cast<qulonglong>(row.evidenceClass));
+                classItem->setData(kFastIoEvidenceRiskRole, static_cast<quint32>(row.riskFlags));
+                classItem->setData(kDriverObjectEvidenceIdentityRole,
+                    QVariantList{ row.evidenceClass,
+                        QVariant::fromValue(static_cast<qulonglong>(row.objectAddress)), row.ordinal });
             }
             if (QTableWidgetItem* const slotItem =
                     m_fastIoEvidenceTable->item(rowIndex, 1))
@@ -3992,9 +4088,7 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                 targetItem->setData(Qt::UserRole,
                     static_cast<qulonglong>(row.targetAddress));
             }
-            // 整行高亮：FastIo/StartIo/DriverObject 证据里带 HIDDEN_HOOK 等位的行整行标红；
-            // 此时排序已关闭，改颜色不会触发重排。
-            ks::ui::integrity::applyRiskRowHighlight(m_fastIoEvidenceTable, rowIndex, row.riskFlags);
+            // 风险位随原表项保存；数据提交结束后统一着色，换主题时仅更新这些角色。
             ++visibleRows;
         }
         if (visibleRows == 0)
@@ -4012,8 +4106,68 @@ void DriverDock::rebuildDriverObjectEvidenceViews()
                     "driver.object.fast_io.empty",
                     QStringLiteral("当前 Driver Integrity 缓存未返回 FastIo 证据。")));
         }
+        refreshFastIoEvidenceTheme(true);
         m_fastIoEvidenceTable->setSortingEnabled(true);
     }
+    if (currentTable != nullptr && previouslySorting && previousSortColumn >= 0 &&
+        previousSortColumn < currentTable->columnCount())
+    {
+        currentTable->sortItems(previousSortColumn, previousSortOrder);
+    }
+    if (currentTable != nullptr && previousIdentity.isValid())
+    {
+        const QSignalBlocker blocker(currentTable);
+        for (int row = 0; row < currentTable->rowCount(); ++row)
+        {
+            const QTableWidgetItem* const item = currentTable->item(row, 0);
+            if (item != nullptr && item->data(kDriverObjectEvidenceIdentityRole) == previousIdentity)
+            {
+                currentTable->setCurrentCell(row, std::clamp(previousColumn, 0, currentTable->columnCount() - 1));
+                break;
+            }
+        }
+        currentTable->verticalScrollBar()->setValue(previousVerticalScroll);
+        currentTable->horizontalScrollBar()->setValue(previousHorizontalScroll);
+    }
+    m_driverObjectProjectionRevisions[pageIndex] = revision;
+}
+
+void DriverDock::refreshFastIoEvidenceTheme(const bool freshlyProjected)
+{
+    if (m_fastIoEvidenceTable == nullptr || m_fastIoPage == nullptr ||
+        (!freshlyProjected && !m_fastIoPage->isVisible()))
+    {
+        return;
+    }
+    const std::array<std::uint32_t, 4> colors = {
+        KswordTheme::ErrorColor().rgba(), KswordTheme::ErrorBackgroundColor().rgba(),
+        KswordTheme::WarningColor().rgba(), KswordTheme::WarningBackgroundColor().rgba()
+    };
+    const bool darkMode = KswordTheme::IsDarkModeEnabled();
+    if (!freshlyProjected && m_hasFastIoRiskTheme &&
+        m_fastIoRiskThemeColors == colors && m_fastIoRiskThemeDarkMode == darkMode)
+    {
+        return;
+    }
+    const QSignalBlocker blocker(m_fastIoEvidenceTable);
+    const bool sortingEnabled = m_fastIoEvidenceTable->isSortingEnabled();
+    m_fastIoEvidenceTable->setSortingEnabled(false);
+    for (int row = 0; row < m_fastIoEvidenceTable->rowCount(); ++row)
+    {
+        const QTableWidgetItem* const classItem = m_fastIoEvidenceTable->item(row, 0);
+        if (classItem != nullptr)
+        {
+            const QVariant riskFlags = classItem->data(kFastIoEvidenceRiskRole);
+            if (riskFlags.isValid())
+            {
+                ks::ui::integrity::applyRiskRowHighlight(m_fastIoEvidenceTable, row, riskFlags.toUInt());
+            }
+        }
+    }
+    m_fastIoEvidenceTable->setSortingEnabled(sortingEnabled);
+    m_fastIoRiskThemeColors = colors;
+    m_fastIoRiskThemeDarkMode = darkMode;
+    m_hasFastIoRiskTheme = true;
 }
 
 void DriverDock::rebuildDriverServiceTableByFilter()
