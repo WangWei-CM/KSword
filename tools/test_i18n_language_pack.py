@@ -8,6 +8,38 @@ import i18n_language_pack as i18n
 
 
 class I18nLanguagePackTests(unittest.TestCase):
+    def test_include_header_names_are_not_ui_literals(self) -> None:
+        source = ('#include "FieldTreeModel.h"\n'
+                  '  # include /* header */ "TableRowFilterSupport.h"\n'
+                  '#include <TableRowFilterIdentityState.h>\n'
+                  '#include \\\n "中文头文件.h"\n'
+                  '/* leading comment */ #include "SameName.h"\n'
+                  'label.setText("SameName.h");\n')
+        self.assertEqual([("SameName.h", 7)], list(i18n.extract_cpp_literals(source)))
+        self.assertEqual([], list(i18n.extract_cpp_concatenated_literals(source)))
+
+    def test_include_looking_ui_text_and_other_directives_still_audit(self) -> None:
+        source = ('#define UI_LABEL "FieldTreeModel.h"\n'
+                  'label.setText("TableRowFilterSupport.h");\n'
+                  'label.setText("TableRowFilterIdentityState.h");\n'
+                  'label.setText(R"(#include "中文正文.h")");\n')
+        values = dict(i18n.extract_cpp_literals(source))
+        for text in ("FieldTreeModel.h", "TableRowFilterSupport.h",
+                     "TableRowFilterIdentityState.h", '#include "中文正文.h"'):
+            self.assertIn(text, values)
+        missing = i18n.audit(
+            {text: i18n.ExtractedString(text) for text in values},
+            {"translations": {}, "context_translations": {}, "source_translations": {}},
+            {"translations": {}, "context_translations": {}, "source_translations": {}},
+        )
+        for text in ("FieldTreeModel.h", "TableRowFilterSupport.h", "TableRowFilterIdentityState.h"):
+            for language in ("zh-CN", "en-US"):
+                self.assertIn(f"missing {language} source translation: {text!r}", missing)
+
+    def test_hash_after_code_is_not_an_include_directive(self) -> None:
+        source = 'int value; #include "BodyText.h"\n'
+        self.assertEqual([("BodyText.h", 1)], list(i18n.extract_cpp_literals(source)))
+
     def test_extracts_compiler_concatenated_literal(self) -> None:
         source = '''
 QString value = QStringLiteral(
