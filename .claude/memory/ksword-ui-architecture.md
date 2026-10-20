@@ -424,3 +424,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 主窗口先通过原内存退出守卫，再冻结新 lease、请求会话停止并用计时器等已接受收尾；最后才查询/停止 R0 服务。超时保持可见，提供重试/取消，不能用固定毫秒直接 quit 杀掉事务。取消退出不撤销已经接受的 STOP；等待期间新建的 MemoryDock 在就绪边界重新进入原退出确认。
 - 正常关闭、UIAccess/Admin 与功能级提权重启共用弱 owner 的协调退出入口，派生析构第一步撤销登记。运行期先冻结启动器值意图，等全部 cleanup/SCM 就绪才启动替代进程，避免子进程35s先超时而父级32s后Retry到40s才退出；Retry保留意图，用户Cancel和首轮内存确认拒绝清除意图，晚到MemoryDock重新确认保留意图。仅替换既有 wait-PID 键和值、保留其它 argv；父侧验证实际存活的 direct-child/same-exe 后才退出，失败恢复旧窗口及真实R0状态。子侧在首业务窗口/采样前验证父关系、映像及创建时间；超时或验证失败停止启动，不能靠 privilege marker 绕过等待。原崩溃报告 bool API 保持旧语义，正常接管使用独立状态矩阵。
 - 验证边界：真实 HostX64 翻译单元、QtCore 慢 STOP/事务与生产状态函数的假 WinAPI 矩阵可证明调度/值资源约束；不替代用户的实际 GUI、UAC/AppInfo、R0 STOP、语言/主题与 DPI 验收。
+
+- 2026-10-20 启动接管竞态：父进程已退出时，只要另一个句柄仍保活其进程对象，`OpenProcess` 仍能成功，而 `QueryFullProcessImageNameW` 可失败并返回 31。正常接管应先保留 direct-parent 与创建时间校验，区分“映像查询失败”及“已知映像不匹配”；仅查询失败后零超时 wait 确认退出才返回 AlreadyExited。活父不可查询、错映像、较新/无法核验创建时间和 wait 失败仍拒绝。独立 Console 父子夹具复现旧源码误拒绝；这不等同真实主程序/UAC验收。
+
+- 同次收缩：首次 Qt 业务窗口创建前的自动 UAC/缩放重启只保留 privilege marker 与业务 argv，并剥离继承的 runtime wait PID；这些简单启动不接入运行期清理/严格父进程接管。主入口只在显式 wait-PID 请求存在时执行严格失败门禁。运行期重启仍等待已接受清理和旧进程退出。

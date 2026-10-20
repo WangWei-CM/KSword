@@ -33,7 +33,7 @@ namespace ks::ui
         Launch m_launch;
     };
 
-    inline QStringList ArgumentsWithRestartPredecessorWait(QStringList arguments, qint64 processId)
+    inline QStringList ArgumentsWithoutRestartPredecessorWait(QStringList arguments)
     {
         const auto key = QStringLiteral("--ksword-crash-restart-wait-pid");
         for (int index = 1; index < arguments.size();)
@@ -51,6 +51,13 @@ namespace ks::ui
                 if (numeric) arguments.removeAt(index);
             }
         }
+        return arguments;
+    }
+
+    inline QStringList ArgumentsWithRestartPredecessorWait(QStringList arguments, qint64 processId)
+    {
+        arguments = ArgumentsWithoutRestartPredecessorWait(std::move(arguments));
+        const auto key = QStringLiteral("--ksword-crash-restart-wait-pid");
         arguments.push_back(key);
         arguments.push_back(QString::number(processId));
         return arguments;

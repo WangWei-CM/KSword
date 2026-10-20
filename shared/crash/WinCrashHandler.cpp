@@ -563,15 +563,20 @@ namespace ks
                     && ::CompareFileTime(&parentCreated, &childCreated) <= 0;
             }
 
-            bool IsSameExecutableProcess(const HANDLE processHandle)
+            bool IsSameExecutableProcess(const HANDLE processHandle, bool* imageQuerySucceeded = nullptr)
             {
                 wchar_t processPath[32768] = {};
                 DWORD processPathCount = static_cast<DWORD>(ARRAYSIZE(processPath));
-                if (::QueryFullProcessImageNameW(
+                const bool queried = ::QueryFullProcessImageNameW(
                     processHandle,
                     0,
                     processPath,
-                    &processPathCount) == FALSE)
+                    &processPathCount) != FALSE;
+                if (imageQuerySucceeded != nullptr)
+                {
+                    *imageQuerySucceeded = queried;
+                }
+                if (!queried)
                 {
                     return false;
                 }
@@ -677,11 +682,24 @@ namespace ks
                     ? RestartPredecessorStatus::PredecessorAlreadyExited
                     : RestartPredecessorStatus::ValidationRejected;
             }
-            if (!IsSameExecutableProcess(predecessor) ||
-                !IsParentOlderThanChild(predecessor, ::GetCurrentProcess()))
+            if (!IsParentOlderThanChild(predecessor, ::GetCurrentProcess()))
             {
                 ::CloseHandle(predecessor);
                 return RestartPredecessorStatus::ValidationRejected;
+            }
+            bool imageQuerySucceeded = false;
+            if (!IsSameExecutableProcess(predecessor, &imageQuerySucceeded))
+            {
+                // An exited direct parent's process object can outlive its image.
+                // Recheck after the failed query: the parent may exit during it.
+                // A known image mismatch or an unqueryable live parent still fails.
+                const DWORD exitProbe = imageQuerySucceeded
+                    ? WAIT_TIMEOUT : ::WaitForSingleObject(predecessor, 0);
+                ::CloseHandle(predecessor);
+                if (exitProbe == WAIT_OBJECT_0)
+                    return RestartPredecessorStatus::PredecessorAlreadyExited;
+                return exitProbe == WAIT_FAILED ? RestartPredecessorStatus::WaitFailed
+                    : RestartPredecessorStatus::ValidationRejected;
             }
             const DWORD result = ::WaitForSingleObject(predecessor, timeoutMilliseconds);
             ::CloseHandle(predecessor);

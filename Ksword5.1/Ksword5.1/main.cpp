@@ -722,7 +722,7 @@ namespace
         return std::wstring(cursorPointer);
     }
 
-    std::wstring parametersForRestartTakeover()
+    std::wstring parametersForPreQtRestart()
     {
         int count = 0;
         LPWSTR* values = ::CommandLineToArgvW(::GetCommandLineW(), &count);
@@ -730,7 +730,7 @@ namespace
         QStringList arguments;
         for (int index = 0; index < count; ++index) arguments.push_back(QString::fromWCharArray(values[index]));
         ::LocalFree(values);
-        arguments = ks::ui::ArgumentsWithRestartPredecessorWait(std::move(arguments), ::GetCurrentProcessId());
+        arguments = ks::ui::ArgumentsWithoutRestartPredecessorWait(std::move(arguments));
         const auto marker = QString::fromWCharArray(kPrivilegeRestartArgument);
         if (!arguments.contains(marker, Qt::CaseInsensitive)) arguments.push_back(marker);
         QStringList parameters;
@@ -752,7 +752,7 @@ namespace
         }
 
         // parameterText 作用：保存当前命令行参数，传递给新启动实例。
-        const std::wstring parameterText = parametersForRestartTakeover();
+        const std::wstring parameterText = parametersForPreQtRestart();
         if (parameterText.empty()) return false;
         const std::wstring executableDirectory = resolveExecutableDirectoryPath(executablePath);
         SHELLEXECUTEINFOW launch{};
@@ -764,9 +764,8 @@ namespace
         launch.lpDirectory = executableDirectory.empty() ? nullptr : executableDirectory.c_str();
         launch.nShow = SW_SHOWNORMAL;
         const bool created = ::ShellExecuteExW(&launch) != FALSE;
-        const bool validChild = created && ks::crash::ValidateRestartChildProcess(launch.hProcess);
         if (launch.hProcess) ::CloseHandle(launch.hProcess);
-        return validChild;
+        return created;
     }
 
     bool tryLaunchUacDeskCompanion()
@@ -808,7 +807,7 @@ namespace
 
         // commandLineText 作用：CreateProcessW 要求可写命令行缓冲区。
         std::wstring commandLineText = L"\"" + executablePath + L"\"";
-        const std::wstring parameterText = parametersForRestartTakeover();
+        const std::wstring parameterText = parametersForPreQtRestart();
         if (parameterText.empty()) return false;
         if (!parameterText.empty())
         {
@@ -839,10 +838,9 @@ namespace
             return false;
         }
 
-        const bool validChild = ks::crash::ValidateRestartChildProcess(processInformation.hProcess);
         ::CloseHandle(processInformation.hThread);
         ::CloseHandle(processInformation.hProcess);
-        return validChild;
+        return true;
     }
 
     // initializeProcessDpiAwareness 作用：
@@ -1362,7 +1360,7 @@ int main(int argc, char* argv[])
     const bool crashRestartWait = restartStatus == ks::crash::RestartPredecessorStatus::PredecessorExited;
     const bool restartParentExited = crashRestartWait ||
         restartStatus == ks::crash::RestartPredecessorStatus::PredecessorAlreadyExited;
-    if ((privilegeRestartLaunch || restartStatus != ks::crash::RestartPredecessorStatus::NotRequested)
+    if (restartStatus != ks::crash::RestartPredecessorStatus::NotRequested
         && !restartParentExited)
     {
         startupTraceRaw("restart handoff rejected or timed out before business initialization");
