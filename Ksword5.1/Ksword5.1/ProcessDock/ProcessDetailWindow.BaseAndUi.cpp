@@ -2187,10 +2187,12 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
         updateThreadInspectStatusLabel(m_threadInspectStatusLabel->text(), m_threadInspectRefreshing);
     }
 
+    if (m_moduleTable != nullptr && m_moduleRecords) rebuildModuleTable();
+
     if (m_moduleStatusLabel != nullptr)
     {
         updateModuleStatusLabel(m_moduleStatusLabel->text(), m_moduleRefreshing);
-        if (!m_moduleRefreshing && m_moduleRecords.empty())
+        if (!m_moduleRefreshing && (!m_moduleRecords || m_moduleRecords->empty()))
         {
             m_moduleStatusLabel->setStyleSheet(buildStateLabelStyle(statusErrorColor(), 700));
         }
@@ -5285,16 +5287,15 @@ void ProcessDetailWindow::initializeModuleTab()
     m_moduleLayout->addLayout(m_moduleTopBarLayout);
 
     // 模块列表表格。
-    m_moduleTable = new QTreeWidget(m_moduleTab);
-    m_moduleTable->setColumnCount(static_cast<int>(ModuleColumn::Count));
-    m_moduleTable->setHeaderLabels(ModuleHeaders);
-    m_moduleTable->setRootIsDecorated(false);
-    m_moduleTable->setItemsExpandable(false);
+    QVector<ks::ui::ImmutableTableHeader> moduleHeaders;
+    for (const auto& header : ModuleHeaders) moduleHeaders.push_back(ks::ui::ImmutableTableHeader(header));
+    m_moduleTable = new ks::ui::ImmutableValueTable(m_moduleTab, std::move(moduleHeaders));
+    ks::ui::SetTableActionBarMode(m_moduleTable, ks::ui::TableActionBarMode::Compact);
     m_moduleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_moduleTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_moduleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_moduleTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_moduleTable->setSortingEnabled(true);
+    m_moduleTable->sortByColumn(toModuleColumnIndex(ModuleColumn::Path), Qt::AscendingOrder);
     m_moduleTable->setAlternatingRowColors(true);
     m_moduleLayout->addWidget(m_moduleTable, 1);
 
@@ -6572,7 +6573,7 @@ void ProcessDetailWindow::initializeConnections()
     });
 
     // 模块表右键菜单。
-    connect(m_moduleTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_moduleTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showModuleContextMenu(localPosition);
     });
 }

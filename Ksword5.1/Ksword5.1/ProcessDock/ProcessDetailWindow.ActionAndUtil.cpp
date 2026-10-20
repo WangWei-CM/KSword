@@ -1272,46 +1272,14 @@ void ProcessDetailWindow::showActionResultMessage(
         << eol;
 }
 
-ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()
+const ks::process::ProcessModuleRecord* ProcessDetailWindow::selectedModuleRecord()
 {
-    QTreeWidgetItem* currentItem = m_moduleTable->currentItem();
-    if (currentItem == nullptr)
-    {
-        kLogEvent selectedModuleNullEvent;
-        warn << selectedModuleNullEvent
-            << "[ProcessDetailWindow] selectedModuleRecord: 当前无选中行。"
-            << eol;
-        return nullptr;
-    }
-
-    const std::string pathText = currentItem->data(
-        toModuleColumnIndex(ModuleColumn::Path),
-        Qt::UserRole).toString().toStdString();
-    const std::uint64_t baseAddress = currentItem->data(
-        toModuleColumnIndex(ModuleColumn::Path),
-        Qt::UserRole + 1).toULongLong();
-
-    auto foundIt = std::find_if(
-        m_moduleRecords.begin(),
-        m_moduleRecords.end(),
-        [baseAddress, &pathText](const ks::process::ProcessModuleRecord& moduleRecord)
-        {
-            return moduleRecord.moduleBaseAddress == baseAddress && moduleRecord.modulePath == pathText;
-        });
-    if (foundIt == m_moduleRecords.end())
-    {
-        kLogEvent selectedModuleNotFoundEvent;
-        warn << selectedModuleNotFoundEvent
-            << "[ProcessDetailWindow] selectedModuleRecord: 缓存中未找到对应模块记录。"
-            << eol;
-        return nullptr;
-    }
-    kLogEvent selectedModuleFoundEvent;
-    dbg << selectedModuleFoundEvent
-        << "[ProcessDetailWindow] selectedModuleRecord: 命中模块记录, path="
-        << foundIt->modulePath
-        << eol;
-    return &(*foundIt);
+    if (m_moduleTable == nullptr || m_moduleTable->currentRow() < 0 || !m_moduleRecords) return nullptr;
+    const auto path = m_moduleTable->currentCell(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole).toString().toStdString();
+    const auto base = m_moduleTable->currentCell(toModuleColumnIndex(ModuleColumn::Path), Qt::UserRole + 1).toULongLong();
+    const auto found = std::find_if(m_moduleRecords->cbegin(), m_moduleRecords->cend(),
+        [&](const ModuleRowValue& value) { return value.record.moduleBaseAddress == base && value.record.modulePath == path; });
+    return found == m_moduleRecords->cend() ? nullptr : &found->record;
 }
 
 void ProcessDetailWindow::openSelectedThreadStackWindow()
@@ -1473,7 +1441,7 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
         }
         return QString();
     }
-    if (m_moduleRecords.empty())
+    if ((!m_moduleRecords || m_moduleRecords->empty()))
     {
         if (errorTextOut != nullptr)
         {
@@ -1494,8 +1462,9 @@ QString ProcessDetailWindow::resolveSelectedThreadModulePathForUpload(QString* e
             continue;
         }
 
-        for (const ks::process::ProcessModuleRecord& moduleRecord : m_moduleRecords)
+        for (const ModuleRowValue& moduleValue : *m_moduleRecords)
         {
+            const auto& moduleRecord = moduleValue.record;
             if (moduleRecord.moduleBaseAddress == 0 || moduleRecord.moduleSizeBytes == 0)
             {
                 continue;

@@ -11,6 +11,8 @@
 #include "../Framework.h"
 #include "ProcessAffinityModel.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/ImmutableValueTable.h"
+#include <QImage>
 #include "../UI/StructuredFieldView.h"
 
 #include <QHash>
@@ -173,10 +175,18 @@ signals:
     void requestOpenFileDetailByPath(const QString& filePath);
 
 private:
+    struct ModuleRowValue
+    {
+        ks::process::ProcessModuleRecord record;
+        QImage icon; // Worker-owned pixel value; GUI delegates create pixmaps only when drawn.
+    };
+
     // ModuleRefreshResult：模块页后台刷新结果数据结构。
     struct ModuleRefreshResult
     {
-        ks::process::ProcessModuleSnapshot moduleSnapshot; // 模块 + 线程快照。
+        ks::process::ProcessModuleSnapshot moduleSnapshot; // 诊断与线程快照。
+        std::shared_ptr<const std::vector<ModuleRowValue>> moduleRows;
+        std::size_t moduleCount = 0, threadCount = 0;
         std::uint64_t elapsedMs = 0;                       // 后台刷新耗时（毫秒）。
         bool includeSignatureCheck = false;                // 本轮是否执行签名校验。
     };
@@ -612,11 +622,12 @@ private:
 
     // ======== 模块页刷新 ========
     void requestAsyncModuleRefresh(bool forceRefresh);
-    void applyModuleRefreshResult(const ModuleRefreshResult& refreshResult);
+    void applyModuleRefreshResult(const std::shared_ptr<const ModuleRefreshResult>& refreshResult);
     // 回填及菜单延期重放前重新核验代次和进程实例；false 表示仍在等待屏障。
     bool tryApplyModuleRefreshResult(std::uint64_t ticket, std::uint32_t processId,
-        std::uint64_t creationTime, const ModuleRefreshResult& refreshResult);
+        std::uint64_t creationTime, const std::shared_ptr<const ModuleRefreshResult>& refreshResult);
     void rebuildModuleTable();
+    void finishModuleRefreshPresentation(const ModuleRefreshResult& refreshResult);
     // filterModuleTable 作用：按搜索框内容隐藏不匹配的模块表行。
     void filterModuleTable(const QString& filterText);
     void updateModuleStatusLabel(const QString& statusText, bool refreshing);
@@ -756,7 +767,7 @@ private:
     // 参数 title：动作标题；actionOk：动作是否成功；detailText：动作详情；actionEvent：同链路日志事件对象。
     // 返回值：无。
     void showActionResultMessage(const QString& title, bool actionOk, const std::string& detailText, const kLogEvent& actionEvent);
-    ks::process::ProcessModuleRecord* selectedModuleRecord();
+    const ks::process::ProcessModuleRecord* selectedModuleRecord();
 
 private:
     // ======== 当前绑定进程基础数据 ========
@@ -914,9 +925,9 @@ private:
     QCheckBox* m_signatureCheckBox = nullptr;  // 是否刷新时做签名校验。
     QLineEdit* m_moduleFilterEdit = nullptr;   // 模块列表筛选输入框。
     QLabel* m_moduleStatusLabel = nullptr;     // 模块刷新状态标签。
-    QTreeWidget* m_moduleTable = nullptr;      // 模块表格。
+    ks::ui::ImmutableValueTable* m_moduleTable = nullptr;      // 模块表格。
 
-    std::vector<ks::process::ProcessModuleRecord> m_moduleRecords; // 当前模块数据缓存。
+    std::shared_ptr<const std::vector<ModuleRowValue>> m_moduleRecords; // 当前模块数据缓存。
 
     // ======== 内嵌句柄审计页 ========
     QVBoxLayout* m_embeddedHandleLayout = nullptr; // 句柄审计页容器布局。
