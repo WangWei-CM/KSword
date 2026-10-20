@@ -3414,10 +3414,13 @@ void ProcessDetailWindow::applyThreadInspectResult(const std::uint64_t ticket,
     ThreadInspectRefreshResult summary = refreshResult;
     summary.rows.reset();
     const auto count = m_threadInspectRows->size();
-    m_threadInspectTable->sourceReady = [alive, ticket, summary = std::move(summary), count]
+    m_threadInspectTable->sourceReady = [alive, ticket, rows = refreshResult.rows, summary = std::move(summary), count]
     {
         if (!alive || ticket != alive->m_threadInspectRefreshTicket || !alive->m_threadInspectRefreshing) return;
+        alive->m_threadInspectPublishedRows = rows;
         alive->m_threadInspectRefreshing = false;
+        if (alive->m_threadInspectTable->currentRowChanged) alive->m_threadInspectTable->currentRowChanged();
+        if (!alive) return;
         if (alive->m_refreshThreadInspectButton) alive->m_refreshThreadInspectButton->setEnabled(true);
         if (alive) alive->finishThreadInspectPresentation(summary, count);
     };
@@ -3546,6 +3549,7 @@ void ProcessDetailWindow::finishThreadInspectPresentation(const ThreadInspectRef
 
 void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
 {
+    if (!m_threadInspectPublishedRows || !m_threadInspectTable || m_threadInspectRefreshing || m_threadInspectTable->isPreparing()) return;
     // 当前线程 PDB deep runtime 采样：
     // - 输入来自线程表当前选中 TID 与窗口 PID；
     // - 后台只传 TID/PID/runtimeItemId/offset/size，不传 ETHREAD 地址；
@@ -3577,14 +3581,14 @@ void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
         : 0U;
     const std::size_t cacheIndex = threadIdItem.isValid()
         ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
-        : static_cast<std::size_t>(m_threadInspectRows->size());
-    if (threadId == 0U || cacheIndex >= m_threadInspectRows->size())
+        : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+    if (threadId == 0U || cacheIndex >= m_threadInspectPublishedRows->size())
     {
         m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("当前线程行缺少 TID 或缓存索引，请先刷新线程页。")));
         return;
     }
 
-    const ThreadInspectItem selectedRow = (*m_threadInspectRows)[cacheIndex];
+    const ThreadInspectItem selectedRow = (*m_threadInspectPublishedRows)[cacheIndex];
     const std::uint32_t processId = selectedRow.processId != 0U
         ? selectedRow.processId
         : m_baseRecord.pid;
@@ -3701,15 +3705,15 @@ void ProcessDetailWindow::requestAsyncSelectedThreadRuntimeSample()
                         guardThis->m_sampleThreadRuntimeButton->setEnabled(true);
                     }
                     bool sameThreadSelection = false;
-                    if (guardThis->m_threadInspectTable != nullptr)
+                    if (guardThis->m_threadInspectTable != nullptr && guardThis->m_threadInspectPublishedRows)
                     {
                         const int currentRow = guardThis->m_threadInspectTable->currentRow();
                         const auto item = guardThis->m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
                         const std::size_t cacheIndex = item.isValid()
-                            ? static_cast<std::size_t>(item.data(Qt::UserRole).toULongLong()) : guardThis->m_threadInspectRows->size();
-                        if (cacheIndex < guardThis->m_threadInspectRows->size())
+                            ? static_cast<std::size_t>(item.data(Qt::UserRole).toULongLong()) : guardThis->m_threadInspectPublishedRows->size();
+                        if (cacheIndex < guardThis->m_threadInspectPublishedRows->size())
                         {
-                            const ThreadInspectItem& current = (*guardThis->m_threadInspectRows)[cacheIndex];
+                            const ThreadInspectItem& current = (*guardThis->m_threadInspectPublishedRows)[cacheIndex];
                             sameThreadSelection = current.threadId == threadId && current.processId == selectedRow.processId
                                 && current.createTime100ns == selectedRow.createTime100ns;
                         }

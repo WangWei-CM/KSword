@@ -2199,6 +2199,11 @@ void ProcessDetailWindow::updateBaseRecord(const ks::process::ProcessRecord& bas
         m_detailOverviewRefreshing = false;
         ++m_detailOverviewRefreshTicket;
         m_detailOverviewResult = DetailOverviewRefreshResult{};
+        ++m_threadInspectRefreshTicket;
+        m_threadInspectRefreshing = false;
+        m_threadInspectRows.reset();
+        m_threadInspectPublishedRows.reset();
+        if (m_threadInspectTable) m_threadInspectTable->clearRows();
         m_threadInspectInitialRefreshStarted = false;
         m_moduleInitialRefreshStarted = false;
         m_tokenInitialRefreshStarted = false;
@@ -4445,6 +4450,7 @@ void ProcessDetailWindow::initializeThreadTab()
         openSelectedThreadStackWindow();
         });
     m_threadInspectTable->currentRowChanged = [this]() {
+        if (m_threadInspectRefreshing || m_threadInspectTable->isPreparing() || !m_threadInspectPublishedRows) return;
         const int currentRow = m_threadInspectTable->currentRow();
         // 选中行详情：
         // - 输入：当前表格行；
@@ -4463,14 +4469,14 @@ void ProcessDetailWindow::initializeThreadTab()
             m_threadInspectTable->model()->index(currentRow, toThreadColumnIndex(ThreadRowColumn::ThreadId));
         const std::size_t cacheIndex = threadIdItem.isValid()
             ? static_cast<std::size_t>(threadIdItem.data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows->size());
-        if (cacheIndex >= m_threadInspectRows->size())
+            : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
+        if (cacheIndex >= m_threadInspectPublishedRows->size())
         {
             m_threadRuntimeSampleOutput->setDocument(fieldNotice(QStringLiteral("当前线程行缺少缓存详情，请刷新线程页。")));
             return;
         }
 
-        const ThreadInspectItem& rowItem = (*m_threadInspectRows)[cacheIndex];
+        const ThreadInspectItem& rowItem = (*m_threadInspectPublishedRows)[cacheIndex];
         const auto threadDetailStatusName = [](const std::uint32_t statusValue) -> QString
         {
             switch (statusValue)
@@ -4563,10 +4569,10 @@ void ProcessDetailWindow::initializeThreadTab()
                 : QModelIndex();
         const std::size_t selectedThreadCacheIndex = selectedThreadIdItem.isValid()
             ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
-            : static_cast<std::size_t>(m_threadInspectRows->size());
+            : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
         const ThreadInspectItem* const selectedThreadAffinityTarget =
-            selectedThreadCacheIndex < m_threadInspectRows->size()
-                ? &(*m_threadInspectRows)[selectedThreadCacheIndex]
+            selectedThreadCacheIndex < m_threadInspectPublishedRows->size()
+                ? &(*m_threadInspectPublishedRows)[selectedThreadCacheIndex]
                 : nullptr;
         QMenu* const affinityMenu = ks::process::addThreadAffinitySubMenu(
             &menu,
@@ -4676,13 +4682,13 @@ void ProcessDetailWindow::initializeThreadTab()
                 toThreadColumnIndex(ThreadRowColumn::ThreadId));
             const std::size_t selectedCacheIndex = selectedThreadIdItem.isValid()
                 ? static_cast<std::size_t>(selectedThreadIdItem.data(Qt::UserRole).toULongLong())
-                : static_cast<std::size_t>(m_threadInspectRows->size());
+                : static_cast<std::size_t>(m_threadInspectPublishedRows->size());
             hasDriverThreadTarget =
-                selectedCacheIndex < m_threadInspectRows->size() &&
-                (*m_threadInspectRows)[selectedCacheIndex].threadId != 0U &&
-                (*m_threadInspectRows)[selectedCacheIndex].createTime100ns != 0ULL &&
-                ((*m_threadInspectRows)[selectedCacheIndex].startAddress != 0ULL ||
-                 (*m_threadInspectRows)[selectedCacheIndex].win32StartAddress != 0ULL);
+                selectedCacheIndex < m_threadInspectPublishedRows->size() &&
+                (*m_threadInspectPublishedRows)[selectedCacheIndex].threadId != 0U &&
+                (*m_threadInspectPublishedRows)[selectedCacheIndex].createTime100ns != 0ULL &&
+                ((*m_threadInspectPublishedRows)[selectedCacheIndex].startAddress != 0ULL ||
+                 (*m_threadInspectPublishedRows)[selectedCacheIndex].win32StartAddress != 0ULL);
         }
         suspendDriverThreadAction->setVisible(hasDriverThreadTarget);
         resumeDriverThreadAction->setVisible(hasDriverThreadTarget);

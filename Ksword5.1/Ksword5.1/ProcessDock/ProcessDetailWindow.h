@@ -985,6 +985,7 @@ private:
     std::uint64_t m_threadRuntimeSampleTicket = 0; // 当前线程 PDB 采样防乱序序号。
     int m_threadInspectRefreshProgressPid = 0;     // 线程细节刷新对应进度 PID。
     std::shared_ptr<const std::vector<ThreadInspectItem>> m_threadInspectRows = std::make_shared<const std::vector<ThreadInspectItem>>(); // 线程详情页最近一次刷新缓存。
+    std::shared_ptr<const std::vector<ThreadInspectItem>> m_threadInspectPublishedRows;
 
     // ======== Process Detail Evidence 页控件 ========
     QVBoxLayout* m_kernelObjectLayout = nullptr; // Process Detail Evidence 页总布局。
