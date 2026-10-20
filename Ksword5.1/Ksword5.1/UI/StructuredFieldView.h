@@ -5,6 +5,7 @@
 #include <QString>
 #include <QVector>
 #include <QWidget>
+#include <functional>
 
 class QComboBox;
 class QLabel;
@@ -51,6 +52,9 @@ namespace ks::ui
             bool translateValue = false);
         FieldDocument& note(const QString& body);
         QString toPlainText(bool localize = false) const;
+        // 冻结的纯值翻译回调供后台导出使用；空回调保留规范源文本。
+        // 标题、可翻译字段和 Note 使用同一格式规则，不访问任何控件或全局语言状态。
+        QString toPlainText(const std::function<QString(const QString&)>& translate) const;
         bool isEmpty() const { return title.isEmpty() && nodes.isEmpty(); }
     };
 

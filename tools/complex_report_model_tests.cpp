@@ -501,6 +501,45 @@ namespace
     }
 }
 
+namespace
+{
+    // 后台导出调用者冻结翻译值，不借用 LanguageManager 或 QWidget 生命周期。
+    void frozenDocumentTranslation()
+    {
+        FieldDocument document;
+        document.title = QStringLiteral("Report");
+        document.section(QStringLiteral("Catalog"));
+        document.field(QStringLiteral("Size"), QStringLiteral("Ready"), true);
+        FieldNode literal;
+        literal.name = QStringLiteral("Size");
+        literal.value = QStringLiteral("Ready");
+        literal.translateName = false;
+        FieldNode note;
+        note.kind = FieldNode::Kind::Note;
+        note.value = QStringLiteral("Ready");
+        literal.children.append(note);
+        document.nodes[0].children.append(literal);
+        const QHash<QString, QString> translations{
+            {QStringLiteral("Report"), QStringLiteral("报告")},
+            {QStringLiteral("Catalog"), QStringLiteral("目录")},
+            {QStringLiteral("Size"), QStringLiteral("大小")},
+            {QStringLiteral("Ready"), QStringLiteral("就绪")}};
+        const std::function<QString(const QString&)> frozen = [translations](const QString& source)
+        {
+            return translations.value(source, source);
+        };
+        const QString expected = QStringLiteral("报告\n[目录]\n大小: 就绪\nSize: Ready\n  就绪");
+        mockTranslation = true;
+        expect(document.toPlainText(frozen) == expected, "frozen callback preserves title, name/value flags, forced note localization and indentation");
+        expect(document.toPlainText(frozen) == document.toPlainText(true), "callback export bytes equal existing localized serialization");
+        mockTranslation = false;
+        expect(document.toPlainText(frozen) == expected, "later global language changes do not affect a frozen export callback");
+        expect(document.toPlainText(std::function<QString(const QString&)>()) == document.toPlainText(false),
+            "empty callback returns exact canonical source text");
+        expect(!document.toPlainText(frozen).endsWith(QLatin1Char('\n')), "frozen export retains the no-trailing-newline format");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv); // 无 QApplication、窗口、离屏平台或 QWidget 对象。
@@ -511,6 +550,7 @@ int main(int argc, char** argv)
     longValueTransitions();
     canonicalCopy();
     compactBrowsingContract();
+    frozenDocumentTranslation();
     recordScale(15000);
     recordScale(30000);
     std::printf("COMPLEX_REPORT_MODEL_RESULT checks=%d failures=%d\n", checks, failures);
