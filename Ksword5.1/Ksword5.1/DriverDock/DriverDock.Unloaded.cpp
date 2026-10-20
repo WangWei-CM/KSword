@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -346,6 +347,8 @@ void DriverDock::initializeUnloadedPiddbTab()
 
     m_unloadedPiddbTable =
         new ks::ui::VisibleTableWidget(m_unloadedPiddbPage);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_unloadedPiddbTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 历史卸载记录与签名缓存有覆盖风险，保留完整留存对比。
     ks::ui::SetTableActionBarMode(m_unloadedPiddbTable, ks::ui::TableActionBarMode::Full);
     m_unloadedPiddbTable->setColumnCount(

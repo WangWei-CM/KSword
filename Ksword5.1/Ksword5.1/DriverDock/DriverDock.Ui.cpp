@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -590,6 +591,8 @@ void DriverDock::initializeServiceTab()
     m_serviceLayout->addLayout(m_overviewToolLayout);
 
     m_serviceTable = new ks::ui::VisibleTableWidget(m_servicePage);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_serviceTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 驱动服务清单的安装、卸载和状态变化需要跨次对比。
     ks::ui::SetTableActionBarMode(m_serviceTable, ks::ui::TableActionBarMode::Full);
     m_serviceTable->setColumnCount(7);
@@ -651,6 +654,8 @@ void DriverDock::initializeKernelModuleTab()
     m_kernelModuleLayout->addLayout(m_kernelModuleToolLayout);
 
     m_moduleTable = new ks::ui::VisibleTableWidget(m_kernelModulePage);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_moduleTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     // 加载模块证据需要保留新增/消失与来源变化的快照。
     ks::ui::SetTableActionBarMode(m_moduleTable, ks::ui::TableActionBarMode::Full);
     m_moduleTable->setColumnCount(ModuleTableColumnCount);
