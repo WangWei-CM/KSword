@@ -1,3 +1,4 @@
+#include "MonitorEventFilterProjection.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/TableContextMenu.h"
 #include "../theme.h"
@@ -251,7 +252,7 @@ void ProcessTraceMonitorWidget::exportVisibleRowsToTsv()
     int visibleCount = 0;
     for (int row = 0; row < m_eventTable->rowCount(); ++row)
     {
-        if (!m_eventTable->isRowHidden(row))
+        if (!ks::ui::IsTableRowExcludedByFilter(m_eventTable, row))
         {
             ++visibleCount;
         }
@@ -293,7 +294,7 @@ void ProcessTraceMonitorWidget::exportVisibleRowsToTsv()
 
     for (int row = 0; row < m_eventTable->rowCount(); ++row)
     {
-        if (m_eventTable->isRowHidden(row))
+        if (ks::ui::IsTableRowExcludedByFilter(m_eventTable, row))
         {
             continue;
         }

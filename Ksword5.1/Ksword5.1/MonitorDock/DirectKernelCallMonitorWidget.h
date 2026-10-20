@@ -30,6 +30,7 @@
 #include <vector>
 
 class QPoint;
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -194,6 +195,7 @@ private:
     QCheckBox* m_keepBottomCheck = nullptr;
     QPushButton* m_clearFilterButton = nullptr;
     QLabel* m_filterStatusLabel = nullptr;
+    ks::monitor::EventFilterProjection* m_eventFilterProjection = nullptr;
     QTableWidget* m_eventTable = nullptr;
     QTimer* m_uiUpdateTimer = nullptr;
     QTimer* m_filterDebounceTimer = nullptr;

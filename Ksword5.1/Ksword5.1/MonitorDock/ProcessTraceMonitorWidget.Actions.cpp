@@ -1,3 +1,4 @@
+#include "MonitorEventFilterProjection.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/SecondaryPageLayout.h"
@@ -1709,103 +1710,38 @@ bool ProcessTraceMonitorWidget::isTimelineFilterActive() const
 
 void ProcessTraceMonitorWidget::applyEventFilter()
 {
-    if (m_eventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString typeText = m_eventTypeCombo != nullptr ? m_eventTypeCombo->currentText().trimmed() : QString();
-    const QString providerText = m_eventProviderFilterEdit != nullptr ? m_eventProviderFilterEdit->text() : QString();
-    const QString processText = m_eventProcessFilterEdit != nullptr ? m_eventProcessFilterEdit->text() : QString();
-    const QString eventNameText = m_eventNameFilterEdit != nullptr ? m_eventNameFilterEdit->text() : QString();
-    const QString detailText = m_eventDetailFilterEdit != nullptr ? m_eventDetailFilterEdit->text() : QString();
-    const QString globalText = m_eventGlobalFilterEdit != nullptr ? m_eventGlobalFilterEdit->text() : QString();
-    const bool useRegex = m_eventRegexCheck != nullptr && m_eventRegexCheck->isChecked();
-    const bool invertMatch = m_eventInvertCheck != nullptr && m_eventInvertCheck->isChecked();
-    const bool timelineFilterActive = isTimelineFilterActive();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_eventCaseCheck != nullptr && m_eventCaseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    const bool anyFilterActive = hasAnyEventFilterActive();
-    if (!anyFilterActive)
-    {
-        for (int row = 0; row < m_eventTable->rowCount(); ++row)
-        {
-            m_eventTable->setRowHidden(row, false);
-        }
-        updateEventFilterStatusText(m_eventTable->rowCount(), m_eventTable->rowCount());
-        updateActionState();
-        updateStatusLabel();
-        return;
-    }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        QTableWidgetItem* timeItem = m_eventTable->item(row, EventColumnTime100ns);
-        const QString rowType = m_eventTable->item(row, EventColumnType) != nullptr
-            ? m_eventTable->item(row, EventColumnType)->text()
-            : QString();
-        const QString rowProvider = m_eventTable->item(row, EventColumnProvider) != nullptr
-            ? m_eventTable->item(row, EventColumnProvider)->text()
-            : QString();
-        const QString rowDetail = m_eventTable->item(row, EventColumnDetail) != nullptr
-            ? m_eventTable->item(row, EventColumnDetail)->text()
-            : QString();
-        const QString processMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleProcessSearchText).toString()
-            : QString();
-        const QString eventMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleEventSearchText).toString()
-            : QString();
-        const QString globalMergedText = timeItem != nullptr
-            ? timeItem->data(kEventRoleGlobalSearchText).toString()
-            : QString();
-
-        // timelineMatched：
-        // - 时间窗口始终是外层约束；
-        // - 现有“反向”选项不能把它反转为“时间框外”，否则会破坏框选时间的语义。
-        bool timelineMatched = true;
-        if (timelineFilterActive)
-        {
-            const std::uint64_t rowTime100ns = timeItem != nullptr
-                ? timeItem->data(kEventRoleTime100nsValue).toULongLong()
-                : 0;
-            timelineMatched = rowTime100ns >= m_timelineSelectionStart100ns
-                && rowTime100ns <= m_timelineSelectionEnd100ns;
-        }
-
-        bool matched = true;
-        if (!typeText.isEmpty() && typeText != QStringLiteral("全部类型"))
-        {
-            matched = matched && (QString::compare(rowType, typeText, Qt::CaseInsensitive) == 0);
-        }
-
-        matched = matched && textMatch(rowProvider, providerText, useRegex, caseSensitivity);
-        matched = matched && textMatch(processMergedText, processText, useRegex, caseSensitivity);
-        matched = matched && textMatch(eventMergedText, eventNameText, useRegex, caseSensitivity);
-        matched = matched && textMatch(rowDetail, detailText, useRegex, caseSensitivity);
-        matched = matched && textMatch(globalMergedText, globalText, useRegex, caseSensitivity);
-
-        if (invertMatch)
-        {
-            matched = !matched;
-        }
-        matched = matched && timelineMatched;
-
-        m_eventTable->setRowHidden(row, !matched);
-        if (matched)
-        {
-            ++visibleCount;
-        }
-    }
-
-    updateEventFilterStatusText(visibleCount, m_eventTable->rowCount());
-
-    updateActionState();
-    updateStatusLabel();
+    if (!m_eventTable) return;
+    if (!m_eventFilterProjection)
+        m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                const auto* time = m_eventTable->item(row, EventColumnTime100ns);
+                auto text = [this, row](int column) { const auto* item = m_eventTable->item(row,column); return item ? item->text() : QString(); };
+                values.fields = {text(EventColumnProvider),time ? time->data(kEventRoleProcessSearchText).toString() : QString(),
+                    time ? time->data(kEventRoleEventSearchText).toString() : QString(),text(EventColumnDetail),
+                    time ? time->data(kEventRoleGlobalSearchText).toString() : QString()};
+                values.type = text(EventColumnType);
+                values.time100ns = time ? time->data(kEventRoleTime100nsValue).toULongLong() : 0;
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                updateEventFilterStatusText(visible,total);
+                if (pending && m_eventFilterStatusLabel) ks::ui::ApplyStatusRole(m_eventFilterStatusLabel,ks::ui::StatusRole::Info);
+                updateActionState();
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_eventProviderFilterEdit ? m_eventProviderFilterEdit->text() : QString(),
+        m_eventProcessFilterEdit ? m_eventProcessFilterEdit->text() : QString(),m_eventNameFilterEdit ? m_eventNameFilterEdit->text() : QString(),
+        m_eventDetailFilterEdit ? m_eventDetailFilterEdit->text() : QString(),m_eventGlobalFilterEdit ? m_eventGlobalFilterEdit->text() : QString()};
+    spec.fieldIndexes = {0,1,2,3,4};
+    spec.type = m_eventTypeCombo ? m_eventTypeCombo->currentText().trimmed() : QString();
+    if (spec.type == QStringLiteral("全部类型")) spec.type.clear();
+    spec.regex = m_eventRegexCheck && m_eventRegexCheck->isChecked();
+    spec.invert = m_eventInvertCheck && m_eventInvertCheck->isChecked();
+    spec.sensitivity = m_eventCaseCheck && m_eventCaseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    spec.timeline = isTimelineFilterActive();
+    if (spec.timeline) { spec.start100ns = m_timelineSelectionStart100ns; spec.end100ns = m_timelineSelectionEnd100ns; }
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void ProcessTraceMonitorWidget::clearEventFilter()
@@ -2038,6 +1974,8 @@ void ProcessTraceMonitorWidget::appendEventRow(const CapturedEventRow& rowValue)
     m_eventTable->setItem(row, EventColumnRelation, createReadOnlyItem(rowValue.relationText));
     m_eventTable->setItem(row, EventColumnDetail, createReadOnlyItem(rowValue.detailDocument.toPlainText(true).simplified().left(6000)));
     m_eventTable->setItem(row, EventColumnActivityId, createReadOnlyItem(rowValue.activityIdText));
+    if (!m_eventFilterProjection) applyEventFilter();
+    m_eventFilterProjection->trackRow(row);
 
     ProcessTraceTimelineEventPoint pointValue;
     pointValue.time100ns = rowValue.time100ns;

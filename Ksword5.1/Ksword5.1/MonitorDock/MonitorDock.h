@@ -40,6 +40,7 @@
 #include <vector>      // std::vector：Provider/事件快照容器。
 
 // Qt 前置声明：减少头文件编译依赖。
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QHBoxLayout;
@@ -962,6 +963,7 @@ private:
     QCheckBox* m_wmiEventKeepBottomCheck = nullptr; // WMI 表格是否保持贴底滚动。
     QPushButton* m_wmiEventFilterClearButton = nullptr; // WMI 筛选清空按钮。
     QLabel* m_wmiEventFilterStatusLabel = nullptr; // WMI 筛选结果状态文本。
+    ks::monitor::EventFilterProjection* m_wmiFilterProjection = nullptr;
     QTableWidget* m_wmiEventTable = nullptr;        // WMI 事件结果表。
 
     std::vector<WmiProviderEntry> m_wmiProviders; // Provider 缓存。

@@ -844,6 +844,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="MonitorDock\MonitorEventFilterProjection.h" />
     <ClInclude Include="UI\TableCompleteExport.h" />
     <ClInclude Include="UI\CompleteExportCapture.h" />
     <ClInclude Include="UI\CompleteExport.h" />

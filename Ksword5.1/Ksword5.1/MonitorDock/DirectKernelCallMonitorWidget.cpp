@@ -1,3 +1,4 @@
+#include "MonitorEventFilterProjection.h"
 #include "DirectKernelCallMonitorWidget.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/VisibleTableWidget.h"
@@ -177,30 +178,7 @@ namespace
         return normalized;
     }
 
-    bool textMatch(
-        const QString& sourceText,
-        const QString& patternText,
-        const bool useRegex,
-        const Qt::CaseSensitivity caseSensitivity)
-    {
-        if (patternText.trimmed().isEmpty())
-        {
-            return true;
-        }
 
-        if (!useRegex)
-        {
-            return sourceText.contains(patternText, caseSensitivity);
-        }
-
-        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-        if (caseSensitivity == Qt::CaseInsensitive)
-        {
-            options |= QRegularExpression::CaseInsensitiveOption;
-        }
-        const QRegularExpression regex(patternText, options);
-        return regex.isValid() && regex.match(sourceText).hasMatch();
-    }
 
     std::optional<std::uint32_t> tryReadSyscallNumberFromStub(
         const unsigned char* functionPointer, const std::size_t length)
@@ -347,6 +325,7 @@ DirectKernelCallMonitorWidget::DirectKernelCallMonitorWidget(QWidget* parent)
 
 DirectKernelCallMonitorWidget::~DirectKernelCallMonitorWidget()
 {
+    if (m_eventFilterProjection) m_eventFilterProjection->close();
     stopCaptureInternal(true);
     if (m_uiUpdateTimer != nullptr)
     {
@@ -1115,7 +1094,7 @@ void DirectKernelCallMonitorWidget::updateActionState()
     }
     if (m_exportButton != nullptr)
     {
-        m_exportButton->setEnabled(hasRows);
+        m_exportButton->setEnabled(hasRows && (!m_eventFilterProjection || !m_eventFilterProjection->isPending()));
     }
 }
 
@@ -2030,6 +2009,8 @@ void DirectKernelCallMonitorWidget::appendEventRow(const CapturedEventRow& rowVa
     m_eventTable->setItem(row, EventColumnCallAddress, createReadOnlyItem(rowValue.callAddressText));
     m_eventTable->setItem(row, EventColumnEventName, createReadOnlyItem(rowValue.eventName));
     m_eventTable->setItem(row, EventColumnDetail, createReadOnlyItem(rowValue.detailText));
+    if (!m_eventFilterProjection) applyFilter();
+    m_eventFilterProjection->trackRow(row);
 }
 
 void DirectKernelCallMonitorWidget::scheduleFilterApply()
@@ -2042,83 +2023,36 @@ void DirectKernelCallMonitorWidget::scheduleFilterApply()
 
 void DirectKernelCallMonitorWidget::applyFilter()
 {
-    if (m_eventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString processFilter = m_processFilterEdit != nullptr ? m_processFilterEdit->text() : QString();
-    const QString serviceFilter = m_serviceFilterEdit != nullptr ? m_serviceFilterEdit->text() : QString();
-    const QString detailFilter = m_detailFilterEdit != nullptr ? m_detailFilterEdit->text() : QString();
-    const QString globalFilter = m_globalFilterEdit != nullptr ? m_globalFilterEdit->text() : QString();
-    const bool useRegex = m_regexCheck != nullptr && m_regexCheck->isChecked();
-    const bool invertMatch = m_invertCheck != nullptr && m_invertCheck->isChecked();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_caseCheck != nullptr && m_caseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    const bool hasTextFilter = !processFilter.trimmed().isEmpty()
-        || !serviceFilter.trimmed().isEmpty()
-        || !detailFilter.trimmed().isEmpty()
-        || !globalFilter.trimmed().isEmpty();
-    const bool requiresFiltering = hasTextFilter || invertMatch;
-    if (!requiresFiltering)
-    {
-        if (m_filterActive)
-        {
-            for (int row = 0; row < m_eventTable->rowCount(); ++row)
-            {
-                m_eventTable->setRowHidden(row, false);
-            }
-        }
-        m_filterActive = false;
-        if (m_filterStatusLabel != nullptr)
-        {
-            m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2")
-                .arg(m_eventTable->rowCount())
-                .arg(m_eventTable->rowCount()));
-            ks::ui::ApplyStatusRole(m_filterStatusLabel,
-                m_eventTable->rowCount() > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-        }
-        return;
-    }
-
-    m_filterActive = true;
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        QTableWidgetItem* timeItem = m_eventTable->item(row, EventColumnTime100ns);
-        const QString processText = timeItem != nullptr ? timeItem->data(kRoleProcessSearchText).toString() : QString();
-        const QString serviceText = timeItem != nullptr ? timeItem->data(kRoleServiceSearchText).toString() : QString();
-        const QString globalText = timeItem != nullptr ? timeItem->data(kRoleGlobalSearchText).toString() : QString();
-        const QString detailText = m_eventTable->item(row, EventColumnDetail) != nullptr
-            ? m_eventTable->item(row, EventColumnDetail)->text()
-            : QString();
-
-        bool matched = textMatch(processText, processFilter, useRegex, caseSensitivity)
-            && textMatch(serviceText, serviceFilter, useRegex, caseSensitivity)
-            && textMatch(detailText, detailFilter, useRegex, caseSensitivity)
-            && textMatch(globalText, globalFilter, useRegex, caseSensitivity);
-        if (invertMatch)
-        {
-            matched = !matched;
-        }
-
-        m_eventTable->setRowHidden(row, !matched);
-        if (matched)
-        {
-            ++visibleCount;
-        }
-    }
-
-    if (m_filterStatusLabel != nullptr)
-    {
-        m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visibleCount).arg(m_eventTable->rowCount()));
-        ks::ui::ApplyStatusRole(m_filterStatusLabel,
-            visibleCount > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
-    }
+    if (!m_eventTable) return;
+    if (!m_eventFilterProjection)
+        m_eventFilterProjection = new ks::monitor::EventFilterProjection(m_eventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                const auto* time = m_eventTable->item(row, EventColumnTime100ns);
+                values.fields = {time ? time->data(kRoleProcessSearchText).toString() : QString(),
+                    time ? time->data(kRoleServiceSearchText).toString() : QString(),
+                    m_eventTable->item(row, EventColumnDetail) ? m_eventTable->item(row, EventColumnDetail)->text() : QString(),
+                    time ? time->data(kRoleGlobalSearchText).toString() : QString()};
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                if (m_filterStatusLabel)
+                {
+                    m_filterStatusLabel->setText(QStringLiteral("筛选结果：%1 / %2").arg(visible).arg(total));
+                    ks::ui::ApplyStatusRole(m_filterStatusLabel, pending ? ks::ui::StatusRole::Info
+                        : visible > 0 ? ks::ui::StatusRole::Success : ks::ui::StatusRole::Idle);
+                }
+                updateActionState();
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_processFilterEdit ? m_processFilterEdit->text() : QString(),
+        m_serviceFilterEdit ? m_serviceFilterEdit->text() : QString(),
+        m_detailFilterEdit ? m_detailFilterEdit->text() : QString(),m_globalFilterEdit ? m_globalFilterEdit->text() : QString()};
+    spec.fieldIndexes = {0,1,2,3};
+    spec.regex = m_regexCheck && m_regexCheck->isChecked();
+    spec.invert = m_invertCheck && m_invertCheck->isChecked();
+    spec.sensitivity = m_caseCheck && m_caseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    m_eventFilterProjection->setFilter(std::move(spec));
 }
 
 void DirectKernelCallMonitorWidget::clearFilter()
@@ -2197,7 +2131,7 @@ void DirectKernelCallMonitorWidget::exportVisibleRowsToTsv()
 
     for (int row = 0; row < m_eventTable->rowCount(); ++row)
     {
-        if (m_eventTable->isRowHidden(row))
+        if (ks::ui::IsTableRowExcludedByFilter(m_eventTable, row))
         {
             continue;
         }

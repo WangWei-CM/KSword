@@ -1,3 +1,4 @@
+#include "MonitorEventFilterProjection.h"
 
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableContextMenu.h"
@@ -1148,34 +1149,7 @@ namespace
     // - 支持普通 contains 与正则匹配两种模式；
     // - 支持大小写敏感切换；
     // - pattern 为空时视为“匹配通过”。
-    bool textMatch(
-        const QString& sourceText,
-        const QString& patternText,
-        const bool useRegex,
-        const Qt::CaseSensitivity caseSensitivity)
-    {
-        if (patternText.trimmed().isEmpty())
-        {
-            return true;
-        }
 
-        if (!useRegex)
-        {
-            return sourceText.contains(patternText, caseSensitivity);
-        }
-
-        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-        if (caseSensitivity == Qt::CaseInsensitive)
-        {
-            options |= QRegularExpression::CaseInsensitiveOption;
-        }
-        const QRegularExpression regex(patternText, options);
-        if (!regex.isValid())
-        {
-            return false;
-        }
-        return regex.match(sourceText).hasMatch();
-    }
 
     // 连接 ROOT\\CIMV2。
     bool connectWmi(IWbemServices** serviceOut, QString* errorOut)
@@ -4885,6 +4859,7 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
 
 MonitorDock::~MonitorDock()
 {
+    if (m_wmiFilterProjection) m_wmiFilterProjection->close();
     // 析构阶段必须同步等待线程退出，防止对象释放后后台线程仍访问成员。
     stopWmiSubscriptionInternal(true);
     stopEtwCaptureInternal(true);
@@ -9735,93 +9710,44 @@ void MonitorDock::applyWmiProviderFilter()
 
 void MonitorDock::applyWmiEventFilter()
 {
-    if (m_wmiEventTable == nullptr)
-    {
-        return;
-    }
-
-    const QString globalKeyword = m_wmiEventGlobalFilterEdit != nullptr
-        ? m_wmiEventGlobalFilterEdit->text().trimmed()
-        : QString();
-    const QString providerKeyword = m_wmiEventProviderFilterEdit != nullptr
-        ? m_wmiEventProviderFilterEdit->text().trimmed()
-        : QString();
-    const QString classKeyword = m_wmiEventClassFilterEdit != nullptr
-        ? m_wmiEventClassFilterEdit->text().trimmed()
-        : QString();
-    const QString pidKeyword = m_wmiEventPidFilterEdit != nullptr
-        ? m_wmiEventPidFilterEdit->text().trimmed()
-        : QString();
-    const QString detailKeyword = m_wmiEventDetailFilterEdit != nullptr
-        ? m_wmiEventDetailFilterEdit->text().trimmed()
-        : QString();
-    const bool useRegex = m_wmiEventRegexCheck != nullptr && m_wmiEventRegexCheck->isChecked();
-    const bool invertMatch = m_wmiEventInvertCheck != nullptr && m_wmiEventInvertCheck->isChecked();
-    const Qt::CaseSensitivity caseSensitivity =
-        (m_wmiEventCaseCheck != nullptr && m_wmiEventCaseCheck->isChecked())
-        ? Qt::CaseSensitive
-        : Qt::CaseInsensitive;
-
-    int visibleCount = 0;
-    const int totalCount = m_wmiEventTable->rowCount();
-    for (int row = 0; row < totalCount; ++row)
-    {
-        const QString tsText = m_wmiEventTable->item(row, 0) != nullptr
-            ? m_wmiEventTable->item(row, 0)->text()
-            : QString();
-        const QString providerText = m_wmiEventTable->item(row, 1) != nullptr
-            ? m_wmiEventTable->item(row, 1)->text()
-            : QString();
-        const QString classText = m_wmiEventTable->item(row, 2) != nullptr
-            ? m_wmiEventTable->item(row, 2)->text()
-            : QString();
-        const QString pidText = m_wmiEventTable->item(row, 3) != nullptr
-            ? m_wmiEventTable->item(row, 3)->text()
-            : QString();
-        const QString detailText = m_wmiEventTable->item(row, 4) != nullptr
-            ? m_wmiEventTable->item(row, 4)->text()
-            : QString();
-
-        const QString mergedText = QStringLiteral("%1 %2 %3 %4 %5")
-            .arg(tsText, providerText, classText, pidText, detailText);
-        const bool globalMatch = textMatch(mergedText, globalKeyword, useRegex, caseSensitivity);
-        const bool providerMatch = textMatch(providerText, providerKeyword, useRegex, caseSensitivity);
-        const bool classMatch = textMatch(classText, classKeyword, useRegex, caseSensitivity);
-        const bool pidMatch = textMatch(pidText, pidKeyword, useRegex, caseSensitivity);
-        const bool detailMatch = textMatch(detailText, detailKeyword, useRegex, caseSensitivity);
-        bool showRow = globalMatch && providerMatch && classMatch && pidMatch && detailMatch;
-        if (invertMatch)
-        {
-            showRow = !showRow;
-        }
-
-        m_wmiEventTable->setRowHidden(row, !showRow);
-        if (showRow)
-        {
-            ++visibleCount;
-        }
-    }
-
-    if (m_wmiEventFilterStatusLabel != nullptr)
-    {
-        m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visibleCount).arg(totalCount));
-    }
-    if (m_wmiEventKeepBottomCheck != nullptr && m_wmiEventKeepBottomCheck->isChecked())
-    {
-        m_wmiEventTable->scrollToBottom();
-    }
-
-    kLogEvent event;
-    dbg << event
-        << "[MonitorDock] 应用WMI事件筛选, total="
-        << totalCount
-        << ", visible="
-        << visibleCount
-        << ", regex="
-        << (useRegex ? "true" : "false")
-        << ", invert="
-        << (invertMatch ? "true" : "false")
-        << eol;
+    if (!m_wmiEventTable) return;
+    if (!m_wmiFilterProjection)
+        m_wmiFilterProjection = new ks::monitor::EventFilterProjection(m_wmiEventTable,
+            [this](int row) {
+                ks::monitor::EventFilterRow values;
+                for (int column = 0; column < 5; ++column)
+                    values.fields.append(m_wmiEventTable->item(row, column) ? m_wmiEventTable->item(row, column)->text() : QString());
+                return values;
+            },
+            [this](int visible, int total, bool pending) {
+                if (m_wmiEventFilterStatusLabel) m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visible).arg(total));
+                if (m_wmiExportButton) m_wmiExportButton->setEnabled(total > 0 && !pending);
+                if (!pending && m_wmiEventTable->isVisible()
+                    && m_wmiEventKeepBottomCheck && m_wmiEventKeepBottomCheck->isChecked())
+                {
+                    const QPointer<MonitorDock> guard(this);
+                    const auto followLatest = [guard]() {
+                        if (guard && guard->m_wmiEventTable && guard->m_wmiEventTable->isVisible()
+                            && guard->m_wmiEventKeepBottomCheck && guard->m_wmiEventKeepBottomCheck->isChecked()
+                            && guard->m_wmiFilterProjection && !guard->m_wmiFilterProjection->isPending())
+                            guard->m_wmiEventTable->scrollToBottom();
+                    };
+                    if (!ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                        QStringLiteral("monitor-wmi-follow-bottom"), { m_wmiEventTable }, followLatest))
+                        followLatest();
+                }
+            });
+    ks::monitor::EventFilterSpec spec;
+    spec.patterns = {m_wmiEventGlobalFilterEdit ? m_wmiEventGlobalFilterEdit->text().trimmed() : QString(),
+        m_wmiEventProviderFilterEdit ? m_wmiEventProviderFilterEdit->text().trimmed() : QString(),
+        m_wmiEventClassFilterEdit ? m_wmiEventClassFilterEdit->text().trimmed() : QString(),
+        m_wmiEventPidFilterEdit ? m_wmiEventPidFilterEdit->text().trimmed() : QString(),
+        m_wmiEventDetailFilterEdit ? m_wmiEventDetailFilterEdit->text().trimmed() : QString()};
+    spec.fieldIndexes = {-1, 1, 2, 3, 4};
+    spec.regex = m_wmiEventRegexCheck && m_wmiEventRegexCheck->isChecked();
+    spec.invert = m_wmiEventInvertCheck && m_wmiEventInvertCheck->isChecked();
+    spec.sensitivity = m_wmiEventCaseCheck && m_wmiEventCaseCheck->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    m_wmiFilterProjection->setFilter(std::move(spec));
 }
 
 void MonitorDock::clearWmiEventFilter()
@@ -10429,6 +10355,8 @@ void MonitorDock::flushWmiPendingRows()
             timestamp->setText(snapshot.timestamp);
             timestamp->setToolTip(snapshot.timestamp);
         }
+        if (!m_wmiFilterProjection) applyWmiEventFilter();
+        m_wmiFilterProjection->trackRow(m_wmiEventTable->rowCount() - 1);
         ++renderedCount;
         if (budget.elapsed() >= 4) break;
     }
@@ -10515,7 +10443,7 @@ void MonitorDock::exportWmiRowsToTsv()
     int visibleCount = 0;
     for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
     {
-        if (!m_wmiEventTable->isRowHidden(row))
+        if (!ks::ui::IsTableRowExcludedByFilter(m_wmiEventTable, row))
         {
             ++visibleCount;
         }
@@ -10572,7 +10500,7 @@ void MonitorDock::exportWmiRowsToTsv()
 
     for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
     {
-        if (m_wmiEventTable->isRowHidden(row))
+        if (ks::ui::IsTableRowExcludedByFilter(m_wmiEventTable, row))
         {
             continue;
         }

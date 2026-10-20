@@ -26,6 +26,7 @@
 #include <unordered_map>  // std::unordered_map：按 PID 保存运行期进程树节点。
 #include <vector>         // std::vector：目标列表、事件缓存、Provider 列表。
 
+namespace ks::monitor { class EventFilterProjection; }
 class QCheckBox;
 class QComboBox;
 class QEvent;
@@ -386,6 +387,7 @@ private:
     QPushButton* m_eventClearFilterButton = nullptr;    // m_eventClearFilterButton：清空筛选按钮。
     QLabel* m_eventFilterStatusLabel = nullptr;         // m_eventFilterStatusLabel：筛选结果统计文本。
     ProcessTraceTimelineWidget* m_eventTimelineWidget = nullptr; // m_eventTimelineWidget：ETW 事件瀑布流时间轴。
+    ks::monitor::EventFilterProjection* m_eventFilterProjection = nullptr;
     QTableWidget* m_eventTable = nullptr;               // m_eventTable：行为事件结果表。
 
     // ========================= 后台状态 =========================
