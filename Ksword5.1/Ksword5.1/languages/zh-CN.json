@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "minidump.status.report_failed": "报告视图生成失败：%1；重新打开报告页可重试。",
     "handle.filter.preparing": "● 正在准备句柄筛选结果...",
     "● 正在准备句柄筛选结果...": "● 正在准备句柄筛选结果...",
     "handle.filter.failed": "● 句柄筛选失败，请重试应用规则或刷新。",
@@ -7046,6 +7047,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "报告视图生成失败：%1；重新打开报告页可重试。": "报告视图生成失败：%1；重新打开报告页可重试。",
     "● 正在准备句柄筛选结果...": "● 正在准备句柄筛选结果...",
     "● 句柄筛选失败，请重试应用规则或刷新。": "● 句柄筛选失败，请重试应用规则或刷新。",
     "导出进行中": "导出进行中",

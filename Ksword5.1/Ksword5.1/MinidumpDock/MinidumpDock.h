@@ -91,6 +91,7 @@ private:
     void renderCurrentResultPage();
     void renderCurrentRawMemoryPage();
     void retranslateResultPages();
+    void requestReportDocument();
     void startResultTableFill(QTableWidget* table, int totalRows, std::function<void(int)> fillRow);
     void scheduleResultTableFill();
     void continueResultTableFill();
@@ -183,5 +184,8 @@ private:
     bool m_buildingResultCatalog = false;
     bool m_buildingRawMemoryCatalog = false;
     std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_reportBuildOperation;
+    std::shared_ptr<const ks::minidump::DumpParseResult> m_cachedReportSource;
+    std::shared_ptr<const ks::ui::FieldDocument> m_cachedReportDocument;
     bool m_parseBusy = false;   // m_parseBusy：解析任务是否正在运行。
 };

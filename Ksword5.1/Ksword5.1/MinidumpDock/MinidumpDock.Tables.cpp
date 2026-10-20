@@ -24,6 +24,7 @@
 #include "Internationalization/LanguageManager.h"
 #include "MinidumpFormat.h"
 #include "UI/CodeEditorWidget.h"
+#include "UI/AsyncOperation.h"
 #include "UI/MemoryWorkbench/SnapshotWorkbenchWidget.h"
 #include "UI/PerfTrace.h"
 #include "UI/TableHeaderSortingSupport.h"
@@ -338,6 +339,11 @@ void MinidumpDock::renderResult(const ks::minidump::DumpParseResult& result)
     const QSignalBlocker tabSignalsBlocker(m_resultTabs);
     m_buildingResultCatalog = true;
     cancelResultTableFills();
+    if (m_reportBuildOperation) m_reportBuildOperation->cancel();
+    m_cachedReportSource.reset();
+    m_cachedReportDocument.reset();
+    m_reportEditor->setDocument({});
+    m_reportEditor->setEnabled(true);
     clearResultTabs();
     m_memoryView->clearData();
     m_projectedResultPages.clear();
@@ -1467,7 +1473,7 @@ void MinidumpDock::projectResult(
         else if (targetPage == m_reportEditor)
         {
             // 报告用中文规范文本生成，只读编辑器按当前语言即时渲染。
-            m_reportEditor->setDocument(buildReportText(result));
+            requestReportDocument();
         }
     }
 

@@ -64,6 +64,7 @@ struct MinidumpExportRequest
 {
     std::shared_ptr<const ks::minidump::DumpParseResult> result;
     QString savePath;
+    std::shared_ptr<const ks::ui::FieldDocument> document;
     std::function<QString(const QString&)> translate;
 };
 
@@ -177,6 +178,7 @@ MinidumpDock::MinidumpDock(QWidget* parent)
 
 MinidumpDock::~MinidumpDock()
 {
+    if (m_reportBuildOperation != nullptr) m_reportBuildOperation->close();
     if (m_exportOperation != nullptr) m_exportOperation->close();
     // 加锁清空 owner：此后 worker 即使完成也不会再向本控件投递结果。
     std::lock_guard<std::mutex> lock(m_asyncState->mutex);
@@ -746,12 +748,90 @@ void MinidumpDock::promptKswordRelatedCrash(const ks::minidump::DumpParseResult&
     }
 }
 
+void MinidumpDock::requestReportDocument()
+{
+    if (!m_lastResult) return;
+    const std::shared_ptr<const ks::minidump::DumpParseResult> snapshot = m_lastResult;
+    if (m_cachedReportSource == snapshot && m_cachedReportDocument)
+    {
+        m_reportEditor->setDocument(*m_cachedReportDocument);
+        m_reportEditor->setEnabled(true);
+        return;
+    }
+    if (m_reportBuildOperation == nullptr)
+    {
+        m_reportBuildOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_reportBuildOperation->setStateChangedCallback([this]()
+            {
+                if (m_reportBuildOperation->isBusy() ||
+                    (m_cachedReportSource == m_lastResult && m_cachedReportDocument)) return;
+                // A dropped GUI delivery must not leave the report disabled indefinitely.
+                m_projectedResultPages.remove(m_reportEditor);
+                m_reportEditor->setEnabled(true);
+                if (m_resultTabs->currentWidget() == m_reportEditor &&
+                    m_statusKey == QStringLiteral("minidump.status.projecting"))
+                    setStatus("minidump.status.report_failed", "报告视图生成失败：%1；重新打开报告页可重试。",
+                        {QString::number(ERROR_OPERATION_ABORTED)});
+            });
+    }
+    m_reportEditor->setDocument({});
+    m_reportEditor->setEnabled(false);
+    if (m_statusKey != QStringLiteral("minidump.status.projecting") &&
+        m_statusKey != QStringLiteral("minidump.status.report_failed"))
+    {
+        m_projectionPreviousStatusKey = m_statusKey;
+        m_projectionPreviousStatusFallback = m_statusFallback;
+        m_projectionPreviousStatusArguments = m_statusArguments;
+    }
+    setStatus("minidump.status.projecting", "正在更新结果视图：%1 / %2", {QStringLiteral("0"), QStringLiteral("1")});
+    using Source = std::shared_ptr<const ks::minidump::DumpParseResult>;
+    using Document = std::shared_ptr<const ks::ui::FieldDocument>;
+    m_reportBuildOperation->submit<Source, Document>(snapshot,
+        [](const Source& source, const ks::ui::AsyncOperationToken& token)
+        {
+            if (token.isCanceled()) return Document{};
+            return Document(new ks::ui::FieldDocument(buildReportText(*source)),
+                [](const ks::ui::FieldDocument* document)
+                {
+                    // A superseded large value document is never recursively freed on GUI.
+                    auto* release = QRunnable::create([document]() { delete document; });
+                    release->setAutoDelete(true);
+                    QThreadPool::globalInstance()->start(release, -1);
+                });
+        },
+        [this, snapshot](const Document& document, std::uint64_t)
+        {
+            if (m_lastResult != snapshot || !document) return true;
+            m_cachedReportSource = snapshot;
+            m_cachedReportDocument = document;
+            const QPointer<MinidumpDock> guardThis(this);
+            m_reportEditor->setDocument(*document);
+            if (guardThis == nullptr) return true;
+            m_reportEditor->setEnabled(true);
+            if (m_resultTabs->currentWidget() == m_reportEditor) restoreResultProjectionStatus();
+            return true;
+        },
+        [this, snapshot](std::exception_ptr failure)
+        {
+            if (m_lastResult != snapshot) return;
+            m_projectedResultPages.remove(m_reportEditor);
+            m_reportEditor->setEnabled(true);
+            if (m_resultTabs->currentWidget() != m_reportEditor) return;
+            QString detail = QString::number(ERROR_UNHANDLED_EXCEPTION);
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) {}
+            setStatus("minidump.status.report_failed", "报告视图生成失败：%1；重新打开报告页可重试。", {detail});
+        });
+}
+
 MinidumpExportResult MinidumpDock::exportReportSnapshot(const MinidumpExportRequest& request)
 {
     MinidumpExportResult result;
     result.savePath = request.savePath;
-    const auto document = buildReportText(*request.result);
-    const QByteArray bytes = document.toPlainText(request.translate).toUtf8();
+    const QByteArray bytes = request.document
+        ? request.document->toPlainText(request.translate).toUtf8()
+        : buildReportText(*request.result).toPlainText(request.translate).toUtf8();
     QSaveFile file(request.savePath);
     result.ok = writeExportBytes(file, bytes, result.errorText);
     return result;
@@ -783,6 +863,7 @@ void MinidumpDock::exportReport()
     const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     MinidumpExportRequest request;
     request.result = snapshot;
+    if (m_cachedReportSource == snapshot) request.document = m_cachedReportDocument;
     request.savePath = savePath;
     request.translate = [translator](const QString& source) { return translator.sourceText(source); };
     const auto ticket = m_exportOperation->submitTransaction<MinidumpExportRequest, MinidumpExportResult>(
