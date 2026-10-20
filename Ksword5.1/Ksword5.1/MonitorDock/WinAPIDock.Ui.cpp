@@ -37,6 +37,7 @@
 #include <QSize>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QTableView>
 #include <QTimer>
 #include <QTabWidget>
 #include <QToolButton>
@@ -563,12 +564,10 @@ void WinAPIDock::initializeUi()
     auto* coverageBoundary = new QLabel(QStringLiteral("覆盖边界：任意 COM 方法、直接系统调用、启动监控前的调用及未识别的原生异步完成路径。Raw 仅采集入口。"), coveragePanel);
     coverageBoundary->setWordWrap(true);
     coverageLayout->addWidget(coverageBoundary);
-    m_coverageTable = new ks::ui::VisibleTableWidget(coveragePanel);
+    m_coverageTable = new ks::ui::TableActionTableView(coveragePanel);
     // API 覆盖为辅助能力快照，紧凑导出可保留原始状态。
     ks::ui::SetTableActionBarMode(m_coverageTable, ks::ui::TableActionBarMode::Compact);
-    m_coverageTable->setColumnCount(7);
-    m_coverageTable->setHorizontalHeaderLabels({QStringLiteral("PID"), QStringLiteral("API ID"), QStringLiteral("Hook 类型"),
-        QStringLiteral("API"), QStringLiteral("覆盖状态"), QStringLiteral("入口地址"), QStringLiteral("原因")});
+    initializeCoverageTable();
     m_coverageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_coverageTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_coverageTable->setAlternatingRowColors(true);

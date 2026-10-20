@@ -62,6 +62,8 @@ void WinAPIDock::changeEvent(QEvent* event)
 
 WinAPIDock::~WinAPIDock()
 {
+    if (m_coverageDispatcher) m_coverageDispatcher->close();
+    ++m_coverageFilterTicket;
     stopMonitoringInternal(true);
 
     if (m_uiFlushTimer != nullptr)
@@ -82,6 +84,7 @@ void WinAPIDock::notifyPageActivated()
         || ((nowMs - m_lastProcessRefreshMs) >= 5000);
 
     m_hasActivatedOnce = true;
+    if (m_coverageDirty) QTimer::singleShot(0, this, [this]() { updateCoverageView(); });
     if (shouldRefresh)
     {
         refreshProcessListAsync();

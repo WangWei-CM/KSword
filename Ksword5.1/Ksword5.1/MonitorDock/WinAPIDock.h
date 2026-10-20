@@ -13,6 +13,9 @@
 #include "../../../shared/ApiMonitorCoverage.h"
 #include "../../../shared/ApiMonitorInjectionBroker.h"
 
+#include "../UI/AsyncUiDispatcher.h"
+#include <QByteArray>
+#include <QStringList>
 #include <QString>  // QString：事件文本、样式文本与会话路径缓存。
 #include <QWidget>  // QWidget：WinAPIDock 的直接基类。
 
@@ -34,6 +37,8 @@ class QPlainTextEdit;
 class QPushButton;
 class QSplitter;
 class QTableWidget;
+class QTableView;
+class QAbstractItemModel;
 class QTabWidget;
 class QTableWidgetItem;
 class QTimer;
@@ -108,6 +113,12 @@ public:
         bool internalEvent = false;
     };
 
+    struct CoverageDisplayRow
+    {
+        QStringList columns;
+        QString searchText;
+    };
+
 protected:
     // changeEvent 将主题重着色排队，不启动监控或改变任何会话状态。
     void changeEvent(QEvent* event) override;
@@ -157,10 +168,13 @@ private:
         std::uint64_t session = 0, revision = 0;
         bool stale = true, complete = false;
         std::vector<ks::winapi_monitor::ApiMonitorEventPacket> rows;
+        std::shared_ptr<const std::vector<CoverageDisplayRow>> displayRows;
     };
     void queueCoverageSnapshot(std::uint32_t pid, std::uint64_t session, std::uint64_t revision,
         std::vector<ks::winapi_monitor::ApiMonitorEventPacket> rows, bool stale, std::uint64_t generation);
     void flushCoverageUpdates();
+    void initializeCoverageTable();
+    void refreshCoverageDefinitionHash();
     void updateCoverageView();
     void resetCoverageView();
     void markCoverageStale();
@@ -242,7 +256,16 @@ private:
     QComboBox* m_coveragePidCombo = nullptr;
     QLineEdit* m_coverageFilterEdit = nullptr;
     QLabel* m_coverageStatusLabel = nullptr;
-    QTableWidget* m_coverageTable = nullptr;
+    QTableView* m_coverageTable = nullptr;
+    QAbstractItemModel* m_coverageModel = nullptr;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_coverageDispatcher;
+    QByteArray m_coverageDefinitionHash;
+    std::uint64_t m_coverageFilterTicket = 0;
+    bool m_coverageFilterRunning = false;
+    bool m_coverageDebouncePending = false;
+    bool m_coverageDebounceDue = false;
+    bool m_coverageHashPending = false;
+    bool m_coverageHashDirty = false;
     bool m_coverageDirty = true;
     std::unordered_map<std::uint32_t, CoverageViewState> m_pendingCoverage, m_coverageViews;
     std::vector<ks::process::ProcessRecord> m_processList; // m_processList：当前系统进程快照。

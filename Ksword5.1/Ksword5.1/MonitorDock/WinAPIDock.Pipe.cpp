@@ -740,12 +740,10 @@ void WinAPIDock::appendEventRow(const EventRow& rowValue)
         if (rowValue.agentStatus == QStringLiteral("SessionReady"))
         {
             m_hookState = HookState::Installing;
-            QFile definitions(QApplication::applicationDirPath() + QStringLiteral("/profiles/api_monitor_definitions.json"));
-            const QByteArray localHash = definitions.open(QIODevice::ReadOnly)
-                ? QCryptographicHash::hash(definitions.readAll(), QCryptographicHash::Sha256).toHex() : QByteArray();
             const QString marker = QString::fromLatin1("definitionSha256=");
             const QString remoteHash = rowValue.detailText.startsWith(marker) ? rowValue.detailText.mid(marker.size(), 64) : QString();
-            m_definitionMismatch = localHash.isEmpty() || remoteHash.size() != 64 || remoteHash.toLatin1() != localHash;
+            m_definitionMismatch = m_coverageDefinitionHash.isEmpty() || remoteHash.size() != 64
+                || remoteHash.toLatin1() != m_coverageDefinitionHash;
         }
         else if (rowValue.agentStatus == QStringLiteral("InstallHooksFailed")) m_hookState = HookState::Failed;
         else if (rowValue.agentStatus == QStringLiteral("HooksPartial")) m_hookState = HookState::Partial;
