@@ -115,6 +115,8 @@ void HardwareOtherDevicesPage::initializeUi()
     m_rootLayout->addLayout(headerLayout, 0);
 
     m_inventoryEditor = new ks::ui::StructuredFieldView(this);
+    // 普通设备清单无需同步tree()；共享值模型按需呈现并延后隐藏投影。
+    m_inventoryEditor->setValueModelProjection();
 
     m_inventoryEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("设备清单加载中，请稍候...")));
     m_rootLayout->addWidget(m_inventoryEditor, 1);
