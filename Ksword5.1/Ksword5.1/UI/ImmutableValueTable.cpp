@@ -53,6 +53,7 @@ namespace ks::ui
         std::function<bool(const ImmutableTableRow&)> accepts;
         int currentColumn = 0, sortColumn = -1;
         Qt::SortOrder sortOrder = Qt::AscendingOrder;
+        bool keepPreviousInteractive = false;
         bool pending = false, running = false, applying = false, notifySelection = false, publishing = false, deferred = false;
     };
 
@@ -98,7 +99,9 @@ namespace ks::ui
             const auto* row = state.model->rowAt(current.row());
             state.currentKey = row ? row->key : QString();
             if (current.isValid()) state.currentColumn = current.column();
+            const QPointer<ImmutableValueTable> alive(this);
             if (currentRowChanged) currentRowChanged();
+            if (alive && m_state->keepPreviousInteractive && isPreparing()) request(false);
         });
         connect(selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
             auto& state = *m_state;
@@ -106,6 +109,7 @@ namespace ks::ui
             state.selectedKeys.clear();
             for (const auto& index : selectionModel()->selectedRows())
                 if (const auto* row = state.model->rowAt(index.row())) state.selectedKeys.insert(row->key);
+            if (state.keepPreviousInteractive && isPreparing()) request(false);
         });
         connect(this, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
             if (rowDoubleClicked) rowDoubleClicked(index.row());
@@ -166,6 +170,11 @@ namespace ks::ui
         }
         startPending();
     }
+    void ImmutableValueTable::setKeepPreviousProjectionInteractive(bool keep)
+    {
+        m_state->keepPreviousInteractive = keep;
+        if (keep) setEnabled(true);
+    }
     void ImmutableValueTable::setQuery(const QString& query)
     {
         if (query == m_state->query) return;
@@ -204,7 +213,7 @@ namespace ks::ui
         state.pending = true;
         state.deferred = false;
         const QPointer<ImmutableValueTable> alive(this);
-        setEnabled(false);
+        if (!state.keepPreviousInteractive) setEnabled(false);
         if (!alive) return;
         retire(std::move(state.pendingProjection));
         startPending();

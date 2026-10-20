@@ -23,6 +23,8 @@ namespace ks::ui
         ~ImmutableValueTable() override;
         void setSourceFactory(SourceFactory factory);
         void setQuery(const QString& query);
+        // Streaming replaceable projections may keep the prior immutable version interactive.
+        void setKeepPreviousProjectionInteractive(bool keep);
         void setRowPredicate(std::function<bool(const ImmutableTableRow&)> accepts);
         void clearRows();
         int rowCount() const;
