@@ -1,4 +1,6 @@
 #include "DiskMonitorPage.h"
+#include "../UI/AsyncUiDispatcher.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -66,6 +68,27 @@
 
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Tdh.lib")
+
+struct DiskMonitorPage::SamplingState
+{
+    std::atomic_bool m_processSamplingStopRequested{ false };
+    std::atomic_bool m_processSamplingInProgress{ false };
+    std::unordered_map<std::uint32_t, ProcessDiskBaseline> m_baselineByPid;
+    QHash<QString, FileActivityStateEntry> m_fileActivityStateByKey;
+    std::unordered_map<std::uint32_t, QString> m_recentProcessNameByPid;
+    std::unordered_map<std::uint32_t, QString> m_recentProcessPathByPid;
+    std::atomic_bool m_fileActivityEtwStopRequested{ false };
+    std::atomic_bool m_fileActivityEtwRunning{ false };
+    std::atomic<std::uint64_t> m_fileActivityEtwSessionHandle{ 0 };
+    std::atomic<std::uint64_t> m_fileActivityEtwTraceHandle{ 0 };
+    std::atomic<std::uint32_t> m_fileActivityEtwLastStatus{ 0 };
+    std::mutex m_fileActivityMutex;
+    std::unordered_map<std::uint64_t, QString> m_filePathByObject;
+    std::unordered_map<std::uint64_t, PendingFileIoOperation> m_pendingFileIoByIrp;
+    QHash<QString, FileActivityAccumulator> m_fileActivityByKey;
+    std::uint64_t m_lastFileActivityDrainMs = 0;
+};
+
 
 namespace
 {
@@ -530,7 +553,7 @@ namespace
     // isFileObjectProperty：
     // - 作用：识别 FileObject / FileKey 之类可作为路径映射键的属性；
     // - 处理：Kernel FileIo 事件不同版本字段名略有差异；
-    // - 返回：true 表示该属性可用于 m_filePathByObject。
+    // - 返回：true 表示该属性可用于 m_samplingState->m_filePathByObject。
     bool isFileObjectProperty(const QString& normalizedName)
     {
         return normalizedName == QStringLiteral("fileobject")
@@ -543,7 +566,7 @@ namespace
     // isIrpProperty：
     // - 作用：识别 Kernel-File 事件中的 IRP 指针；
     // - 处理：Read/Write 与 OperationEnd 通过同一 IRP 关联开始和完成；
-    // - 返回：true 表示该字段可作为 m_pendingFileIoByIrp 的键。
+    // - 返回：true 表示该字段可作为 m_samplingState->m_pendingFileIoByIrp 的键。
     bool isIrpProperty(const QString& normalizedName)
     {
         return normalizedName == QStringLiteral("irp")
@@ -951,7 +974,9 @@ namespace
 }
 
 DiskMonitorPage::DiskMonitorPage(QWidget* parent)
-    : QWidget(parent)
+    : QWidget(parent),
+      m_samplingState(std::make_shared<SamplingState>()),
+      m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
 {
     // 构造顺序：先搭建 UI 和连接事件；ETW/进程枚举延迟到首帧后启动。
     initializeUi();
@@ -973,11 +998,12 @@ DiskMonitorPage::DiskMonitorPage(QWidget* parent)
 
 DiskMonitorPage::~DiskMonitorPage()
 {
+    m_dispatcher->close();
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->stop();
     }
-    m_processSamplingStopRequested.store(
+    m_samplingState->m_processSamplingStopRequested.store(
         true,
         std::memory_order_release);
     if (m_processSamplingThread != nullptr && m_processSamplingThread->joinable())
@@ -988,7 +1014,7 @@ DiskMonitorPage::~DiskMonitorPage()
         m_processSamplingThread->join();
     }
     m_processSamplingThread.reset();
-    m_processSamplingInProgress.store(false);
+    m_samplingState->m_processSamplingInProgress.store(false);
     if (m_storagePanel != nullptr)
     {
         // collectSamples 已完全退出后只移交 lease；GUI 线程不执行 OFF。
@@ -1344,64 +1370,58 @@ void DiskMonitorPage::installProcessColumnMenu()
 
 void DiskMonitorPage::refreshNow()
 {
-    if (m_processSamplingStopRequested.load(
-        std::memory_order_acquire))
-    {
-        return;
-    }
-    if (m_processSamplingInProgress.exchange(true))
-    {
-        return;
-    }
-
-    // 上一轮线程只会在投递结果后立即退出，在下一轮启动前回收避免 joinable thread 析构终止进程。
-    if (m_processSamplingThread != nullptr && m_processSamplingThread->joinable())
-    {
-        m_processSamplingThread->join();
-    }
+    if (m_samplingState->m_processSamplingStopRequested.load(std::memory_order_acquire)) return;
+    if (m_samplingState->m_processSamplingInProgress.exchange(true)) return;
+    if (m_processSamplingThread != nullptr && m_processSamplingThread->joinable()) m_processSamplingThread->join();
     m_processSamplingThread.reset();
-
     if (m_refreshButton != nullptr) m_refreshButton->setEnabled(false);
-    const auto storageBackend = m_storagePanel != nullptr
-        ? m_storagePanel->samplingBackend() : nullptr;
-    m_processSamplingThread = std::make_unique<std::thread>([this, storageBackend]()
+    const auto storageBackend = m_storagePanel != nullptr ? m_storagePanel->samplingBackend() : nullptr;
+    const auto state = m_samplingState;
+    const auto dispatcher = m_dispatcher;
+    const QPointer<DiskMonitorPage> guard(this);
+    m_processSamplingThread = std::make_unique<std::thread>([state, storageBackend, dispatcher, guard]()
     {
-        std::vector<ProcessDiskSample> sampleList = collectProcessDiskSamples();
-        if (m_processSamplingStopRequested.load(
-            std::memory_order_acquire))
+        // Physical sampling and ETW retention advance independently of GUI/menu work.
+        struct Finished
         {
-            return;
+            std::shared_ptr<SamplingState> state;
+            ~Finished() { state->m_processSamplingInProgress.store(false); }
+        } finished {state};
+        try
+        {
+        std::vector<ProcessDiskSample> samples = collectProcessDiskSamples(*state);
+        if (state->m_processSamplingStopRequested.load(std::memory_order_acquire)) return;
+        std::sort(samples.begin(), samples.end(), [](const ProcessDiskSample& left, const ProcessDiskSample& right) {
+            if (!qFuzzyCompare(left.totalBytesPerSec + 1.0, right.totalBytesPerSec + 1.0))
+                return left.totalBytesPerSec > right.totalBytesPerSec;
+            return left.pid < right.pid;
+        });
+        auto files = consumeFileActivitySamples(*state, samples);
+        DiskMonitorStorageBatch storage = storageBackend != nullptr
+            ? storageBackend->collectSamples(&state->m_processSamplingStopRequested) : DiskMonitorStorageBatch{};
+        if (state->m_processSamplingStopRequested.load(std::memory_order_acquire)) return;
+        dispatcher->post([guard, samples = std::move(samples), files = std::move(files), storage = std::move(storage)]() mutable {
+            if (guard == nullptr) return;
+            if (guard->m_refreshButton != nullptr) guard->m_refreshButton->setEnabled(true);
+            guard->applyProcessDiskSamples(std::move(samples), std::move(files), std::move(storage));
+        });
         }
-        DiskMonitorStorageBatch storageSampleBatch =
-            storageBackend != nullptr
-            ? storageBackend->collectSamples(
-                &m_processSamplingStopRequested)
-            : DiskMonitorStorageBatch{};
-        if (m_processSamplingStopRequested.load(
-            std::memory_order_acquire))
+        catch (...)
         {
-            return;
+            dispatcher->post([guard]() {
+                if (guard == nullptr) return;
+                if (guard->m_refreshButton != nullptr) guard->m_refreshButton->setEnabled(true);
+                if (guard->m_statusLabel != nullptr) guard->m_statusLabel->setText(ks::i18n::contextText(
+                    QStringLiteral("hardware.disk_monitor.sampling_failed"),
+                    QStringLiteral("状态：磁盘采样失败，请刷新重试。")));
+            });
         }
-        QMetaObject::invokeMethod(
-            this,
-            [
-                this,
-                sampleList = std::move(sampleList),
-                storageSampleBatch = std::move(storageSampleBatch)
-            ]() mutable
-        {
-            m_processSamplingInProgress.store(false);
-            if (m_refreshButton != nullptr) m_refreshButton->setEnabled(true);
-            applyProcessDiskSamples(
-                std::move(sampleList),
-                std::move(storageSampleBatch));
-        },
-            Qt::QueuedConnection);
     });
 }
 
 void DiskMonitorPage::applyProcessDiskSamples(
     std::vector<ProcessDiskSample> sampleList,
+    std::vector<FileActivitySample> fileSamples,
     DiskMonitorStorageBatch storageSampleBatch)
 {
     const QList<QTableView*> diskActivityTables = {
@@ -1410,7 +1430,7 @@ void DiskMonitorPage::applyProcessDiskSamples(
     };
     if (ks::ui::IsTableUiCommitBlockedByContextMenu(diskActivityTables))
     {
-        // 延迟完整采样提交，ETW 活动队列也保持到安全回投时再消费。
+        // 仅延期完整纯值采样包；ETW 聚合与保留期继续在采样 worker 推进。
         const QPointer<DiskMonitorPage> safeThis(this);
         ks::ui::DeferTableUiCommitIfContextMenuOpen(
             this,
@@ -1418,33 +1438,23 @@ void DiskMonitorPage::applyProcessDiskSamples(
             diskActivityTables,
             [safeThis,
                 sampleList = std::move(sampleList),
+                fileSamples = std::move(fileSamples),
                 storageSampleBatch = std::move(storageSampleBatch)]() mutable
             {
                 if (!safeThis.isNull())
                 {
                     safeThis->applyProcessDiskSamples(
                         std::move(sampleList),
+                        std::move(fileSamples),
                         std::move(storageSampleBatch));
                 }
             });
         return;
     }
 
-    std::sort(
-        sampleList.begin(),
-        sampleList.end(),
-        [](const ProcessDiskSample& left, const ProcessDiskSample& right)
-        {
-            if (!qFuzzyCompare(left.totalBytesPerSec + 1.0, right.totalBytesPerSec + 1.0))
-            {
-                return left.totalBytesPerSec > right.totalBytesPerSec;
-            }
-            return left.pid < right.pid;
-        });
-
     pruneStaleSelection(sampleList);
-    m_lastSampleList = sampleList;
-    m_lastFileActivityList = consumeFileActivitySamples(m_lastSampleList);
+    m_lastSampleList = std::move(sampleList);
+    m_lastFileActivityList = std::move(fileSamples);
 
     // 保持 ETW 消费和速率基线连续，只把不可见表格的 item/排序工作延后。
     m_processPresentationDirty = true;
@@ -1457,11 +1467,11 @@ void DiskMonitorPage::applyProcessDiskSamples(
 
     if (m_statusLabel != nullptr)
     {
-        const std::uint32_t etwStatus = m_fileActivityEtwLastStatus.load();
-        const QString etwStateText = m_fileActivityEtwRunning.load()
+        const std::uint32_t etwStatus = m_samplingState->m_fileActivityEtwLastStatus.load();
+        const QString etwStateText = m_samplingState->m_fileActivityEtwRunning.load()
             ? QStringLiteral("ETW文件级")
             : QStringLiteral("文件级ETW未运行");
-        const QString statusSuffix = (!m_fileActivityEtwRunning.load() && etwStatus != ERROR_SUCCESS)
+        const QString statusSuffix = (!m_samplingState->m_fileActivityEtwRunning.load() && etwStatus != ERROR_SUCCESS)
             ? QStringLiteral("(错误:%1)").arg(etwStatus)
             : QString();
         m_statusLabel->setText(
@@ -1501,7 +1511,7 @@ void DiskMonitorPage::refreshProcessPresentation()
     m_processPresentationDirty = false;
 }
 
-std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessDiskSamples()
+std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessDiskSamples(SamplingState& state)
 {
     std::vector<ProcessDiskSample> sampleList;
     const std::uint64_t currentTickMs = steadyTickMs();
@@ -1555,8 +1565,8 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
                 sample.rawOtherOps = static_cast<std::uint64_t>(ioCounters.OtherOperationCount);
                 sample.countersReady = true;
 
-                const auto baselineIt = m_baselineByPid.find(sample.pid);
-                if (baselineIt != m_baselineByPid.end()
+                const auto baselineIt = state.m_baselineByPid.find(sample.pid);
+                if (baselineIt != state.m_baselineByPid.end()
                     && isSameProcessIdentity(createTime100ns, baselineIt->second.identityCreateTime100ns)
                     && currentTickMs > baselineIt->second.sampleTickMs)
                 {
@@ -1615,7 +1625,7 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
                 baseline.rawReadOps = sample.rawReadOps;
                 baseline.rawWriteOps = sample.rawWriteOps;
                 baseline.rawOtherOps = sample.rawOtherOps;
-                m_baselineByPid[sample.pid] = baseline;
+                state.m_baselineByPid[sample.pid] = baseline;
             }
         }
 
@@ -1623,11 +1633,11 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
     } while (::Process32NextW(snapshotHandle.get(), &processEntry) != FALSE);
 
     // 移除已经退出进程的历史基线，避免 PID 复用时旧样本长期残留。
-    for (auto baselineIt = m_baselineByPid.begin(); baselineIt != m_baselineByPid.end();)
+    for (auto baselineIt = state.m_baselineByPid.begin(); baselineIt != state.m_baselineByPid.end();)
     {
         if (observedPidSet.find(baselineIt->first) == observedPidSet.end())
         {
-            baselineIt = m_baselineByPid.erase(baselineIt);
+            baselineIt = state.m_baselineByPid.erase(baselineIt);
         }
         else
         {
@@ -1639,15 +1649,15 @@ std::vector<DiskMonitorPage::ProcessDiskSample> DiskMonitorPage::collectProcessD
 }
 
 std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileActivitySamples(
-    const std::vector<ProcessDiskSample>& sampleList)
+    SamplingState& state, const std::vector<ProcessDiskSample>& sampleList)
 {
     const std::uint64_t nowMs = steadyTickMs();
     double deltaSeconds = 1.0;
-    if (m_lastFileActivityDrainMs != 0 && nowMs > m_lastFileActivityDrainMs)
+    if (state.m_lastFileActivityDrainMs != 0 && nowMs > state.m_lastFileActivityDrainMs)
     {
-        deltaSeconds = std::max(0.001, static_cast<double>(nowMs - m_lastFileActivityDrainMs) / 1000.0);
+        deltaSeconds = std::max(0.001, static_cast<double>(nowMs - state.m_lastFileActivityDrainMs) / 1000.0);
     }
-    m_lastFileActivityDrainMs = nowMs;
+    state.m_lastFileActivityDrainMs = nowMs;
 
     std::unordered_map<std::uint32_t, QString> processNameByPid;
     std::unordered_map<std::uint32_t, QString> processPathByPid;
@@ -1655,19 +1665,19 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
     processNameByPid.reserve(sampleList.size());
     processPathByPid.reserve(sampleList.size());
     processIoPriorityByPid.reserve(sampleList.size());
-    if (m_recentProcessNameByPid.size() > 4096U)
+    if (state.m_recentProcessNameByPid.size() > 4096U)
     {
-        m_recentProcessNameByPid.clear();
-        m_recentProcessPathByPid.clear();
+        state.m_recentProcessNameByPid.clear();
+        state.m_recentProcessPathByPid.clear();
     }
     for (const ProcessDiskSample& sample : sampleList)
     {
         processNameByPid[sample.pid] = sample.processName;
         processPathByPid[sample.pid] = sample.processImagePath;
-        m_recentProcessNameByPid[sample.pid] = sample.processName;
+        state.m_recentProcessNameByPid[sample.pid] = sample.processName;
         if (!sample.processImagePath.isEmpty())
         {
-            m_recentProcessPathByPid[sample.pid] =
+            state.m_recentProcessPathByPid[sample.pid] =
                 sample.processImagePath;
         }
         if (!sample.ioPriorityText.isEmpty())
@@ -1676,23 +1686,22 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         }
     }
 
-    const bool fileActivityEtwRunning = m_fileActivityEtwRunning.load();
+    const bool fileActivityEtwRunning = state.m_fileActivityEtwRunning.load();
     QHash<QString, FileActivityAccumulator> activitySnapshot;
     {
-        std::lock_guard<std::mutex> lock(m_fileActivityMutex);
-        activitySnapshot = m_fileActivityByKey;
-        m_fileActivityByKey.clear();
+        std::lock_guard<std::mutex> lock(state.m_fileActivityMutex);
+        activitySnapshot.swap(state.m_fileActivityByKey);
         if (!fileActivityEtwRunning)
         {
             // ETW 会话退出后清理跨窗口状态，避免下次启动时把旧 IRP/路径误关联到新事件。
-            m_pendingFileIoByIrp.clear();
-            m_filePathByObject.clear();
+            state.m_pendingFileIoByIrp.clear();
+            state.m_filePathByObject.clear();
             activitySnapshot.clear();
         }
-        else if (m_pendingFileIoByIrp.size() > 32768)
+        else if (state.m_pendingFileIoByIrp.size() > 32768)
         {
             // 长时间未完成的 IRP 多半已经丢失完成事件，定期裁剪保护 UI 进程内存占用。
-            m_pendingFileIoByIrp.clear();
+            state.m_pendingFileIoByIrp.clear();
         }
     }
 
@@ -1716,9 +1725,9 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         else
         {
             const auto recentNameIt =
-                m_recentProcessNameByPid.find(sample.pid);
+                state.m_recentProcessNameByPid.find(sample.pid);
             sample.processName =
-                recentNameIt != m_recentProcessNameByPid.end()
+                recentNameIt != state.m_recentProcessNameByPid.end()
                 ? recentNameIt->second
                 : QStringLiteral("<PID %1>").arg(sample.pid);
         }
@@ -1730,8 +1739,8 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         else
         {
             const auto recentPathIt =
-                m_recentProcessPathByPid.find(sample.pid);
-            if (recentPathIt != m_recentProcessPathByPid.end())
+                state.m_recentProcessPathByPid.find(sample.pid);
+            if (recentPathIt != state.m_recentProcessPathByPid.end())
             {
                 sample.processImagePath = recentPathIt->second;
             }
@@ -1762,14 +1771,14 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
 
     if (!fileActivityEtwRunning)
     {
-        m_fileActivityStateByKey.clear();
+        state.m_fileActivityStateByKey.clear();
         return {};
     }
 
     // 每轮先把仍在保留期内但本秒无新事件的行速率归零；随后仅覆盖本轮活跃键。
     // 这样长时间读写持续更新同一行，活动暂停时也不会把上一秒速率伪装成当前速率。
-    for (auto stateIt = m_fileActivityStateByKey.begin();
-        stateIt != m_fileActivityStateByKey.end();
+    for (auto stateIt = state.m_fileActivityStateByKey.begin();
+        stateIt != state.m_fileActivityStateByKey.end();
         ++stateIt)
     {
         FileActivitySample& sample = stateIt.value().sample;
@@ -1788,7 +1797,7 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         }
 
         const QString keyText = fileActivityIdentityKey(sample.pid, sample.filePath);
-        FileActivityStateEntry& stateEntry = m_fileActivityStateByKey[keyText];
+        FileActivityStateEntry& stateEntry = state.m_fileActivityStateByKey[keyText];
         stateEntry.lastActivityMs = nowMs;
         stateEntry.sample = sample;
     }
@@ -1799,8 +1808,8 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
     {
         alivePidSet.insert(processSample.pid);
     }
-    for (auto stateIt = m_fileActivityStateByKey.begin();
-        stateIt != m_fileActivityStateByKey.end();)
+    for (auto stateIt = state.m_fileActivityStateByKey.begin();
+        stateIt != state.m_fileActivityStateByKey.end();)
     {
         const FileActivityStateEntry& stateEntry = stateIt.value();
         const bool expired = nowMs >= stateEntry.lastActivityMs
@@ -1809,7 +1818,7 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
             && alivePidSet.find(stateEntry.sample.pid) == alivePidSet.end();
         if (expired || processExited)
         {
-            stateIt = m_fileActivityStateByKey.erase(stateIt);
+            stateIt = state.m_fileActivityStateByKey.erase(stateIt);
         }
         else
         {
@@ -1817,12 +1826,12 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         }
     }
 
-    if (m_fileActivityStateByKey.size() > 2048)
+    if (state.m_fileActivityStateByKey.size() > 2048)
     {
         std::vector<std::pair<QString, std::uint64_t>> stateAgeList;
-        stateAgeList.reserve(static_cast<std::size_t>(m_fileActivityStateByKey.size()));
-        for (auto stateIt = m_fileActivityStateByKey.constBegin();
-            stateIt != m_fileActivityStateByKey.constEnd();
+        stateAgeList.reserve(static_cast<std::size_t>(state.m_fileActivityStateByKey.size()));
+        for (auto stateIt = state.m_fileActivityStateByKey.constBegin();
+            stateIt != state.m_fileActivityStateByKey.constEnd();
             ++stateIt)
         {
             stateAgeList.emplace_back(stateIt.key(), stateIt.value().lastActivityMs);
@@ -1837,14 +1846,14 @@ std::vector<DiskMonitorPage::FileActivitySample> DiskMonitorPage::consumeFileAct
         const std::size_t removeCount = stateAgeList.size() - 2048U;
         for (std::size_t index = 0; index < removeCount; ++index)
         {
-            m_fileActivityStateByKey.remove(stateAgeList[index].first);
+            state.m_fileActivityStateByKey.remove(stateAgeList[index].first);
         }
     }
 
     resultList.clear();
-    resultList.reserve(static_cast<std::size_t>(m_fileActivityStateByKey.size()));
-    for (auto stateIt = m_fileActivityStateByKey.constBegin();
-        stateIt != m_fileActivityStateByKey.constEnd();
+    resultList.reserve(static_cast<std::size_t>(state.m_fileActivityStateByKey.size()));
+    for (auto stateIt = state.m_fileActivityStateByKey.constBegin();
+        stateIt != state.m_fileActivityStateByKey.constEnd();
         ++stateIt)
     {
         resultList.push_back(stateIt.value().sample);
@@ -2092,7 +2101,7 @@ void DiskMonitorPage::updateActivityTable()
     m_activityTable->setRowCount(1);
     // stateText：区分“全部活动”与“勾选 PID”两种视角，
     // 避免空选择时仍提示用户必须勾选进程。
-    const QString stateText = m_fileActivityEtwRunning.load()
+    const QString stateText = m_samplingState->m_fileActivityEtwRunning.load()
         ? (filterBySelectedPid
             ? QStringLiteral("<最近 5 秒未捕获到所选 PID 的文件级 Read/Write 事件>")
             : QStringLiteral("<最近 5 秒未捕获到文件级 Read/Write 事件>"))
@@ -2129,7 +2138,7 @@ void DiskMonitorPage::updateSummaryLabels(const std::vector<ProcessDiskSample>& 
 
     if (m_summaryLabel != nullptr)
     {
-        const QString modeText = m_fileActivityEtwRunning.load()
+        const QString modeText = m_samplingState->m_fileActivityEtwRunning.load()
             ? QStringLiteral("ETW文件级")
             : QStringLiteral("文件级ETW未运行");
         m_summaryLabel->setText(
@@ -2206,10 +2215,10 @@ void DiskMonitorPage::startFileActivityEtw()
         return;
     }
 
-    m_fileActivityEtwStopRequested.store(false);
-    m_fileActivityEtwLastStatus.store(ERROR_SUCCESS);
+    m_samplingState->m_fileActivityEtwStopRequested.store(false);
+    m_samplingState->m_fileActivityEtwLastStatus.store(ERROR_SUCCESS);
 
-    m_fileActivityEtwThread = std::make_unique<std::thread>([this]()
+    m_fileActivityEtwThread = std::make_unique<std::thread>([state = m_samplingState]()
     {
         const std::wstring sessionNameWide(kDiskMonitorEtwSessionName);
         const ULONG traceNameBytes =
@@ -2243,15 +2252,15 @@ void DiskMonitorPage::startFileActivityEtw()
         }
         if (startStatus != ERROR_SUCCESS)
         {
-            m_fileActivityEtwLastStatus.store(startStatus);
-            m_fileActivityEtwRunning.store(false);
+            state->m_fileActivityEtwLastStatus.store(startStatus);
+            state->m_fileActivityEtwRunning.store(false);
             return;
         }
 
-        m_fileActivityEtwSessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
-        if (m_fileActivityEtwStopRequested.load())
+        state->m_fileActivityEtwSessionHandle.store(static_cast<std::uint64_t>(sessionHandle));
+        if (state->m_fileActivityEtwStopRequested.load())
         {
-            const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+            const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
             if (ownedSessionHandle != 0)
             {
                 ::ControlTraceW(
@@ -2260,10 +2269,10 @@ void DiskMonitorPage::startFileActivityEtw()
                     properties,
                     EVENT_TRACE_CONTROL_STOP);
             }
-            m_fileActivityEtwRunning.store(false);
+            state->m_fileActivityEtwRunning.store(false);
             return;
         }
-        m_fileActivityEtwRunning.store(true);
+        state->m_fileActivityEtwRunning.store(true);
 
         const ULONG enableStatus = ::EnableTraceEx2(
             sessionHandle,
@@ -2276,9 +2285,9 @@ void DiskMonitorPage::startFileActivityEtw()
             nullptr);
         if (enableStatus != ERROR_SUCCESS)
         {
-            m_fileActivityEtwLastStatus.store(enableStatus);
-            m_fileActivityEtwRunning.store(false);
-            const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+            state->m_fileActivityEtwLastStatus.store(enableStatus);
+            state->m_fileActivityEtwRunning.store(false);
+            const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
             if (ownedSessionHandle != 0)
             {
                 ::ControlTraceW(
@@ -2290,9 +2299,9 @@ void DiskMonitorPage::startFileActivityEtw()
             return;
         }
 
-        if (m_fileActivityEtwStopRequested.load())
+        if (state->m_fileActivityEtwStopRequested.load())
         {
-            const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+            const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
             if (ownedSessionHandle != 0)
             {
                 ::ControlTraceW(
@@ -2301,7 +2310,7 @@ void DiskMonitorPage::startFileActivityEtw()
                     properties,
                     EVENT_TRACE_CONTROL_STOP);
             }
-            m_fileActivityEtwRunning.store(false);
+            state->m_fileActivityEtwRunning.store(false);
             return;
         }
 
@@ -2309,15 +2318,15 @@ void DiskMonitorPage::startFileActivityEtw()
         traceLogFile.LoggerName = loggerNamePointer;
         traceLogFile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
         traceLogFile.EventRecordCallback = &DiskMonitorPage::fileActivityEtwCallback;
-        traceLogFile.Context = this;
+        traceLogFile.Context = state.get();
 
         TRACEHANDLE traceHandle = ::OpenTraceW(&traceLogFile);
         if (traceHandle == INVALID_PROCESSTRACE_HANDLE)
         {
             const ULONG lastError = ::GetLastError();
-            m_fileActivityEtwLastStatus.store(lastError);
-            m_fileActivityEtwRunning.store(false);
-            const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+            state->m_fileActivityEtwLastStatus.store(lastError);
+            state->m_fileActivityEtwRunning.store(false);
+            const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
             if (ownedSessionHandle != 0)
             {
                 ::ControlTraceW(
@@ -2329,15 +2338,15 @@ void DiskMonitorPage::startFileActivityEtw()
             return;
         }
 
-        m_fileActivityEtwTraceHandle.store(static_cast<std::uint64_t>(traceHandle));
-        if (m_fileActivityEtwStopRequested.load())
+        state->m_fileActivityEtwTraceHandle.store(static_cast<std::uint64_t>(traceHandle));
+        if (state->m_fileActivityEtwStopRequested.load())
         {
-            const std::uint64_t ownedTraceHandle = m_fileActivityEtwTraceHandle.exchange(0);
+            const std::uint64_t ownedTraceHandle = state->m_fileActivityEtwTraceHandle.exchange(0);
             if (ownedTraceHandle != 0)
             {
                 ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
             }
-            const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+            const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
             if (ownedSessionHandle != 0)
             {
                 ::ControlTraceW(
@@ -2346,20 +2355,20 @@ void DiskMonitorPage::startFileActivityEtw()
                     properties,
                     EVENT_TRACE_CONTROL_STOP);
             }
-            m_fileActivityEtwRunning.store(false);
+            state->m_fileActivityEtwRunning.store(false);
             return;
         }
         const ULONG processStatus = ::ProcessTrace(&traceHandle, 1, nullptr, nullptr);
-        m_fileActivityEtwLastStatus.store(
-            m_fileActivityEtwStopRequested.load() ? ERROR_SUCCESS : processStatus);
+        state->m_fileActivityEtwLastStatus.store(
+            state->m_fileActivityEtwStopRequested.load() ? ERROR_SUCCESS : processStatus);
 
-        const std::uint64_t ownedTraceHandle = m_fileActivityEtwTraceHandle.exchange(0);
+        const std::uint64_t ownedTraceHandle = state->m_fileActivityEtwTraceHandle.exchange(0);
         if (ownedTraceHandle != 0)
         {
             ::CloseTrace(static_cast<TRACEHANDLE>(ownedTraceHandle));
         }
 
-        const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+        const std::uint64_t ownedSessionHandle = state->m_fileActivityEtwSessionHandle.exchange(0);
         if (ownedSessionHandle != 0)
         {
             ::ControlTraceW(
@@ -2369,18 +2378,18 @@ void DiskMonitorPage::startFileActivityEtw()
                 EVENT_TRACE_CONTROL_STOP);
         }
 
-        m_fileActivityEtwRunning.store(false);
+        state->m_fileActivityEtwRunning.store(false);
     });
 }
 
 void DiskMonitorPage::stopFileActivityEtw()
 {
-    m_fileActivityEtwStopRequested.store(true);
+    m_samplingState->m_fileActivityEtwStopRequested.store(true);
 
     // The worker exclusively closes the trace consumer handle: it can still be
     // publishing that handle when this stop request arrives. Stopping the session
     // wakes ProcessTrace without invalidating the worker's local trace handle.
-    const std::uint64_t ownedSessionHandle = m_fileActivityEtwSessionHandle.exchange(0);
+    const std::uint64_t ownedSessionHandle = m_samplingState->m_fileActivityEtwSessionHandle.exchange(0);
     if (ownedSessionHandle != 0)
     {
         const std::wstring sessionNameWide(kDiskMonitorEtwSessionName);
@@ -2403,30 +2412,27 @@ void DiskMonitorPage::stopFileActivityEtw()
     if (m_fileActivityEtwThread == nullptr || !m_fileActivityEtwThread->joinable())
     {
         m_fileActivityEtwThread.reset();
-        m_fileActivityEtwRunning.store(false);
+        m_samplingState->m_fileActivityEtwRunning.store(false);
         return;
     }
 
     m_fileActivityEtwThread->join();
     m_fileActivityEtwThread.reset();
-    m_fileActivityEtwRunning.store(false);
+    m_samplingState->m_fileActivityEtwRunning.store(false);
 }
 
 void WINAPI DiskMonitorPage::fileActivityEtwCallback(struct _EVENT_RECORD* eventRecordPointer)
 {
-    if (eventRecordPointer == nullptr || eventRecordPointer->UserContext == nullptr)
-    {
-        return;
-    }
-
-    auto* pagePointer = reinterpret_cast<DiskMonitorPage*>(eventRecordPointer->UserContext);
-    pagePointer->handleFileActivityEtwEvent(eventRecordPointer);
+    if (eventRecordPointer == nullptr || eventRecordPointer->UserContext == nullptr) return;
+    auto* state = static_cast<SamplingState*>(eventRecordPointer->UserContext);
+    handleFileActivityEtwEvent(*state, eventRecordPointer);
 }
 
-void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eventRecordPointer)
+void DiskMonitorPage::handleFileActivityEtwEvent(
+    SamplingState& state, const struct _EVENT_RECORD* eventRecordPointer)
 {
     const EVENT_RECORD* eventRecord = reinterpret_cast<const EVENT_RECORD*>(eventRecordPointer);
-    if (eventRecord == nullptr || m_fileActivityEtwStopRequested.load())
+    if (eventRecord == nullptr || state.m_fileActivityEtwStopRequested.load())
     {
         return;
     }
@@ -2579,7 +2585,7 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
         }
     }
 
-    std::lock_guard<std::mutex> lock(m_fileActivityMutex);
+    std::lock_guard<std::mutex> lock(state.m_fileActivityMutex);
     if (isOperationEndEvent)
     {
         if (irpValue == 0)
@@ -2587,14 +2593,14 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
             return;
         }
 
-        const auto pendingIt = m_pendingFileIoByIrp.find(irpValue);
-        if (pendingIt == m_pendingFileIoByIrp.end())
+        const auto pendingIt = state.m_pendingFileIoByIrp.find(irpValue);
+        if (pendingIt == state.m_pendingFileIoByIrp.end())
         {
             return;
         }
 
         const PendingFileIoOperation pendingOperation = pendingIt->second;
-        m_pendingFileIoByIrp.erase(pendingIt);
+        state.m_pendingFileIoByIrp.erase(pendingIt);
         if (pendingOperation.filePath.isEmpty())
         {
             return;
@@ -2623,7 +2629,7 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
             const QString keyText = fileActivityIdentityKey(
                 pendingOperation.pid,
                 pendingOperation.filePath);
-            FileActivityAccumulator& accumulator = m_fileActivityByKey[keyText];
+            FileActivityAccumulator& accumulator = state.m_fileActivityByKey[keyText];
             accumulator.pid = pendingOperation.pid;
             accumulator.filePath = pendingOperation.filePath;
             if (!pendingOperation.ioPriorityText.isEmpty())
@@ -2640,45 +2646,45 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
     {
         if (fileObjectValue != 0)
         {
-            m_filePathByObject[fileObjectValue] = filePathText;
+            state.m_filePathByObject[fileObjectValue] = filePathText;
         }
         if (fileKeyValue != 0)
         {
-            m_filePathByObject[fileKeyValue] = filePathText;
+            state.m_filePathByObject[fileKeyValue] = filePathText;
         }
-        if (m_filePathByObject.size() > 65536)
+        if (state.m_filePathByObject.size() > 65536)
         {
             // 文件对象映射只是辅助把后续 Read/Write 关联到路径，过大时清理可接受。
-            m_filePathByObject.clear();
+            state.m_filePathByObject.clear();
             if (fileObjectValue != 0)
             {
-                m_filePathByObject[fileObjectValue] = filePathText;
+                state.m_filePathByObject[fileObjectValue] = filePathText;
             }
             if (fileKeyValue != 0)
             {
-                m_filePathByObject[fileKeyValue] = filePathText;
+                state.m_filePathByObject[fileKeyValue] = filePathText;
             }
         }
     }
     if (isCloseEvent && fileObjectValue != 0)
     {
-        m_filePathByObject.erase(fileObjectValue);
+        state.m_filePathByObject.erase(fileObjectValue);
         return;
     }
     if (filePathText.isEmpty())
     {
         if (fileObjectValue != 0)
         {
-            const auto objectPathIt = m_filePathByObject.find(fileObjectValue);
-            if (objectPathIt != m_filePathByObject.end())
+            const auto objectPathIt = state.m_filePathByObject.find(fileObjectValue);
+            if (objectPathIt != state.m_filePathByObject.end())
             {
                 filePathText = objectPathIt->second;
             }
         }
         if (filePathText.isEmpty() && fileKeyValue != 0)
         {
-            const auto keyPathIt = m_filePathByObject.find(fileKeyValue);
-            if (keyPathIt != m_filePathByObject.end())
+            const auto keyPathIt = state.m_filePathByObject.find(fileKeyValue);
+            if (keyPathIt != state.m_filePathByObject.end())
             {
                 filePathText = keyPathIt->second;
             }
@@ -2693,7 +2699,7 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
     // Read/Write 本身就是独立 I/O 请求的开始证据，立即计入当前窗口。
     // OperationEnd 仅补充响应时间，避免长请求或丢失完成事件导致吞吐长期不可见。
     const QString keyText = fileActivityIdentityKey(pid, filePathText);
-    FileActivityAccumulator& accumulator = m_fileActivityByKey[keyText];
+    FileActivityAccumulator& accumulator = state.m_fileActivityByKey[keyText];
     accumulator.pid = pid;
     accumulator.filePath = filePathText;
     if (isReadEvent)
@@ -2716,7 +2722,7 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
 
     if (irpValue != 0)
     {
-        PendingFileIoOperation& pendingOperation = m_pendingFileIoByIrp[irpValue];
+        PendingFileIoOperation& pendingOperation = state.m_pendingFileIoByIrp[irpValue];
         pendingOperation.pid = pid;
         pendingOperation.filePath = filePathText;
         pendingOperation.ioPriorityText = ioPriorityText;
@@ -2724,10 +2730,10 @@ void DiskMonitorPage::handleFileActivityEtwEvent(const struct _EVENT_RECORD* eve
             eventRecord->EventHeader.TimeStamp.QuadPart > 0
             ? static_cast<std::uint64_t>(eventRecord->EventHeader.TimeStamp.QuadPart)
             : 0;
-        if (m_pendingFileIoByIrp.size() > 65536)
+        if (state.m_pendingFileIoByIrp.size() > 65536)
         {
             // OperationEnd 丢失或系统负载很高时避免未完成 IRP 缓存无限增长。
-            m_pendingFileIoByIrp.clear();
+            state.m_pendingFileIoByIrp.clear();
         }
         return;
     }
