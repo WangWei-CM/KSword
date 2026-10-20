@@ -368,13 +368,14 @@ private:
     std::vector<int> currentRowIndents_;
     std::vector<std::wstring> collapsedObjectPaths_;
     std::vector<std::wstring> currentRawColumns_;
-    std::vector<std::vector<std::wstring>> currentRawRows_;
+    using KernelRows = std::vector<std::vector<std::wstring>>;
+    std::shared_ptr<const KernelRows> currentRawRows_ = std::make_shared<const KernelRows>();
     struct KernelFeatureViewCache {
         std::vector<std::wstring> columns;
         std::vector<std::vector<std::wstring>> rows;
         std::vector<int> rowIndents;
         std::vector<std::wstring> rawColumns;
-        std::vector<std::vector<std::wstring>> rawRows;
+        std::shared_ptr<const KernelRows> rawRows;
         std::vector<std::wstring> collapsedObjectPaths;
         std::vector<std::vector<std::wstring>> propertyRows;
         std::vector<std::vector<std::wstring>> summaryRows;

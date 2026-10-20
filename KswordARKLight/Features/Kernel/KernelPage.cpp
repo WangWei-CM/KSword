@@ -32,6 +32,13 @@
 
 namespace Ksword::Features::Kernel {
 namespace {
+using KernelRawRows = std::vector<std::vector<std::wstring>>;
+
+std::shared_ptr<const KernelRawRows> EmptyKernelRawRows() {
+    static const auto empty = std::make_shared<const KernelRawRows>();
+    return empty;
+}
+
 constexpr wchar_t kKernelPageClass[] = L"KswordARKLight.KernelPage";
 constexpr int kIdPrimaryTab = 51001;
 constexpr int kIdSecondaryTab = 51002;
@@ -1710,7 +1717,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                 descriptor->id == KernelFeatureId::DeviceDriverObjects &&
                 !currentRawColumns_.empty()) {
                 currentColumns_ = currentRawColumns_;
-                currentRows_ = currentRawRows_;
+                currentRows_ = *currentRawRows_;
                 RebuildObjectNamespaceListFromCache(descriptor->id);
                 ConfigureVisibleLayout();
                 InvalidateCurrentFeatureViewCache();
@@ -1724,7 +1731,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                 descriptor->id == KernelFeatureId::BaseNamedObjects &&
                 !currentRawColumns_.empty()) {
                 currentColumns_ = currentRawColumns_;
-                currentRows_ = currentRawRows_;
+                currentRows_ = *currentRawRows_;
                 RebuildObjectNamespaceListFromCache(descriptor->id);
                 ConfigureVisibleLayout();
                 InvalidateCurrentFeatureViewCache();
@@ -1737,7 +1744,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
                 descriptor != nullptr &&
                 !currentRawColumns_.empty()) {
                 currentColumns_ = currentRawColumns_;
-                currentRows_ = currentRawRows_;
+                currentRows_ = *currentRawRows_;
                 if (descriptor->id == KernelFeatureId::KernelExecutableMemory ||
                     descriptor->id == KernelFeatureId::KernelMemoryEvidence) {
                     RebuildKernelMemoryScanListFromCache(descriptor->id);
@@ -4262,7 +4269,7 @@ void KernelPage::ParkCurrentFeatureViewCache() {
     // Input is the activeFeatureId_ state; processing is skipped when no page is
     // active or when the live buffers are already empty; no value is returned.
     if (!hasActiveFeatureId_ ||
-        (currentColumns_.empty() && currentRows_.empty() && currentRawColumns_.empty() && currentRawRows_.empty())) {
+        (currentColumns_.empty() && currentRows_.empty() && currentRawColumns_.empty() && currentRawRows_->empty())) {
         return;
     }
     SaveCurrentFeatureViewCache(true);
@@ -4329,7 +4336,7 @@ void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
         cache.rows = std::move(currentRows_);
         cache.rowIndents = std::move(currentRowIndents_);
         cache.rawColumns = std::move(currentRawColumns_);
-        cache.rawRows = std::move(currentRawRows_);
+        cache.rawRows = std::exchange(currentRawRows_, EmptyKernelRawRows());
         cache.collapsedObjectPaths = std::move(collapsedObjectPaths_);
         cache.propertyRows = CaptureReportListRows(propertyList_);
         cache.summaryRows = CaptureReportListRows(summaryList_);
@@ -4345,7 +4352,7 @@ void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
     cache.selectedRow = resultList_ ? ListView_GetNextItem(resultList_, -1, LVNI_SELECTED) : -1;
     cache.topRow = resultList_ ? ListView_GetTopIndex(resultList_) : 0;
     if (transferDataToCache) {
-        cache.hasData = !cache.columns.empty() || !cache.rows.empty() || !cache.rawRows.empty();
+        cache.hasData = !cache.columns.empty() || !cache.rows.empty() || (cache.rawRows && !cache.rawRows->empty());
     }
     if (detailEdit_) {
         cache.detailText = WindowText(detailEdit_);
@@ -4376,7 +4383,7 @@ void KernelPage::InvalidateCurrentFeatureViewCache() {
     found->second.rows.clear();
     found->second.rowIndents.clear();
     found->second.rawColumns.clear();
-    found->second.rawRows.clear();
+    found->second.rawRows.reset();
     found->second.collapsedObjectPaths.clear();
     found->second.propertyRows.clear();
     found->second.summaryRows.clear();
@@ -4386,7 +4393,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     // If the requested page is still resident in the current buffers, keep it
     // live instead of moving from the cache. This covers repeated selection or
     // control-notification noise and avoids a needless ListView reset.
-    if (hasActiveFeatureId_ && activeFeatureId_ == featureId && (!currentColumns_.empty() || !currentRows_.empty() || !currentRawRows_.empty())) {
+    if (hasActiveFeatureId_ && activeFeatureId_ == featureId && (!currentColumns_.empty() || !currentRows_.empty() || !currentRawRows_->empty())) {
         return true;
     }
 
@@ -4400,7 +4407,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     currentRows_ = std::move(cache.rows);
     currentRowIndents_ = std::move(cache.rowIndents);
     currentRawColumns_ = std::move(cache.rawColumns);
-    currentRawRows_ = std::move(cache.rawRows);
+    currentRawRows_ = cache.rawRows ? std::move(cache.rawRows) : EmptyKernelRawRows();
     collapsedObjectPaths_ = std::move(cache.collapsedObjectPaths);
     objectNamespaceSelectedRow_ = cache.objectNamespaceSelectedRow;
     objectNamespaceSelectedKind_ = cache.objectNamespaceSelectedKind;
@@ -5269,7 +5276,7 @@ void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
     currentColumns_.clear();
     currentRows_.clear();
     currentRawColumns_.clear();
-    currentRawRows_.clear();
+    currentRawRows_ = EmptyKernelRawRows();
     sortColumn_ = -1;
     sortAscending_ = true;
     ClearResultTable();
@@ -5346,7 +5353,7 @@ void KernelPage::RenderResult(const KernelOperationResult& result) {
     currentColumns_ = orderedColumns;
     currentRows_.clear();
     currentRawColumns_.clear();
-    currentRawRows_.clear();
+    currentRawRows_ = EmptyKernelRawRows();
     sortColumn_ = -1;
     sortAscending_ = true;
 
@@ -5354,7 +5361,7 @@ void KernelPage::RenderResult(const KernelOperationResult& result) {
         AddDynamicResultRow(static_cast<int>(rowIndex), result.rows[rowIndex], orderedColumns);
     }
     currentRawColumns_ = currentColumns_;
-    currentRawRows_ = currentRows_;
+    currentRawRows_ = std::make_shared<const KernelRawRows>(currentRows_);
     if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
         descriptor != nullptr && IsObjectNamespaceFeature(descriptor->id)) {
         RebuildObjectNamespaceListFromCache(descriptor->id);
@@ -5638,7 +5645,7 @@ void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId)
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const std::wstring moduleFilterText = WindowText(moduleFilterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
@@ -5845,7 +5852,7 @@ void KernelPage::RebuildObjectNamespaceListFromCache(const KernelFeatureId featu
     // root rows, tree indentation, original headers and hidden action fields;
     // there is no return value because the ListView owns the visible output.
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     std::vector<std::wstring> displayColumns;
     for (const std::wstring& column : CanonicalColumnNames(featureId)) {
         if (!HasColumn(displayColumns, column)) {
@@ -6874,7 +6881,7 @@ void KernelPage::RebuildAtomTableFromCache() {
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
@@ -6978,7 +6985,7 @@ void KernelPage::RebuildNtQueryLegacyListFromCache() {
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
     };
@@ -7084,7 +7091,7 @@ void KernelPage::RebuildDiagnosticDualTableFromCache(const KernelFeatureId featu
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
@@ -7451,7 +7458,7 @@ void KernelPage::RebuildCallbackEnumerationListFromCache() {
         return;
     }
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
@@ -7644,7 +7651,7 @@ void KernelPage::RebuildKernelMemoryScanListFromCache(const KernelFeatureId feat
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const bool executablePage = featureId == KernelFeatureId::KernelExecutableMemory;
     const bool riskOnly = riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED;
     const std::wstring primaryFilter = executablePage ? WindowText(moduleFilterEdit_) : WindowText(filterEdit_);
@@ -7846,7 +7853,7 @@ void KernelPage::RebuildCrossViewListFromCache(const KernelFeatureId featureId) 
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
         return RowFieldByName(row, rawColumns, names);
@@ -8039,7 +8046,7 @@ void KernelPage::RebuildIntegrityEvidenceListFromCache(const KernelFeatureId fea
     }
 
     const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
     const std::wstring filterText = WindowText(filterEdit_);
     const bool cpuPage = featureId == KernelFeatureId::KernelCpuIntegrity;
     const auto rawValue = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) -> std::wstring {
@@ -8230,8 +8237,8 @@ void KernelPage::RebuildIntegrityEvidenceListFromCache(const KernelFeatureId fea
 KernelR0EvidenceSnapshot BuildR0EvidenceSnapshot(
     const KernelFeatureId featureId,
     std::wstring pageName,
-    std::vector<std::wstring> rawColumns,
-    std::vector<std::vector<std::wstring>> rawRows,
+    const std::vector<std::wstring>& rawColumns,
+    const KernelRawRows& rawRows,
     std::wstring filterText,
     const bool riskOnly,
     std::wstring selectedRowSignature,
@@ -8403,7 +8410,7 @@ void KernelPage::ApplyCachedFilter(const KernelFeatureId featureId) {
         return;
     }
     currentColumns_ = currentRawColumns_;
-    currentRows_ = currentRawRows_;
+    currentRows_ = *currentRawRows_;
     if (IsObjectNamespaceFeature(descriptor->id)) {
         RebuildObjectNamespaceListFromCache(descriptor->id);
     } else if (descriptor->id == KernelFeatureId::AtomTable) {
@@ -8465,7 +8472,8 @@ void KernelPage::RequestR0EvidenceRebuild(const KernelFeatureId featureId) {
         return;
     }
     std::vector<std::wstring> rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-    std::vector<std::vector<std::wstring>> rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+    const auto rawRows = !currentRawRows_->empty() || currentRows_.empty() ? currentRawRows_ :
+        std::make_shared<const KernelRawRows>(currentRows_);
     const std::wstring filterText = WindowText(filterEdit_);
     const bool riskOnly = riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED;
     const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
@@ -8475,15 +8483,15 @@ void KernelPage::RequestR0EvidenceRebuild(const KernelFeatureId featureId) {
     const int topRow = std::max(0, ListView_GetTopIndex(resultList_));
     std::wstring pageName = descriptor->title;
     if (!r0EvidenceFilterTask_) {
-        ApplyR0EvidenceSnapshot(BuildR0EvidenceSnapshot(featureId, pageName, rawColumns, rawRows, filterText,
+        ApplyR0EvidenceSnapshot(BuildR0EvidenceSnapshot(featureId, pageName, rawColumns, *rawRows, filterText,
             riskOnly, selectedSignature, topRow));
         return;
     }
     ::SetWindowTextW(statusText_, (L"状态：正在后台筛选 " + pageName + L"…").c_str());
     r0EvidenceFilterTask_->request(
-        [featureId, pageName = std::move(pageName), rawColumns = std::move(rawColumns), rawRows = std::move(rawRows),
+        [featureId, pageName = std::move(pageName), rawColumns = std::move(rawColumns), rawRows,
             filterText = std::move(filterText), riskOnly, selectedSignature = std::move(selectedSignature), topRow]() mutable {
-            return BuildR0EvidenceSnapshot(featureId, std::move(pageName), std::move(rawColumns), std::move(rawRows),
+            return BuildR0EvidenceSnapshot(featureId, std::move(pageName), rawColumns, *rawRows,
                 std::move(filterText), riskOnly, std::move(selectedSignature), topRow);
         },
         [this](std::uint64_t, std::optional<KernelR0EvidenceSnapshot>&& snapshot, std::exception_ptr error) {
@@ -8730,7 +8738,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
     };
     const auto rawSummary = [&](std::initializer_list<const wchar_t*> names) -> std::wstring {
         const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-        const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+        const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
         for (const std::vector<std::wstring>& rawRow : rawRows) {
             const std::wstring value = RowFieldByName(rawRow, rawColumns, names);
             if (!value.empty()) {
@@ -9050,7 +9058,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
                << L"当前全局能力位: " << globalMaskText << L"\r\n"
                << L"当前未启用能力: " << DisabledDynCapabilitySummary(globalMask) << L"\r\n\r\n"
                << L"R0不可用原因: " << rawSummary({ L"UnavailableReason", L"Reason", L"Detail" }) << L"\r\n\r\n"
-               << L"StatusFlags: " << rawSummary({ L"StatusFlags" }) << L" (" << DynDataStatusFlagsText(static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_.empty() ? currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"StatusFlags" }))) << L")\r\n"
+               << L"StatusFlags: " << rawSummary({ L"StatusFlags" }) << L" (" << DynDataStatusFlagsText(static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_->empty() ? *currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"StatusFlags" }))) << L")\r\n"
                << L"SystemInformerDataVersion: " << rawSummary({ L"SI Version" }) << L"\r\n"
                << L"SystemInformerDataLength: " << rawSummary({ L"SI Length" }) << L"\r\n"
                << L"MatchedProfileClass: " << rawSummary({ L"MatchedClass", L"ProfileClass" }) << L"\r\n"
@@ -9078,7 +9086,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
         const std::uint32_t featureFlags = static_cast<std::uint32_t>(featureFlags64);
         const std::uint32_t requiredPolicy = static_cast<std::uint32_t>(requiredPolicy64);
         const std::uint32_t deniedPolicy = static_cast<std::uint32_t>(deniedPolicy64);
-        const std::uint32_t dynStatusFlags = static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_.empty() ? currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"DynDataStatus" }));
+        const std::uint32_t dynStatusFlags = static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_->empty() ? *currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"DynDataStatus" }));
         std::wostringstream detail;
         detail << L"功能: " << cell({ L"功能", L"Feature", L"Name", L"项目" }) << L"\r\n"
                << L"FeatureId: " << cell({ L"Id" }) << L"\r\n"
@@ -13631,7 +13639,7 @@ std::wstring KernelPage::BuildDiagnosticReportForCurrentFeature() const {
     };
     const auto firstRawValue = [&](std::initializer_list<const wchar_t*> names) -> std::wstring {
         const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
-        const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_.empty() ? currentRawRows_ : currentRows_;
+        const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
         for (const std::vector<std::wstring>& row : rawRows) {
             const std::wstring value = RowFieldByName(row, rawColumns, names);
             if (!value.empty()) {
@@ -13708,7 +13716,7 @@ std::wstring KernelPage::BuildDiagnosticReportForCurrentFeature() const {
         AppendReportLine(report, L"MatchedProfileOffset", firstAnyValue({ L"MatchedProfileOffset" }));
         AppendReportLine(report, L"MatchedFieldsId", firstAnyValue({ L"MatchedFieldsId" }));
         AppendReportLine(report, L"UnavailableReason", firstAnyValue({ L"UnavailableReason" }));
-        AppendReportLine(report, L"PdbProfileActive", FlagEnabled(FirstRowUInt64(!currentRawRows_.empty() ? currentRawRows_ : currentRows_,
+        AppendReportLine(report, L"PdbProfileActive", FlagEnabled(FirstRowUInt64(!currentRawRows_->empty() ? *currentRawRows_ : currentRows_,
             !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"StatusFlags" }), KSW_DYN_STATUS_FLAG_PDB_PROFILE_ACTIVE) ? L"是" : L"否");
         AppendReportLine(report, L"PdbProfileScanAttempted", firstAnyValue({ L"PdbProfileScanAttempted" }));
         AppendReportLine(report, L"PdbProfileFound", firstAnyValue({ L"PdbProfileFound" }));
