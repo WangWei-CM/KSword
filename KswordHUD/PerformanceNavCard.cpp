@@ -4,6 +4,8 @@
 #include <QEasingCurve>
 #include <QVariantAnimation>
 #include <QPaintEvent>
+#include <QHideEvent>
+#include <QShowEvent>
 #include <QPainter>
 #include <QPainterPath>
 
@@ -79,9 +81,30 @@ void PerformanceNavCard::clearSamples()
 void PerformanceNavCard::startLatestSampleAnimation(const double previousSample)
 {
     m_previousSample = previousSample;
-    m_animationProgress = 0.0;
     m_sampleAnimation->stop();
+    // Recording remains active while the HUD is hidden; presentation does not.
+    if (!isVisible())
+    {
+        m_animationProgress = 1.0;
+        return;
+    }
+    m_animationProgress = 0.0;
     m_sampleAnimation->start();
+}
+
+void PerformanceNavCard::hideEvent(QHideEvent* event)
+{
+    m_sampleAnimation->stop();
+    m_animationProgress = 1.0;
+    QWidget::hideEvent(event);
+}
+
+void PerformanceNavCard::showEvent(QShowEvent* event)
+{
+    m_sampleAnimation->stop();
+    m_animationProgress = 1.0;
+    QWidget::showEvent(event);
+    update();
 }
 
 double PerformanceNavCard::animatedXRatio(const int sampleIndex, const int sampleCount) const
