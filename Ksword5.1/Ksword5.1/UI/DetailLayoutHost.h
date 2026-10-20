@@ -23,6 +23,7 @@
 #include <functional>
 
 class CodeEditorWidget;
+struct CodeEditorReadOnlyViewState;
 class QAbstractItemView;
 class QAbstractItemDelegate;
 class QAbstractItemModel;
@@ -110,6 +111,12 @@ namespace ks::ui
             int originalRowHeight = -1;
             int detailHeight = 128;
             QVariant originalSizeHint;
+            FieldDocument document;
+            QString detailText;
+            StructuredFieldView::Presentation presentation = StructuredFieldView::Presentation::Sections;
+            std::shared_ptr<const StructuredFieldViewState> fieldState;
+            std::shared_ptr<const CodeEditorReadOnlyViewState> textState;
+            bool structured = false;
         };
 
         // initializeHostUi / scheduleHostUiInitialization / initializeConnections：
@@ -162,6 +169,11 @@ namespace ks::ui
 
         // 指示器只由delegate绘制，业务模型DecorationRole始终保持原值。
         void updateEmbeddedEditorGeometries();
+        void flushEmbeddedEditorGeometries();
+        QList<QPersistentModelIndex> visibleEmbeddedRows() const;
+        bool realizeEmbeddedEntry(const std::shared_ptr<EmbeddedEntry>& entry);
+        void releaseEmbeddedEditor(const std::shared_ptr<EmbeddedEntry>& entry);
+        void trimEmbeddedEditorPool();
         void restoreEmbeddedEntryLayout(const EmbeddedEntry& entry);
         void refreshEmbeddedIndicators();
         void scheduleEmbeddedIndicatorRefresh();
@@ -199,7 +211,14 @@ namespace ks::ui
             QPointer<EmbeddedRowDelegate> wrapper;
         };
         QHash<int, EmbeddedDelegateBinding> m_embeddedColumnDelegates;
-        QList<EmbeddedEntry> m_embeddedEntries;         // m_embeddedEntries：当前已展开的多行详情。
+        QHash<QPersistentModelIndex, std::shared_ptr<EmbeddedEntry>> m_embeddedEntries;         // m_embeddedEntries：当前已展开的多行详情。
+        QSet<QPersistentModelIndex> m_activeEmbeddedRows;
+        QList<QPointer<CodeEditorWidget>> m_textEditorPool;
+        QList<QPointer<StructuredFieldView>> m_fieldEditorPool;
+        bool m_embeddedGeometryScheduled = false;
+        quint64 m_embeddedRevision = 0;
+        bool m_embeddedTreeUniformRowsCaptured = false;
+        bool m_embeddedTreeUniformRows = false;
         QList<EmbeddedEntry> m_layoutRestorations;       // 排序后再按重映射索引还原逻辑行高。
         ks::settings::DetailDisplayScheme m_scheme =
             ks::settings::DetailDisplayScheme::BottomCollapsed;

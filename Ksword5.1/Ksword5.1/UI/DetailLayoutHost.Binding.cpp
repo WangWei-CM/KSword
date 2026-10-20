@@ -303,7 +303,18 @@ namespace ks::ui
                 return;
             }
             // Qt 表头可能已缓存排序前尺寸；排序后还要按重映射索引再还原一次。
-            m_layoutRestorations = m_embeddedEntries;
+            m_layoutRestorations.clear();
+            for (const auto& entry : m_embeddedEntries)
+            {
+                // Restore only layout metadata after remapping. Do not retain
+                // canonical documents or reading states in this temporary list.
+                EmbeddedEntry layout;
+                layout.sourceIndex = entry->sourceIndex;
+                layout.treeSourceItem = entry->treeSourceItem;
+                layout.originalRowHeight = entry->originalRowHeight;
+                layout.originalSizeHint = entry->originalSizeHint;
+                m_layoutRestorations.append(std::move(layout));
+            }
             ++m_bindingGeneration;
             clearEmbeddedDetails();
         };
@@ -321,6 +332,8 @@ namespace ks::ui
         m_modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this, rebuilding));
         m_modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeMoved, this, rebuilding));
         m_modelConnections.append(connect(model, &QAbstractItemModel::columnsAboutToBeRemoved, this, rebuilding));
+        m_modelConnections.append(connect(model, &QAbstractItemModel::columnsAboutToBeInserted, this, rebuilding));
+        m_modelConnections.append(connect(model, &QAbstractItemModel::columnsAboutToBeMoved, this, rebuilding));
         m_modelConnections.append(connect(model, &QAbstractItemModel::rowsInserted, this, changed));
         m_modelConnections.append(connect(model, &QAbstractItemModel::modelReset, this, changed));
         m_modelConnections.append(connect(model, &QAbstractItemModel::layoutChanged, this, [this, changed]()
