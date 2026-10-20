@@ -214,6 +214,7 @@ public:
         m_colors = colors;
         m_fullRefreshRequired = true;
     }
+    const EditorColors& colors() const { return m_colors; }
     bool takeFullRefreshRequired()
     {
         const bool required = m_fullRefreshRequired;
@@ -381,8 +382,14 @@ CodeTextEdit::CodeTextEdit(QWidget* parent) : QPlainTextEdit(parent)
     connect(m_extraSelectionTimer, &QTimer::timeout, this, [this] { refreshExtraSelections(); });
     connect(this, &QPlainTextEdit::blockCountChanged, this, [this](int) { updateGutterGeometry(); });
     connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect& rect, int deltaY) {
-        if (deltaY) m_lineNumberArea->update();
-        else m_lineNumberArea->update(0, rect.y() + (m_compactMode ? 2 : 10), m_lineNumberArea->width(), rect.height());
+        const int inset = m_compactMode ? 2 : 10;
+        if (deltaY)
+        {
+            // Reuse stable line-number pixels. QWidget invalidates only the
+            // exposed strip; the fixed top/bottom padding does not move.
+            m_lineNumberArea->scroll(0, deltaY, m_lineNumberArea->rect().adjusted(0, inset, 0, -inset));
+        }
+        else m_lineNumberArea->update(0, rect.y() + inset, m_lineNumberArea->width(), rect.height());
         if (rect.contains(viewport()->rect())) updateGutterGeometry();
     });
     connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
@@ -537,7 +544,7 @@ void CodeTextEdit::updateGutterGeometry()
 
 void CodeTextEdit::paintLineNumberArea(QPaintEvent* event)
 {
-    const auto colors = colorsFor(palette());
+    const auto& colors = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->colors();
     QPainter painter(m_lineNumberArea);
     painter.fillRect(event->rect(), colors.gutter);
     painter.setPen(colors.divider);
@@ -702,7 +709,7 @@ int CodeTextEdit::findBracketPair(int bracketPos, QChar bracketCh) const
 
 void CodeTextEdit::refreshExtraSelections()
 {
-    const auto colors = colorsFor(palette());
+    const auto& colors = static_cast<CodeSyntaxHighlighter*>(m_syntaxHighlighter)->colors();
     QList<QTextEdit::ExtraSelection> selections;
     QTextEdit::ExtraSelection line;
     line.cursor = textCursor(); line.cursor.clearSelection();
