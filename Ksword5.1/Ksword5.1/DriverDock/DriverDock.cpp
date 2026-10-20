@@ -488,6 +488,7 @@ using namespace ksword::driver_dock_internal;
 
 DriverDock::DriverDock(QWidget* parent)
     : QWidget(parent)
+    , m_debugCaptureDispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
 {
     // initEvent 用途：贯穿整个构造流程，便于按同一 GUID 追踪初始化链路。
     kLogEvent initEvent;
@@ -532,7 +533,9 @@ void DriverDock::showEvent(QShowEvent* event)
 
 DriverDock::~DriverDock()
 {
-    stopDebugOutputCapture();
+    // 派生类析构第一步关门，不能等 QObject 基类清空 QPointer 后才停止回投。
+    m_debugCaptureDispatcher->close();
+    releaseDebugOutputCapture();
 
     // 自身驱动页的业务对象仍由 KernelDock 持有；独立销毁 DriverDock 时将页面接回，
     // 避免 KernelDock 的动态偏移/状态成员指向已经被 QTabWidget 删除的控件。

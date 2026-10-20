@@ -6,6 +6,9 @@
 #include <QScrollBar>
 #include <QStringList>
 
+#include <condition_variable>
+#include <functional>
+
 // 说明：由原聚合式实现迁移为独立 .cpp，成员函数实现保持原样。
 using namespace ksword::driver_dock_internal;
 
@@ -56,19 +59,16 @@ std::uint64_t DriverDock::DebugOutputBuffer::clear()
     return m_nextSequence - 1U;
 }
 
+void DriverDock::scheduleDebugOutputFlush()
+{
+    QTimer::singleShot(50, this, [this]() { flushDebugOutputLines(); });
+}
+
 void DriverDock::enqueueDebugOutputLines(std::vector<DebugOutputLineRecord> records)
 {
-    if (!m_debugOutputBuffer.append(std::move(records))) return;
-    QPointer<DriverDock> guardThis(this);
-    // 队列中只放唤醒，不逐条捕获 QString；整个批次窗口只有一个待处理任务。
-    QMetaObject::invokeMethod(this, [guardThis]()
-        {
-            if (guardThis == nullptr) return;
-            QTimer::singleShot(50, guardThis.data(), [guardThis]()
-                {
-                    if (guardThis != nullptr) guardThis->flushDebugOutputLines();
-                });
-        }, Qt::QueuedConnection);
+    if (!m_debugOutputBuffer->append(std::move(records))) return;
+    // 与会话共用同一回投门禁，队列里仍然只有一次可见投影唤醒。
+    m_debugCaptureDispatcher->post([this]() { scheduleDebugOutputFlush(); });
 }
 
 bool DriverDock::eventFilter(QObject* watched, QEvent* event)
@@ -77,178 +77,271 @@ bool DriverDock::eventFilter(QObject* watched, QEvent* event)
     {
         if (event->type() == QEvent::Show)
         {
-            m_debugOutputBuffer.setVisible(true);
+            m_debugOutputBuffer->setVisible(true);
             // 首次绘制前补齐隐藏期数据；保留已排队唤醒，避免重复投递。
             flushDebugOutputLines(false);
         }
         else if (event->type() == QEvent::Hide)
         {
-            m_debugOutputBuffer.setVisible(false);
+            m_debugOutputBuffer->setVisible(false);
         }
     }
     return QWidget::eventFilter(watched, event);
 }
 
+// 此对象独立于 QWidget 生存。工作线程只捕获 session；回投只能经共享门禁执行。
+struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<DebugCaptureSession>
+{
+    std::shared_ptr<DebugOutputBuffer> buffer;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> dispatcher;
+    std::function<void()> projectionWake;
+    std::function<void()> stateChanged;
+    ksword::ark::DriverClient driverClient;
+    ksword::ark::DriverHandle driverHandle;
+    std::thread worker;
+    std::atomic_bool stopRequested{ false };
+    std::atomic_bool finished{ false };
+    std::mutex waitMutex;
+    std::condition_variable waitChanged;
+    bool stopRequired = false; // 仅工作线程读写。
+
+    // 跨 DriverDock 销毁/重建也不能让新 START 与旧 STOP 竞争。
+    static std::shared_ptr<std::mutex> captureGate()
+    {
+        static const auto gate = std::make_shared<std::mutex>();
+        return gate;
+    }
+    const std::shared_ptr<std::mutex> gate = captureGate();
+
+    ~DebugCaptureSession()
+    {
+        // 最后一个所有者可能是已完成 run() 的线程闭包；从不在 GUI 或自身 join。
+        // STOP/close 已在 run() 中完成，闭包也不再借用任何 GUI 对象。
+        if (worker.joinable()) worker.detach();
+    }
+
+    void start()
+    {
+        // 调用方必须先持有会话，再安装 thread；这里不派发 GUI 事件。
+        worker = std::thread([session = shared_from_this()]() { session->run(); });
+    }
+
+    void requestStop()
+    {
+        {
+            // 与 wait 的谓词检查同锁，避免检查后、真正睡眠前丢失 notify。
+            std::lock_guard<std::mutex> lock(waitMutex);
+            stopRequested.store(true);
+        }
+        waitChanged.notify_all();
+    }
+
+    void waitForStop(std::chrono::milliseconds interval)
+    {
+        std::unique_lock<std::mutex> lock(waitMutex);
+        waitChanged.wait_for(lock, interval, [this]() { return stopRequested.load(); });
+    }
+
+    void append(std::vector<DebugOutputLineRecord> records)
+    {
+        if (buffer->append(std::move(records))) dispatcher->post(projectionWake);
+    }
+
+    void appendLocalizedDebugOutputLine(const QString& sourceText)
+    {
+        DebugOutputLineRecord record;
+        record.timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+        record.sourceText = sourceText;
+        record.translateSourceText = true;
+        append({ std::move(record) });
+    }
+
+    void run() noexcept
+    {
+        {
+            std::unique_lock<std::mutex> lease(*gate);
+            try
+            {
+                // 等旧会话清理期间停止时，不再打开设备或注册新回调。
+                if (!stopRequested.load()) capture();
+            }
+            catch (...)
+            {
+                try
+                {
+                    appendLocalizedDebugOutputLine(QStringLiteral("读取 R0 调试输出失败：%1")
+                        .arg(QString::number(ERROR_UNHANDLED_EXCEPTION)));
+                }
+                catch (...) {}
+            }
+            requestStop();
+            try { dispatcher->post(stateChanged); } catch (...) {}
+            if (stopRequired)
+            {
+                // 不因宿主销毁或 drain 出错省略 STOP；只由本会话执行一次。
+                bool stopped = false;
+                try
+                {
+                    const auto result = driverClient.controlDebugOutput(
+                        driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
+                    stopped = result.io.ok;
+                }
+                catch (...) {}
+                try
+                {
+                    appendLocalizedDebugOutputLine(stopped
+                        ? QStringLiteral("R0 调试输出回调已停止。")
+                        : QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。"));
+                }
+                catch (...) {}
+                stopRequired = false;
+            }
+            driverHandle.reset();
+        }
+        // 只有 STOP 与句柄关闭之后才允许 GUI 接受下一次启动。
+        finished.store(true);
+        try { dispatcher->post(stateChanged); } catch (...) {}
+    }
+
+    void capture()
+    {
+        driverHandle = driverClient.open();
+        if (!driverHandle.isValid())
+        {
+            const unsigned long openError = ::GetLastError();
+            appendLocalizedDebugOutputLine(
+                QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。").arg(openError));
+            return;
+        }
+        stopRequired = true; // START 已执行但客户端后处理抛异常时也必须尝试 STOP。
+        const ksword::ark::DebugOutputControlResult startResult = driverClient.controlDebugOutput(
+            driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_START);
+        if (!startResult.io.ok)
+        {
+            stopRequired = false;
+            appendLocalizedDebugOutputLine(startResult.unsupported
+                ? QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。")
+                : QStringLiteral("启动失败：R0 调试输出回调注册失败：%1")
+                    .arg(QString::fromStdString(startResult.io.message)));
+            return;
+        }
+        appendLocalizedDebugOutputLine(
+            QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息..."));
+
+        std::uint64_t nextSequence = 0;
+        std::uint64_t reportedDroppedCount = 0;
+        while (!stopRequested.load())
+        {
+            const ksword::ark::DebugOutputDrainResult drainResult = driverClient.drainDebugOutput(
+                driverHandle, nextSequence, KSWORD_ARK_DEBUG_OUTPUT_DEFAULT_DRAIN_RECORDS);
+            if (!drainResult.io.ok)
+            {
+                appendLocalizedDebugOutputLine(QStringLiteral("读取 R0 调试输出失败：%1")
+                    .arg(QString::fromStdString(drainResult.io.message)));
+                break;
+            }
+            nextSequence = drainResult.nextSequence;
+            if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_OVERFLOW) != 0U &&
+                drainResult.lostBeforeFirst != 0U)
+            {
+                appendLocalizedDebugOutputLine(
+                    QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。")
+                        .arg(static_cast<qulonglong>(drainResult.lostBeforeFirst)));
+            }
+            if (drainResult.droppedCount > reportedDroppedCount)
+            {
+                const qulonglong droppedDelta = static_cast<qulonglong>(
+                    drainResult.droppedCount - reportedDroppedCount);
+                reportedDroppedCount = drainResult.droppedCount;
+                appendLocalizedDebugOutputLine(
+                    QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。")
+                        .arg(droppedDelta));
+            }
+            std::vector<DebugOutputLineRecord> outputLines;
+            outputLines.reserve(drainResult.records.size());
+            const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+            for (const ksword::ark::DebugOutputRecord& record : drainResult.records)
+            {
+                QString messageText = QString::fromUtf8(
+                    record.text.data(), static_cast<int>(record.text.size())).trimmed();
+                if (messageText.isEmpty()) continue;
+                const QString componentText = QString::number(record.componentId, 16)
+                    .toUpper().rightJustified(8, QLatin1Char('0'));
+                const QString levelText = QString::number(record.level, 16)
+                    .toUpper().rightJustified(8, QLatin1Char('0'));
+                DebugOutputLineRecord line;
+                line.timePrefix = timePrefix;
+                line.sourceText = QStringLiteral("[Seq=%1][Component=0x%2][Level=0x%3] %4")
+                    .arg(static_cast<qulonglong>(record.sequence))
+                    .arg(componentText, levelText, messageText);
+                if ((record.flags & KSWORD_ARK_DEBUG_OUTPUT_RECORD_FLAG_TEXT_TRUNCATED) != 0U)
+                    line.localizedSuffixSource = QStringLiteral(" [已截断]");
+                outputLines.push_back(std::move(line));
+            }
+            append(std::move(outputLines));
+            // 有更多记录时立即继续读取；空闲等待可被停止请求立即唤醒。
+            if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_MORE_AVAILABLE) == 0U)
+                waitForStop(std::chrono::milliseconds(100));
+        }
+    }
+};
+
 void DriverDock::startDebugOutputCapture()
 {
-    if (m_kernelDebugCaptureRunning.exchange(true))
+    if (m_debugCaptureSession != nullptr)
     {
         appendLocalizedDebugOutputLine(QStringLiteral("捕获线程已在运行。"));
         return;
     }
-
-    // 上一轮线程可能已自行退出；重新启动前必须回收 joinable 对象。
-    if (m_kernelDebugCaptureThread != nullptr && m_kernelDebugCaptureThread->joinable())
-    {
-        m_kernelDebugCaptureThread->join();
-    }
-    m_kernelDebugCaptureThread.reset();
-
     appendLocalizedDebugOutputLine(QStringLiteral("正在注册 R0 内核调试输出回调..."));
     try
     {
-        m_kernelDebugCaptureThread = std::make_unique<std::thread>([this]()
-            {
-                runKernelDebugOutputCaptureLoop();
-            });
+        auto session = std::make_shared<DebugCaptureSession>();
+        session->buffer = m_debugOutputBuffer;
+        session->dispatcher = m_debugCaptureDispatcher;
+        session->projectionWake = [this]() { scheduleDebugOutputFlush(); };
+        const std::weak_ptr<DebugCaptureSession> weakSession(session);
+        session->stateChanged = [this, weakSession]()
+        {
+            const auto completed = weakSession.lock();
+            if (completed == nullptr || completed != m_debugCaptureSession) return;
+            if (completed->finished.load()) m_debugCaptureSession.reset();
+            updateDebugCaptureButtonState();
+        };
+        m_debugCaptureSession = std::move(session);
+        m_debugCaptureSession->start();
     }
     catch (...)
     {
-        m_kernelDebugCaptureRunning.store(false);
-        m_kernelDebugCaptureThread.reset();
+        m_debugCaptureSession.reset();
         appendLocalizedDebugOutputLine(QStringLiteral("启动失败：无法创建后台线程。"));
     }
-
     updateDebugCaptureButtonState();
 }
 
 void DriverDock::stopDebugOutputCapture()
 {
-    m_kernelDebugCaptureRunning.store(false);
-    if (m_kernelDebugCaptureThread != nullptr && m_kernelDebugCaptureThread->joinable())
-    {
-        m_kernelDebugCaptureThread->join();
-    }
-    m_kernelDebugCaptureThread.reset();
+    if (m_debugCaptureSession != nullptr) m_debugCaptureSession->requestStop();
     updateDebugCaptureButtonState();
 }
 
-void DriverDock::runKernelDebugOutputCaptureLoop()
+void DriverDock::releaseDebugOutputCapture()
 {
-    QPointer<DriverDock> guardThis(this);
-    const auto updateButtons = [this, guardThis]()
-        {
-            QMetaObject::invokeMethod(this, [guardThis]()
-                {
-                    if (guardThis != nullptr) guardThis->updateDebugCaptureButtonState();
-                }, Qt::QueuedConnection);
-        };
-    ksword::ark::DriverClient driverClient;
-    ksword::ark::DriverHandle driverHandle = driverClient.open();
-    if (!driverHandle.isValid())
-    {
-        const unsigned long openError = ::GetLastError();
-        m_kernelDebugCaptureRunning.store(false);
-        appendLocalizedDebugOutputLine(
-            QStringLiteral("启动失败：无法打开 KswordARK 控制设备（Win32=%1）。").arg(openError));
-        updateButtons();
-        return;
-    }
-    const ksword::ark::DebugOutputControlResult startResult = driverClient.controlDebugOutput(
-        driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_START);
-    if (!startResult.io.ok)
-    {
-        m_kernelDebugCaptureRunning.store(false);
-        appendLocalizedDebugOutputLine(startResult.unsupported
-            ? QStringLiteral("启动失败：当前 KswordARK 驱动版本不支持内核调试输出 IOCTL。")
-            : QStringLiteral("启动失败：R0 调试输出回调注册失败：%1")
-                .arg(QString::fromStdString(startResult.io.message)));
-        updateButtons();
-        return;
-    }
-    appendLocalizedDebugOutputLine(
-        QStringLiteral("R0 内核调试输出回调已启动，等待 DbgPrint/DbgPrintEx/KdPrintEx 消息..."));
-    updateButtons();
-
-    std::uint64_t nextSequence = 0;
-    std::uint64_t reportedDroppedCount = 0;
-    while (m_kernelDebugCaptureRunning.load())
-    {
-        const ksword::ark::DebugOutputDrainResult drainResult = driverClient.drainDebugOutput(
-            driverHandle, nextSequence, KSWORD_ARK_DEBUG_OUTPUT_DEFAULT_DRAIN_RECORDS);
-        if (!drainResult.io.ok)
-        {
-            appendLocalizedDebugOutputLine(QStringLiteral("读取 R0 调试输出失败：%1")
-                .arg(QString::fromStdString(drainResult.io.message)));
-            break;
-        }
-        nextSequence = drainResult.nextSequence;
-        if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_OVERFLOW) != 0U &&
-            drainResult.lostBeforeFirst != 0U)
-        {
-            appendLocalizedDebugOutputLine(
-                QStringLiteral("警告：读取游标落后，已有 %1 条内核调试消息被环形缓冲区覆盖。")
-                    .arg(static_cast<qulonglong>(drainResult.lostBeforeFirst)));
-        }
-        if (drainResult.droppedCount > reportedDroppedCount)
-        {
-            const qulonglong droppedDelta = static_cast<qulonglong>(
-                drainResult.droppedCount - reportedDroppedCount);
-            reportedDroppedCount = drainResult.droppedCount;
-            appendLocalizedDebugOutputLine(
-                QStringLiteral("警告：高 IRQL 并发写入期间丢弃了 %1 条内核调试消息。")
-                    .arg(droppedDelta));
-        }
-        std::vector<DebugOutputLineRecord> outputLines;
-        outputLines.reserve(drainResult.records.size());
-        const QString timePrefix = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
-        for (const ksword::ark::DebugOutputRecord& record : drainResult.records)
-        {
-            QString messageText = QString::fromUtf8(
-                record.text.data(), static_cast<int>(record.text.size())).trimmed();
-            if (messageText.isEmpty()) continue;
-            const QString componentText = QString::number(record.componentId, 16)
-                .toUpper().rightJustified(8, QLatin1Char('0'));
-            const QString levelText = QString::number(record.level, 16)
-                .toUpper().rightJustified(8, QLatin1Char('0'));
-            DebugOutputLineRecord line;
-            line.timePrefix = timePrefix;
-            line.sourceText = QStringLiteral("[Seq=%1][Component=0x%2][Level=0x%3] %4")
-                .arg(static_cast<qulonglong>(record.sequence))
-                .arg(componentText, levelText, messageText);
-            if ((record.flags & KSWORD_ARK_DEBUG_OUTPUT_RECORD_FLAG_TEXT_TRUNCATED) != 0U)
-                line.localizedSuffixSource = QStringLiteral(" [已截断]");
-            outputLines.push_back(std::move(line));
-        }
-        enqueueDebugOutputLines(std::move(outputLines));
-        // 有更多记录时立即继续读取，否则保留原空轮询休眠策略。
-        if ((drainResult.responseFlags & KSWORD_ARK_DEBUG_OUTPUT_DRAIN_FLAG_MORE_AVAILABLE) == 0U)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    const ksword::ark::DebugOutputControlResult stopResult = driverClient.controlDebugOutput(
-        driverHandle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
-    m_kernelDebugCaptureRunning.store(false);
-    appendLocalizedDebugOutputLine(stopResult.io.ok
-        ? QStringLiteral("R0 调试输出回调已停止。")
-        : QStringLiteral("捕获线程已退出，但 R0 回调注销返回失败。"));
-    updateButtons();
+    if (m_debugCaptureSession != nullptr) m_debugCaptureSession->requestStop();
+    m_debugCaptureSession.reset();
 }
 
 void DriverDock::updateDebugCaptureButtonState()
 {
-    const bool running = m_kernelDebugCaptureRunning.load();
-    if (m_startCaptureButton != nullptr)
-    {
-        m_startCaptureButton->setEnabled(!running);
-    }
-    if (m_stopCaptureButton != nullptr)
-    {
-        m_stopCaptureButton->setEnabled(running);
-    }
+    const bool active = m_debugCaptureSession != nullptr;
+    const bool stopping = active && m_debugCaptureSession->stopRequested.load();
+    if (m_startCaptureButton != nullptr) m_startCaptureButton->setEnabled(!active);
+    if (m_stopCaptureButton != nullptr) m_stopCaptureButton->setEnabled(active && !stopping);
     if (m_debugCaptureStatusLabel != nullptr)
     {
-        m_debugCaptureStatusLabel->setText(
-            running
+        m_debugCaptureStatusLabel->setText(stopping
+            ? driverText("driver.service.state.stop_pending", QStringLiteral("停止中"))
+            : active
                 ? driverText("driver.debug.status.running", QStringLiteral("状态：捕获运行中"))
                 : driverText("driver.debug.status.not_started", QStringLiteral("状态：未启动")));
     }
@@ -287,7 +380,7 @@ void DriverDock::appendLocalizedDebugOutputLine(const QString& sourceText)
 
 void DriverDock::flushDebugOutputLines(bool clearWake)
 {
-    const DebugOutputSnapshot snapshot = m_debugOutputBuffer.snapshot(
+    const DebugOutputSnapshot snapshot = m_debugOutputBuffer->snapshot(
         m_debugOutputRenderedSequence, m_debugOutputTranslationDirty, clearWake);
     if (!snapshot.visible || m_debugOutputEdit == nullptr) return;
     if (!snapshot.replace && snapshot.records.empty()) return;
@@ -319,7 +412,7 @@ void DriverDock::refreshDebugOutputLines()
 
 void DriverDock::clearDebugOutputLines()
 {
-    m_debugOutputRenderedSequence = m_debugOutputBuffer.clear();
+    m_debugOutputRenderedSequence = m_debugOutputBuffer->clear();
     m_debugOutputTranslationDirty = false;
     if (m_debugOutputEdit != nullptr) m_debugOutputEdit->clear();
 }

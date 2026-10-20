@@ -28,13 +28,17 @@ def main():
     source = (area / "DriverDock.DebugAndUtils.cpp").read_text(encoding="utf-8-sig")
     production_class = block(header, "class DebugOutputBuffer final") + ";"
     start = source.index("bool DriverDock::DebugOutputBuffer::append(")
-    end = source.index("void DriverDock::enqueueDebugOutputLines(", start)
+    end = source.index("void DriverDock::scheduleDebugOutputFlush()", start)
     methods = source[start:end].replace("DriverDock::", "")
     # The production worker sends one batch for every drain; protocol/loss reporting stays present.
-    worker = block(source, "void DriverDock::runKernelDebugOutputCaptureLoop()")
-    assert "enqueueDebugOutputLines(std::move(outputLines))" in worker
-    assert worker.count("QMetaObject::invokeMethod") == 1  # constant status callbacks only
-    for token in ("nextSequence = drainResult.nextSequence", "lostBeforeFirst", "droppedCount", "TEXT_TRUNCATED", "ACTION_STOP"):
+    session = block(source, "struct DriverDock::DebugCaptureSession final")
+    worker = block(session, "    void capture()")
+    assert "append(std::move(outputLines))" in worker
+    assert "QMetaObject::invokeMethod" not in worker
+    append = block(session, "    void append(std::vector<DebugOutputLineRecord> records)")
+    assert "if (buffer->append(std::move(records))) dispatcher->post(projectionWake);" in append
+    assert "ACTION_STOP" in block(session, "    void run() noexcept")
+    for token in ("nextSequence = drainResult.nextSequence", "lostBeforeFirst", "droppedCount", "TEXT_TRUNCATED"):
         assert token in worker, token
     fixture = r"""
 #include <atomic>

@@ -14,6 +14,7 @@
 
 #include "../Framework.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../UI/AsyncUiDispatcher.h"
 
 #include <QPointer>
 #include <QWidget>
@@ -22,7 +23,7 @@
 #include <deque>    // 最近调试记录按固定容量保留，避免头删搬移。
 #include <mutex>    // 捕获线程只接纳值数据，文档仍由 GUI 线程拥有。
 #include <cstdint>  // std::uint32_t/std::uint64_t：状态值与地址值。
-#include <memory>   // std::unique_ptr：线程对象托管。
+#include <memory>   // std::shared_ptr：独立捕获会话及规范缓冲生命周期。
 #include <string>   // std::string：错误文本桥接与日志输出。
 #include <thread>   // std::thread：后台调试输出捕获线程。
 #include <vector>   // std::vector：驱动服务与模块快照容器。
@@ -62,7 +63,7 @@ public:
     explicit DriverDock(QWidget* parent = nullptr);
 
     // 析构函数：
-    // - 作用：停止调试捕获线程并回收资源。
+    // - 作用：断开 GUI 回投并请求独立捕获会话异步清理。
     ~DriverDock() override;
 
     // attachKswordSelfDriverPage：
@@ -545,12 +546,13 @@ private:
     void startDebugOutputCapture();
 
     // stopDebugOutputCapture：
-    // - 作用：停止 R0 内核调试输出捕获线程。
+    // - 作用：请求停止并立即返回；会话异步完成 R0 STOP 与句柄回收。
     void stopDebugOutputCapture();
 
-    // runKernelDebugOutputCaptureLoop：
-    // - 作用：线程函数，通过 ArkDriverClient 增量读取 R0 环形缓冲区。
-    void runKernelDebugOutputCaptureLoop();
+    struct DebugCaptureSession;
+    // 析构前先断开共享回投门禁，再请求独立会话异步完成 STOP。
+    void releaseDebugOutputCapture();
+    void scheduleDebugOutputFlush();
 
     // updateDebugCaptureButtonState：
     // - 作用：刷新调试捕获按钮启用状态与提示文本。
@@ -685,7 +687,7 @@ private:
     QPushButton* m_copyDebugOutputButton = nullptr;   // 复制输出按钮。
     QLabel* m_debugCaptureStatusLabel = nullptr;      // 捕获状态标签。
     CodeEditorWidget* m_debugOutputEdit = nullptr;      // 调试输出文本框。
-    DebugOutputBuffer m_debugOutputBuffer;
+    std::shared_ptr<DebugOutputBuffer> m_debugOutputBuffer = std::make_shared<DebugOutputBuffer>();
     std::uint64_t m_debugOutputRenderedSequence = 0;
     bool m_debugOutputTranslationDirty = false;
 
@@ -774,6 +776,6 @@ private:
     bool m_initialRefreshDone = false;                          // 首次显示时是否已完成首轮刷新。
 
     // ========================= 调试捕获线程状态 =========================
-    std::atomic_bool m_kernelDebugCaptureRunning{ false };   // R0 捕获线程运行标记。
-    std::unique_ptr<std::thread> m_kernelDebugCaptureThread; // R0 捕获线程对象。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_debugCaptureDispatcher;
+    std::shared_ptr<DebugCaptureSession> m_debugCaptureSession; // STOP 和句柄关闭完成前不替换。
 };
