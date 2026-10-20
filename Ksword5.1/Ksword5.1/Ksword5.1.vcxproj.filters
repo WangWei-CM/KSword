@@ -3066,6 +3066,9 @@
     <ClInclude Include="UI\LazyPageContent.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="KernelDock\KernelNavigationCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\PageControlStyle.h">
       <Filter>Header Files</Filter>
     </ClInclude>

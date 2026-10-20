@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelDock.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
@@ -1887,12 +1888,12 @@ private:
         ks::ui::StyleJoinedResultTabs(m_ruleTabWidget, ruleHeader);
         rightLayout->addWidget(m_ruleTabWidget, 1);
 
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, kernelText("kernel.callback.intercept.tab.registry", QStringLiteral("注册表")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, kernelText("kernel.callback.intercept.tab.process", QStringLiteral("进程创建")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, kernelText("kernel.callback.intercept.tab.thread", QStringLiteral("线程创建")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, kernelText("kernel.callback.intercept.tab.image", QStringLiteral("镜像加载")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, kernelText("kernel.callback.intercept.tab.object", QStringLiteral("对象管理器")));
-        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, kernelText("kernel.callback.intercept.tab.minifilter", QStringLiteral("文件系统微过滤器")));
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_REGISTRY, "audit.intercept.registry");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_PROCESS_CREATE, "audit.intercept.process");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_THREAD_CREATE, "audit.intercept.thread");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_IMAGE_LOAD, "audit.intercept.image");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_OBJECT, "audit.intercept.object");
+        createRuleTableTab(KSWORD_ARK_CALLBACK_TYPE_MINIFILTER, "audit.intercept.minifilter");
         createMinifilterBypassPidTab(m_ruleTabWidget);
         createProcessProtectTab(m_ruleTabWidget);
 
@@ -1904,8 +1905,8 @@ private:
         static_cast<CodeTextEdit*>(m_eventLogEditor)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
         m_appLogEditor->setReadOnly(true);
         m_eventLogEditor->setReadOnly(true);
-        logTabWidget->addTab(m_appLogEditor, kernelText("kernel.callback.intercept.log_tab.application", QStringLiteral("应用日志")));
-        logTabWidget->addTab(m_eventLogEditor, kernelText("kernel.callback.intercept.log_tab.events", QStringLiteral("事件日志")));
+        ksword::kernel_navigation::addTab(logTabWidget, m_appLogEditor, "audit.intercept.application");
+        ksword::kernel_navigation::addTab(logTabWidget, m_eventLogEditor, "audit.intercept.events");
         rootLayout->addWidget(logTabWidget, 0);
 
         auto* fileMonitorFrame = new QFrame(scrollContent);
@@ -2478,7 +2479,7 @@ private:
         m_minifilterBypassStatusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         tabLayout->addWidget(m_minifilterBypassStatusLabel, 0);
 
-        m_ruleTabWidget->addTab(tabPage, kernelText("kernel.callback.intercept.minifilter.tab", QStringLiteral("Minifilter PID 放行")));
+        ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, "audit.intercept.bypass");
     }
 
     QList<quint32> parseMinifilterBypassPidText(const QString& rawText, QString* errorTextOut) const
@@ -3097,9 +3098,7 @@ private:
         }
         workspace->finish();
 
-        m_ruleTabWidget->addTab(
-            tabPage,
-            kernelText("kernel.callback.intercept.process_protect.tab", QStringLiteral("进程保护")));
+        ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, "audit.intercept.protect");
     }
 
     QTableWidgetItem* makeProcessProtectCheckItem(const bool checkedState) const
@@ -3932,7 +3931,7 @@ private:
         return statusParts.join(QLatin1Char(' '));
     }
 
-    void createRuleTableTab(quint32 callbackType, const QString& titleText)
+    void createRuleTableTab(quint32 callbackType, const char* navigationId)
     {
         auto* tabPage = new QWidget(m_ruleTabWidget);
         auto* tabLayout = new QVBoxLayout(tabPage);
@@ -4000,7 +3999,7 @@ private:
             showRuleTableContextMenu(ruleTable, callbackType, localPos);
         });
 
-        const int tabIndex = m_ruleTabWidget->addTab(tabPage, titleText);
+        const int tabIndex = ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, navigationId);
         m_tabCallbackTypeMap.insert(tabIndex, callbackType);
         m_ruleTableMap.insert(callbackType, ruleTable);
     }

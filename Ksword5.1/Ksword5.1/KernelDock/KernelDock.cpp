@@ -1,5 +1,6 @@
 
 #include "KernelDock.h"
+#include "KernelNavigationCatalog.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/LazyPageContent.h"
@@ -244,6 +245,7 @@ KernelDock::KernelDock(QWidget* parent)
     kLogEvent initEvent;
     info << initEvent << "[KernelDock] 构造开始，准备初始化五页内核视图。" << eol;
 
+    m_navigationRegistry = new ksword::kernel_navigation::Registry(this);
     initializeUi();
     initializeConnections();
 
@@ -258,6 +260,104 @@ KernelDock::KernelDock(QWidget* parent)
     });
 
     info << initEvent << "[KernelDock] 构造完成。" << eol;
+}
+
+
+ks::ui::PageNavigationCatalog KernelDock::navigationCatalog(const KernelDock* existing)
+{
+    return existing != nullptr && existing->m_navigationRegistry != nullptr
+        ? existing->m_navigationRegistry->snapshot()
+        : ksword::kernel_navigation::catalog();
+}
+
+QWidget* KernelDock::activateNavigationDescriptor(const QString& id)
+{
+    if (m_navigationRegistry == nullptr) return nullptr;
+    const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QStringLiteral("Kernel"));
+    if (!resolved) return nullptr;
+    auto target = std::find_if(resolved->cbegin(), resolved->cend(), [&id](const auto& entry) {
+        return entry.page.id == id;
+    });
+    if (target == resolved->cend() || !target->page.visible || !target->page.enabled) return nullptr;
+    QStringList chain;
+    QString current = id;
+    while (!current.isEmpty())
+    {
+        const auto* spec = ksword::kernel_navigation::definition(current);
+        if (spec == nullptr) return nullptr;
+        chain.prepend(current);
+        current = QString::fromLatin1(spec->parent);
+    }
+    const QPointer<KernelDock> guard(this);
+    using Binding = ksword::kernel_navigation::Registry::Binding;
+    QVector<Binding> selectedChain;
+    const auto available = [](const Binding& binding) {
+        if (binding.tabs.isNull() || binding.page.isNull()) return false;
+        const int index = binding.tabs->indexOf(binding.page);
+        return index >= 0 && binding.tabs->isTabVisible(index)
+            && binding.tabs->isTabEnabled(index);
+    };
+    const auto bindingCurrent = [&available](const Binding& binding) {
+        return available(binding) && binding.tabs->currentWidget() == binding.page;
+    };
+    const auto chainCurrent = [&selectedChain, &bindingCurrent]() {
+        return std::all_of(selectedChain.cbegin(), selectedChain.cend(), bindingCurrent);
+    };
+    for (const QString& key : chain)
+    {
+        // The previous selection synchronously exposes its real child factory.
+        ensureCurrentTabReadyForDisplay();
+        if (guard.isNull() || !chainCurrent()) return nullptr;
+        const auto binding = m_navigationRegistry->binding(key);
+        if (!available(binding)) return nullptr;
+        binding.tabs->setCurrentIndex(binding.tabs->indexOf(binding.page));
+        if (guard.isNull() || !bindingCurrent(binding) || !chainCurrent()) return nullptr;
+        selectedChain.push_back(binding);
+        ensureCurrentTabReadyForDisplay();
+        if (guard.isNull() || !chainCurrent()) return nullptr;
+    }
+    return !selectedChain.isEmpty() && chainCurrent() ? selectedChain.constLast().page.data() : nullptr;
+}
+
+ks::ui::PageNavigationCatalog KernelDock::selfDriverNavigationCatalog(const KernelDock* existing)
+{
+    auto pages = ksword::kernel_navigation::selfDriverCatalog();
+    if (existing == nullptr) return pages;
+    const auto tabs = existing->m_selfDriverNavigationTabs;
+    const auto widgets = existing->m_selfDriverNavigationPages;
+    for (int row = 0; row < pages.size(); ++row)
+    {
+        auto& page = pages[row];
+        const int index = tabs != nullptr && widgets[row] != nullptr ? tabs->indexOf(widgets[row]) : -1;
+        if (index < 0) { page.visible = false; page.enabled = false; page.current = false; continue; }
+        page.title = tabs->tabText(index);
+        page.searchTexts.append(tabs->tabToolTip(index));
+        page.visible = tabs->isTabVisible(index);
+        page.enabled = tabs->isTabEnabled(index);
+        page.current = tabs->currentWidget() == widgets[row];
+    }
+    return pages;
+}
+
+QWidget* KernelDock::activateSelfDriverNavigationDescriptor(const QString& id)
+{
+    const auto pages = selfDriverNavigationCatalog(this);
+    const auto target = std::find_if(pages.cbegin(), pages.cend(), [&id](const auto& page) { return page.id == id; });
+    if (target == pages.cend() || !target->visible || !target->enabled) return nullptr;
+    const auto widgets = m_selfDriverNavigationPages;
+    const QPointer<KernelDock> guard(this);
+    const auto tabs = m_selfDriverNavigationTabs;
+    const QPointer<QWidget> page(widgets[static_cast<std::size_t>(target - pages.cbegin())]);
+    const auto available = [&tabs, &page]() {
+        if (tabs.isNull() || page.isNull()) return false;
+        const int index = tabs->indexOf(page);
+        return index >= 0 && tabs->isTabVisible(index) && tabs->isTabEnabled(index);
+    };
+    if (!available()) return nullptr;
+    tabs->setCurrentIndex(tabs->indexOf(page));
+    if (guard.isNull() || m_selfDriverNavigationTabs != tabs || !available() || tabs->currentWidget() != page) return nullptr;
+    ensureSelfDriverCurrentTabRefreshed();
+    return !guard.isNull() && m_selfDriverNavigationTabs == tabs && available() && tabs->currentWidget() == page ? page.data() : nullptr;
 }
 
 QWidget* KernelDock::kswordSelfDriverPage() const
@@ -471,37 +571,32 @@ void KernelDock::initializeUi()
     m_selfDriverLayout->addWidget(m_selfDriverInnerTabWidget, 1);
     m_driverStatusPage = new QWidget(m_selfDriverInnerTabWidget);
 
-    m_objectNamespaceTabIndex = m_tabWidget->addTab(
-        m_objectNamespacePage,
+    m_objectNamespaceTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_objectNamespacePage,
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        kernelText("kernel.main.tab.object_namespace.title", QStringLiteral("对象命名空间")));
+        "object");
     m_tabWidget->setTabToolTip(m_objectNamespaceTabIndex, kernelText("kernel.main.tab.object_namespace.tooltip", QStringLiteral("对象管理器命名空间遍历（默认页）")));
 
-    m_atomTabIndex = m_tabWidget->addTab(
-        m_atomPage,
+    m_atomTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_atomPage,
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        kernelText("kernel.main.tab.atom.title", QStringLiteral("原子表遍历")));
+        "atom");
     m_tabWidget->setTabToolTip(m_atomTabIndex, kernelText("kernel.main.tab.atom.tooltip", QStringLiteral("遍历全局原子范围并提供校验操作")));
 
-    m_ntQueryTabIndex = m_miscInnerTabWidget->addTab(
-        m_ntQueryPage,
+    m_ntQueryTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, m_ntQueryPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.tab.nt_query.title", QStringLiteral("历史NtQuery")));
+        "misc.ntquery");
     m_miscInnerTabWidget->setTabToolTip(m_ntQueryTabIndex, kernelText("kernel.main.tab.nt_query.tooltip", QStringLiteral("旧版内核 NtQuery 信息页")));
 
-    m_miscTabIndex = m_tabWidget->addTab(
-        m_miscPage,
+    m_miscTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_miscPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.tab.misc.title", QStringLiteral("杂项")));
+        "misc");
     m_tabWidget->setTabToolTip(
         m_miscTabIndex,
         kernelText("kernel.main.tab.misc.tooltip", QStringLiteral("历史 NtQuery、内核知识、代码完整性与 VBS/HVCI")));
 
     // I/O 管理把原顶层 SSDT、SSSDT、IDT/GDT 收拢为横向子页，并追加 IOCTLS 解码器。
-    m_ioManagementTabIndex = m_tabWidget->addTab(
-        m_ioManagementPage,
+    m_ioManagementTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_ioManagementPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.tab.io_management.title", QStringLiteral("I/O管理")));
+        "io");
     m_tabWidget->setTabToolTip(
         m_ioManagementTabIndex,
         kernelText(
@@ -509,32 +604,28 @@ void KernelDock::initializeUi()
             QStringLiteral("集中查看 SSDT、ShadowSSDT、IDT、GDT 并解析 IOCTL 控制码")));
     initializeIoManagementTab();
 
-    m_inlineHookTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        m_inlineHookPage,
+    m_inlineHookTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, m_inlineHookPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        QStringLiteral("Inline Hook"));
+        "audit.inline");
     m_kernelAuditInnerTabWidget->setTabToolTip(m_inlineHookTabIndex, kernelText("kernel.main.tab.inline_hook.tooltip", QStringLiteral("扫描内核模块导出函数头部跳转补丁，并提供 force 后 NOP 摘除")));
 
-    m_iatEatHookTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        m_iatEatHookPage,
+    m_iatEatHookTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, m_iatEatHookPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("IAT/EAT"));
+        "audit.iat");
     m_kernelAuditInnerTabWidget->setTabToolTip(m_iatEatHookTabIndex, kernelText("kernel.main.tab.iat_eat.tooltip", QStringLiteral("检测内核模块导入表和导出表可疑目标指针")));
 
-    m_callbackEnumTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        m_callbackEnumPage,
+    m_callbackEnumTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, m_callbackEnumPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.tab.callback_enum.title", QStringLiteral("回调遍历")));
+        "audit.callbacks");
     m_kernelAuditInnerTabWidget->setTabToolTip(
         m_callbackEnumTabIndex,
         kernelText(
             "kernel.main.tab.callback_enum.tooltip",
             QStringLiteral("遍历 KswordARK 可见的系统回调、minifilter 和 System Informer DynData 诊断项")));
 
-    m_callbackTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        m_callbackInterceptPage,
+    m_callbackTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, m_callbackInterceptPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        kernelText("kernel.main.tab.callback.title", QStringLiteral("驱动回调")));
+        "audit.intercept");
     m_kernelAuditInnerTabWidget->setTabToolTip(
         m_callbackTabIndex,
         kernelText(
@@ -542,10 +633,9 @@ void KernelDock::initializeUi()
             QStringLiteral("驱动回调拦截规则管理与询问事件处理")));
 
     // 统一 Patch/Hook 审计页——聚合全部 hook 类型的一键扫描。
-    m_patchHookAuditTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        new KernelPatchHookAuditTab(m_kernelAuditInnerTabWidget),
+    m_patchHookAuditTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, new KernelPatchHookAuditTab(m_kernelAuditInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        kernelText("kernel.main.tab.patch_hook_audit.title", QStringLiteral("统一审计")));
+        "audit.unified");
     m_kernelAuditInnerTabWidget->setTabToolTip(
         m_patchHookAuditTabIndex,
         kernelText(
@@ -553,40 +643,36 @@ void KernelDock::initializeUi()
             QStringLiteral("一键扫描 Inline Hook、IAT/EAT、SSDT、ObjectType 和驱动完整性，按风险汇总")));
 
     // Shadow 比较页——逐条对比 SSDT / ShadowSSDT 所属模块。
-    m_shadowComparisonTabIndex = m_kernelAuditInnerTabWidget->addTab(
-        new KernelShadowComparisonTab(m_kernelAuditInnerTabWidget),
+    m_shadowComparisonTabIndex = ksword::kernel_navigation::addTab(m_kernelAuditInnerTabWidget, new KernelShadowComparisonTab(m_kernelAuditInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.tab.shadow_comparison.title", QStringLiteral("Shadow 比较")));
+        "audit.shadow");
     m_kernelAuditInnerTabWidget->setTabToolTip(
         m_shadowComparisonTabIndex,
         kernelText(
             "kernel.main.tab.shadow_comparison.tooltip",
             QStringLiteral("逐条对比 SSDT 或 ShadowSSDT 服务表当前值与期望模块，高亮被修改的条目")));
 
-    m_kernelAuditTabIndex = m_tabWidget->addTab(
-        m_kernelAuditPage,
+    m_kernelAuditTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_kernelAuditPage,
         tabIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        kernelText("kernel.main.tab.audit_callbacks.title", QStringLiteral("内核审计与回调")));
+        "audit");
     m_tabWidget->setTabToolTip(
         m_kernelAuditTabIndex,
         kernelText(
             "kernel.main.tab.audit_callbacks.tooltip",
             QStringLiteral("集中查看 Inline Hook、IAT/EAT、回调遍历和驱动回调")));
 
-    const int halAuditTabIndex = m_tabWidget->addTab(
-        new KernelPlatformAuditTab(KernelPlatformAuditTab::Mode::Hal, m_tabWidget),
+    const int halAuditTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, new KernelPlatformAuditTab(KernelPlatformAuditTab::Mode::Hal, m_tabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.tab.hal_audit.title", QStringLiteral("HAL")));
+        "hal");
     m_tabWidget->setTabToolTip(
         halAuditTabIndex,
         kernelText(
             "kernel.main.tab.hal_audit.tooltip",
             QStringLiteral("审计 HalDispatchTable、HalPrivateDispatchTable、HalAcpiDispatchTable 与 HalSubComponents，并受控编辑已验证函数槽")));
 
-    const int wdfAuditTabIndex = m_tabWidget->addTab(
-        new KernelPlatformAuditTab(KernelPlatformAuditTab::Mode::Wdf, m_tabWidget),
+    const int wdfAuditTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, new KernelPlatformAuditTab(KernelPlatformAuditTab::Mode::Wdf, m_tabWidget),
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.tab.wdf_audit.title", QStringLiteral("WDF")));
+        "wdf");
     m_tabWidget->setTabToolTip(
         wdfAuditTabIndex,
         kernelText(
@@ -598,36 +684,27 @@ void KernelDock::initializeUi()
     // 准备/释放资源在菜单里，PREPARE/SELF_TEST/EPT 规则在这一页里，两边零
     // 交叉引用，用户在任一侧都走不完一次完整的生命周期。
 
-    m_slatIommuTabIndex = m_tabWidget->addTab(
-        new KernelSlatIommuAuditTab(m_tabWidget),
+    m_slatIommuTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, new KernelSlatIommuAuditTab(m_tabWidget),
         tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
-        kernelText(
-            "kernel.main.tab.slat_iommu.title",
-            QStringLiteral("SLAT/IOMMU")));
+        "slat");
     m_tabWidget->setTabToolTip(
         m_slatIommuTabIndex,
         kernelText(
             "kernel.main.tab.slat_iommu.tooltip",
             QStringLiteral("只读 EPT/NPT 虚拟-物理交叉视图、Hypervisor CPUID 与 DMAR/IVRS/IOMMU 运行时取证")));
 
-    m_textIntegrityTabIndex = m_miscInnerTabWidget->addTab(
-        new KernelTextIntegrityTab(m_miscInnerTabWidget),
+    m_textIntegrityTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, new KernelTextIntegrityTab(m_miscInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText(
-            "kernel.main.tab.text_integrity.title",
-            QStringLiteral("代码完整性")));
+        "misc.integrity");
     m_miscInnerTabWidget->setTabToolTip(
         m_textIntegrityTabIndex,
         kernelText(
             "kernel.main.tab.text_integrity.tooltip",
             QStringLiteral("把每个已加载模块的可执行节与重定位后的磁盘净映像全量逐字节比对，区分动态重定位位点与无法解释的代码改写")));
 
-    m_vbsPostureTabIndex = m_miscInnerTabWidget->addTab(
-        new KernelVbsPostureTab(m_miscInnerTabWidget),
+    m_vbsPostureTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, new KernelVbsPostureTab(m_miscInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
-        kernelText(
-            "kernel.main.tab.vbs_posture.title",
-            QStringLiteral("VBS/HVCI")));
+        "misc.vbs");
     m_miscInnerTabWidget->setTabToolTip(
         m_vbsPostureTabIndex,
         kernelText(
@@ -635,12 +712,9 @@ void KernelDock::initializeUi()
             QStringLiteral("区分 HVCI 策略位与运行时证据，识别「策略说开着但实际没跑」，并列出审计模式/测试签名/CI 调试等降级项")));
 
     // HVCI W^X 绕过实验页：standalone 页面，自管理 showEvent 首刷。
-    m_hvciBypassTabIndex = m_miscInnerTabWidget->addTab(
-        new ks::misc::HvciBypassPage(m_miscInnerTabWidget),
+    m_hvciBypassTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, new ks::misc::HvciBypassPage(m_miscInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/process_priority.svg")),
-        kernelText(
-            "kernel.main.tab.hvci_bypass.title",
-            QStringLiteral("HVCI 绕过")));
+        "misc.hvci");
     m_miscInnerTabWidget->setTabToolTip(
         m_hvciBypassTabIndex,
         kernelText(
@@ -648,46 +722,39 @@ void KernelDock::initializeUi()
             QStringLiteral("HVCI W^X 保护绕过实验：通过 MmChangeImageProtection 与 MDL 别名验证写入可执行内存")));
 
     // RXPF 页错误模拟页：standalone 页面，自管理 showEvent 首刷。
-    m_rxpfTabIndex = m_miscInnerTabWidget->addTab(
-        new ks::misc::RxpfPage(m_miscInnerTabWidget),
+    m_rxpfTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, new ks::misc::RxpfPage(m_miscInnerTabWidget),
         tabIcon(QStringLiteral(":/Icon/development/terminal_line.svg")),
-        kernelText(
-            "kernel.main.tab.rxpf.title",
-            QStringLiteral("RXPF 模拟")));
+        "misc.rxpf");
     m_miscInnerTabWidget->setTabToolTip(
         m_rxpfTabIndex,
         kernelText(
             "kernel.main.tab.rxpf.tooltip",
             QStringLiteral("RX 页错误模拟：通过影子 IDT 与指令模拟器在 NX 页上截获并模拟执行")));
 
-    m_timerDpcTabIndex = m_tabWidget->addTab(
-        m_timerDpcPage,
+    m_timerDpcTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_timerDpcPage,
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        kernelText("kernel.main.tab.timer_dpc.title", QStringLiteral("定时器/DPC")));
+        "timers");
     m_tabWidget->setTabToolTip(m_timerDpcTabIndex, kernelText("kernel.main.tab.timer_dpc.tooltip", QStringLiteral("按 CPU 只读遍历 KTIMER 表并解析关联 KDPC 例程")));
 
     // 工作队列线程页只使用系统线程快照、WrQueue 和可信 ActiveExWorker 标志；
     // 不读取或猜测 Critical/Delayed/HyperCritical 队列的未公开链表结构。
-    m_workQueueThreadTabIndex = m_tabWidget->addTab(
-        new KernelThreadAuditTab(KernelThreadAuditTab::Mode::WorkQueueThreads, m_tabWidget),
+    m_workQueueThreadTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, new KernelThreadAuditTab(KernelThreadAuditTab::Mode::WorkQueueThreads, m_tabWidget),
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        kernelText("kernel.main.tab.work_queue_threads.title", QStringLiteral("内核工作队列线程")));
+        "workers");
     m_tabWidget->setTabToolTip(
         m_workQueueThreadTabIndex,
         kernelText(
             "kernel.main.tab.work_queue_threads.tooltip",
             QStringLiteral("基于安全线程证据审计工作队列候选、入口和模块归属")));
 
-    m_crossViewTabIndex = m_tabWidget->addTab(
-        m_crossViewPage,
+    m_crossViewTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_crossViewPage,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.tab.cid.title", QStringLiteral("CID表")));
+        "cid");
     m_tabWidget->setTabToolTip(m_crossViewTabIndex, kernelText("kernel.main.tab.cid.tooltip", QStringLiteral("只读 CID / cross-view 证据聚合")));
 
-    m_ipcTabIndex = m_tabWidget->addTab(
-        m_ipcPage,
+    m_ipcTabIndex = ksword::kernel_navigation::addTab(m_tabWidget, m_ipcPage,
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("IPC"));
+        "ipc");
     m_tabWidget->setTabToolTip(m_ipcTabIndex, kernelText("kernel.main.tab.ipc.tooltip", QStringLiteral("只读 NamedPipe / ALPC / 通信对象")));
 
     // 知识中心是纯只读页：目录和正文均由语言包驱动，站内按钮只切换到既有观察页面。
@@ -695,10 +762,9 @@ void KernelDock::initializeUi()
     m_knowledgeTab->setRouteHandler([this](const QString& routeId) {
         openKnowledgeRoute(routeId);
     });
-    m_knowledgeTabIndex = m_miscInnerTabWidget->addTab(
-        m_knowledgeTab,
+    m_knowledgeTabIndex = ksword::kernel_navigation::addTab(m_miscInnerTabWidget, m_knowledgeTab,
         tabIcon(QStringLiteral(":/Icon/knowledge_book.svg")),
-        ks::i18n::text(QStringLiteral("kernel.knowledge.tab.title")));
+        "misc.knowledge");
     m_miscInnerTabWidget->setTabToolTip(
         m_knowledgeTabIndex,
         ks::i18n::text(QStringLiteral("kernel.knowledge.tab.tooltip")));
@@ -732,6 +798,9 @@ void KernelDock::initializeUi()
     // 后续自动/手工刷新继续调用原成员函数，不复制驱动状态业务逻辑。
     initializeDriverStatusTab();
     m_driverStatusTabInitialized = true;
+    // Transfer to DriverDock changes parentage, so bind these exact real pages once.
+    m_selfDriverNavigationTabs = m_selfDriverInnerTabWidget;
+    m_selfDriverNavigationPages = {m_dynDataOverviewPage, m_dynDataProfilePage, m_driverStatusPage};
 
     m_tabWidget->setCurrentIndex(m_objectNamespaceTabIndex);
     updateTabIconContrast();
@@ -898,12 +967,10 @@ void KernelDock::initializeIoManagementTab()
     // SSDT 与 ShadowSSDT 继续复用原有页面和惰性刷新逻辑，只调整容器层级。
     m_ssdtPage = new QWidget(m_ioManagementInnerTabWidget);
     m_shadowSsdtPage = new QWidget(m_ioManagementInnerTabWidget);
-    m_ioSsdtTabIndex = m_ioManagementInnerTabWidget->addTab(
-        m_ssdtPage,
-        kernelText("kernel.main.inner_tab.ssdt", QStringLiteral("SSDT")));
-    m_ioShadowSsdtTabIndex = m_ioManagementInnerTabWidget->addTab(
-        m_shadowSsdtPage,
-        kernelText("kernel.main.inner_tab.shadow_ssdt", QStringLiteral("ShadowSSDT")));
+    m_ioSsdtTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, m_ssdtPage,
+        "io.ssdt");
+    m_ioShadowSsdtTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, m_shadowSsdtPage,
+        "io.shadow");
 
     // IDT/GDT 分别固定到独立实例，满足截图中的四张内核表横向切换心智模型。
     auto* idtTab = new KernelDescriptorTableTab(
@@ -912,26 +979,22 @@ void KernelDock::initializeIoManagementTab()
     auto* gdtTab = new KernelDescriptorTableTab(
         KernelDescriptorTableKind::Gdt,
         m_ioManagementInnerTabWidget);
-    m_ioIdtTabIndex = m_ioManagementInnerTabWidget->addTab(
-        idtTab,
-        kernelText("kernel.main.inner_tab.idt", QStringLiteral("IDT")));
-    m_ioGdtTabIndex = m_ioManagementInnerTabWidget->addTab(
-        gdtTab,
-        kernelText("kernel.main.inner_tab.gdt", QStringLiteral("GDT")));
+    m_ioIdtTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, idtTab,
+        "io.idt");
+    m_ioGdtTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, gdtTab,
+        "io.gdt");
 
     // IOCTLS 子页为纯 R3 解码器，不访问驱动，因此可以与其余内核表并列即时创建。
     auto* ioctlDecoderTab = new KernelIoctlDecoderTab(m_ioManagementInnerTabWidget);
-    m_ioIoctlTabIndex = m_ioManagementInnerTabWidget->addTab(
-        ioctlDecoderTab,
-        kernelText("kernel.main.inner_tab.ioctls", QStringLiteral("IOCTLS")));
+    m_ioIoctlTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, ioctlDecoderTab,
+        "io.ioctls");
 
     // DriverStartIo 子页会对每个 DriverObject 发起 R0 查询，因此与其它 I/O 管理子页
     // 一样只在用户切入时采集：首刷登记进 ensureIoManagementTabInitialized，不另起一条
     // currentChanged，否则会绕开"外层页签当前可见"这道门。
     m_driverStartIoTab = new KernelDriverStartIoTab(m_ioManagementInnerTabWidget);
-    m_ioStartIoTabIndex = m_ioManagementInnerTabWidget->addTab(
-        m_driverStartIoTab,
-        kernelText("kernel.main.inner_tab.driver_start_io", QStringLiteral("DriverStartIo")));
+    m_ioStartIoTabIndex = ksword::kernel_navigation::addTab(m_ioManagementInnerTabWidget, m_driverStartIoTab,
+        "io.startio");
 
     m_ioManagementInnerTabWidget->setTabToolTip(
         m_ioSsdtTabIndex,
@@ -980,43 +1043,37 @@ void KernelDock::initializeObjectNamespaceTab()
     m_objectNamespaceOverviewLayout->setContentsMargins(4, 4, 4, 4);
     m_objectNamespaceOverviewLayout->setSpacing(6);
 
-    m_objectNamespaceInnerTabWidget->addTab(
-        m_objectNamespaceOverviewPage,
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, m_objectNamespaceOverviewPage,
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        kernelText("kernel.main.inner_tab.overview", QStringLiteral("总览")));
-    m_objectNamespaceInnerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        "object.overview");
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelObjectDirectoryDeepTab(page);
         }),
         tabIcon(QStringLiteral(":/Icon/process_tree.svg")),
-        kernelText("kernel.main.inner_tab.directory_recursion", QStringLiteral("目录递归")));
-    m_objectNamespaceInnerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        "object.directory");
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelBaseNamedObjectsTab(page);
         }),
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("BaseNamedObjects"));
-    m_objectNamespaceInnerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        "object.named");
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelSymbolicLinkTab(page);
         }),
         tabIcon(QStringLiteral(":/Icon/process_refresh.svg")),
-        kernelText("kernel.main.inner_tab.symbolic_link", QStringLiteral("符号链接")));
-    m_objectNamespaceInnerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+        "object.links");
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelDeviceDriverObjectsTab(page);
         }),
         tabIcon(QStringLiteral(":/Icon/process_details.svg")),
-        kernelText("kernel.main.inner_tab.device_driver", QStringLiteral("设备与驱动")));
+        "object.drivers");
     auto* ioTimerTab = new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
         auto* content = new KernelIoTimerTab(page);
         content->requestInitialRefresh();
         return content;
     });
-    const int ioTimerInnerTabIndex = m_objectNamespaceInnerTabWidget->addTab(
-        ioTimerTab,
+    const int ioTimerInnerTabIndex = ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, ioTimerTab,
         tabIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        kernelText("kernel.main.inner_tab.io_timer", QStringLiteral("IoTimer")));
+        "object.iotimer");
     m_objectNamespaceInnerTabWidget->setTabToolTip(
         ioTimerInnerTabIndex,
         kernelText(
@@ -1027,10 +1084,9 @@ void KernelDock::initializeObjectNamespaceTab()
         content->requestInitialRefresh();
         return content;
     });
-    m_objectNamespaceInnerTabWidget->addTab(
-        ioctlAuditTab,
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, ioctlAuditTab,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.inner_tab.ioctl_audit", QStringLiteral("IOCTL 派遣表")));
+        "object.ioctl");
     // ObjectType 方法指针检查：只核对类型表/类型对象地址会漏掉被改写的二级方法指针（Open/Parse/...），
     // 首刷同样只在用户切入子页后才发起 R0 查询。
     auto* objectTypeProcedureTab = new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
@@ -1038,21 +1094,19 @@ void KernelDock::initializeObjectNamespaceTab()
         content->requestInitialRefresh();
         return content;
     });
-    const int objectTypeProcedureTabIndex = m_objectNamespaceInnerTabWidget->addTab(
-        objectTypeProcedureTab,
+    const int objectTypeProcedureTabIndex = ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, objectTypeProcedureTab,
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.inner_tab.object_type_procedures", QStringLiteral("ObjectType 方法指针")));
+        "object.procedures");
     m_objectNamespaceInnerTabWidget->setTabToolTip(
         objectTypeProcedureTabIndex,
         kernelText(
             "kernel.main.inner_tab.object_type_procedures.tooltip",
             QStringLiteral("逐个读取 OBJECT_TYPE 里的八个方法指针并核对归属模块，布局未通过运行时自验证时如实显示检查未启用")));
-    m_objectNamespaceInnerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
+    ksword::kernel_navigation::addTab(m_objectNamespaceInnerTabWidget, new ks::ui::LazyPageContent(m_objectNamespaceInnerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelObjectTypeMatrixTab(page);
         }),
         tabIcon(QStringLiteral(":/Icon/process_list.svg")),
-        kernelText("kernel.main.inner_tab.object_type", QStringLiteral("对象类型")));
+        "object.types");
 
     m_objectNamespaceToolLayout = new QHBoxLayout();
     m_objectNamespaceToolLayout->setContentsMargins(0, 0, 0, 0);
@@ -1719,4 +1773,9 @@ void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
         // requestInitialRefresh 自身幂等，重复进出该子页不会重复发起 R0 查询。
         m_driverStartIoTab->requestInitialRefresh();
     }
+}
+
+namespace
+{
+    const bool kKernelNavigationRegistered = ks::ui::RegisterTypedPageNavigationCatalog<KernelDock>(QStringLiteral("kernel"));
 }

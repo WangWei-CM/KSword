@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelDock.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
@@ -2170,9 +2171,8 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumTable->setColumnHidden(static_cast<int>(CallbackEnumColumn::Status), true);
     m_callbackEnumTable->setSortingEnabled(false);
     callbackEnumInstallHeaderColumnMenu(m_callbackEnumTable);
-    callbackViewTabs->addTab(
-        m_callbackEnumTable,
-        kernelText("kernel.callback.enum.view.list", QStringLiteral("回调列表")));
+    ksword::kernel_navigation::addTab(callbackViewTabs, m_callbackEnumTable,
+        "audit.callbacks.list");
 
     m_minifilterCallbackTree = new QTreeWidget(callbackViewTabs);
     m_minifilterCallbackTree->setColumnCount(10);
@@ -2202,9 +2202,8 @@ void KernelDock::initializeCallbackEnumTab()
     m_minifilterCallbackTree->setToolTip(kernelText(
         "kernel.callback.enum.minifilter.tooltip",
         QStringLiteral("按 Filter 展开真实 IRP_MJ_* Pre/Post 回调；双击回调可查看驱动文件详情")));
-    callbackViewTabs->addTab(
-        m_minifilterCallbackTree,
-        kernelText("kernel.callback.enum.view.minifilter_tree", QStringLiteral("Minifilter 回调树")));
+    ksword::kernel_navigation::addTab(callbackViewTabs, m_minifilterCallbackTree,
+        "audit.callbacks.tree");
 
     m_callbackEnumDetailEditor = new ks::ui::StructuredFieldView(splitter);
 

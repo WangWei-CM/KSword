@@ -16,6 +16,9 @@
 
 #include <QWidget>
 #include <QString>
+#include <QPointer>
+#include <array>
+#include "../UI/PageNavigationCatalog.h"
 
 #include <atomic>   // std::atomic_bool：控制异步刷新互斥。
 #include <cstdint>  // std::uintXX_t：固定宽度整数。
@@ -32,6 +35,8 @@ namespace ksword::kernel_dock_internal
         return ks::i18n::contextText(QString::fromLatin1(contextKey), sourceText);
     }
 }
+
+namespace ksword::kernel_navigation { class Registry; }
 
 // Qt 前置声明：减少头文件耦合。
 class QPoint;
@@ -556,6 +561,11 @@ public:
     // - 参数 parent：Qt 父控件。
     explicit KernelDock(QWidget* parent = nullptr);
 
+    static ks::ui::PageNavigationCatalog navigationCatalog(const KernelDock* existing = nullptr);
+    static ks::ui::PageNavigationCatalog selfDriverNavigationCatalog(const KernelDock* existing = nullptr);
+    QWidget* activateSelfDriverNavigationDescriptor(const QString& id);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 析构函数：
     // - 资源由 Qt 父子机制与容器自动释放。
     ~KernelDock() override = default;
@@ -1028,6 +1038,9 @@ private:
 private:
     // ==================== 根级控件 ====================
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
+    ksword::kernel_navigation::Registry* m_navigationRegistry = nullptr;
+    QPointer<QTabWidget> m_selfDriverNavigationTabs;
+    std::array<QPointer<QWidget>, 3> m_selfDriverNavigationPages;
     QTabWidget* m_tabWidget = nullptr;   // m_tabWidget：顶层 Tab 容器。
     QProgressBar* m_tabInitializingProgressBar = nullptr; // m_tabInitializingProgressBar：Tab 初始化顶部不确定进度条。
     QLabel* m_tabInitializingStatusLabel = nullptr;       // m_tabInitializingStatusLabel：Tab 初始化状态提示文字。

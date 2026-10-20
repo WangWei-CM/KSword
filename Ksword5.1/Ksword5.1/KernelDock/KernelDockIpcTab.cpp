@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
@@ -264,12 +265,11 @@ void KernelDockIpcTab::initializeUi()
     m_innerTabWidget->setIconSize(QSize(16, 16));
     rootLayout->addWidget(m_innerTabWidget, 1);
 
-    m_innerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
+    ksword::kernel_navigation::addTab(m_innerTabWidget, new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelNamedPipeTab(page);
         }),
         QIcon(QStringLiteral(":/Icon/process_list.svg")),
-        QStringLiteral("NamedPipe"));
+        "ipc.pipe");
     m_innerTabWidget->setTabToolTip(0, kernelText("kernel.ipc.tab.named_pipe.tooltip", QStringLiteral("只读 NPFS NamedPipe 目录枚举")));
 
     auto* alpcShell = new ks::ui::LazyPageContent(m_innerTabWidget, [this](QWidget*) -> QWidget* {
@@ -278,18 +278,16 @@ void KernelDockIpcTab::initializeUi()
         refreshAlpcQuery();
         return m_alpcPage;
     });
-    m_innerTabWidget->addTab(
-        alpcShell,
+    ksword::kernel_navigation::addTab(m_innerTabWidget, alpcShell,
         QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("ALPC"));
+        "ipc.alpc");
     m_innerTabWidget->setTabToolTip(1, kernelText("kernel.ipc.tab.alpc.tooltip", QStringLiteral("只读 ALPC 端口关系查询")));
 
-    m_innerTabWidget->addTab(
-        new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
+    ksword::kernel_navigation::addTab(m_innerTabWidget, new ks::ui::LazyPageContent(m_innerTabWidget, [](QWidget* page) -> QWidget* {
             return new KernelCommunicationEndpointTab(page);
         }),
         QIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        kernelText("kernel.ipc.tab.communication.title", QStringLiteral("通信对象")));
+        "ipc.communication");
     m_innerTabWidget->setTabToolTip(2, kernelText("kernel.ipc.tab.communication.tooltip", QStringLiteral("只读 ALPC/RPC 通信端点聚合")));
 }
 

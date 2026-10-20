@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelIoctlAuditTab.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
@@ -461,10 +462,14 @@ void KernelIoctlAuditTab::initializeUi()
     auto* registryLayout = new QVBoxLayout(m_registryPage);
     registryLayout->setContentsMargins(2, 2, 2, 2);
     registryLayout->addWidget(m_registryTable);
-    m_innerTabs->addTab(m_driverPage, kernelText("kernel.ioctl_audit.tab.drivers", QStringLiteral("驱动概览")));
-    m_innerTabs->addTab(m_devicePage, kernelText("kernel.ioctl_audit.tab.devices", QStringLiteral("设备对象")));
-    m_innerTabs->addTab(m_dispatchPage, kernelText("kernel.ioctl_audit.tab.dispatch", QStringLiteral("MajorFunction")));
-    m_innerTabs->addTab(m_registryPage, kernelText("kernel.ioctl_audit.tab.registry", QStringLiteral("KswordARK IOCTL 注册表")));
+    ksword::kernel_navigation::addTab(m_innerTabs, m_driverPage,
+        "object.ioctl.drivers");
+    ksword::kernel_navigation::addTab(m_innerTabs, m_devicePage,
+        "object.ioctl.devices");
+    ksword::kernel_navigation::addTab(m_innerTabs, m_dispatchPage,
+        "object.ioctl.dispatch");
+    ksword::kernel_navigation::addTab(m_innerTabs, m_registryPage,
+        "object.ioctl.registry");
     resultLayout->addWidget(m_innerTabs, 1);
 
     connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });

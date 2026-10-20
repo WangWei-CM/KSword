@@ -48,7 +48,7 @@ private:
 
     void initializeUi();
     void retranslateUi();
-    void addPage(unsigned long scope, const QString& title);
+    void addPage(unsigned long scope, const char* navigationId);
     void refreshAsync();
     void applyResult(ksword::ark::PlatformAuditResult result);
     void populatePage(Page& page, const ksword::ark::PlatformAuditResult& result);

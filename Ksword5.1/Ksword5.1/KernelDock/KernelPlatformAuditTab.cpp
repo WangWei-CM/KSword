@@ -1,3 +1,4 @@
+#include "KernelNavigationCatalog.h"
 #include "KernelPlatformAuditTab.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -403,27 +404,15 @@ void KernelPlatformAuditTab::initializeUi()
     ks::ui::StyleJoinedResultTabs(m_innerTabs, queryHeader);
     if (m_mode == Mode::Hal)
     {
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_DISPATCH,
-            kernelText("kernel.platform.hal.dispatch", QStringLiteral("HalDispatchTable")));
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_PRIVATE,
-            kernelText("kernel.platform.hal.private", QStringLiteral("HalPrivateDispatchTable")));
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_ACPI,
-            kernelText("kernel.platform.hal.acpi", QStringLiteral("HalAcpiDispatchTable")));
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_SUBCOMPONENTS,
-            kernelText("kernel.platform.hal.subcomponents", QStringLiteral("HalSubComponents")));
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_DISPATCH, "hal.dispatch");
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_PRIVATE, "hal.private");
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_ACPI, "hal.acpi");
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_HAL_SUBCOMPONENTS, "hal.components");
     }
     else
     {
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_WDF_FUNCTIONS,
-            kernelText("kernel.platform.wdf.functions", QStringLiteral("WDF 函数")));
-        addPage(
-            KSWORD_ARK_PLATFORM_AUDIT_SCOPE_WDF_CALLBACKS,
-            kernelText("kernel.platform.wdf.callbacks", QStringLiteral("WDF 回调")));
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_WDF_FUNCTIONS, "wdf.functions");
+        addPage(KSWORD_ARK_PLATFORM_AUDIT_SCOPE_WDF_CALLBACKS, "wdf.callbacks");
     }
     resultLayout->addWidget(m_innerTabs, 1);
 
@@ -573,7 +562,7 @@ void KernelPlatformAuditTab::retranslateUi()
     }
 }
 
-void KernelPlatformAuditTab::addPage(const unsigned long scope, const QString& title)
+void KernelPlatformAuditTab::addPage(const unsigned long scope, const char* navigationId)
 {
     auto* table = new ks::ui::VisibleTableWidget(m_innerTabs);
     // HAL/WDF 各页的回调与派遣地址需要保留完整性快照。
@@ -615,7 +604,7 @@ void KernelPlatformAuditTab::addPage(const unsigned long scope, const QString& t
     // 顶部常驻风险横幅移除后，事前口径改挂在「当前地址」列表头上；
     // 漏调这一句会让风险文案只在进入编辑对话框之后才出现。
     applyLiveAddressHeaderTooltip(table, scopeIsEditable(scope));
-    m_innerTabs->addTab(table, title);
+    ksword::kernel_navigation::addTab(m_innerTabs, table, navigationId);
     m_pages.push_back(Page{ scope, table });
     applyColumnGroup();
 }
