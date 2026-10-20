@@ -56,9 +56,7 @@ namespace ks::ui
         if (!bytesVisible_) return 0;
         if (byteWidthOverride_ >= 0) return std::clamp(byteWidthOverride_, 40, std::max(40, viewport()->width() - addressWidth() - 40));
         if (textPriority_) return std::clamp(viewport()->width() / 4, 60, 240);
-        int longest = 1;
-        for (const auto& row : rows_) longest = std::max(longest, static_cast<int>(row.bytes.size()));
-        return std::min(longest * characterWidth_ * 3 + kPadding * 2, std::max(80, viewport()->width() / 2));
+        return std::min(maximumRowBytes_ * characterWidth_ * 3 + kPadding * 2, std::max(80, viewport()->width() / 2));
     }
     int MemoryRowCanvas::contentStart() const { return gutterWidth() + addressWidth() + bytesWidth(); }
 
@@ -176,6 +174,13 @@ namespace ks::ui
         const auto previous = selection_;
         const auto pending = pendingNavigationAddress_;
         rows_ = std::move(rows);
+        maximumRowBytes_ = 1;
+        rowsByAddress_.clear();
+        for (int i = 0; i < rows_.size(); ++i)
+        {
+            maximumRowBytes_ = std::max(maximumRowBytes_, static_cast<int>(rows_[i].bytes.size()));
+            rowsByAddress_[rows_[i].address].push_back(i);
+        }
         addressDigits_ = addressBits_ > 32 || std::any_of(rows_.begin(), rows_.end(), [](const auto& row) { return row.address > 0xFFFFFFFFULL; }) ? 16 : 8;
         selectedRow_ = -1;
         updateScrollBars();
@@ -355,7 +360,14 @@ namespace ks::ui
                 p.setPen(QPen(color, i == selectedRow_ ? 2 : 1));
                 const int y = rect.top() + lineHeight_ / 2;
                 int targetY = *row.branchTarget < row.address ? headerHeight_ + 2 : viewport()->height() - 2;
-                for (int t = start; t < rows_.size(); ++t) if (rows_[t].address == *row.branchTarget) { targetY = rowRect(t).top() + lineHeight_ / 2; break; }
+                const auto targetRows = rowsByAddress_.constFind(*row.branchTarget);
+                if (targetRows != rowsByAddress_.cend())
+                {
+                    // Preserve the original first matching row at/after the painted start,
+                    // including repeated addresses and offscreen continuation arrows.
+                    const auto target = std::lower_bound(targetRows->cbegin(), targetRows->cend(), start);
+                    if (target != targetRows->cend()) targetY = rowRect(*target).top() + lineHeight_ / 2;
+                }
                 const int lane = 5 + (i % 3) * 6;
                 p.drawLine(lane, y, 26, y); p.drawLine(lane, y, lane, targetY); p.drawLine(lane, targetY, 25, targetY);
                 p.drawLine(25, targetY, 21, targetY - 3); p.drawLine(25, targetY, 21, targetY + 3);
