@@ -7,6 +7,7 @@
 #include "DriverDock.Internal.h"
 #include "../UI/CodeEditorWidget.h"
 #include "../KernelDock/KernelThreadAuditTab.h"
+#include "../KernelDock/KernelDock.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/DetailLayoutRegistry.h"
@@ -339,6 +340,15 @@ ks::ui::PageNavigationCatalog DriverDock::navigationCatalog(const DriverDock* ex
         }
         result.push_back(std::move(page));
     }
+    const auto* source = existing ? dynamic_cast<KernelDock*>(existing->m_kswordSelfDriverFallbackOwner.data()) : nullptr;
+    const bool attached = existing && source && source->kswordSelfDriverPage() == existing->m_kswordSelfDriverPage;
+    for (auto child : KernelDock::selfDriverNavigationCatalog(source))
+    {
+        child.id = QStringLiteral("self_driver.") + child.id;
+        child.parentId = QStringLiteral("self_driver");
+        if (existing && !attached) { child.visible=false;child.enabled=false;child.current=false; }
+        result.push_back(std::move(child));
+    }
     return result;
 }
 
@@ -351,6 +361,28 @@ QWidget* DriverDock::activateNavigationDescriptor(const QString& id)
         return false;
     };
     if (!allowed()) return nullptr;
+    if (id.startsWith(QStringLiteral("self_driver.")))
+    {
+        const QPointer<DriverDock> alive(this);
+        const QPointer<KernelDock> source(dynamic_cast<KernelDock*>(m_kswordSelfDriverFallbackOwner.data()));
+        const QPointer<QWidget> root(m_kswordSelfDriverPage);
+        const QPointer<QTabWidget> tabs(m_tabWidget);
+        const auto currentOwner = [&]() {
+            return alive && source && root && tabs && m_tabWidget==tabs.data()
+                && m_kswordSelfDriverFallbackOwner.data()==source.data() && m_kswordSelfDriverPage==root.data()
+                && source->kswordSelfDriverPage()==root.data();
+        };
+        if (!currentOwner()) return nullptr;
+        const int rootIndex=tabs->indexOf(root);
+        if (rootIndex<0) return nullptr;
+        tabs->setCurrentIndex(rootIndex);
+        if (!currentOwner() || !allowed() || tabs->currentWidget()!=root.data()) return nullptr;
+        const QPointer<QWidget> target(source->activateSelfDriverNavigationDescriptor(id.mid(12)));
+        if (!currentOwner() || !target || !allowed() || tabs->currentWidget()!=root.data()) return nullptr;
+        const auto fresh=ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this),QStringLiteral("DriverDock"));
+        if (fresh) for (const auto& entry:*fresh) if(entry.page.id==id && entry.page.current)return target.data();
+        return nullptr;
+    }
     const QPointer<DriverDock> guard(this);const QPointer<QWidget> target(navigationPage(id));
     const QPointer<QTabWidget> mainTabs(m_tabWidget),objectTabs(m_objectDetailTabWidget);
     if (!target) return nullptr;
