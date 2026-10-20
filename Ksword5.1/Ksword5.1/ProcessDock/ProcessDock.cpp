@@ -59,6 +59,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFormLayout>
+#include <QFutureWatcher>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -90,6 +91,7 @@
 #include <QPersistentModelIndex>
 #include <QPointer>
 #include <QPushButton>
+#include <QPromise>
 #include <QPixmap>
 #include <QRectF>
 #include <QRunnable>
@@ -822,6 +824,18 @@ namespace
         }
         ScopedProcessActionHandle(const ScopedProcessActionHandle&) = delete;
         ScopedProcessActionHandle& operator=(const ScopedProcessActionHandle&) = delete;
+        ScopedProcessActionHandle(ScopedProcessActionHandle&& other) noexcept
+            : m_handle(std::exchange(other.m_handle, nullptr)) {}
+        ScopedProcessActionHandle& operator=(ScopedProcessActionHandle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (m_handle != nullptr) ::CloseHandle(m_handle);
+                m_handle = std::exchange(other.m_handle, nullptr);
+            }
+            return *this;
+        }
+        HANDLE get() const noexcept { return m_handle; }
         bool valid() const { return m_handle != nullptr; }
     private:
         HANDLE m_handle = nullptr;
@@ -896,6 +910,30 @@ namespace
         }
 
         *processHandleOut = processHandle;
+        return true;
+    }
+    // The accepted Token source remains pinned through queueing and backend completion.
+    // Use the held object for liveness; do not reinterpret a numeric PID after a delay.
+    bool tokenSourceIdentityIsActive(const HANDLE processHandle,
+        const std::uint64_t expectedCreationTime100ns, std::string* detailText)
+    {
+        FILETIME creation{}, exited{}, kernel{}, user{};
+        const BOOL queried = processHandle != nullptr
+            ? ::GetProcessTimes(processHandle, &creation, &exited, &kernel, &user) : FALSE;
+        const DWORD error = queried != FALSE ? ERROR_SUCCESS : ::GetLastError();
+        const std::uint64_t actualCreationTime100ns =
+            (static_cast<std::uint64_t>(creation.dwHighDateTime) << 32U) | creation.dwLowDateTime;
+        if (queried == FALSE || actualCreationTime100ns != expectedCreationTime100ns ||
+            expectedCreationTime100ns == 0U || exited.dwHighDateTime != 0U || exited.dwLowDateTime != 0U)
+        {
+            if (detailText != nullptr)
+            {
+                *detailText = queried == FALSE
+                    ? formatProcessWin32Error("GetProcessTimes", error)
+                    : "process identity is unavailable; action skipped";
+            }
+            return false;
+        }
         return true;
     }
     // enableProcessContextPrivilege 作用：
@@ -15398,6 +15436,12 @@ void ProcessDock::executeApplyTokenPrivilegeEditsOnly()
 
 void ProcessDock::executeCreateProcessRequest()
 {
+    // 已接受的创建是不可撤销事务：重复点击不排第二个请求，隐藏/关闭页面不撤销系统调用。
+    if (m_createProcessInProgress)
+    {
+        return;
+    }
+
     // 创建进程动作日志：整段流程复用同一个 kLogEvent，避免离散调用链。
     kLogEvent createProcessEvent;
     bool buildOk = false;
@@ -15413,36 +15457,123 @@ void ProcessDock::executeCreateProcessRequest()
         return;
     }
 
-    ks::process::CreateProcessResult createResult{};
-    const bool launchOk = ks::process::LaunchProcess(request, &createResult);
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
-        ks::i18n::sourceText(launchOk ? QStringLiteral("成功") : QStringLiteral("失败"))));
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("路径模式: %1")).arg(
-        createResult.usedTokenPath ? QStringLiteral("Token") : QStringLiteral("CreateProcessW")));
-    appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("错误码: %1")).arg(createResult.win32Error));
-    appendCreateResultLine(QString::fromStdString(createResult.detailText));
-    if (createResult.processInfoAvailable)
+    ScopedProcessActionHandle tokenIdentityHold(nullptr);
+    std::uint64_t expectedTokenCreationTime100ns = 0;
+    if (request.tokenModeEnabled)
     {
-        appendCreateResultLine(
-            ks::i18n::sourceText(QStringLiteral(
-                "输出 PI: pid=%1 tid=%2（后端已关闭返回的 hProcess/hThread 句柄快照: 0x%3 / 0x%4）"))
-            .arg(createResult.dwProcessId)
-            .arg(createResult.dwThreadId)
-            .arg(QString::number(createResult.hProcess, 16))
-            .arg(QString::number(createResult.hThread, 16)));
+        bool cachedSourceExited = false;
+        for (const auto& pair : m_cacheByIdentity)
+        {
+            const auto& record = pair.second.record;
+            if (record.pid == request.tokenSourcePid && record.creationTime100ns > expectedTokenCreationTime100ns)
+            {
+                expectedTokenCreationTime100ns = record.creationTime100ns;
+                cachedSourceExited = pair.second.isExitedInLatestRound;
+            }
+        }
+        std::string identityError;
+        const bool identityKnown = !cachedSourceExited &&
+            (expectedTokenCreationTime100ns != 0U || ks::process::QueryProcessCreationTimeByPid(
+                request.tokenSourcePid, &expectedTokenCreationTime100ns, &identityError));
+        HANDLE rawIdentityHandle = nullptr;
+        const bool pinned = identityKnown && acquireProcessActionIdentityHold(
+            request.tokenSourcePid, expectedTokenCreationTime100ns, &rawIdentityHandle, &identityError);
+        tokenIdentityHold = ScopedProcessActionHandle(rawIdentityHandle);
+        if (!pinned || !tokenSourceIdentityIsActive(
+            tokenIdentityHold.get(), expectedTokenCreationTime100ns, &identityError))
+        {
+            if (identityError.empty()) identityError = "process identity is unavailable; action skipped";
+            appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
+                ks::i18n::sourceText(QStringLiteral("失败"))));
+            appendCreateResultLine(QString::fromStdString(identityError));
+            err << createProcessEvent << identityError << eol;
+            return;
+        }
     }
 
-    (launchOk ? info : err) << createProcessEvent
-        << "[ProcessDock] CreateProcess 请求完成, ok=" << (launchOk ? "true" : "false")
-        << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
-        << ", error=" << createResult.win32Error
-        << ", detail=" << createResult.detailText
-        << eol;
-
-    if (launchOk)
+    using LaunchOutcome = std::pair<bool, ks::process::CreateProcessResult>;
+    const auto promise = std::make_shared<QPromise<LaunchOutcome>>();
+    auto* watcher = new QFutureWatcher<LaunchOutcome>(this);
+    // 记录自身禁用状态，不把父容器临时禁用永久写进按钮。
+    const bool launchButtonWasEnabled = m_launchProcessButton != nullptr
+        && m_launchProcessButton->isEnabledTo(m_launchProcessButton->parentWidget());
+    connect(watcher, &QFutureWatcher<LaunchOutcome>::finished, this,
+        [this, watcher, launchButtonWasEnabled]() {
+        LaunchOutcome outcome = watcher->future().takeResult();
+        watcher->deleteLater();
+        m_createProcessInProgress = false;
+        if (m_launchProcessButton != nullptr)
+        {
+            m_launchProcessButton->setEnabled(launchButtonWasEnabled);
+        }
+        const bool launchOk = outcome.first;
+        const ks::process::CreateProcessResult& createResult = outcome.second;
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("调用结果: %1")).arg(
+            ks::i18n::sourceText(launchOk ? QStringLiteral("成功") : QStringLiteral("失败"))));
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("路径模式: %1")).arg(
+            createResult.usedTokenPath ? QStringLiteral("Token") : QStringLiteral("CreateProcessW")));
+        appendCreateResultLine(ks::i18n::sourceText(QStringLiteral("错误码: %1")).arg(createResult.win32Error));
+        appendCreateResultLine(QString::fromStdString(createResult.detailText));
+        if (createResult.processInfoAvailable)
+        {
+            appendCreateResultLine(
+                ks::i18n::sourceText(QStringLiteral(
+                    "输出 PI: pid=%1 tid=%2（后端已关闭返回的 hProcess/hThread 句柄快照: 0x%3 / 0x%4）"))
+                .arg(createResult.dwProcessId)
+                .arg(createResult.dwThreadId)
+                .arg(QString::number(createResult.hProcess, 16))
+                .arg(QString::number(createResult.hThread, 16)));
+        }
+        if (launchOk)
+        {
+            requestAsyncRefresh(true);
+        }
+    });
+    promise->start();
+    watcher->setFuture(promise->future());
+    m_createProcessInProgress = true;
+    if (m_launchProcessButton != nullptr)
     {
-        requestAsyncRefresh(true);
+        m_launchProcessButton->setEnabled(false);
     }
+
+    // watcher 的结果连接属于 Dock；Dock 销毁只丢弃展示，不等待、取消或终止已接受创建。
+    // 工作线程只持有请求/结果/日志事件，后端继续按原顺序关闭返回的进程和线程句柄。
+    QRunnable* launchTask = QRunnable::create([request, promise, createProcessEvent,
+        expectedTokenCreationTime100ns, tokenIdentityHold = std::move(tokenIdentityHold)]() {
+        LaunchOutcome outcome{};
+        outcome.second.usedTokenPath = request.tokenModeEnabled;
+        try
+        {
+            if (request.tokenModeEnabled && !tokenSourceIdentityIsActive(
+                tokenIdentityHold.get(), expectedTokenCreationTime100ns, &outcome.second.detailText))
+            {
+                outcome.second.win32Error = ERROR_PROCESS_ABORTED;
+            }
+            else
+            {
+                outcome.first = ks::process::LaunchProcess(request, &outcome.second);
+            }
+        }
+        catch (...)
+        {
+            // 即使后端抛出异常，也交付一次失败并结束 future，不能让执行按钮永久停在 busy。
+            outcome.first = false;
+            outcome.second.success = false;
+            outcome.second.win32Error = ERROR_UNHANDLED_EXCEPTION;
+        }
+        const auto& createResult = outcome.second;
+        (outcome.first ? info : err) << createProcessEvent
+            << "[ProcessDock] CreateProcess 请求完成, ok=" << (outcome.first ? "true" : "false")
+            << ", tokenMode=" << (request.tokenModeEnabled ? "true" : "false")
+            << ", error=" << createResult.win32Error
+            << ", detail=" << createResult.detailText
+            << eol;
+        promise->addResult(std::move(outcome));
+        promise->finish();
+    });
+    launchTask->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(launchTask);
 }
 
 bool ProcessDock::isTreeModeEnabled() const

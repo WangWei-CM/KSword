@@ -1147,6 +1147,7 @@ private:
     QTabWidget* m_sideTabWidget = nullptr;    // 顶部 tab 栏（North），包含四个进程功能页。
     QWidget* m_processListPage = nullptr;     // “进程列表”页容器。
     QVBoxLayout* m_processPageLayout = nullptr; // 进程页主布局。
+    bool m_createProcessInProgress = false; // GUI-owned accepted launch gate; completion only clears on GUI.
     QWidget* m_createProcessPage = nullptr;   // “创建进程”页容器。
     QVBoxLayout* m_createProcessPageLayout = nullptr; // 创建页主布局。
     QWidget* m_threadPage = nullptr;          // “线程列表”页容器。
