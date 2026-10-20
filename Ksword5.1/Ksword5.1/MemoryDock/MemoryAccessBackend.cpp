@@ -1,6 +1,7 @@
 #include "MemoryAccessBackend.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
+#include "../ksword/log/log.h"
 // 切片长度与门禁顺序都取共用纯函数，和 R0 用的是同一份实现，也是单元测试
 // 覆盖的那一份。
 #include "../../../shared/driver/KswordArkDdmaPlan.h"
@@ -148,6 +149,39 @@ namespace ksword::memory_backend
                 QStringLiteral("0X"), QStringLiteral("0x"));
         }
 
+        std::mutex& scratchReceiptMutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        std::vector<DdmaScratchFailure>& mutableDdmaScratchFailures()
+        {
+            static std::vector<DdmaScratchFailure> failures;
+            return failures;
+        }
+
+        AccessOutcome recordScratchFailure(const DdmaSession& session,
+            const std::uint64_t physicalAddress, AccessOutcome outcome, const bool write)
+        {
+            if (outcome.scratchDirty)
+            {
+                {
+                    std::lock_guard<std::mutex> receiptLock(scratchReceiptMutex());
+                    mutableDdmaScratchFailures().push_back({session, physicalAddress,
+                        outcome.bytesDone, write, outcome.failureText});
+                }
+                // The existing thread-safe archive exposes this receipt even
+                // when the page was closed or its visual result became stale.
+                warn << "DDMA scratch restore failed: disk=" << session.diskIndex
+                     << " device=" << QString::fromStdWString(session.deviceName)
+                     << " lba=" << session.scratchLba << " physical=" << physicalAddress
+                     << " write=" << write << " bytesDone=" << outcome.bytesDone
+                     << " detail=" << outcome.failureText << eol;
+            }
+            return outcome;
+        }
+
         // ddmaReadOnePage：
         // - 读取一个物理页内的一段（调用方保证不跨页）；
         // - 把 R0 的多段状态压成 AccessOutcome 的少数几个布尔。
@@ -178,13 +212,13 @@ namespace ksword::memory_backend
                     ? QStringLiteral("当前驱动不支持 DDMA，请更新 KswordARK 驱动。")
                     : QStringLiteral("DDMA 读取通信失败：%1")
                           .arg(QString::fromStdString(result.io.message));
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
             }
             if (result.readStatus != KSWORD_ARK_DDMA_READ_STATUS_OK ||
                 result.data.size() != static_cast<std::size_t>(lengthBytes))
             {
                 outcome.failureText = describeDdmaReadFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
             }
 
             outcome.ok = true;
@@ -192,7 +226,7 @@ namespace ksword::memory_backend
             outcome.data = QByteArray(
                 reinterpret_cast<const char*>(result.data.data()),
                 static_cast<qsizetype>(result.data.size()));
-            return outcome;
+            return recordScratchFailure(session, physicalAddress, std::move(outcome), false);
         }
 
         // ddmaWriteOnePage：写入一个物理页内的一段（调用方保证不跨页）。
@@ -229,7 +263,7 @@ namespace ksword::memory_backend
                     ? QStringLiteral("当前驱动不支持 DDMA，请更新 KswordARK 驱动。")
                     : QStringLiteral("DDMA 写入通信失败：%1")
                           .arg(QString::fromStdString(result.io.message));
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
             if (result.writeStatus == KSWORD_ARK_DDMA_WRITE_STATUS_FORCE_REQUIRED)
             {
@@ -237,18 +271,18 @@ namespace ksword::memory_backend
                 // 而不是让用户回去改 DDMA 配置。
                 outcome.forceRequired = true;
                 outcome.failureText = describeDdmaWriteFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
             if (result.writeStatus != KSWORD_ARK_DDMA_WRITE_STATUS_OK ||
                 result.bytesWritten != static_cast<std::uint32_t>(chunk.size()))
             {
                 outcome.failureText = describeDdmaWriteFailure(result);
-                return outcome;
+                return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
             }
 
             outcome.ok = true;
             outcome.bytesDone = static_cast<std::uint64_t>(chunk.size());
-            return outcome;
+            return recordScratchFailure(session, physicalAddress, std::move(outcome), true);
         }
 
         // mergeChunkOutcome：把逐页结果里的告警位合并进总结果。
@@ -307,6 +341,12 @@ namespace ksword::memory_backend
         return { mutableCurrentDdmaSession(), mutableDdmaSessionGeneration().load() };
     }
 
+    std::vector<DdmaScratchFailure> captureDdmaScratchFailures()
+    {
+        std::lock_guard<std::mutex> receiptLock(scratchReceiptMutex());
+        return mutableDdmaScratchFailures();
+    }
+
     std::recursive_mutex& ddmaTransactionMutex()
     {
         static std::recursive_mutex mutex;
@@ -318,6 +358,8 @@ namespace ksword::memory_backend
         // Construct the gate first so it outlives queue shutdown and draining.
         auto* const gate = &ddmaTransactionMutex();
         (void)captureDdmaSession(); // Session state must also outlive queue draining.
+        (void)mutableDdmaScratchFailures();
+        (void)scratchReceiptMutex();
         static ksword::evidence::SerialTransactionQueue queue(32);
         return queue.trySubmit([gate, transaction = std::move(transaction)]() {
             std::lock_guard<std::recursive_mutex> transactionLock(*gate);

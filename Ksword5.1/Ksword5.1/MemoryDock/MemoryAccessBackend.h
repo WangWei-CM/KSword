@@ -26,6 +26,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <vector>
 
 namespace ksword::memory_backend
 {
@@ -137,6 +138,19 @@ namespace ksword::memory_backend
         std::uint64_t generation = 0;
     };
     DdmaSessionSnapshot captureDdmaSession();
+
+    // Failure history belongs to the process, independent of any requesting
+    // page. This is an audit receipt, not a new channel-lock/reset policy.
+    struct DdmaScratchFailure
+    {
+        DdmaSession session;
+        std::uint64_t physicalAddress = 0;
+        std::uint64_t bytesDone = 0;
+        bool write = false;
+        QString failureText;
+    };
+    std::vector<DdmaScratchFailure> captureDdmaScratchFailures();
+
 
     // One process-wide gate covers complete multi-call transactions and all
     // synchronous facade callers. Recursive only for facade calls inside a task.
