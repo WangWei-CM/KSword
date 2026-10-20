@@ -22,6 +22,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -35,6 +36,7 @@
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QThreadPool>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVariant>
@@ -44,6 +46,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -52,6 +55,29 @@
 
 namespace
 {
+    // Only the actual thread table Show is observed; no global widget traversal.
+    class ThreadPageShowFilter final : public QObject
+    {
+    public:
+        ThreadPageShowFilter(std::function<void()> onShow, QObject* parent)
+            : QObject(parent), m_onShow(std::move(onShow))
+        {
+        }
+
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::Show)
+            {
+                m_onShow();
+            }
+            return false;
+        }
+
+    private:
+        std::function<void()> m_onShow;
+    };
+
     // 线程页表头：强调线程基础身份、调度状态与时间统计。
     const QStringList ThreadTableHeaders{
         "TID",
@@ -753,11 +779,27 @@ void ProcessDock::initializeThreadPageConnections()
         });
     }
 
-    // 搜索框：仅过滤当前缓存结果，不触发系统调用。
+    m_threadProjectionTimer = new QTimer(this);
+    m_threadProjectionTimer->setSingleShot(true);
+    connect(m_threadProjectionTimer, &QTimer::timeout, this, [this]() {
+        if (m_threadProjectionDirty)
+        {
+            rebuildThreadTable();
+        }
+    });
+    if (m_threadTable != nullptr)
+    {
+        m_threadPageVisibilityFilter = new ThreadPageShowFilter(
+            [this]() { activateThreadPage(); }, this);
+        m_threadTable->installEventFilter(m_threadPageVisibilityFilter);
+    }
+
+    // 合并连续输入；仅投影最近一次缓存，不触发系统调用。
     if (m_threadSearchLineEdit != nullptr)
     {
         connect(m_threadSearchLineEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-            rebuildThreadTable();
+            m_threadProjectionDirty = true;
+            m_threadProjectionTimer->start(120);
         });
     }
 
@@ -765,7 +807,8 @@ void ProcessDock::initializeThreadPageConnections()
     if (m_threadScopeCombo != nullptr)
     {
         connect(m_threadScopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-            rebuildThreadTable();
+            m_threadProjectionDirty = true;
+            m_threadProjectionTimer->start(0);
         });
     }
 
@@ -799,6 +842,40 @@ void ProcessDock::initializeThreadPageConnections()
         connect(threadHeader, &QHeaderView::sectionResized, this, [this](int, int, int) {
             clearThreadColumnPresetSelection();
         });
+    }
+}
+
+void ProcessDock::activateThreadPage()
+{
+    if (m_threadTable == nullptr || !m_threadTable->isVisible())
+    {
+        return;
+    }
+    if (m_threadProjectionDirty)
+    {
+        rebuildThreadTable();
+    }
+    // 首次进入才枚举；热切使用完整缓存，手动刷新和监控请求仍保持原语义。
+    if (!m_threadSnapshotReady)
+    {
+        requestAsyncThreadRefresh(true);
+    }
+}
+
+void ProcessDock::shutdownThreadPage()
+{
+    if (m_threadProjectionTimer != nullptr)
+    {
+        m_threadProjectionTimer->stop();
+    }
+    if (m_threadPageVisibilityFilter != nullptr)
+    {
+        if (m_threadTable != nullptr)
+        {
+            m_threadTable->removeEventFilter(m_threadPageVisibilityFilter);
+        }
+        delete m_threadPageVisibilityFilter;
+        m_threadPageVisibilityFilter = nullptr;
     }
 }
 
@@ -928,6 +1005,7 @@ void ProcessDock::requestAsyncThreadRefresh(const bool forceRefresh)
                 guardThis->m_threadRecordList = std::move(*deferredThreadList);
                 guardThis->m_threadCounterSampleByIdentity = std::move(*nextThreadCounters);
                 guardThis->m_threadDiagnosticText = diagnosticText;
+                guardThis->m_threadSnapshotReady = true;
                 guardThis->rebuildThreadTable();
 
                 {
@@ -1023,9 +1101,29 @@ bool ProcessDock::threadRecordMatchesScope(const ks::process::SystemThreadRecord
 
 void ProcessDock::rebuildThreadTable()
 {
-    if (m_threadTable == nullptr)
+    m_threadProjectionDirty = true;
+    if (m_threadTable == nullptr || !m_threadTable->isVisible())
     {
         return;
+    }
+    QPointer<ProcessDock> guardThis(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
+            this,
+            QStringLiteral("process-thread-projection-apply"),
+            {m_threadTable},
+            [guardThis]() {
+                if (guardThis != nullptr && guardThis->m_threadProjectionDirty)
+                {
+                    guardThis->rebuildThreadTable();
+                }
+            }))
+    {
+        return;
+    }
+    m_threadProjectionDirty = false;
+    if (m_threadProjectionTimer != nullptr)
+    {
+        m_threadProjectionTimer->stop();
     }
 
     QSignalBlocker tableSignalBlocker(m_threadTable);

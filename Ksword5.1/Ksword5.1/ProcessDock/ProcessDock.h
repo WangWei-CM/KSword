@@ -582,6 +582,8 @@ private:
     void initializeCrossViewPage();
     void initializeConnections();
     void initializeThreadPageConnections();
+    void activateThreadPage();
+    void shutdownThreadPage();
     // initializeCrossViewConnections 作用：
     // - 连接 Cross-View 刷新、过滤和表格选择事件；
     // - 所有 R0 查询都通过 ArkDriverClient；
@@ -1382,6 +1384,10 @@ private:
     bool m_threadContextMenuVisible = false;     // 线程菜单弹出期间冻结线程刷新。
 
     // ======== 线程刷新调度 ========
+    QTimer* m_threadProjectionTimer = nullptr; // 合并搜索/范围投影请求。
+    bool m_threadSnapshotReady = false; // 成功收到一轮完整查询（含空结果）。
+    bool m_threadProjectionDirty = false; // 隐藏/合并更新延后投影。
+    QObject* m_threadPageVisibilityFilter = nullptr; // 派生析构前移除Show/Hide观察。
     bool m_threadRefreshInProgress = false;      // 线程页是否存在进行中的后台刷新任务。
     std::uint64_t m_threadRefreshTicket = 0;     // 线程页刷新序号（用于丢弃过期结果）。
     bool m_initialRefreshScheduled = false;      // 首次显示时是否已安排首轮刷新。

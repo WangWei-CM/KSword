@@ -4449,6 +4449,7 @@ ProcessDock::ProcessDock(QWidget* parent)
 
 ProcessDock::~ProcessDock()
 {
+    shutdownThreadPage();
     // 使已运行任务的回传结果失效，并取消尚未开始的图标查询任务。
     // 线程池析构会等待已运行任务结束，任务只使用自己的路径副本，不再访问 Dock 成员。
     ++m_processIconExtractionGeneration;
@@ -6765,7 +6766,7 @@ void ProcessDock::initializeConnections()
         if (currentPage == m_threadPage)
         {
             updateProcessActivityStatusLabel();
-            requestAsyncThreadRefresh(true);
+            activateThreadPage();
             return;
         }
         updateProcessActivityStatusLabel();
