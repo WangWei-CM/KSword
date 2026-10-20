@@ -12,7 +12,6 @@
 #include <QEvent>
 #include <QFontMetrics>
 #include <QHash>
-#include <QSet>
 #include <QPersistentModelIndex>
 #include <QHeaderView>
 #include <QModelIndex>
@@ -145,8 +144,8 @@ namespace
                 if (!m_viewport.isNull()) m_viewport->removeEventFilter(this);
                 m_viewport = view->viewport();
                 if (!m_viewport.isNull()) m_viewport->installEventFilter(this);
-                for (QObject* widget : m_cellWidgets) widget->removeEventFilter(this);
-                m_cellWidgets.clear();
+                for (auto it = m_widgetMetrics.cbegin(); it != m_widgetMetrics.cend(); ++it)
+                    it.key()->removeEventFilter(this);
                 m_widgetMetrics.clear();
                 invalidate();
             }
@@ -202,7 +201,7 @@ namespace
             // Check the small sampled widget set without rereading model cells.
             for (auto it = m_widgetMetrics.begin(); it != m_widgetMetrics.end(); ++it)
             {
-                QWidget* widget = it.key();
+                QWidget* widget = static_cast<QWidget*>(it.key());
                 const QSize minimum = widget->minimumSizeHint().expandedTo(widget->minimumSize());
                 const QSize preferred = widget->sizeHint();
                 const auto metrics = qMakePair(minimum, preferred);
@@ -222,13 +221,11 @@ namespace
 
         void observeCellWidget(QWidget* widget)
         {
-            if (widget == nullptr || m_cellWidgets.contains(widget)) return;
-            m_cellWidgets.insert(widget);
+            if (widget == nullptr || m_widgetMetrics.contains(widget)) return;
             m_widgetMetrics.insert(widget, qMakePair(
                 widget->minimumSizeHint().expandedTo(widget->minimumSize()), widget->sizeHint()));
             widget->installEventFilter(this);
             connect(widget, &QObject::destroyed, this, [this, widget]() {
-                m_cellWidgets.remove(widget);
                 m_widgetMetrics.remove(widget);
                 invalidate();
             });
@@ -243,7 +240,7 @@ namespace
             if (event != nullptr && (event->type() == QEvent::ChildAdded
                 || event->type() == QEvent::ChildRemoved || event->type() == QEvent::StyleChange
                 || event->type() == QEvent::FontChange
-                || (m_cellWidgets.contains(watched) && event->type() == QEvent::LayoutRequest)))
+                || (m_widgetMetrics.contains(watched) && event->type() == QEvent::LayoutRequest)))
             {
                 invalidate();
             }
@@ -259,8 +256,7 @@ namespace
         QFont m_headerFont;
         const void* m_style = nullptr;
         QSize m_iconSize;
-        QSet<QObject*> m_cellWidgets;
-        QHash<QWidget*, QPair<QSize, QSize>> m_widgetMetrics;
+        QHash<QObject*, QPair<QSize, QSize>> m_widgetMetrics;
         int m_dpiX = 0;
         int m_dpiY = 0;
         qreal m_dpr = 0;
