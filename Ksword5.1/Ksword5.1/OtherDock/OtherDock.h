@@ -23,6 +23,7 @@
 // Qt 前置声明：降低头文件编译耦合。
 namespace ks::ui { class AsyncOperation; }
 namespace ks::windowlist { struct Snapshot; class SnapshotModel; }
+namespace ks::desktoplist { struct Snapshot; }
 class QEvent;
 class QCheckBox;
 class CodeEditorWidget;
@@ -32,6 +33,8 @@ class QPushButton;
 class QSplitter;
 class QSpinBox;
 class QTableWidget;
+class QTableView;
+class QAbstractItemModel;
 class QTabWidget;
 class QStatusBar;
 class QTextEdit;
@@ -109,6 +112,7 @@ public:
     {
         QString windowStationName;          // 创建时所在窗口站名称。
         QString desktopName;                // 桌面对象名称。
+        std::shared_ptr<void> handleLease;   // 值worker复制租约，最后持有者关闭保留桌面。
         void* desktopHandle = nullptr;      // HDESK 句柄，头文件内用 void* 避免传播 Windows.h。
         std::uint32_t desiredAccess = 0;    // 创建时请求的 DESKTOP_* 访问掩码。
         bool privateAccess = false;         // 是否使用“其他进程不可访问”的私有 DACL。
@@ -136,6 +140,9 @@ private:
     // - 传入：无；
     // - 传出：无，结果直接写入 m_desktopTable 与 m_desktopStatusLabel。
     void refreshDesktopList();
+    void initializeDesktopTableModel();
+    void publishDesktopSnapshot();
+    void refreshDesktopPresentation();
 
     // switchToSelectedDesktop：
     // - 作用：切换到表格中当前选中的桌面；
@@ -231,7 +238,14 @@ private:
     QPushButton* m_desktopRefreshButton = nullptr;// 刷新桌面列表按钮。
     QPushButton* m_desktopSwitchButton = nullptr; // 切换到选中桌面按钮。
     QPushButton* m_desktopCreateButton = nullptr; // 新建桌面按钮，详细参数在弹窗中设置。
-    QTableWidget* m_desktopTable = nullptr;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
+    QTableView* m_desktopTable = nullptr;
+    QAbstractItemModel* m_desktopSourceModel = nullptr;
+    QAbstractItemModel* m_desktopDisplayModel = nullptr;
+    ks::ui::AsyncOperation* m_desktopOperation = nullptr;
+    ks::ui::AsyncOperation* m_desktopPresentationOperation = nullptr;
+    std::shared_ptr<const ks::desktoplist::Snapshot> m_desktopSnapshot;
+    bool m_desktopLoaded = false;
+    bool m_desktopProjectionDirty = false;       // 桌面列表表格（窗口站/桌面/SessionId/SID/SID详情/备注）。
     QLabel* m_desktopStatusLabel = nullptr;       // 桌面状态提示标签。
     std::vector<CreatedDesktopRecord> m_createdDesktopHandles; // 本进程创建并保留的桌面句柄记录。
 

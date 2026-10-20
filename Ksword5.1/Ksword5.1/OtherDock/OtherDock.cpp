@@ -3551,6 +3551,8 @@ OtherDock::OtherDock(QWidget* parent)
     info << event << "[OtherDock] 构造开始，初始化窗口管理页。" << eol;
 
     m_windowState = makeWindowBackgroundValue<ks::windowlist::Snapshot>();
+    m_desktopOperation = new ks::ui::AsyncOperation(this);
+    m_desktopPresentationOperation = new ks::ui::AsyncOperation(this);
     m_windowRefreshOperation = new ks::ui::AsyncOperation(this);
     m_windowProjectionOperation = new ks::ui::AsyncOperation(this);
     m_windowFilterTimer = new QTimer(this);
@@ -3577,6 +3579,8 @@ OtherDock::~OtherDock()
 {
     if (m_previewScaleOperation) m_previewScaleOperation->close();
     if (m_windowRefreshOperation) m_windowRefreshOperation->close();
+    if (m_desktopOperation) m_desktopOperation->close();
+    if (m_desktopPresentationOperation) m_desktopPresentationOperation->close();
     if (m_windowProjectionOperation) m_windowProjectionOperation->close();
     if (m_autoRefreshTimer != nullptr)
     {
@@ -3586,7 +3590,7 @@ OtherDock::~OtherDock()
     // 关闭本进程主动保留的新建桌面句柄，避免桌面对象在程序退出后残留引用。
     for (const CreatedDesktopRecord& desktopRecord : m_createdDesktopHandles)
     {
-        if (desktopRecord.desktopHandle != nullptr)
+        if (desktopRecord.desktopHandle != nullptr && !desktopRecord.handleLease)
         {
             ::CloseDesktop(reinterpret_cast<HDESK>(desktopRecord.desktopHandle));
         }
@@ -3936,25 +3940,11 @@ void OtherDock::initializeUi()
     ks::ui::NormalizeToolbarRow(m_desktopToolLayout);
     m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
-    m_desktopTable = new ks::ui::VisibleTableWidget(m_desktopPage);
-    // 桌面/窗口站是动态系统现场，明确保留完整快照和对比。
-    ks::ui::SetTableActionBarMode(m_desktopTable, ks::ui::TableActionBarMode::Full);
-    m_desktopTable->setColumnCount(13);
-    m_desktopTable->setHorizontalHeaderLabels({
-        QStringLiteral("窗口站"),
-        QStringLiteral("桌面名称"),
-        QStringLiteral("当前站"),
-        QStringLiteral("当前桌面"),
-        QStringLiteral("交互式"),
-        QStringLiteral("可读"),
-        QStringLiteral("可切换"),
-        QStringLiteral("SessionId"),
-        QStringLiteral("所有者"),
-        QStringLiteral("SID"),
-        QStringLiteral("SID详情"),
-        QStringLiteral("堆(KB)"),
-        QStringLiteral("备注")
-        });
+    m_desktopTable = new ks::ui::TableActionTableView(m_desktopPage);
+    initializeDesktopTableModel();
+    m_desktopTable->installEventFilter(this);
+    m_desktopStatusLabel->setToolTip(m_desktopStatusLabel->text());
+    m_desktopStatusLabel->setText(QStringLiteral("未读取"));
     m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -3996,8 +3986,7 @@ void OtherDock::initializeUi()
     m_autoRefreshTimer = new QTimer(this);
     m_autoRefreshTimer->setInterval(m_autoRefreshIntervalSpin->value());
 
-    // 初始化一次桌面列表，确保打开页签后立即可见。
-    refreshDesktopList();
+    // Desktop enumeration starts on the actual table Show event below.
     // 页头、内容Tab及状态栏共享同一外壳，四角只放在整页根并保留原4px留白。
     ks::ui::StyleWorkspaceContentFrame(this, 4);
 }
@@ -4232,10 +4221,10 @@ void OtherDock::initializeConnections()
     connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
         showCreateDesktopDialog();
     });
-    connect(m_desktopTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
+    connect(m_desktopTable, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
         switchToSelectedDesktop();
     });
-    connect(m_desktopTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+    connect(m_desktopTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
         showDesktopContextMenu(pos);
     });
 }
@@ -4678,11 +4667,19 @@ std::vector<OtherDock::WindowInfo> OtherDock::selectedWindowSnapshots() const
 
 bool OtherDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_desktopTable && event->type() == QEvent::LanguageChange && m_desktopSnapshot)
+        refreshDesktopPresentation();
     if (watched == m_windowTree && event->type() == QEvent::LanguageChange)
     {
         m_windowProjectionDirty = true;
         QTimer::singleShot(0, this, [this] { rebuildWindowTreeFromSnapshot(); });
     }
+    if (watched == m_desktopTable && event->type() == QEvent::Show)
+    {
+        if (!m_desktopLoaded) refreshDesktopList();
+        else if (m_desktopProjectionDirty) refreshDesktopPresentation();
+    }
+
     if (watched == m_windowTree && event->type() == QEvent::Show && m_windowProjectionDirty)
         QTimer::singleShot(0, this, [this] { if (m_windowProjectionDirty) rebuildWindowTreeFromSnapshot(); });
 
