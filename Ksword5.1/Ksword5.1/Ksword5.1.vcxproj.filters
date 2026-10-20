@@ -46,6 +46,9 @@
     <Filter Include="Header Files\MemoryWorkbench\Shared">
       <UniqueIdentifier>{a8a0d876-0ad9-417d-bfbe-2bff029a73d1}</UniqueIdentifier>
     </Filter>
+    <ClCompile Include="PrivilegeDock\PrivilegeLegacyReadService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\TableCompleteExport.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -79,6 +82,12 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="PrivilegeDock\PrivilegeLegacyValueOperations.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PrivilegeDock\PrivilegeLegacyReadService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\MonitorEventFilterProjection.h">
       <Filter>Header Files</Filter>
     </ClInclude>
