@@ -118,7 +118,11 @@ namespace ks::monitor
                 ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
             m_timer.setSingleShot(true); m_timer.setInterval(16);
             connect(&m_timer, &QTimer::timeout, this, [this]() { launch(); });
-            m_operation->setStateChangedCallback([this]() { notify(); });
+            m_operation->setStateChangedCallback([this]() {
+                if (!m_closed && !m_operation->isBusy() && !m_operation->isInFlight()
+                    && m_filter && !m_filter->spec.matchesAll() && (m_allDirty || !m_pending.isEmpty())) schedule();
+                notify();
+            });
             table->installEventFilter(this);
             connect(table->model(), &QAbstractItemModel::rowsAboutToBeRemoved, this,
                 [this](const QModelIndex& parent, int first, int last) {
@@ -134,8 +138,8 @@ namespace ks::monitor
                 });
             connect(table->model(), &QAbstractItemModel::rowsRemoved, this, [this]() { notify(); });
             connect(table->model(), &QAbstractItemModel::modelReset, this, [this]() {
-                m_operation->cancel(); ++m_revision; m_ids.clear(); m_indexes.clear(); m_records.clear(); m_versions.clear();
-                m_pending.clear(); m_excluded.clear(); m_allDirty = false; notify();
+                ++m_revision; m_timer.stop(); m_ids.clear(); m_indexes.clear(); m_records.clear(); m_versions.clear();
+                m_pending.clear(); m_excluded.clear(); m_allDirty = false; m_operation->cancel(); notify();
             });
             connect(table->model(), &QAbstractItemModel::dataChanged, this,
                 [this](const QModelIndex& first, const QModelIndex& last, const QList<int>& roles) {
@@ -150,7 +154,7 @@ namespace ks::monitor
         }
 
         ~EventFilterProjection() override { close(); }
-        void close() { m_operation->close(); m_timer.stop(); }
+        void close() { m_closed = true; m_timer.stop(); m_operation->close(); }
 
         void setFilter(EventFilterSpec spec)
         {
@@ -269,7 +273,7 @@ namespace ks::monitor
         QTimer m_timer;
         std::shared_ptr<const CompiledEventFilter> m_filter;
         quint64 m_revision = 0, m_nextId = 0;
-        bool m_allDirty = false;
+        bool m_allDirty = false, m_closed = false;
         QHash<QPersistentModelIndex, quint64> m_ids;
         std::unordered_map<quint64, QPersistentModelIndex> m_indexes;
         std::unordered_map<quint64, std::shared_ptr<const EventFilterRow>> m_records;
