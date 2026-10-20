@@ -7,6 +7,7 @@
 #include "../UI/UI_All.h"
 #include "DriverDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableFreezeSupport.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include <QTimeZone>
@@ -480,17 +481,17 @@ void DriverDock::initializeUnloadedPiddbTab()
         m_unloadedPiddbFieldCombo,
         &QComboBox::currentIndexChanged,
         this,
-        [this](int) { rebuildUnloadedPiddbTable(); });
+        [this](int) { queueDriverTableFilter(TableFilterTarget::Unloaded); });
     connect(
         m_unloadedPiddbFilterEdit,
         &QLineEdit::textChanged,
         this,
-        [this](const QString&) { rebuildUnloadedPiddbTable(); });
+        [this](const QString&) { queueDriverTableFilter(TableFilterTarget::Unloaded); });
     connect(
         m_unloadedPiddbRegexCheck,
         &QCheckBox::toggled,
         this,
-        [this](bool) { rebuildUnloadedPiddbTable(); });
+        [this](bool) { queueDriverTableFilter(TableFilterTarget::Unloaded); });
     connect(
         m_unloadedPiddbTable,
         &QTableWidget::customContextMenuRequested,
@@ -622,7 +623,7 @@ void DriverDock::applyUnloadedDriverQueryResult(
 void DriverDock::rebuildUnloadedPiddbTable()
 {
     // 输入：当前行缓存、字段选择、关键词和正则开关。
-    // 处理：本地筛选并写入截图要求的六列；UserRole 保存源缓存索引。
+    // 处理：仅在数据发布时写入六列并缓存搜索文本；UserRole 保存源缓存索引。
     // 返回：无。
     if (m_unloadedPiddbTable == nullptr)
     {
@@ -632,77 +633,20 @@ void DriverDock::rebuildUnloadedPiddbTable()
     m_unloadedPiddbTable->setSortingEnabled(false);
     m_unloadedPiddbTable->setRowCount(0);
 
-    const QString pattern = m_unloadedPiddbFilterEdit != nullptr
-        ? m_unloadedPiddbFilterEdit->text().trimmed()
-        : QString();
-    const int filterField = m_unloadedPiddbFieldCombo != nullptr
-        ? m_unloadedPiddbFieldCombo->currentData().toInt()
-        : kFilterAllFields;
-    const bool regularExpressionEnabled =
-        m_unloadedPiddbRegexCheck != nullptr &&
-        m_unloadedPiddbRegexCheck->isChecked();
-    QRegularExpression expression;
-    if (regularExpressionEnabled && !pattern.isEmpty())
+    auto filterRows = std::make_shared<TableFilterRows>();
+    filterRows->reserve(m_unloadedDriverCache.size());
+    for (std::size_t cacheIndex = 0; cacheIndex < m_unloadedDriverCache.size(); ++cacheIndex)
     {
-        expression = QRegularExpression(
-            pattern,
-            QRegularExpression::CaseInsensitiveOption);
-        if (!expression.isValid())
-        {
-            if (m_unloadedPiddbCountLabel != nullptr)
-            {
-                m_unloadedPiddbCountLabel->setText(
-                    driverText(
-                        "driver.unloaded.count",
-                        QStringLiteral("数量：%1"))
-                        .arg(0));
-            }
-            if (m_unloadedPiddbStatusLabel != nullptr)
-            {
-                m_unloadedPiddbStatusLabel->setText(
-                    driverText(
-                        "driver.unloaded.status.regex_invalid",
-                        QStringLiteral("状态：正则表达式无效：%1"))
-                        .arg(expression.errorString()));
-                m_unloadedPiddbStatusLabel->setStyleSheet(
-                    QStringLiteral("color:%1; font-weight:700;")
-                        .arg(KswordTheme::WarningColor().name(QColor::HexRgb)));
-            }
-            return;
-        }
-    }
-
-    for (std::size_t cacheIndex = 0U;
-         cacheIndex < m_unloadedDriverCache.size();
-         ++cacheIndex)
-    {
-        const ksword::ark::UnloadedDriverEntry& row =
-            m_unloadedDriverCache[cacheIndex];
+        const ksword::ark::UnloadedDriverEntry& row = m_unloadedDriverCache[cacheIndex];
         const auto cells = displayCells(row);
-        QString haystack;
-        if (filterField >= 0 &&
-            filterField < columnIndex(UnloadedColumn::Count))
+        QStringList fields;
+        for (const QString& cell : cells)
         {
-            haystack = cells[static_cast<std::size_t>(filterField)];
+            fields.push_back(cell);
         }
-        else
-        {
-            QStringList parts;
-            for (const QString& cell : cells)
-            {
-                parts << cell;
-            }
-            haystack = parts.join(QLatin1Char('\n'));
-        }
-
-        const bool matches = pattern.isEmpty() ||
-            (regularExpressionEnabled
-                ? expression.match(haystack).hasMatch()
-                : haystack.contains(pattern, Qt::CaseInsensitive));
-        if (!matches)
-        {
-            continue;
-        }
+        // 最后一项为原来“所有字段”的带换行规范文本，保留正则跨字段语义。
+        fields.push_back(fields.join(QLatin1Char('\n')));
+        filterRows->push_back(std::move(fields));
 
         const int outputRow = m_unloadedPiddbTable->rowCount();
         m_unloadedPiddbTable->insertRow(outputRow);
@@ -767,18 +711,9 @@ void DriverDock::rebuildUnloadedPiddbTable()
             unloadItem);
     }
 
+    m_unloadedFilterRows = std::move(filterRows);
     m_unloadedPiddbTable->setSortingEnabled(true);
-    if (m_unloadedPiddbCountLabel != nullptr)
-    {
-        m_unloadedPiddbCountLabel->setText(
-            driverText(
-                "driver.unloaded.count",
-                QStringLiteral("数量：%1"))
-                .arg(m_unloadedPiddbTable->rowCount()));
-    }
-    updateQueryStatusLabel(
-        m_unloadedPiddbStatusLabel,
-        m_lastUnloadedDriverResult);
+    queueDriverTableFilter(TableFilterTarget::Unloaded, false);
 }
 
 void DriverDock::showUnloadedPiddbContextMenu(
@@ -993,6 +928,10 @@ void DriverDock::copyVisibleUnloadedPiddbRows()
     lines << headers.join(QLatin1Char('\t'));
     for (int row = 0; row < m_unloadedPiddbTable->rowCount(); ++row)
     {
+        if (ks::ui::IsTableRowExcludedByFilter(m_unloadedPiddbTable, row))
+        {
+            continue;
+        }
         QStringList cells;
         for (int column = 0;
              column < m_unloadedPiddbTable->columnCount();
@@ -1005,4 +944,9 @@ void DriverDock::copyVisibleUnloadedPiddbRows()
     }
     QGuiApplication::clipboard()->setText(
         lines.join(QLatin1Char('\n')));
+}
+
+void DriverDock::refreshUnloadedFilterStatus()
+{
+    updateQueryStatusLabel(m_unloadedPiddbStatusLabel, m_lastUnloadedDriverResult);
 }

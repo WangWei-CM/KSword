@@ -18,6 +18,8 @@
 #include "../UI/PageNavigationCatalog.h"
 
 #include <QPointer>
+#include <QPersistentModelIndex>
+#include <QStringList>
 #include <QWidget>
 
 #include <array>    // std::array：五个对象投影各自记录已消费的快照与语言代次。
@@ -385,6 +387,7 @@ private:
     // - 处理逻辑：只做本地过滤，不重新访问驱动；
     // - 返回：无。
     void rebuildUnloadedPiddbTable();
+    void refreshUnloadedFilterStatus();
 
     // selectedPiDdbEntryIdentity：
     // - 作用：把截图页当前选中的 PiDDB 统一行转换为删除协议所需的精确身份；
@@ -547,8 +550,16 @@ private:
         const LoadedModuleEvidenceRecord& evidence);
     static QString localizedModuleEvidenceText(const QString& sourceText);
 
+    // 输入仅排队计算缓存文本的匹配掩码；发布新数据才生成表项。
+    enum class TableFilterTarget { Services, Modules, Unloaded };
+    using TableFilterRows = std::vector<QStringList>;
+    void queueDriverTableFilter(TableFilterTarget target, bool debounce = true);
+    void applyDriverTableFilterResult(TableFilterTarget target, std::uint64_t ticket,
+        std::shared_ptr<const std::vector<std::uint8_t>> matches, const QString& error);
+    void updateDriverOverviewFilteredCounts();
+
     // rebuildDriverServiceTableByFilter：
-    // - 作用：按过滤关键词重建驱动服务表格。
+    // - 作用：发布服务缓存表项并排队更新过滤投影。
     void rebuildDriverServiceTableByFilter();
 
     // rebuildLoadedModuleTable：
@@ -831,6 +842,19 @@ private:
     std::uint64_t m_unloadedDriverQueryTicket = 0;    // 来源切换/查询序号。
 
     // ========================= 数据缓存 =========================
+    // 不可变展示文本快照只在数据/语言发布时替换，后台搜索不访问 QWidget。
+    std::shared_ptr<const TableFilterRows> m_serviceFilterRows;
+    std::shared_ptr<const TableFilterRows> m_moduleFilterRows;
+    std::shared_ptr<const TableFilterRows> m_unloadedFilterRows;
+    std::shared_ptr<std::atomic_uint64_t> m_serviceFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    std::shared_ptr<std::atomic_uint64_t> m_moduleFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    std::shared_ptr<std::atomic_uint64_t> m_unloadedFilterTicket = std::make_shared<std::atomic_uint64_t>(0);
+    int m_visibleServiceCount = 0;
+    int m_visibleModuleCount = 0;
+    bool m_serviceEnumerationFailed = false;
+    bool m_moduleEnumerationFailed = false;
+    QPersistentModelIndex m_moduleFilterRestoreIndex;
+    bool m_selectFirstFilteredModule = false;
     std::vector<DriverServiceRecord> m_driverServiceCache;      // 驱动服务缓存。
     std::vector<LoadedKernelModuleRecord> m_loadedModuleCache;  // 已加载模块缓存。
     std::vector<LoadedModuleEvidenceRecord> m_loadedModuleEvidenceCache; // 模块证据缓存。

@@ -1,6 +1,11 @@
 #include "../UI/AsyncOperation.h"
 #include "DriverDock.Internal.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
+#include "../UI/TableFreezeSupport.h"
+#include <QItemSelectionModel>
+#include <QPersistentModelIndex>
+#include <QSet>
 
 namespace ksword::driver_dock_internal
 {
@@ -549,6 +554,9 @@ DriverDock::~DriverDock()
     if (m_serviceRegistrationOperation) { m_serviceRegistrationOperation->close(); }
     if (m_piDdbPreflightOperation) m_piDdbPreflightOperation->close();
     if (m_piDdbCommitOperation) m_piDdbCommitOperation->close();
+    ++*m_serviceFilterTicket;
+    ++*m_moduleFilterTicket;
+    ++*m_unloadedFilterTicket;
     releaseDebugOutputCapture();
 
     // 自身驱动页的业务对象仍由 KernelDock 持有；独立销毁 DriverDock 时将页面接回，
@@ -607,4 +615,295 @@ void DriverDock::attachKswordSelfDriverPage(QWidget* page, QWidget* fallbackOwne
         driverText(
             "driver.tab.self_driver.tooltip",
             QStringLiteral("KswordARK 动态偏移与驱动状态")));
+}
+
+namespace
+{
+    struct DriverFilterMatchResult
+    {
+        std::vector<std::uint8_t> matches;
+        QString error;
+        bool canceled = false;
+    };
+
+    // 只读不可变文本快照；-2 保留服务/模块原来的逐字段包含，-1 是卸载表“所有字段”。
+    DriverFilterMatchResult matchDriverFilterRows(const std::vector<QStringList>& rows,
+        const QString& pattern, const int field, const bool regex,
+        const std::atomic_uint64_t& currentTicket, const std::uint64_t ticket)
+    {
+        DriverFilterMatchResult result;
+        result.matches.resize(rows.size(), 0);
+        QRegularExpression expression;
+        if (regex && !pattern.isEmpty())
+        {
+            expression = QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption);
+            if (!expression.isValid())
+            {
+                result.error = expression.errorString();
+                return result;
+            }
+        }
+        for (std::size_t index = 0; index < rows.size(); ++index)
+        {
+            if (currentTicket.load(std::memory_order_relaxed) != ticket)
+            {
+                result.canceled = true;
+                return result;
+            }
+            const QStringList& fields = rows[index];
+            if (pattern.isEmpty())
+            {
+                result.matches[index] = 1;
+            }
+            else if (field == -2)
+            {
+                result.matches[index] = static_cast<std::uint8_t>(std::any_of(fields.cbegin(), fields.cend(),
+                    [&pattern](const QString& value) { return value.contains(pattern, Qt::CaseInsensitive); }));
+            }
+            else if (!fields.isEmpty())
+            {
+                const QString& haystack = field >= 0 && field < fields.size() - 1
+                    ? fields[field] : fields.back();
+                result.matches[index] = static_cast<std::uint8_t>(regex
+                    ? expression.match(haystack).hasMatch()
+                    : haystack.contains(pattern, Qt::CaseInsensitive));
+            }
+        }
+        return result;
+    }
+}
+
+void DriverDock::queueDriverTableFilter(const TableFilterTarget target, const bool debounce)
+{
+    QTableWidget* table = nullptr;
+    std::shared_ptr<const TableFilterRows> rows;
+    std::shared_ptr<std::atomic_uint64_t> ticketState;
+    QString pattern;
+    int field = -2;
+    bool regex = false;
+    switch (target)
+    {
+    case TableFilterTarget::Services:
+        table = m_serviceTable;
+        rows = m_serviceFilterRows;
+        ticketState = m_serviceFilterTicket;
+        pattern = m_serviceFilterEdit != nullptr ? m_serviceFilterEdit->text().trimmed() : QString();
+        break;
+    case TableFilterTarget::Modules:
+        table = m_moduleTable;
+        rows = m_moduleFilterRows;
+        ticketState = m_moduleFilterTicket;
+        pattern = m_moduleFilterEdit != nullptr ? m_moduleFilterEdit->text().trimmed() : QString();
+        break;
+    case TableFilterTarget::Unloaded:
+        table = m_unloadedPiddbTable;
+        rows = m_unloadedFilterRows;
+        ticketState = m_unloadedFilterTicket;
+        pattern = m_unloadedPiddbFilterEdit != nullptr ? m_unloadedPiddbFilterEdit->text().trimmed() : QString();
+        field = m_unloadedPiddbFieldCombo != nullptr ? m_unloadedPiddbFieldCombo->currentData().toInt() : -1;
+        regex = m_unloadedPiddbRegexCheck != nullptr && m_unloadedPiddbRegexCheck->isChecked();
+        break;
+    }
+    const std::uint64_t ticket = ++*ticketState;
+    // 新缓存的行与过滤结果同一轮发布前先关闭可操作窗口。
+    // 输入中的旧投影保持可读；只有实际换数据时进入此待发布状态。
+    if (!debounce && table != nullptr)
+    {
+        if (target == TableFilterTarget::Services)
+        {
+            m_visibleServiceCount = 0;
+        }
+        else if (target == TableFilterTarget::Modules)
+        {
+            m_visibleModuleCount = 0;
+        }
+        else if (m_unloadedPiddbCountLabel != nullptr)
+        {
+            m_unloadedPiddbCountLabel->setText(driverText("driver.unloaded.count", QStringLiteral("数量：%1")).arg(0));
+        }
+        if (target == TableFilterTarget::Modules)
+        {
+            m_moduleFilterRestoreIndex = QPersistentModelIndex(table->model()->index(table->currentRow(), 0));
+        }
+        QSet<QPersistentModelIndex> pendingRows;
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            pendingRows.insert(QPersistentModelIndex(table->model()->index(row, 0)));
+        }
+        ks::ui::ApplyTableRowFilter(table, pendingRows);
+        table->clearSelection();
+        if (table->selectionModel() != nullptr)
+        {
+            table->selectionModel()->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+        }
+    }
+    if (!rows)
+    {
+        rows = std::make_shared<const TableFilterRows>();
+    }
+    const QPointer<DriverDock> guard(this);
+    // 同一输入串只启动最后一次工作；旧任务逐行核对票号，关闭页面也会使其失效。
+    QTimer::singleShot(debounce ? 80 : 0, this, [guard, target, rows, ticketState, ticket, pattern, field, regex]()
+    {
+        if (guard.isNull() || ticketState->load(std::memory_order_relaxed) != ticket)
+        {
+            return;
+        }
+        auto* task = QRunnable::create([guard, target, rows, ticketState, ticket, pattern, field, regex]()
+        {
+            DriverFilterMatchResult result = matchDriverFilterRows(*rows, pattern, field, regex, *ticketState, ticket);
+            if (result.canceled || ticketState->load(std::memory_order_relaxed) != ticket)
+            {
+                return;
+            }
+            auto matches = std::make_shared<const std::vector<std::uint8_t>>(std::move(result.matches));
+            QMetaObject::invokeMethod(QCoreApplication::instance(),
+                [guard, target, ticket, matches, error = std::move(result.error)]()
+            {
+                if (!guard.isNull())
+                {
+                    guard->applyDriverTableFilterResult(target, ticket, matches, error);
+                }
+            }, Qt::QueuedConnection);
+        });
+        task->setAutoDelete(true);
+        QThreadPool::globalInstance()->start(task);
+    });
+}
+
+void DriverDock::applyDriverTableFilterResult(const TableFilterTarget target, const std::uint64_t ticket,
+    std::shared_ptr<const std::vector<std::uint8_t>> matches, const QString& error)
+{
+    QTableWidget* table = nullptr;
+    std::shared_ptr<std::atomic_uint64_t> ticketState;
+    int sourceRole = Qt::UserRole + 42;
+    switch (target)
+    {
+    case TableFilterTarget::Services:
+        table = m_serviceTable;
+        ticketState = m_serviceFilterTicket;
+        break;
+    case TableFilterTarget::Modules:
+        table = m_moduleTable;
+        ticketState = m_moduleFilterTicket;
+        sourceRole = ModuleRecordIndexRole;
+        break;
+    case TableFilterTarget::Unloaded:
+        table = m_unloadedPiddbTable;
+        ticketState = m_unloadedFilterTicket;
+        sourceRole = Qt::UserRole + 57;
+        break;
+    }
+    if (table == nullptr || ticketState->load(std::memory_order_relaxed) != ticket)
+    {
+        return;
+    }
+    const QPointer<DriverDock> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("driver-table-filter-") + QString::number(static_cast<int>(target)),
+        { table }, [guard, target, ticket, matches, error]()
+        {
+            if (!guard.isNull())
+            {
+                guard->applyDriverTableFilterResult(target, ticket, matches, error);
+            }
+        }))
+    {
+        return;
+    }
+    QSet<QPersistentModelIndex> excludedRows;
+    int acceptedCount = 0;
+    int firstAcceptedRow = -1;
+    for (int row = 0; row < table->rowCount(); ++row)
+    {
+        const QTableWidgetItem* item = table->item(row, 0);
+        const auto sourceIndex = item != nullptr
+            ? static_cast<std::size_t>(item->data(sourceRole).toULongLong()) : matches->size();
+        const bool accepted = sourceIndex < matches->size() && (*matches)[sourceIndex] != 0;
+        if (!accepted)
+        {
+            excludedRows.insert(QPersistentModelIndex(table->model()->index(row, 0)));
+        }
+        else
+        {
+            ++acceptedCount;
+            if (firstAcceptedRow < 0)
+            {
+                firstAcceptedRow = row;
+            }
+        }
+    }
+    const int currentRow = table->currentRow();
+    const bool clearCurrent = currentRow >= 0 &&
+        excludedRows.contains(QPersistentModelIndex(table->model()->index(currentRow, 0)));
+    // 共享入口保留冻结身份，筛选/复制/快照/搜索使用同一业务可见性。
+    ks::ui::ApplyTableRowFilter(table, excludedRows);
+    if (table->selectionModel() != nullptr)
+    {
+        const QModelIndexList selectedRows = table->selectionModel()->selectedRows(0);
+        for (const QModelIndex& index : selectedRows)
+        {
+            if (excludedRows.contains(QPersistentModelIndex(index)))
+            {
+                table->selectionModel()->select(index, QItemSelectionModel::Deselect | QItemSelectionModel::Rows);
+            }
+        }
+    }
+    if (clearCurrent)
+    {
+        table->selectionModel()->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+    }
+    if (target == TableFilterTarget::Modules)
+    {
+        if (m_moduleFilterRestoreIndex.isValid() && !excludedRows.contains(m_moduleFilterRestoreIndex))
+        {
+            table->setCurrentCell(m_moduleFilterRestoreIndex.row(), 0);
+        }
+        m_moduleFilterRestoreIndex = QPersistentModelIndex();
+        if (m_selectFirstFilteredModule && table->currentRow() < 0 && firstAcceptedRow >= 0)
+        {
+            table->setCurrentCell(firstAcceptedRow, 0);
+        }
+        m_selectFirstFilteredModule = false;
+        m_visibleModuleCount = acceptedCount;
+        updateDriverOverviewFilteredCounts();
+    }
+    else if (target == TableFilterTarget::Services)
+    {
+        m_visibleServiceCount = acceptedCount;
+        updateDriverOverviewFilteredCounts();
+    }
+    else
+    {
+        if (m_unloadedPiddbCountLabel != nullptr)
+        {
+            m_unloadedPiddbCountLabel->setText(driverText("driver.unloaded.count", QStringLiteral("数量：%1")).arg(acceptedCount));
+        }
+        if (m_unloadedDriverQuerying)
+        {
+            return;
+        }
+        if (!error.isEmpty() && m_unloadedPiddbStatusLabel != nullptr)
+        {
+            m_unloadedPiddbStatusLabel->setText(driverText("driver.unloaded.status.regex_invalid",
+                QStringLiteral("状态：正则表达式无效：%1")).arg(error));
+            m_unloadedPiddbStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:700;")
+                .arg(KswordTheme::WarningColor().name(QColor::HexRgb)));
+        }
+        else
+        {
+            // updateQueryStatusLabel 为当前来源的原生状态所有者，实现在 Unloaded.cpp。
+            refreshUnloadedFilterStatus();
+        }
+    }
+}
+
+void DriverDock::updateDriverOverviewFilteredCounts()
+{
+    if (m_overviewStatusLabel != nullptr && !m_serviceEnumerationFailed && !m_moduleEnumerationFailed)
+    {
+        m_overviewStatusLabel->setText(driverText("driver.overview.count.filtered",
+            QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
+            .arg(m_driverServiceCache.size()).arg(m_visibleServiceCount)
+            .arg(m_loadedModuleCache.size()).arg(m_visibleModuleCount));
+    }
 }

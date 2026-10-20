@@ -1805,6 +1805,7 @@ void DriverDock::refreshDriverServiceRecords()
 
                     if (!collectSucceeded)
                     {
+                        guardThis->m_serviceEnumerationFailed = true;
                         guardThis->m_driverServiceCache.clear();
                         guardThis->rebuildDriverServiceTableByFilter();
                         guardThis->appendOperateLogLine(
@@ -1828,19 +1829,21 @@ void DriverDock::refreshDriverServiceRecords()
                         return;
                     }
 
+                    guardThis->m_serviceEnumerationFailed = false;
                     guardThis->m_driverServiceCache = std::move(collectedServiceRecords);
                     guardThis->rebuildDriverServiceTableByFilter();
 
-                    if (guardThis->m_overviewStatusLabel != nullptr)
+                    if (guardThis->m_overviewStatusLabel != nullptr &&
+                        !guardThis->m_serviceEnumerationFailed && !guardThis->m_moduleEnumerationFailed)
                     {
                         guardThis->m_overviewStatusLabel->setText(
                             driverText(
                                 "driver.overview.count.filtered",
                                 QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
                             .arg(guardThis->m_driverServiceCache.size())
-                            .arg(guardThis->m_serviceTable != nullptr ? guardThis->m_serviceTable->rowCount() : 0)
+                            .arg(guardThis->m_visibleServiceCount)
                             .arg(guardThis->m_loadedModuleCache.size())
-                            .arg(guardThis->m_moduleTable != nullptr ? guardThis->m_moduleTable->rowCount() : 0));
+                            .arg(guardThis->m_visibleModuleCount));
                     }
 
                     info << refreshEvent
@@ -1946,6 +1949,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                     if (!collectSucceeded)
                     {
                         guardThis->cancelLoadedModuleEvidenceQuery();
+                        guardThis->m_moduleEnumerationFailed = true;
                         guardThis->m_loadedModuleCache.clear();
                         guardThis->m_loadedModuleEvidenceCache.clear();
                         if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
@@ -1977,6 +1981,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
 
                     guardThis->cancelLoadedModuleEvidenceQuery();
 
+                    guardThis->m_moduleEnumerationFailed = false;
                     guardThis->m_loadedModuleCache = std::move(collectedModuleRecords);
                     guardThis->m_loadedModuleEvidenceCache.clear();
                     guardThis->m_loadedModuleEvidenceCache.reserve(guardThis->m_loadedModuleCache.size());
@@ -1987,16 +1992,17 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                     }
                     guardThis->rebuildLoadedModuleTable();
 
-                    if (guardThis->m_overviewStatusLabel != nullptr)
+                    if (guardThis->m_overviewStatusLabel != nullptr &&
+                        !guardThis->m_serviceEnumerationFailed && !guardThis->m_moduleEnumerationFailed)
                     {
                         guardThis->m_overviewStatusLabel->setText(
                             driverText(
                                 "driver.overview.count.filtered",
                                 QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
                             .arg(guardThis->m_driverServiceCache.size())
-                            .arg(guardThis->m_serviceTable != nullptr ? guardThis->m_serviceTable->rowCount() : 0)
+                            .arg(guardThis->m_visibleServiceCount)
                             .arg(guardThis->m_loadedModuleCache.size())
-                            .arg(guardThis->m_moduleTable != nullptr ? guardThis->m_moduleTable->rowCount() : 0));
+                            .arg(guardThis->m_visibleModuleCount));
                     }
                     if (guardThis->m_moduleEvidenceStatusLabel != nullptr)
                     {
@@ -4180,68 +4186,48 @@ void DriverDock::rebuildDriverServiceTableByFilter()
     {
         return;
     }
-
-    const QString filterText = m_serviceFilterEdit != nullptr
-        ? m_serviceFilterEdit->text().trimmed()
-        : QString();
-
+    const QSignalBlocker blocker(m_serviceTable);
+    const bool sortingEnabled = m_serviceTable->isSortingEnabled();
+    m_serviceTable->setSortingEnabled(false);
     m_serviceTable->setRowCount(0);
-    int visibleCount = 0;
-    for (const DriverServiceRecord& serviceRecord : m_driverServiceCache)
+    auto filterRows = std::make_shared<TableFilterRows>();
+    filterRows->reserve(m_driverServiceCache.size());
+    for (std::size_t sourceIndex = 0; sourceIndex < m_driverServiceCache.size(); ++sourceIndex)
     {
-        const bool matchFilter =
-            filterText.isEmpty() ||
-            serviceRecord.serviceName.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.displayName.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.binaryPath.contains(filterText, Qt::CaseInsensitive) ||
-            serviceRecord.description.contains(filterText, Qt::CaseInsensitive);
-        if (!matchFilter)
-        {
-            continue;
-        }
-
+        const DriverServiceRecord& serviceRecord = m_driverServiceCache[sourceIndex];
+        filterRows->push_back({ serviceRecord.serviceName, serviceRecord.displayName,
+            serviceRecord.binaryPath, serviceRecord.description });
         const int rowIndex = m_serviceTable->rowCount();
         m_serviceTable->insertRow(rowIndex);
-
         QTableWidgetItem* serviceNameItem = createReadOnlyItem(serviceRecord.serviceName);
         serviceNameItem->setData(Qt::UserRole, serviceRecord.serviceName);
+        serviceNameItem->setData(Qt::UserRole + 42,
+            QVariant::fromValue<qulonglong>(static_cast<qulonglong>(sourceIndex)));
         m_serviceTable->setItem(rowIndex, 0, serviceNameItem);
         m_serviceTable->setItem(rowIndex, 1, createReadOnlyItem(serviceRecord.displayName));
         m_serviceTable->setItem(rowIndex, 2, createReadOnlyItem(serviceStateToText(serviceRecord.currentState)));
         m_serviceTable->setItem(rowIndex, 3, createReadOnlyItem(startTypeToText(serviceRecord.startType)));
         m_serviceTable->setItem(rowIndex, 4, createReadOnlyItem(errorControlToText(serviceRecord.errorControl)));
-
         QTableWidgetItem* pathItem = createReadOnlyItem(serviceRecord.binaryPath);
         pathItem->setToolTip(serviceRecord.binaryPath);
         m_serviceTable->setItem(rowIndex, 5, pathItem);
-
         QTableWidgetItem* descriptionItem = createReadOnlyItem(serviceRecord.description);
         descriptionItem->setToolTip(serviceRecord.description);
         m_serviceTable->setItem(rowIndex, 6, descriptionItem);
-
         if (serviceRecord.currentState == SERVICE_RUNNING)
         {
             for (int columnIndex = 0; columnIndex < m_serviceTable->columnCount(); ++columnIndex)
             {
-                QTableWidgetItem* cellItem = m_serviceTable->item(rowIndex, columnIndex);
-                if (cellItem != nullptr)
+                if (QTableWidgetItem* item = m_serviceTable->item(rowIndex, columnIndex))
                 {
-                    cellItem->setBackground(KswordTheme::NewRowBackgroundColor());
+                    item->setBackground(KswordTheme::NewRowBackgroundColor());
                 }
             }
         }
-        ++visibleCount;
     }
-
-    if (m_overviewStatusLabel != nullptr)
-    {
-        m_overviewStatusLabel->setText(
-            driverText(
-                "driver.service.count.filtered",
-                QStringLiteral("状态：驱动服务 %1 条（显示 %2 条）"))
-            .arg(m_driverServiceCache.size())
-            .arg(visibleCount));
-    }
+    m_serviceFilterRows = std::move(filterRows);
+    m_serviceTable->setSortingEnabled(sortingEnabled);
+    queueDriverTableFilter(TableFilterTarget::Services, false);
 }
 
 void DriverDock::rebuildLoadedModuleTable()
@@ -4250,82 +4236,67 @@ void DriverDock::rebuildLoadedModuleTable()
     {
         return;
     }
-
-    // filterText 用途：仅筛选内核模块页，不再与驱动服务页共用搜索条件。
-    const QString filterText = m_moduleFilterEdit != nullptr
-        ? m_moduleFilterEdit->text().trimmed()
-        : QString();
+    QString selectedName;
+    std::uint64_t selectedBase = 0;
+    if (QTableWidgetItem* selectedItem = m_moduleTable->item(m_moduleTable->currentRow(), ModuleNameColumn))
+    {
+        selectedName = selectedItem->text();
+        if (QTableWidgetItem* baseItem = m_moduleTable->item(selectedItem->row(), ModuleBaseColumn))
+        {
+            selectedBase = baseItem->data(Qt::UserRole).toULongLong();
+        }
+    }
+    const QSignalBlocker blocker(m_moduleTable);
+    const bool sortingEnabled = m_moduleTable->isSortingEnabled();
+    m_moduleTable->setSortingEnabled(false);
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_moduleEvidenceDetailEditor);
     m_moduleTable->setRowCount(0);
+    auto filterRows = std::make_shared<TableFilterRows>();
+    filterRows->reserve(m_loadedModuleCache.size());
+    QTableWidgetItem* restoreItem = nullptr;
     for (std::size_t sourceIndex = 0U; sourceIndex < m_loadedModuleCache.size(); ++sourceIndex)
     {
         const LoadedKernelModuleRecord& moduleRecord = m_loadedModuleCache[sourceIndex];
-        // evidencePointer 用途：签名后台扫描完成后让搜索立即覆盖签名状态文本。
-        const LoadedModuleEvidenceRecord* evidencePointer =
-            sourceIndex < m_loadedModuleEvidenceCache.size()
-            ? &m_loadedModuleEvidenceCache[sourceIndex]
-            : nullptr;
+        const LoadedModuleEvidenceRecord* evidencePointer = sourceIndex < m_loadedModuleEvidenceCache.size()
+            ? &m_loadedModuleEvidenceCache[sourceIndex] : nullptr;
         const QString signatureStatusText = evidencePointer != nullptr
             ? moduleSignatureStatusText(*evidencePointer)
             : driverText("driver.evidence.pending", QStringLiteral("待扫描"));
-        const bool matchesFilter =
-            filterText.isEmpty() ||
-            moduleRecord.moduleName.contains(filterText, Qt::CaseInsensitive) ||
-            moduleRecord.imagePath.contains(filterText, Qt::CaseInsensitive) ||
-            signatureStatusText.contains(filterText, Qt::CaseInsensitive);
-        if (!matchesFilter)
-        {
-            continue;
-        }
-
+        filterRows->push_back({ moduleRecord.moduleName, moduleRecord.imagePath, signatureStatusText });
         const int rowIndex = m_moduleTable->rowCount();
         m_moduleTable->insertRow(rowIndex);
         QTableWidgetItem* moduleNameItem = createReadOnlyItem(moduleRecord.moduleName);
-        moduleNameItem->setData(
-            ModuleRecordIndexRole,
+        moduleNameItem->setData(ModuleRecordIndexRole,
             QVariant::fromValue<qulonglong>(static_cast<qulonglong>(sourceIndex)));
         m_moduleTable->setItem(rowIndex, ModuleNameColumn, moduleNameItem);
         QTableWidgetItem* baseItem = createReadOnlyItem(formatAddress(moduleRecord.baseAddress));
-        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(
-            static_cast<qulonglong>(moduleRecord.baseAddress)));
+        baseItem->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(moduleRecord.baseAddress)));
         m_moduleTable->setItem(rowIndex, ModuleBaseColumn, baseItem);
-        m_moduleTable->setItem(
-            rowIndex,
-            ModuleSignatureColumn,
-            createReadOnlyItem(signatureStatusText));
-        for (int evidenceColumn = ModuleEvidenceFirstColumn;
-            evidenceColumn <= ModuleEvidenceLastColumn;
-            ++evidenceColumn)
+        m_moduleTable->setItem(rowIndex, ModuleSignatureColumn, createReadOnlyItem(signatureStatusText));
+        for (int evidenceColumn = ModuleEvidenceFirstColumn; evidenceColumn <= ModuleEvidenceLastColumn; ++evidenceColumn)
         {
-            m_moduleTable->setItem(
-                rowIndex,
-                evidenceColumn,
+            m_moduleTable->setItem(rowIndex, evidenceColumn,
                 createReadOnlyItem(driverText("driver.evidence.pending", QStringLiteral("待扫描"))));
         }
         QTableWidgetItem* pathItem = createReadOnlyItem(moduleRecord.imagePath);
         pathItem->setToolTip(moduleRecord.imagePath);
         m_moduleTable->setItem(rowIndex, ModuleImagePathColumn, pathItem);
+        if (moduleRecord.moduleName == selectedName && moduleRecord.baseAddress == selectedBase)
+        {
+            restoreItem = moduleNameItem;
+        }
     }
-    if (m_moduleTable->rowCount() > 0)
-    {
-        m_moduleTable->setCurrentCell(0, 0);
-    }
+    m_moduleFilterRows = std::move(filterRows);
+    // 回填证据时禁止动态排序，避免回填列改变后其余单元格写入另一行。
     rebuildLoadedModuleEvidenceViews();
-    if (m_overviewStatusLabel != nullptr)
+    m_moduleTable->setSortingEnabled(sortingEnabled);
+    if (restoreItem != nullptr)
     {
-        // visibleServiceCount 用途：状态栏同步展示服务与模块两个表格的筛选数量。
-        const int visibleServiceCount = m_serviceTable != nullptr
-            ? m_serviceTable->rowCount()
-            : 0;
-        m_overviewStatusLabel->setText(
-            driverText(
-                "driver.overview.count.filtered",
-                QStringLiteral("状态：驱动服务 %1 条（显示 %2 条），模块 %3 条（显示 %4 条）"))
-            .arg(m_driverServiceCache.size())
-            .arg(visibleServiceCount)
-            .arg(m_loadedModuleCache.size())
-            .arg(m_moduleTable->rowCount()));
+        m_moduleTable->setCurrentItem(restoreItem);
     }
+    m_selectFirstFilteredModule = restoreItem == nullptr && selectedName.isEmpty();
+    queueDriverTableFilter(TableFilterTarget::Modules, false);
+    showSelectedModuleEvidenceDetail();
 }
 
 void DriverDock::syncOperateFormBySelectedService()

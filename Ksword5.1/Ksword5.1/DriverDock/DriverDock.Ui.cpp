@@ -1450,11 +1450,11 @@ void DriverDock::initializeConnections()
         });
     connect(m_serviceFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
-            rebuildDriverServiceTableByFilter();
+            queueDriverTableFilter(TableFilterTarget::Services);
         });
     connect(m_moduleFilterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
-            rebuildLoadedModuleTable();
+            queueDriverTableFilter(TableFilterTarget::Modules);
         });
 
     // 内核模块页：刷新、过滤和统一详情布局连接。
