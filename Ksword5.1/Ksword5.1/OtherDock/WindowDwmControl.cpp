@@ -541,9 +541,8 @@ namespace ks::window::dwmctl
             , m_target(target)
         {
             buildUi();
-            readAllAttributes(false);
-            refreshDiagnostics();
-
+            // Hidden companion pages keep their stable shell without reading
+            // target attributes/timing before their first actual visit.
             m_thumbnailTimer = new QTimer(this);
             m_thumbnailTimer->setInterval(kThumbnailRefreshMs);
             connect(m_thumbnailTimer, &QTimer::timeout, this, [this]() {
@@ -563,6 +562,12 @@ namespace ks::window::dwmctl
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
+            if (!m_initialReadDone)
+            {
+                m_initialReadDone = true;
+                readAllAttributes(false);
+                refreshDiagnostics();
+            }
             if (m_thumbnailEnableCheck != nullptr && m_thumbnailEnableCheck->isChecked())
             {
                 ensureThumbnail();
@@ -2062,6 +2067,7 @@ namespace ks::window::dwmctl
         }
 
     private:
+        bool m_initialReadDone = false;
         HWND m_target = nullptr;                       // m_target：被控制的目标窗口。
         std::vector<AttributeRow> m_rows;              // m_rows：全部可控属性行。
 
