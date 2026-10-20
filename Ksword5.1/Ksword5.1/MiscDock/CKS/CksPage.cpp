@@ -3,6 +3,7 @@
 
 #include "../../Internationalization/LanguageManager.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/AsyncOperation.h"
 #include "../../UI/ParameterWorkspace.h"
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/ToolbarMetrics.h"
@@ -15,6 +16,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -57,27 +59,25 @@ namespace
             : T(QStringLiteral("misc.cks.state.off"), QStringLiteral("关闭"));
     }
 
-    // FileLabel：选中后显示路径与本地 SHA-256，不读取或保存证书私钥。
-    QString FileLabel(const QString& path)
+    // Cached file evidence only; language changes never reopen or hash the selected file.
+    QString FileLabel(const QString& path, const QByteArray& digest = {}, const bool pending = false)
     {
         if (path.isEmpty())
         {
             return T(QStringLiteral("misc.cks.file.none"), QStringLiteral("尚未选择文件"));
         }
-        QFile file(path); // file：仅在用户选择文件后只读计算哈希。
-        if (!file.open(QIODevice::ReadOnly))
+        if (pending)
         {
             return path + QLatin1Char('\n')
-                + T(QStringLiteral("misc.cks.file.unreadable"), QStringLiteral("文件已无法读取"));
+                + T(QStringLiteral("misc.cks.file.hashing"), QStringLiteral("正在计算 SHA-256…"));
         }
-        QCryptographicHash hash(QCryptographicHash::Sha256);
-        if (!hash.addData(&file))
+        if (digest.isEmpty())
         {
             return path + QLatin1Char('\n')
                 + T(QStringLiteral("misc.cks.file.unreadable"), QStringLiteral("文件已无法读取"));
         }
         return T(QStringLiteral("misc.cks.file.hash"), QStringLiteral("%1\nSHA-256：%2"))
-            .arg(path, QString::fromLatin1(hash.result().toHex()));
+            .arg(path, QString::fromLatin1(digest.toHex()));
     }
 
     // DetailText：后台只传原始回执；UI 线程再按当前语言显示。
@@ -134,12 +134,31 @@ namespace ks::misc
     CksPage::CksPage(QWidget* parent)
         : QWidget(parent)
     {
+        for (auto& operation : m_fileHashOperations)
+        {
+            operation = new ks::ui::AsyncOperation(this);
+        }
         initializeUi();
+        for (int slot = 0; slot < static_cast<int>(m_fileHashOperations.size()); ++slot)
+        {
+            m_fileHashOperations[slot]->setStateChangedCallback([this, slot]() {
+                if (!m_fileHashOperations[slot]->isInFlight() && m_fileHashPending[slot])
+                {
+                    m_fileHashPending[slot] = false;
+                    m_fileDigests[slot].clear();
+                    showSelectedFiles();
+                }
+            });
+        }
         updateButtons();
     }
 
     CksPage::~CksPage()
     {
+        for (auto* operation : m_fileHashOperations)
+        {
+            operation->close();
+        }
         // CksBackend 的系统调用没有 stop_token 入口；先设置发布门禁，再等待有限的
         // 查询/操作返回，保证页面和 QObject 树销毁后没有 detached 线程继续回投。
         m_cancelRequested->store(true, std::memory_order_release);
@@ -161,9 +180,7 @@ namespace ks::misc
         if (event != nullptr && event->type() == QEvent::LanguageChange)
         {
             showSnapshot();
-            m_policyFile->setText(FileLabel(m_policyPath));
-            m_helperFile->setText(FileLabel(m_helperPath));
-            m_driverFile->setText(FileLabel(m_driverPath));
+            showSelectedFiles();
             if (m_researchPlan != nullptr)
             {
                 m_researchPlan->setRawText(CksResearchVerificationTemplate());
@@ -636,19 +653,70 @@ namespace ks::misc
         if (policy)
         {
             m_policyPath = file.absoluteFilePath();
-            m_policyFile->setText(FileLabel(m_policyPath));
+            queueFileHash(0, m_policyPath);
         }
         else if (helper)
         {
             m_helperPath = file.absoluteFilePath();
-            m_helperFile->setText(FileLabel(m_helperPath));
+            queueFileHash(1, m_helperPath);
         }
         else
         {
             m_driverPath = file.absoluteFilePath();
-            m_driverFile->setText(FileLabel(m_driverPath));
+            queueFileHash(2, m_driverPath);
         }
         updateButtons();
+    }
+
+    void CksPage::showSelectedFiles()
+    {
+        m_policyFile->setText(FileLabel(m_policyPath, m_fileDigests[0], m_fileHashPending[0]));
+        m_helperFile->setText(FileLabel(m_helperPath, m_fileDigests[1], m_fileHashPending[1]));
+        m_driverFile->setText(FileLabel(m_driverPath, m_fileDigests[2], m_fileHashPending[2]));
+    }
+
+    void CksPage::queueFileHash(const int slot, const QString& path)
+    {
+        m_fileDigests[slot].clear();
+        m_fileHashPending[slot] = true;
+        showSelectedFiles();
+        m_fileHashOperations[slot]->submit<QString, QByteArray>(path,
+            [](const QString& selectedPath, const ks::ui::AsyncOperationToken& token) {
+                if (token.isCanceled()) return QByteArray();
+                QFile file(selectedPath);
+                if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+                const QFileInfo before(file);
+                const qint64 expectedSize = before.size();
+                const QDateTime expectedModified = before.lastModified();
+                QCryptographicHash hash(QCryptographicHash::Sha256);
+                qint64 bytesRead = 0;
+                while (!file.atEnd())
+                {
+                    if (token.isCanceled()) return QByteArray();
+                    const QByteArray chunk = file.read(1024 * 1024);
+                    if (chunk.isEmpty()) return QByteArray();
+                    bytesRead += chunk.size();
+                    hash.addData(chunk);
+                }
+                const QFileInfo after(file);
+                if (file.error() != QFileDevice::NoError || bytesRead != expectedSize
+                    || after.size() != expectedSize || after.lastModified() != expectedModified)
+                {
+                    return QByteArray();
+                }
+                return hash.result();
+            },
+            [this, slot](const QByteArray& digest, std::uint64_t) {
+                m_fileDigests[slot] = digest;
+                m_fileHashPending[slot] = false;
+                showSelectedFiles();
+                return true;
+            },
+            [this, slot](std::exception_ptr) {
+                m_fileDigests[slot].clear();
+                m_fileHashPending[slot] = false;
+                showSelectedFiles();
+            });
     }
 
     void CksPage::runOperation(const std::function<bool(QString*)>& operation)

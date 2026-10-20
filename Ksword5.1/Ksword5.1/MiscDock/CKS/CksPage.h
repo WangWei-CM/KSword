@@ -6,6 +6,8 @@
 #include "CksBackend.h"
 
 #include <QWidget>
+#include <QByteArray>
+#include <array>
 
 #include <functional>
 #include <atomic>
@@ -18,6 +20,8 @@ class QLabel;
 class QPushButton;
 class QShowEvent;
 class QTableWidget;
+
+namespace ks::ui { class AsyncOperation; }
 
 namespace ks::misc
 {
@@ -45,6 +49,8 @@ namespace ks::misc
         void updateButtons();
         // chooseFile：只在用户手势下打开文件选择器并显示 SHA-256。
         void chooseFile(const QString& kind);
+        void showSelectedFiles();
+        void queueFileHash(int slot, const QString& path);
         // runOperation：后台执行一次具体操作，然后重新读取系统状态。
         void runOperation(const std::function<bool(QString*)>& operation);
         // startWorker：统一拥有后台线程；页面析构时请求取消并等待线程离开，禁止 detached 回投。
@@ -57,6 +63,9 @@ namespace ks::misc
         cks::Snapshot m_snapshot; // m_snapshot：最近一次系统状态回读。
         bool m_hasSnapshot = false; // m_hasSnapshot：状态卡是否有真实数据。
         bool m_busy = false; // m_busy：防止刷新与操作并发重入。
+        std::array<ks::ui::AsyncOperation*, 3> m_fileHashOperations{};
+        std::array<QByteArray, 3> m_fileDigests{};
+        std::array<bool, 3> m_fileHashPending{};
         QString m_policyPath; // m_policyPath：用户选择的已签名 .cip 路径。
         QString m_helperPath; // m_helperPath：用户选择的 SSDE 启用程序路径。
         QString m_driverPath; // m_driverPath：用户选择的已签名 ssde.sys 路径。

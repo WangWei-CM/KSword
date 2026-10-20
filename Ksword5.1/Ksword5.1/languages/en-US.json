@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "misc.cks.file.hashing": "Calculating SHA-256…",
     "monitor.wmi.archive_failed": "● Archive failed: %1",
     "monitor.wmi.archive_stats": "WMI: archived %1, skipped in display %2, pending display %3",
     "misc.async.receipt_missing": "The background task returned no valid receipt. Refresh the system status.",
