@@ -19,6 +19,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QProgressBar>
+#include <QPointer>
+#include "../UI/AsyncCleanupRegistry.h"
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSplitter>
@@ -153,6 +155,15 @@ QString sourceName(const QString& source)
 }
 }
 
+struct HyperVMemoryPage::ExportJob {
+    std::atomic_bool done{false};
+    // 0: cancellable; 1: atomic commit claimed; 2: cancellation accepted.
+    std::atomic_int phase{0};
+    QString path, error;
+    bool saved = false;
+    std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> shutdownLease;
+};
+
 HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
 {
     // 页面自带内部滚动壳：固定高度的归因图加五页签约四百五十像素，嵌在系统内存审计页里
@@ -207,7 +218,10 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
      m_tabs->addTab(m_evidence, {});
     resultLayout->addWidget(m_tabs, 1);
     connect(m_collect, &QPushButton::clicked, this, [this] { startCollection(); });
-    connect(m_cancel, &QPushButton::clicked, this, [this] { if (m_job) { m_job->cancel.store(true); } });
+    connect(m_cancel, &QPushButton::clicked, this, [this] {
+        if (m_job) { m_job->cancel.store(true); }
+        if (m_exportJob) { int active = 0; m_exportJob->phase.compare_exchange_strong(active, 2); }
+    });
     connect(m_export, &QPushButton::clicked, this, [this] { exportEvidence(); });
     connect(m_filter, &QLineEdit::textChanged, this, [this] { rebuildPartitions(); });
     connect(m_partitions, &QTableWidget::itemSelectionChanged, this, [this] {
@@ -225,7 +239,11 @@ HyperVMemoryPage::HyperVMemoryPage(QWidget* parent) : QWidget(parent)
     connect(timer, &QTimer::timeout, this, [this] { poll(); }); timer->start();
     retranslate(); rebuild();
 }
-HyperVMemoryPage::~HyperVMemoryPage() { if (m_job) { m_job->cancel.store(true); } }
+HyperVMemoryPage::~HyperVMemoryPage()
+{
+    if (m_job) { m_job->cancel.store(true); }
+    if (m_exportJob) { int active = 0; m_exportJob->phase.compare_exchange_strong(active, 2); }
+}
 void HyperVMemoryPage::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
@@ -249,7 +267,7 @@ void HyperVMemoryPage::setPfnContext(const std::shared_ptr<ksword::pfn::Scan>& s
 }
 void HyperVMemoryPage::startCollection()
 {
-    if (m_job) { return; }
+    if (m_job || m_exportJob) { return; }
     m_jobContext = m_latestContext;
     try {
         m_job = std::make_shared<Job>();
@@ -260,6 +278,19 @@ void HyperVMemoryPage::startCollection()
 }
 void HyperVMemoryPage::poll()
 {
+    if (m_exportJob) {
+        if (!m_exportJob->done.load()) {
+            m_cancel->setEnabled(m_exportJob->phase.load() == 0);
+            return;
+        }
+        const auto job = std::move(m_exportJob);
+        m_collect->setEnabled(true); m_cancel->setEnabled(false); m_export->setEnabled(bool(m_snapshot));
+        m_cancel->setText(L("Cancel collection"));
+        m_progress->setRange(0, 1); m_progress->setValue(job->saved ? 1 : 0);
+        m_summary->setText(job->saved ? L("Hyper-V evidence saved to %1").arg(job->path)
+            : job->phase.load() == 2 ? L("Evidence export cancelled")
+            : L("Failed to export Hyper-V evidence: %1").arg(job->error));
+    }
     if (!m_job) { return; }
     if (m_job->done.load()) {
         std::shared_ptr<Snapshot> result;
@@ -276,7 +307,7 @@ void HyperVMemoryPage::poll()
 }
 void HyperVMemoryPage::retranslate()
 {
-    m_collect->setText(L("Collect Hyper-V evidence")); m_cancel->setText(L("Cancel collection")); m_export->setText(L("Export evidence"));
+    m_collect->setText(L("Collect Hyper-V evidence")); m_cancel->setText(m_exportJob ? L("Cancel") : L("Cancel collection")); m_export->setText(L("Export evidence"));
     m_filter->setPlaceholderText(L("Filter partition, owner, GUID, or runtime ID"));
     m_collect->setToolTip(L("Read VID, Hyper-V WMI, HCS, VBS and host process evidence. Repeat to compare allocations over time."));
     m_tabs->setTabText(0, L("Partitions and utility VMs")); m_tabs->setTabText(1, L("Host memory evidence"));
@@ -367,8 +398,8 @@ void HyperVMemoryPage::showPartition(int index)
 }
 void HyperVMemoryPage::rebuild()
 {
-    m_cancel->setEnabled(bool(m_job)); m_collect->setEnabled(!m_job); m_export->setEnabled(bool(m_snapshot) && !m_job);
-    if (!m_job) { m_progress->setRange(0, 1); m_progress->setValue(m_snapshot ? 1 : 0); }
+    m_cancel->setEnabled(bool(m_job) || (m_exportJob && m_exportJob->phase.load() == 0)); m_collect->setEnabled(!m_job && !m_exportJob); m_export->setEnabled(bool(m_snapshot) && !m_job && !m_exportJob);
+    if (!m_job && !m_exportJob) { m_progress->setRange(0, 1); m_progress->setValue(m_snapshot ? 1 : 0); }
     if (!m_snapshot) {
         m_summary->setText(L("Find VM and utility-VM allocations that a process list cannot fully explain. Collect a sample to link partition counters to WSL, containers and registered VMs."));
         m_chart->setSegments({}, L("Hyper-V partition allocations")); return;
@@ -444,13 +475,51 @@ void HyperVMemoryPage::rebuild()
 }
 void HyperVMemoryPage::exportEvidence()
 {
-    if (!m_snapshot) { return; }
+    if (!m_snapshot || m_job || m_exportJob) { return; }
+    // 保存对话框可处理嵌套事件；先冻结证据和身份，返回后再核验页面生命期。
+    const std::shared_ptr<const Snapshot> snapshot = m_snapshot, previous = m_previous;
+    const auto context = m_resultContext;
+    const auto interpretation = m_evidence->plainText();
+    const QPointer<HyperVMemoryPage> page(this);
     const auto path = QFileDialog::getSaveFileName(this, L("Export Hyper-V memory evidence"), QStringLiteral("hyperv-memory-evidence.json"), L("JSON files (*.json)"));
-    if (path.isEmpty()) { return; }
-    auto object = toJson(*m_snapshot, m_resultContext);
-    object.insert(QStringLiteral("interpretation"), m_evidence->plainText());
-    if (m_previous) { object.insert(QStringLiteral("previous_sample"), toJson(*m_previous)); }
-    QSaveFile file(path); const auto data = QJsonDocument(object).toJson(QJsonDocument::Indented);
-    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) { m_summary->setText(L("Failed to export Hyper-V evidence: %1").arg(file.errorString())); }
-    else { m_summary->setText(L("Hyper-V evidence saved to %1").arg(path)); }
+    if (!page || path.isEmpty() || m_job || m_exportJob) { return; }
+    const auto job = std::make_shared<ExportJob>();
+    job->path = path;
+    const auto workerFailure = L("Evidence export worker failed");
+    job->shutdownLease = ks::ui::AsyncCleanupRegistry::global().acquire([weak = std::weak_ptr<ExportJob>(job)] {
+        if (const auto activeJob = weak.lock()) { int active = 0; activeJob->phase.compare_exchange_strong(active, 2); }
+    });
+    if (!job->shutdownLease) { m_summary->setText(L("Failed to export Hyper-V evidence: %1").arg(workerFailure)); return; }
+    m_exportJob = job;
+    m_collect->setEnabled(false); m_export->setEnabled(false); m_cancel->setEnabled(true);
+    m_cancel->setText(L("Cancel")); m_summary->setText(L("Export evidence")); m_progress->setRange(0, 0);
+    try { std::thread([job, snapshot, previous, context, interpretation, workerFailure] {
+        try {
+            if (job->phase.load() != 2) {
+                auto object = toJson(*snapshot, context);
+                object.insert(QStringLiteral("interpretation"), interpretation);
+                if (previous) { object.insert(QStringLiteral("previous_sample"), toJson(*previous)); }
+                const auto data = QJsonDocument(object).toJson(QJsonDocument::Indented);
+                QSaveFile file(job->path);
+                if (job->phase.load() != 2) {
+                    if (!file.open(QIODevice::WriteOnly)) { job->error = file.errorString(); }
+                    else {
+                        qsizetype offset = 0;
+                        while (offset < data.size() && job->phase.load() != 2) {
+                            const auto count = std::min<qsizetype>(65536, data.size() - offset);
+                            if (file.write(data.constData() + offset, count) != count) { job->error = file.errorString(); break; }
+                            offset += count;
+                        }
+                        int active = 0;
+                        if (offset == data.size() && job->phase.compare_exchange_strong(active, 1)) {
+                            job->saved = file.commit();
+                            if (!job->saved) { job->error = file.errorString(); }
+                        }
+                    }
+                }
+            }
+        } catch (...) { job->error = workerFailure; }
+        job->done.store(true);
+        job->shutdownLease.reset();
+    }).detach(); } catch (...) { job->error = workerFailure; job->done.store(true); job->shutdownLease.reset(); }
 }

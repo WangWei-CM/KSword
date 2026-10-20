@@ -43,5 +43,7 @@ private:
     ks::ui::StructuredFieldView* m_evidence = nullptr;
     ksword::hyperv::Context m_latestContext, m_jobContext, m_resultContext;
     std::shared_ptr<ksword::hyperv::Job> m_job;
+    struct ExportJob;
+    std::shared_ptr<ExportJob> m_exportJob;
     std::shared_ptr<ksword::hyperv::Snapshot> m_snapshot, m_previous;
 };
