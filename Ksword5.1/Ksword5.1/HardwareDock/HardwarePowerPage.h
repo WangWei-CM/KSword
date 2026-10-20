@@ -7,6 +7,8 @@
 
 namespace ks::ui { class AsyncOperation; }
 struct HardwarePowerSchemeSnapshot;
+struct HardwarePowerTransactionRequest;
+struct HardwarePowerTransactionResult;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -31,11 +33,9 @@ private:
     void initializeUi();
     void initializeConnections();
     void refreshAll();
-    void refreshPowerSchemes();
     void applyPowerSchemesSnapshot(const HardwarePowerSchemeSnapshot& snapshot);
     void applySelectedPowerScheme();
     void restoreInitialState();
-    void refreshCpuPower();
     void applySnapshotToUi(const ksword::ark::CpuPowerResult& result);
     void updateControlAvailability();
     void setStatus(const QString& text, bool isError = false);
@@ -44,8 +44,12 @@ private:
     KSWORD_ARK_CPU_POWER_CONTROL_REQUEST buildRestoreControlRequest(
         unsigned long applyFlags) const;
     unsigned long restorableCpuApplyFlags() const;
-    bool executeControlRequest(
-        const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request);
+    void confirmRestoreInitialState();
+    void submitPowerTransaction(const HardwarePowerTransactionRequest& request);
+    void consumePowerTransaction(const HardwarePowerTransactionResult& result);
+    void reportPowerTransactionUnavailable(bool accepted);
+    bool presentControlResult(const KSWORD_ARK_CPU_POWER_CONTROL_REQUEST& request,
+        const ksword::ark::CpuPowerResult& result);
     void sendControlRequest(
         unsigned long applyFlags,
         const QString& confirmationText);
@@ -53,6 +57,9 @@ private:
 
     ks::ui::AsyncOperation* m_queryOperation = nullptr;
     bool m_queryPending = false;
+    bool m_transactionPending = false;
+    bool m_confirming = false;
+    bool m_restorePreparing = false;
     bool m_loadedOnce = false;                        // m_loadedOnce：首次显示时自动刷新一次。
     bool m_hasSnapshot = false;                       // m_hasSnapshot：expected raw MSR 是否有效。
     KSWORD_ARK_CPU_POWER_RESPONSE m_snapshot{};       // m_snapshot：最近一次锁内 R0 快照。
