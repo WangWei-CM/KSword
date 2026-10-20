@@ -32,5 +32,16 @@ int main(int argc,char**argv)
     bool workerOK=false;std::thread worker([&]{auto projection=ProjectImmutableTable(source,"99999",0,Qt::DescendingOrder,"SID:99999",[]{return false;});workerOK=projection&&projection->source->rows.size()==100000&&projection->rows.size()==1;});worker.join();expect(workerOK,"worker pure projection without model/widget access");
     {auto* dying=new ImmutableValueTableModel(3,[](int){return QString();});QPointer<ImmutableValueTableModel> alive(dying);QObject::connect(dying,&QAbstractItemModel::modelAboutToBeReset,&app,[dying]{delete dying;});auto abandoned=dying->replace(last);expect(!alive&&abandoned==last,"aboutToReset deleting model returns incoming value without accessafterdelete");}
     {auto* dying=new ImmutableValueTableModel(3,[](int){return QString();});QPointer<ImmutableValueTableModel> alive(dying);QObject::connect(dying,&QAbstractItemModel::modelReset,&app,[dying]{delete dying;});auto abandoned=dying->replace(last);expect(!alive&&!abandoned,"endReset deleting model returns safely");}
+
+    { ImmutableTableRow decorated; decorated.key="Window:1"; decorated.cells={"handle", "Timer", "16"}; decorated.searchText="handle Timer 16";
+      decorated.columnRoles[1].insert(Qt::DecorationRole, QString("cached-icon-value")); decorated.columnRoles[2].insert(Qt::UserRole+7,16);
+      auto all=MakeImmutableTableSource({decorated}); auto accepted=ProjectImmutableTable(all,"Timer 16",-1,Qt::AscendingOrder,decorated.key,[]{return false;},{decorated.key},[](const ImmutableTableRow&r){return r.cells.value(2).toInt()==16;});
+      model.replace(accepted); expect(accepted->rows.size()==1&&accepted->currentRow==0&&accepted->selectedRanges==QVector<QPair<int,int>>{{0,0}},"joined full-row search, TypeId predicate, stable selected range");
+      expect(model.index(0,1).data(Qt::DecorationRole).toString()=="cached-icon-value"&&model.index(0,2).data(Qt::UserRole+7).toInt()==16,"per-column decoration and native value roles survive");
+      auto rejected=ProjectImmutableTable(all,{},-1,Qt::AscendingOrder,decorated.key,[]{return false;},{decorated.key},[](const auto&){return false;});expect(rejected->rows.isEmpty()&&rejected->selectedKeys.contains(decorated.key)&&rejected->source==all,"filter hides projection while canonical selection and complete source remain");
+      auto gone=ProjectImmutableTable(MakeImmutableTableSource({}),{},-1,Qt::AscendingOrder,decorated.key,[]{return false;},{decorated.key}); expect(gone->selectedKeys.isEmpty(),"deleted source identity dropped from retained selection"); }
+    { QSet<QString> keys; for(int i=0;i<100000;i+=2)keys.insert(QString("SID:%1").arg(i));
+      auto many=ProjectImmutableTable(source,{},0,Qt::DescendingOrder,{},[]{return false;},keys);expect(many->selectedKeys.size()==50000&&many->selectedRanges.size()==50000,"full extended selection worker projection has no truncation");
+      auto contiguous=ProjectImmutableTable(source,"enabled",0,Qt::AscendingOrder,{},[]{return false;},keys);expect(contiguous->rows.size()==50000&&contiguous->selectedRanges==QVector<QPair<int,int>>{{0,49999}},"selected rows batch into complete contiguous range after filter"); }
     std::printf("IMMUTABLE_VALUE_TABLE_CHECKS=%d FAILURES=%d\n",checks,failures);return failures?1:0;
 }

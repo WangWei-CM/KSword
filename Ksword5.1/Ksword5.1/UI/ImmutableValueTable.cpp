@@ -48,6 +48,8 @@ namespace ks::ui
         std::shared_ptr<std::atomic<quint64>> revision = std::make_shared<std::atomic<quint64>>(0);
         quint64 dataRevision = 0, sourceRevision = 0, contentRevision = 0, notifiedContent = 0, pendingRevision = 0;
         QString query, currentKey;
+        QSet<QString> selectedKeys;
+        std::function<bool(const ImmutableTableRow&)> accepts;
         int currentColumn = 0, sortColumn = -1;
         Qt::SortOrder sortOrder = Qt::AscendingOrder;
         bool pending = false, running = false, applying = false, notifySelection = false, publishing = false, deferred = false;
@@ -83,6 +85,13 @@ namespace ks::ui
             if (current.isValid()) state.currentColumn = current.column();
             if (currentRowChanged) currentRowChanged();
         });
+        connect(selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
+            auto& state = *m_state;
+            if (state.applying) return;
+            state.selectedKeys.clear();
+            for (const auto& index : selectionModel()->selectedRows())
+                if (const auto* row = state.model->rowAt(index.row())) state.selectedKeys.insert(row->key);
+        });
         connect(this, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
             if (rowDoubleClicked) rowDoubleClicked(index.row());
         });
@@ -108,7 +117,7 @@ namespace ks::ui
         setModel(nullptr);
         delete model;
         state.model = nullptr;
-        retire(std::move(state.factory), std::move(state.source), std::move(state.pendingProjection), std::move(projection));
+        retire(std::move(state.factory), std::move(state.accepts), std::move(state.selectedKeys), std::move(state.source), std::move(state.pendingProjection), std::move(projection));
     }
 
     void ImmutableValueTable::setSourceFactory(SourceFactory factory)
@@ -123,6 +132,7 @@ namespace ks::ui
         auto& state = *m_state;
         const QPointer<ImmutableValueTable> alive(this);
         state.currentKey.clear();
+        state.selectedKeys.clear();
         retire(std::move(state.source), std::move(state.pendingProjection));
         setSourceFactory([](const auto&) { return MakeImmutableTableSource({}); });
         if (!alive) return;
@@ -147,6 +157,12 @@ namespace ks::ui
         m_state->query = query;
         request(false);
     }
+    void ImmutableValueTable::setRowPredicate(std::function<bool(const ImmutableTableRow&)> accepts)
+    {
+        retire(std::move(m_state->accepts));
+        m_state->accepts = std::move(accepts);
+        request(false);
+    }
     int ImmutableValueTable::rowCount() const { return m_state->model->rowCount(); }
     int ImmutableValueTable::columnCount() const { return m_state->model->columnCount(); }
     int ImmutableValueTable::currentRow() const { return !m_state->currentKey.isEmpty() && currentIndex().isValid() ? currentIndex().row() : -1; }
@@ -159,6 +175,7 @@ namespace ks::ui
         m_state->notifySelection = m_state->notifySelection || m_state->currentKey != key;
         m_state->currentKey = key;
         m_state->currentColumn = column;
+        m_state->selectedKeys = key.isEmpty() ? QSet<QString>{} : QSet<QString>{key};
         request(false);
     }
     ImmutableTableSource ImmutableValueTable::canonicalSource() const { return m_state->source; }
@@ -190,6 +207,8 @@ namespace ks::ui
         const auto factory = state.factory;
         const auto source = state.source;
         const auto query = state.query, currentKey = state.currentKey;
+        const auto selectedKeys = state.selectedKeys;
+        const auto accepts = state.accepts;
         const int sortColumn = state.sortColumn;
         const auto sortOrder = state.sortOrder;
         const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
@@ -233,7 +252,7 @@ namespace ks::ui
         });
         watcher->setFuture(promise->future());
         QThreadPool::globalInstance()->start(QRunnable::create([promise, factory, source, formatting, translator,
-            query, sortColumn, sortOrder, currentKey, revision, ticket] {
+            query, sortColumn, sortOrder, currentKey, selectedKeys, accepts, revision, ticket] {
             auto result = std::make_shared<Prepared>();
             try
             {
@@ -243,7 +262,7 @@ namespace ks::ui
                 {
                     // A prepared source may be reused even if only the query became obsolete.
                     result->projection = ProjectImmutableTable(values, query, sortColumn, sortOrder, currentKey,
-                        [ticket, revision] { return ticket->load() != revision; });
+                        [ticket, revision] { return ticket->load() != revision; }, selectedKeys, accepts);
                     if (!result->projection)
                     {
                         auto prepared = std::make_shared<ImmutableTableProjection>();
@@ -277,6 +296,8 @@ namespace ks::ui
         state.publishing = true;
         state.applying = true;
         const int selected = projection->currentRow;
+        const QString previousVisibleKey = rowKey(currentIndex().row());
+        const QString nextVisibleKey = selected >= 0 ? state.currentKey : QString();
         const bool lost = !state.currentKey.isEmpty()
             && (!projection->source || !projection->source->byKey.contains(state.currentKey));
         retire(state.model->replace(projection));
@@ -289,12 +310,21 @@ namespace ks::ui
                 const auto index = state.model->index(selected, state.currentColumn);
                 selectionModel()->setCurrentIndex(index, QItemSelectionModel::NoUpdate);
                 if (!alive) { retire(std::move(projection)); return; }
-                if (revision == state.revision->load())
+                if (revision == state.revision->load() && selectionMode() == QAbstractItemView::SingleSelection)
                     selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                if (!alive) { retire(std::move(projection)); return; }
+            }
+            if (revision == state.revision->load() && selectionMode() != QAbstractItemView::SingleSelection)
+            {
+                QItemSelection selectedRows;
+                for (const auto& range : projection->selectedRanges)
+                    selectedRows.select(state.model->index(range.first, 0), state.model->index(range.second, columnCount() - 1));
+                selectionModel()->select(selectedRows, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
                 if (!alive) { retire(std::move(projection)); return; }
             }
             if (revision == state.revision->load())
             {
+                state.selectedKeys = projection->selectedKeys;
                 if (lost) state.currentKey.clear();
                 state.applying = false;
                 setEnabled(true);
@@ -305,7 +335,9 @@ namespace ks::ui
                     startPending();
                     return;
                 }
-                const bool notifySelection = lost || std::exchange(state.notifySelection, false);
+                const bool requestedSelectionNotification = std::exchange(state.notifySelection, false);
+                const bool notifySelection = lost || previousVisibleKey != nextVisibleKey
+                    || requestedSelectionNotification;
                 if (notifySelection && currentRowChanged) currentRowChanged();
                 if (!alive) { retire(std::move(projection)); return; }
                 if (revision == state.revision->load() && state.notifiedContent != state.contentRevision)

@@ -14,7 +14,7 @@ namespace ks::ui
         ImmutableTableHeader(QString contextKey, QString sourceText) : key(std::move(contextKey)), source(std::move(sourceText)) {}
     };
 
-    // Ordinary read-only single-selection value table. Professional/custom models retain their own view.
+    // Ordinary read-only value table; default single-selection preserves existing consumers. Professional/custom models retain their own view.
     class ImmutableValueTable final : public TableActionTableView
     {
     public:
@@ -23,6 +23,7 @@ namespace ks::ui
         ~ImmutableValueTable() override;
         void setSourceFactory(SourceFactory factory);
         void setQuery(const QString& query);
+        void setRowPredicate(std::function<bool(const ImmutableTableRow&)> accepts);
         void clearRows();
         int rowCount() const;
         int columnCount() const;

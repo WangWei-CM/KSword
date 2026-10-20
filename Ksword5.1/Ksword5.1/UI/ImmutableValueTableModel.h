@@ -2,6 +2,7 @@
 #include <QAbstractTableModel>
 #include <QHash>
 #include <QPointer>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
 #include <algorithm>
@@ -17,6 +18,10 @@ namespace ks::ui
         QStringList cells;
         QHash<int, QVariant> roles;
         bool rolesInAllColumns = false;
+        // Values only: per-column native roles (TypeId, target identity, decoration, etc.).
+        QHash<int, QHash<int, QVariant>> columnRoles;
+        // Optional complete producer search document; ordinary tables retain per-cell matching.
+        QString searchText;
     };
     struct ImmutableTableValues
     {
@@ -43,12 +48,16 @@ namespace ks::ui
         ImmutableTableSource source;
         QVector<int> rows;
         int currentRow = -1;
+        QSet<QString> selectedKeys;
+        QVector<QPair<int, int>> selectedRanges;
     };
     using ImmutableTableViewValues = std::shared_ptr<const ImmutableTableProjection>;
 
     // Pure worker preparation; canonical rows/roles are never trimmed by presentation filters.
     inline ImmutableTableViewValues ProjectImmutableTable(ImmutableTableSource source, const QString& query,
-        int sortColumn, Qt::SortOrder sortOrder, const QString& currentKey, const std::function<bool()>& cancelled)
+        int sortColumn, Qt::SortOrder sortOrder, const QString& currentKey, const std::function<bool()>& cancelled,
+        const QSet<QString>& selectedKeys = {},
+        const std::function<bool(const ImmutableTableRow&)>& accepts = {})
     {
         auto projection = std::make_shared<ImmutableTableProjection>();
         projection->source = std::move(source);
@@ -57,9 +66,11 @@ namespace ks::ui
         {
             if ((row & 127) == 0 && cancelled()) return {};
             const auto& value = projection->source->rows[row];
-            bool matches = query.isEmpty();
-            for (const auto& cell : value.cells)
-                if (matches || cell.contains(query, Qt::CaseInsensitive)) { matches = true; break; }
+            if (accepts && !accepts(value)) continue;
+            bool matches = query.isEmpty() || (!value.searchText.isNull() && value.searchText.contains(query, Qt::CaseInsensitive));
+            if (value.searchText.isNull())
+                for (const auto& cell : value.cells)
+                    if (matches || cell.contains(query, Qt::CaseInsensitive)) { matches = true; break; }
             if (matches) projection->rows.push_back(row);
         }
         if (sortColumn >= 0)
@@ -71,8 +82,20 @@ namespace ks::ui
             });
             if (cancelled()) return {};
         }
+        for (const auto& key : selectedKeys)
+            if (projection->source->byKey.contains(key)) projection->selectedKeys.insert(key);
+        int rangeStart = -1;
         for (int row = 0; row < projection->rows.size(); ++row)
-            if (projection->source->rows[projection->rows[row]].key == currentKey) { projection->currentRow = row; break; }
+        {
+            if ((row & 127) == 0 && cancelled()) return {};
+            const auto& key = projection->source->rows[projection->rows[row]].key;
+            if (key == currentKey) projection->currentRow = row;
+            if (projection->selectedKeys.contains(key))
+            { if (rangeStart < 0) rangeStart = row; }
+            else if (rangeStart >= 0)
+            { projection->selectedRanges.push_back({rangeStart, row - 1}); rangeStart = -1; }
+        }
+        if (rangeStart >= 0) projection->selectedRanges.push_back({rangeStart, static_cast<int>(projection->rows.size()) - 1});
         return projection;
     }
 
@@ -106,6 +129,12 @@ namespace ks::ui
         {
             const auto* row = rowAt(index.row());
             if (!index.isValid() || !row || index.column() < 0 || index.column() >= m_columns) return {};
+            const auto column = row->columnRoles.constFind(index.column());
+            if (column != row->columnRoles.cend())
+            {
+                const auto value = column->constFind(role);
+                if (value != column->cend()) return *value;
+            }
             if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return row->cells.value(index.column());
             return index.column() == 0 || row->rolesInAllColumns ? row->roles.value(role) : QVariant{};
         }
