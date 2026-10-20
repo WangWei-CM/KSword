@@ -1651,7 +1651,7 @@ void ks::i18n::LanguageManager::bindText(
     }
     object->setProperty(kTextKeyProperty, key);
     object->setProperty(kTextFallbackProperty, fallbackText);
-    applyBindings(object);
+    applyTextBinding(object);
 }
 
 bool ks::i18n::LanguageManager::moveTextBinding(
@@ -1697,7 +1697,7 @@ void ks::i18n::LanguageManager::bindToolTip(
     }
     widget->setProperty(kToolTipKeyProperty, key);
     widget->setProperty(kToolTipFallbackProperty, fallbackText);
-    applyBindings(widget);
+    widget->setToolTip(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindPlaceholder(
@@ -1711,7 +1711,7 @@ void ks::i18n::LanguageManager::bindPlaceholder(
     }
     lineEdit->setProperty(kPlaceholderKeyProperty, key);
     lineEdit->setProperty(kPlaceholderFallbackProperty, fallbackText);
-    applyBindings(lineEdit);
+    lineEdit->setPlaceholderText(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindSuffix(
@@ -1725,7 +1725,7 @@ void ks::i18n::LanguageManager::bindSuffix(
     }
     spinBox->setProperty(kSuffixKeyProperty, key);
     spinBox->setProperty(kSuffixFallbackProperty, fallbackText);
-    applyBindings(spinBox);
+    spinBox->setSuffix(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindWindowTitle(
@@ -1739,7 +1739,7 @@ void ks::i18n::LanguageManager::bindWindowTitle(
     }
     widget->setProperty(kWindowTitleKeyProperty, key);
     widget->setProperty(kWindowTitleFallbackProperty, fallbackText);
-    applyBindings(widget);
+    widget->setWindowTitle(text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindTab(
@@ -1754,7 +1754,11 @@ void ks::i18n::LanguageManager::bindTab(
     }
     page->setProperty(kTabKeyProperty, key);
     page->setProperty(kTabFallbackProperty, fallbackText);
-    applyBindings(tabWidget);
+    const int index = tabWidget->indexOf(page);
+    if (index >= 0)
+    {
+        tabWidget->setTabText(index, text(key, fallbackText));
+    }
 }
 
 void ks::i18n::LanguageManager::bindTabToolTip(
@@ -1769,7 +1773,7 @@ void ks::i18n::LanguageManager::bindTabToolTip(
     }
     page->setProperty(kTabToolTipKeyProperty, key);
     page->setProperty(kTabToolTipFallbackProperty, fallbackText);
-    applyBindings(tabWidget);
+    tabWidget->setTabToolTip(tabWidget->indexOf(page), text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::bindComboBoxItem(
@@ -1784,7 +1788,7 @@ void ks::i18n::LanguageManager::bindComboBoxItem(
     }
     comboBox->setItemData(itemIndex, key, kComboKeyRole);
     comboBox->setItemData(itemIndex, fallbackText, kComboFallbackRole);
-    applyBindings(comboBox);
+    comboBox->setItemText(itemIndex, text(key, fallbackText));
 }
 
 void ks::i18n::LanguageManager::retranslateAll()
@@ -2628,7 +2632,7 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
     visitObject(object);
 }
 
-void ks::i18n::LanguageManager::applyBindings(QObject* object) const
+void ks::i18n::LanguageManager::applyTextBinding(QObject* object) const
 {
     if (object == nullptr)
     {
@@ -2656,6 +2660,16 @@ void ks::i18n::LanguageManager::applyBindings(QObject* object) const
             action->setText(translatedText);
         }
     }
+}
+
+void ks::i18n::LanguageManager::applyBindings(QObject* object) const
+{
+    if (object == nullptr)
+    {
+        return;
+    }
+
+    applyTextBinding(object);
 
     if (QWidget* widget = qobject_cast<QWidget*>(object))
     {

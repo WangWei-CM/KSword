@@ -97,6 +97,8 @@ namespace ks::i18n
         void ensureApplicationEventFilter();
         void scheduleRuntimeTranslation(QObject* object);
         void applyRuntimeTranslations(QObject* object);
+        // Binding registration updates only its declared property; language switches traverse the tree.
+        void applyTextBinding(QObject* object) const;
         void applyBindings(QObject* object) const;
         void applyApplicationDirection() const;
         bool eventFilter(QObject* watched, QEvent* event) override;
