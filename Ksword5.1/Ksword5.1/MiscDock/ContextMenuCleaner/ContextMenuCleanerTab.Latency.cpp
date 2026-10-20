@@ -15,6 +15,9 @@
 
 #include "ContextMenuCleanerTab.h"
 #include "../../UI/AsyncOperation.h"
+#include "../../UI/RetainedCleanupJob.h"
+#include <QTimer>
+#include <exception>
 
 #include "ContextMenuCleanerTab.Internal.h"
 
@@ -114,128 +117,6 @@ namespace
             return true;
         }
         return false;
-    }
-
-    // applyTemporaryDisable：以 HKCU 覆盖方式临时禁用一条菜单项。
-    // 入参 subKeyPath：相对根键的完整子键路径（HKLM 项也写同样的 HKCU 路径形成覆盖）；
-    //      isHandler：true=ContextMenuHandlers 处理器（默认值是 CLSID，置空即禁用），
-    //                 false=shell verb（默认值不是 CLSID，改用 LegacyDisable）；
-    //      originalValueOut：输出被覆盖前的默认值（空表示原本不存在该 HKCU 键）；
-    //      keyCreatedOut：输出本次是否新建了 HKCU 键（还原时需要据此删除）。
-    // 返回：成功 true。**只写不删**，任何原有数据都通过 originalValue 保留。
-    bool applyTemporaryDisable(
-        const QString& subKeyPath,
-        const bool isHandler,
-        QString* originalValueOut,
-        bool* keyCreatedOut)
-    {
-        if (originalValueOut != nullptr)
-        {
-            originalValueOut->clear();
-        }
-        if (keyCreatedOut != nullptr)
-        {
-            *keyCreatedOut = false;
-        }
-
-        HKEY key = nullptr;
-        DWORD disposition = 0;
-        const LSTATUS openStatus = ::RegCreateKeyExW(HKEY_CURRENT_USER,
-            subKeyPath.toStdWString().c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE,
-            KEY_READ | KEY_WRITE, nullptr, &key, &disposition);
-        if (openStatus != ERROR_SUCCESS)
-        {
-            return false;
-        }
-        if (keyCreatedOut != nullptr)
-        {
-            *keyCreatedOut = disposition == REG_CREATED_NEW_KEY;
-        }
-
-        // 先记下原值：处理器需要保留原 CLSID，verb 需要知道 LegacyDisable 是否本来就有。
-        DWORD type = 0;
-        DWORD size = 0;
-        if (::RegQueryValueExW(key, L"", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && size > 0)
-        {
-            std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1U, L'\0');
-            if (::RegQueryValueExW(key, L"", nullptr, &type,
-                    reinterpret_cast<BYTE*>(buffer.data()), &size) == ERROR_SUCCESS)
-            {
-                if (originalValueOut != nullptr)
-                {
-                    *originalValueOut = QString::fromWCharArray(buffer.data());
-                }
-            }
-        }
-
-        LSTATUS status = ERROR_SUCCESS;
-        if (isHandler)
-        {
-            // 处理器：把默认值（CLSID）置空，Shell 会因 CLSID 无效而跳过该处理器。
-            const wchar_t empty[] = L"";
-            status = ::RegSetValueExW(key, L"", 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(empty), sizeof(empty));
-        }
-        else
-        {
-            // verb：加 LegacyDisable，Shell 会隐藏该动词。
-            const wchar_t empty[] = L"";
-            status = ::RegSetValueExW(key, L"LegacyDisable", 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(empty), sizeof(empty));
-        }
-        ::RegCloseKey(key);
-        return status == ERROR_SUCCESS;
-    }
-
-    // revertTemporaryDisable：还原 applyTemporaryDisable 造成的改动。
-    // 入参 subKeyPath/isHandler/originalValue/keyCreated：与禁用时一致。
-    // 返回：成功 true（失败会在报告里记为"未还原"，提醒用户用文件备份兜底）。
-    bool revertTemporaryDisable(
-        const QString& subKeyPath,
-        const bool isHandler,
-        const QString& originalValue,
-        const bool keyCreated)
-    {
-        HKEY key = nullptr;
-        if (::RegOpenKeyExW(HKEY_CURRENT_USER, subKeyPath.toStdWString().c_str(), 0,
-                KEY_READ | KEY_WRITE, &key) != ERROR_SUCCESS)
-        {
-            return true; // 键已经不存在，视为已还原。
-        }
-
-        LSTATUS status = ERROR_SUCCESS;
-        if (isHandler)
-        {
-            if (originalValue.isEmpty() && keyCreated)
-            {
-                // 这个 HKCU 键是我们为了本次测量新建的，且原本没有值：直接删掉它。
-                ::RegCloseKey(key);
-                status = ::RegDeleteKeyExW(HKEY_CURRENT_USER, subKeyPath.toStdWString().c_str(),
-                    0, 0);
-                return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
-            }
-            const std::wstring restored = originalValue.toStdWString();
-            status = ::RegSetValueExW(key, L"", 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(restored.c_str()),
-                static_cast<DWORD>((restored.size() + 1) * sizeof(wchar_t)));
-        }
-        else
-        {
-            // verb：删掉我们加的 LegacyDisable；若该键是本次新建且已空，则连键一起删。
-            status = ::RegDeleteValueW(key, L"LegacyDisable");
-            if (status == ERROR_FILE_NOT_FOUND)
-            {
-                status = ERROR_SUCCESS;
-            }
-        }
-        ::RegCloseKey(key);
-
-        if (status == ERROR_SUCCESS && !isHandler && keyCreated)
-        {
-            // 清完 LegacyDisable 后再试删空键：非空（用户本来就有内容）会失败，属正常。
-            ::RegDeleteKeyExW(HKEY_CURRENT_USER, subKeyPath.toStdWString().c_str(), 0, 0);
-        }
-        return status == ERROR_SUCCESS;
     }
 
     // formatMilliseconds：统一的耗时文本。
@@ -368,90 +249,101 @@ QVector<ContextMenuCleanerTab::LatencyProbeItem> ContextMenuCleanerTab::collectL
 
 void ContextMenuCleanerTab::startLatencyMeasurement()
 {
-    // 已经在跑就不重复启动。
-    if (m_latencyRunning.load())
-    {
-        return;
-    }
-
-    const MenuArea area = currentArea();
-    if (widgetsForArea(area)->tableBuilding) return;
-    ks::window::MenuProbeContext probeContext = ks::window::MenuProbeContext::DesktopBackground;
-    if (!latencyContextForArea(area == MenuArea::Desktop, &probeContext))
-    {
-        QMessageBox::information(this, QStringLiteral("测量菜单耗时"),
-            QStringLiteral("当前分类没有可程序化触发的右键菜单，无法测量：\n\n"
-                           "· 桌面右键菜单：可测（对应桌面空白处右键）\n"
-                           "· 文件 / 格式右键菜单：需要先选中具体文件，本版不支持自动测量\n"
-                           "· IE 右键菜单：IE 已废弃且需要 IE 窗口\n"
-                           "· URL 绑定 / 文件打开方式 / 资源管理器主页：这些是关联或命名空间，不是右键菜单"));
-        return;
-    }
-
-    const unsigned long explorerPid = resolveExplorerPid();
-    if (explorerPid == 0)
-    {
-        QMessageBox::warning(this, QStringLiteral("测量菜单耗时"),
-            QStringLiteral("找不到资源管理器进程，无法测量。"));
-        return;
-    }
-
-    // 用户确认：测量会短暂弹出菜单，并且会临时改注册表（测完立刻还原）。
-    const QMessageBox::StandardButton confirm = QMessageBox::question(
-        this,
-        QStringLiteral("测量菜单耗时"),
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();if(!alive||shellBusy())return;
+    const MenuArea area=currentArea();auto* widgets=widgetsForArea(area);
+    if(widgets->tableBuilding)return;
+    ks::window::MenuProbeContext ignored=ks::window::MenuProbeContext::DesktopBackground;
+    if(!latencyContextForArea(area==MenuArea::Desktop,&ignored))return;
+    const unsigned long explorerPid=resolveExplorerPid();
+    if(!explorerPid){QMessageBox::warning(this,QStringLiteral("测量菜单耗时"),QStringLiteral("找不到资源管理器进程，无法测量。"));return;}
+    int truncatedCount=0;const auto items=collectLatencyProbeItems(area,&truncatedCount);
+    if(items.isEmpty()){QMessageBox::information(this,QStringLiteral("测量菜单耗时"),QStringLiteral("当前分类还没有可测条目，请先点「刷新」枚举一次。"));return;}
+    const int entryCount=widgets->entries.size();
+    if(!beginShellAction())return;
+    const auto answer=QMessageBox::question(this,QStringLiteral("测量菜单耗时"),
         QStringLiteral("测量过程会：\n1) 自动导出整份右键菜单注册表备份（防意外）；\n2) 反复短暂弹出桌面右键菜单并自动关闭（不注入鼠标键盘）；\n3) 逐条临时禁用菜单项后复测，随后立即还原。\n\n耗时取决于菜单本身快慢：整轮有总时长预算（约 3 分钟），预算内测不完的条目会列入未测，不再拖长时间。开始吗？"),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::Yes);
-    if (confirm != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    // 开测前先落一份文件备份：这是崩溃兜底的关键一步。
-    const QString backupPath = backupContextMenuToFile(false);
-
-    int truncatedCount = 0;
-    const QVector<LatencyProbeItem> items = collectLatencyProbeItems(area, &truncatedCount);
-    if (items.isEmpty())
-    {
-        QMessageBox::information(this, QStringLiteral("测量菜单耗时"),
-            QStringLiteral("当前分类还没有可测条目，请先点「刷新」枚举一次。"));
-        return;
-    }
-
-    const std::array<MenuArea, 7> queryAreas{MenuArea::InternetExplorer, MenuArea::Desktop,
-        MenuArea::File, MenuArea::UrlBinding, MenuArea::OpenWith, MenuArea::FormatMenu,
-        MenuArea::ExplorerHome};
-    for (const MenuArea queryArea : queryAreas)
-    {
-        AreaWidgets* widgets = widgetsForArea(queryArea);
-        if (widgets->queryOperation != nullptr && widgets->queryOperation->isInFlight())
+        QMessageBox::Yes|QMessageBox::No,QMessageBox::Yes);
+    if(!alive)return;
+    if(answer!=QMessageBox::Yes){endShellAction();return;}
+    auto session=std::make_shared<shell_transaction::LatencySession>();
+    const auto serial=m_registrySerial;
+    auto cleanup=ks::ui::RetainedCleanupJob::create([session,serial]{
+        session->stop.store(true);
+        std::lock_guard<std::mutex> lock(*serial);
+        shell_transaction::NativePort port;
+        return shell_transaction::cleanupLatencySession(port,*session);
+    },0,[session]{session->stop.store(true);});
+    if(!cleanup){endShellAction();return;}
+    m_latencySession=session;m_latencyCleanup=cleanup;m_latencyArea=area;
+    m_latencySnapshotGeneration=widgets->refreshGeneration;
+    m_latencyRunning.store(true);m_latencyCancelRequested.store(false);
+    m_latencyProgressPid=kPro.add(this,"Shell 菜单耗时测量","准备基准测量");
+    if(!m_latencyPulseTimer)
+    {m_latencyPulseTimer=new QTimer(this);m_latencyPulseTimer->setInterval(80);connect(m_latencyPulseTimer,&QTimer::timeout,this,[this]{pollLatencyProgress();});}
+    m_latencyPulseTimer->start();
+    submitShellTransaction([area,items,truncatedCount,entryCount,explorerPid,session,cleanup]{
+        return runLatencyMeasurement(area,items,truncatedCount,entryCount,explorerPid,session,cleanup);
+    },[this,area](const ShellTransactionResult& result){
+        // Rejection never ran the worker guard; release that unused reservation once.
+        if(m_latencyCleanup&&!m_latencyCleanup->isCleanupRequested())m_latencyCleanup->requestCleanup();
+        if(result.latency&&widgetsForArea(area)->refreshGeneration==m_latencySnapshotGeneration)
+            applyLatencyResults(area,result.latency->baselineMs,result.latency->contributions,
+                result.latency->report,result.latency->measuredEntries);
+        else
         {
-            widgets->queryPending = false;
-            widgets->refreshDeferred = true;
-            ++widgets->refreshGeneration;
-            widgets->queryOperation->cancel();
+            m_latencyRunning.store(false);setLatencyUiRunning(false);
+            if(m_latencyStatusLabel)m_latencyStatusLabel->setText(result.ok
+                ? QStringLiteral("测量已停止，已还原临时注册表。") : result.failureText());
         }
-        widgets->pendingSnapshot.reset();
+        if(result.latency&&result.latency->cancelled&&!m_latencySession->recoveryPending.load()&&m_latencyStatusLabel)
+            m_latencyStatusLabel->setText(QStringLiteral("测量已停止，已还原临时注册表。"));
+        if(!result.failures.isEmpty()&&m_latencyStatusLabel)
+            m_latencyStatusLabel->setText(QStringLiteral("临时注册表恢复未完成，请重试恢复：%1").arg(result.failures.join('\n')));
+        pollLatencyProgress();
+    });
+}
+
+void ContextMenuCleanerTab::pollLatencyProgress()
+{
+    const QPointer<ContextMenuCleanerTab> alive(this);
+    settleShellTransaction();if(!alive||!m_latencySession)return;
+    QVector<QPair<int,double>> singles;QString text;float progress=0;
+    {std::lock_guard<std::mutex> lock(m_latencySession->progressMutex);singles.swap(m_latencySession->singles);text=m_latencySession->progressText;progress=m_latencySession->progress;}
+    if(m_latencyRunning.load()&&widgetsForArea(m_latencyArea)->refreshGeneration==m_latencySnapshotGeneration)
+        for(const auto& value:singles)applySingleLatencyResult(m_latencyArea,value.first,value.second);
+    if(m_latencyProgressPid>0&&!text.isEmpty())kPro.set(m_latencyProgressPid,text.toStdString(),0,progress);
+    if(m_latencyCleanup&&m_latencyCleanup->hasFailed()&&m_latencyStatusLabel&&!text.isEmpty())m_latencyStatusLabel->setText(text);
+    setLatencyUiRunning(m_latencyRunning.load());
+    if(!m_latencyRunning.load()&&m_latencyCleanup&&m_latencyCleanup->isComplete())
+    {
+        if(m_latencyProgressPid>0){kPro.set(m_latencyProgressPid,"测量完成",0,1.0f);m_latencyProgressPid=0;}
+        if(m_latencySession->failedInlineRestore.load()&&m_latencyStatusLabel)
+            m_latencyStatusLabel->setText(QStringLiteral("临时注册表已恢复；测量结果保留在详情中。"));
+        m_latencyPulseTimer->stop();m_latencyCleanup.reset();m_latencySession.reset();
+        setLatencyUiRunning(false);
     }
-    m_latencyCancelRequested.store(false);
-    m_latencyRunning.store(true);
-    setLatencyUiRunning(true);
+}
 
-    // kProgress 需要在 UI 线程建卡片；set 自带锁，后台线程可以更新它。
-    m_latencyProgressPid = kPro.add(this, "Shell 菜单耗时测量",
-        "准备基准测量");
-
-    kLogEvent event;
-    info << event << "[ContextMenuCleanerTab] 开始菜单耗时测量: area="
-         << areaTitle(area).toStdString() << ", items=" << items.size()
-         << ", 备份=" << backupPath.toStdString() << eol;
-
-    QPointer<ContextMenuCleanerTab> guardThis(this);
-    QThreadPool::globalInstance()->start(
-        [guardThis, area, probeContext, explorerPid, items, truncatedCount, backupPath]()
-        {
+ContextMenuCleanerTab::ShellTransactionResult ContextMenuCleanerTab::runLatencyMeasurement(
+    const MenuArea area,const QVector<LatencyProbeItem>& items,int truncatedCount,int entryCount,
+    unsigned long explorerPid,std::shared_ptr<shell_transaction::LatencySession> session,
+    std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup)
+{
+    struct CleanupOnExit
+    {
+        std::shared_ptr<ks::ui::RetainedCleanupJob> job;
+        ~CleanupOnExit(){job->requestCleanup();}
+    } cleanupOnExit{cleanup};
+    ShellTransactionResult result;result.stage=ShellTransactionStage::Completed;
+    if(session->stop.load()) { result.ok=true;return result; }
+    QString backupPath;
+    if(!exportContextMenuBackupToFile(&backupPath,&result.error))
+    {result.stage=ShellTransactionStage::BackupFailed;return result;}
+    result.path=backupPath;
+    if(session->stop.load()){result.ok=true;return result;}
+    const auto probeContext=ks::window::MenuProbeContext::DesktopBackground;
+    shell_transaction::NativePort port;
             // ---- 后台线程：只做测量与数据拼装，不碰任何 Qt 控件 ----
             // 报告刻意保持简短：逐条明细在表格的「耗时」列里，这里只给结论和关键数字。
             ks::ui::FieldDocument report;
@@ -506,7 +398,7 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
             // 凭空认领了 1212 ms（正好等于另一个慢扩展的延迟）。紧邻的前后基准能把这类漂移抵消掉，
             // 而 3 次弹出仍比最初的 4 次（禁用期间测 2 次）更快。
             QVector<double> contributions;
-            contributions.resize(items.size());
+            contributions.resize(entryCount);
             for (int i = 0; i < contributions.size(); ++i)
             {
                 contributions[i] = -1.0;
@@ -526,107 +418,60 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
             int aliasGroupCount = 0;    // aliasGroupCount：与其它位置共用同一扩展的条目数。
             int unstableCount = 0;      // unstableCount：因前后基准对不上而被判为"不稳定"的条目数。
             QStringList unreverted;
+            QStringList probeFailures;
 
-            // DisabledEntry：一条被临时禁用的注册项及其还原所需信息。
-            struct DisabledEntry
-            {
-                QString path;            // path：被改动的 HKCU 覆盖路径。
-                QString originalValue;   // originalValue：改动前的默认值（空表示原本没有值）。
-                bool keyCreated = false; // keyCreated：该 HKCU 键是否本次新建。
-            };
-
-            // 把"禁用整组 → 测量 → 还原整组"收成一个 lambda，常规轮与确认轮共用。
-            const auto measureWithItemDisabled =
-                [&](const ContextMenuCleanerTab::LatencyProbeItem& item,
-                    const int mutedSamples,
-                    double* mutedMsOut,
-                    int* disabledPathCountOut,
-                    bool* aliasGroupUsedOut) -> bool
-            {
-                QVector<DisabledEntry> disabledEntries;
-                for (const QString& aliasPath : item.aliasPaths)
+            const auto measureWithItemDisabled = [&](const LatencyProbeItem& item,
+                int mutedSamples,double* mutedMsOut,int* disabledPathCountOut,bool* aliasGroupUsedOut) {
+                bool disabled=true;int paths=0;
+                for(const auto& path:item.aliasPaths)
                 {
-                    DisabledEntry record;
-                    record.path = aliasPath;
-                    if (applyTemporaryDisable(aliasPath, item.isHandler,
-                            &record.originalValue, &record.keyCreated))
-                    {
-                        disabledEntries.push_back(record);
-                    }
+                    if(session->stop.load()){disabled=false;break;}
+                    shell_transaction::TemporaryOverride record;
+                    if(!shell_transaction::captureOverride(port,{QStringLiteral("HKCU"),0,path},item.isHandler,record))
+                    {probeFailures.push_back(record.error);disabled=false;break;}
+                    session->overrides.push_back(std::move(record));
+                    session->recoveryPending.store(true);
+                    if(!shell_transaction::disableOverride(port,session->overrides.last())){probeFailures.push_back(session->overrides.last().error);disabled=false;break;}
+                    ++paths;
                 }
-                if (disabledEntries.isEmpty())
+                ks::window::MenuProbeMeasurement muted;
+                std::exception_ptr failure;
+                try
                 {
-                    return false; // 一处都没禁用成功 → 本条不改判定。
+                    if(disabled&&!session->stop.load())muted=ks::window::MeasureMenuOpenLatency(
+                        probeContext,explorerPid,ks::window::MenuProbeOptions{mutedSamples,8000,kProbeGapMs});
                 }
-                if (disabledPathCountOut != nullptr)
+                catch(...){failure=std::current_exception();}
+                if(!shell_transaction::restoreOverrides(port,*session))
                 {
-                    *disabledPathCountOut = disabledEntries.size();
+                    session->failedInlineRestore.store(true);session->stop.store(true);
+                    for(const auto& record:session->overrides)if(record.pending)unreverted.push_back(record.error);
+                    disabled=false;
                 }
-                if (aliasGroupUsedOut != nullptr && disabledEntries.size() > 1)
-                {
-                    *aliasGroupUsedOut = true;
-                }
-
-                const ks::window::MenuProbeMeasurement muted = ks::window::MeasureMenuOpenLatency(
-                    probeContext, explorerPid,
-                    ks::window::MenuProbeOptions{ mutedSamples, 8000, kProbeGapMs });
-
-                // 无论测量结果如何都必须还原：这是"绝不留下残疾菜单"的底线。
-                for (const DisabledEntry& record : disabledEntries)
-                {
-                    if (!revertTemporaryDisable(record.path, item.isHandler,
-                            record.originalValue, record.keyCreated))
-                    {
-                        unreverted.push_back(record.path);
-                    }
-                }
-
-                if (!muted.attempted || muted.samples.empty())
-                {
-                    return false;
-                }
-                if (mutedMsOut != nullptr)
-                {
-                    *mutedMsOut = muted.minMs;
-                }
+                if(failure)std::rethrow_exception(failure);
+                if(session->stop.load()||!disabled||!muted.attempted||muted.samples.empty())return false;
+                if(disabledPathCountOut)*disabledPathCountOut=paths;
+                if(aliasGroupUsedOut)*aliasGroupUsedOut=paths>1;
+                if(mutedMsOut)*mutedMsOut=muted.minMs;
                 return true;
             };
 
-            // publishResult：把一条结果立刻推回 UI 线程 —— "测完一条填一条"。
-            const auto publishResult = [&](const int entryIndex, const double valueMs)
-            {
-                if (guardThis.isNull())
-                {
-                    return;
-                }
-                QMetaObject::invokeMethod(guardThis, [guardThis, area, entryIndex, valueMs]()
-                    {
-                        if (!guardThis.isNull())
-                        {
-                            guardThis->applySingleLatencyResult(area, entryIndex, valueMs);
-                        }
-                    }, Qt::QueuedConnection);
+            QVector<int> measuredEntries;
+            const auto publishResult = [&](int entryIndex,double valueMs) {
+                measuredEntries.push_back(entryIndex);
+                std::lock_guard<std::mutex> lock(session->progressMutex);
+                session->singles.push_back(qMakePair(entryIndex,valueMs));
             };
-
 
             for (int index = 0; index < plannedItems; ++index)
             {
-                if (guardThis.isNull())
+                if (session->stop.load()) break;
+                const LatencyProbeItem& item = items.at(index);
                 {
-                    break;
-                }
-                if (guardThis->m_latencyCancelRequested.load())
-                {
-                    break;
-                }
-
-                const ContextMenuCleanerTab::LatencyProbeItem& item = items.at(index);
-                if (guardThis->m_latencyProgressPid > 0)
-                {
-                    kPro.set(guardThis->m_latencyProgressPid,
-                        QStringLiteral("正在测：%1 (%2/%3)")
-                            .arg(item.displayName).arg(index + 1).arg(plannedItems).toStdString(),
-                        0, static_cast<float>(index) / static_cast<float>(plannedItems));
+                    std::lock_guard<std::mutex> lock(session->progressMutex);
+                    session->progressText=QStringLiteral("正在测：%1 (%2/%3)")
+                        .arg(item.displayName).arg(index+1).arg(plannedItems);
+                    session->progress=static_cast<float>(index)/static_cast<float>(plannedItems);
                 }
 
                 // A：禁用前的基准（紧邻参照之一）。
@@ -646,6 +491,8 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
                 {
                     ++aliasGroupCount;
                 }
+
+                if(session->stop.load())break; // Do not start another menu probe after accepted stop/close.
 
                 // B：禁用后的基准（紧邻参照之二）。
                 const ks::window::MenuProbeMeasurement after = ks::window::MeasureMenuOpenLatency(
@@ -667,16 +514,16 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
                 // （实测出现过普通动词被报成 1212 ms，正好等于另一个慢扩展的延迟）。
                 if (std::abs(before.minMs - after.minMs) > thresholdMs)
                 {
-                    contributions[index] = -1.0;
+                    contributions[item.entryIndex] = -1.0;
                     publishResult(item.entryIndex, -1.0);
                     ++unstableCount;
                     continue;
                 }
 
                 const double rawContribution = itemReferenceMs - mutedMs;
-                contributions[index] = rawContribution > thresholdMs ? rawContribution : 0.0;
+                contributions[item.entryIndex] = rawContribution > thresholdMs ? rawContribution : 0.0;
                 // 测完一条立刻填一条，不等整轮结束。
-                publishResult(item.entryIndex, contributions[index]);
+                publishResult(item.entryIndex, contributions[item.entryIndex]);
             }
 
             // 汇总：只统计超过门限的条目。
@@ -689,11 +536,11 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
                 }
             }
             const double residualMs = std::max(0.0, baselineMs - attributableMs);
-            const int notPlannedCount = total - plannedItems;
+            const int notPlannedCount = total - measuredEntries.size();
 
             // 报告只留结论与关键数字；逐条明细在表格「耗时」列里（很短 = 无可测贡献）。
             report.field(QStringLiteral("逐条"), QStringLiteral("共测 %1 项，其中 %2 项有显著贡献，%3 项因状态不稳定跳过，合计 %4")
-                .arg(plannedItems).arg(significantCount).arg(unstableCount)
+                .arg(measuredEntries.size()).arg(significantCount).arg(unstableCount)
                 .arg(formatMilliseconds(attributableMs)));
             report.field(QStringLiteral("残差"), QStringLiteral("%1（基准里无法归因到单条扩展的部分）")
                 .arg(formatMilliseconds(residualMs)));
@@ -704,7 +551,7 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
                     : QStringLiteral("耗时主要落在标红的条目上，可优先禁用它们后再测一次。")));
             if (notPlannedCount > 0)
             {
-                report.field(QStringLiteral("未测"), QStringLiteral("%1 项（超出本次时间预算）").arg(notPlannedCount));
+                report.field(QStringLiteral("未测"), QStringLiteral("%1 项（停止、失败或超出本次时间预算）").arg(notPlannedCount));
             }
             if (aliasGroupCount > 0)
             {
@@ -721,66 +568,39 @@ void ContextMenuCleanerTab::startLatencyMeasurement()
                     .arg(unreverted.size()));
             }
 
+            if(!probeFailures.isEmpty())report.field(QStringLiteral("跳过项"),probeFailures.join('\n'));
             report.note(QStringLiteral("明细见表格「耗时」列。"));
 
-            // ---- 回主线程应用结果 ----
-            const ks::ui::FieldDocument reportSnapshot = report;
-            if (!guardThis.isNull())
-            {
-                QMetaObject::invokeMethod(guardThis, [guardThis, area, baselineMs,
-                    contributions, reportSnapshot]()
-                    {
-                        if (!guardThis.isNull())
-                        {
-                            guardThis->applyLatencyResults(area, baselineMs, contributions, reportSnapshot);
-                        }
-                    }, Qt::QueuedConnection);
-            }
-        });
+
+    result.latency=std::make_shared<LatencyMeasurementResult>();
+    result.latency->cancelled=session->stop.load();
+    result.latency->baselineMs=baselineMs;
+    result.latency->contributions=std::move(contributions);
+    result.latency->measuredEntries=std::move(measuredEntries);
+    result.latency->report=std::move(report);
+    result.ok=unreverted.isEmpty();
+    result.failures=unreverted;
+    return result;
 }
 
 void ContextMenuCleanerTab::cancelLatencyMeasurement()
 {
-    if (m_latencyRunning.load())
-    {
-        m_latencyCancelRequested.store(true);
-        if (m_latencyStatusLabel != nullptr)
-        {
-            m_latencyStatusLabel->setText(QStringLiteral("正在停止测量（等待当前一项测完）…"));
-        }
-    }
+    if(m_latencySession)m_latencySession->stop.store(true);
+    const bool retry=m_latencyCleanup&&m_latencyCleanup->hasFailed();
+    if(retry)m_latencyCleanup->requestCleanup();
+    if(m_latencyStatusLabel)m_latencyStatusLabel->setText(retry?QStringLiteral("正在恢复临时注册表…"):QStringLiteral("正在停止测量（等待当前一项测完）…"));
+    setLatencyUiRunning(m_latencyRunning.load());
 }
 
 void ContextMenuCleanerTab::applyLatencyResults(
     const MenuArea area,
     const double baselineMs,
     const QVector<double>& perEntryMs,
-    const ks::ui::FieldDocument& report)
+    const ks::ui::FieldDocument& report, const QVector<int>& measuredEntries)
 {
     AreaWidgets* areaWidgets = widgetsForArea(area);
-    if (areaWidgets != nullptr && areaWidgets->table != nullptr)
-    {
-        // 把逐条贡献写进耗时列：超过阈值的用警示色标红，便于一眼看出该从哪里下手。
-        for (int row = 0; row < areaWidgets->table->rowCount(); ++row)
-        {
-            QTableWidgetItem* anchorItem = areaWidgets->table->item(row, kColumnName);
-            if (anchorItem == nullptr)
-            {
-                continue;
-            }
-            const int entryIndex = anchorItem->data(Qt::UserRole).toInt();
-            if (entryIndex < 0 || entryIndex >= perEntryMs.size())
-            {
-                continue;
-            }
-            const double value = perEntryMs.at(entryIndex);
-            if (value < 0.0)
-            {
-                continue; // 未测（本轮时间预算没轮到它）。
-            }
-            writeLatencyCell(areaWidgets, row, value);
-        }
-    }
+    for(const int index:measuredEntries)
+        if(index>=0&&index<perEntryMs.size())applySingleLatencyResult(area,index,perEntryMs.at(index));
 
     // 报告写进详情编辑器：复用上一轮接好的详情布局系统（四种布局都生效）。
     if (areaWidgets != nullptr && areaWidgets->detailEditor != nullptr)
@@ -791,12 +611,6 @@ void ContextMenuCleanerTab::applyLatencyResults(
     {
         m_latencyStatusLabel->setText(QStringLiteral("测量完成：基准 %1，明细见下方详情区")
             .arg(formatMilliseconds(baselineMs)));
-    }
-
-    if (m_latencyProgressPid > 0)
-    {
-        kPro.set(m_latencyProgressPid, "测量完成", 0, 1.0f);
-        m_latencyProgressPid = 0;
     }
 
     m_latencyRunning.store(false);
@@ -865,19 +679,9 @@ void ContextMenuCleanerTab::applySingleLatencyResult(
     {
         return;
     }
-    const int rowCount = areaWidgets->table->rowCount();
-    for (int row = 0; row < rowCount; ++row)
-    {
-        const QTableWidgetItem* anchorItem = areaWidgets->table->item(row, kColumnName);
-        if (anchorItem == nullptr ||
-            anchorItem->data(Qt::UserRole).toInt() != entryIndex)
-        {
-            continue;
-        }
-        writeLatencyCell(areaWidgets, row, valueMs);
-        return;
-    }
-    // 该条目当前被筛选/未显示在表格里：结果留在最终的统一写入里体现，不算错误。
+    if(entryIndex>=areaWidgets->entryAnchors.size())return;
+    auto* anchor=areaWidgets->entryAnchors.at(entryIndex);
+    if(anchor)writeLatencyCell(areaWidgets,anchor->row(),valueMs);
 }
 
 void ContextMenuCleanerTab::clearLatencyColumn(const MenuArea area)
@@ -901,16 +705,18 @@ void ContextMenuCleanerTab::clearLatencyColumn(const MenuArea area)
 
 void ContextMenuCleanerTab::setLatencyUiRunning(const bool running)
 {
-    const bool busy = running || m_shellPromptActive || m_shellPending;
+    const bool busy = shellBusy();
     if (m_backupButton) m_backupButton->setEnabled(!busy);
     if (m_restoreBackupButton) m_restoreBackupButton->setEnabled(!busy);
     if (m_latencyButton != nullptr)
     {
-        m_latencyButton->setEnabled(!busy);
+        m_latencyButton->setEnabled(!busy && !widgetsForArea(currentArea())->tableBuilding);
     }
     if (m_latencyStopButton != nullptr)
     {
-        m_latencyStopButton->setEnabled(running);
+        const bool retry=m_latencyCleanup&&m_latencyCleanup->hasFailed();
+        m_latencyStopButton->setText(retry?QStringLiteral("重试恢复"):QStringLiteral("停止测量"));
+        m_latencyStopButton->setEnabled(running||retry);
     }
 
     // 测量期间禁用各分类的刷新/删除/筛选/复制：避免表格被重建，把逐条结果冲掉。

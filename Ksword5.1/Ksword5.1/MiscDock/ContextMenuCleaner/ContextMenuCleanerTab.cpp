@@ -14,6 +14,7 @@
 #include <QShowEvent>
 #include <QHash>
 #include <QPointer>
+#include "../../UI/RetainedCleanupJob.h"
 
 #include "ContextMenuCleanerTab.Internal.h"
 #include "../../theme.h"
@@ -66,6 +67,8 @@ ContextMenuCleanerTab::ContextMenuCleanerTab(QWidget* parent)
 
 ContextMenuCleanerTab::~ContextMenuCleanerTab()
 {
+    if (m_latencySession) m_latencySession->stop.store(true);
+    if (m_latencyCleanup && !m_latencyCleanup->isCleanupRequested()) m_latencyCleanup->requestCleanup();
     m_shellCompletion = {};
     if (m_shellOperation != nullptr) m_shellOperation->close();
     const std::array<MenuArea, 7> areas{MenuArea::InternetExplorer, MenuArea::Desktop,
@@ -501,6 +504,8 @@ void ContextMenuCleanerTab::rebuildAreaTable(const MenuArea area)
     if (widgets == nullptr || widgets->table == nullptr) return;
     widgets->filterTimer->stop();
     widgets->presentationTimer->stop();
+    widgets->entryAnchors.clear();
+    widgets->entryAnchors.resize(widgets->entries.size());
     widgets->searchTexts.clear();
     widgets->searchTexts.reserve(widgets->entries.size());
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(widgets->detailEditor);
@@ -551,7 +556,9 @@ void ContextMenuCleanerTab::processAreaPresentation(const MenuArea area)
             item->setToolTip(text);
             return item;
         };
-        widgets->table->setItem(row, kColumnName, makeItem(entry.itemName));
+        auto* anchor = makeItem(entry.itemName);
+        widgets->entryAnchors[row] = anchor;
+        widgets->table->setItem(row, kColumnName, anchor);
         widgets->table->setItem(row, kColumnDisplayName, makeItem(entry.displayName));
         widgets->table->setItem(row, kColumnKind, makeItem(entry.entryKind));
         widgets->table->setItem(row, kColumnSource, makeItem(entry.sourceGroup));
@@ -1061,7 +1068,8 @@ ks::ui::FieldDocument ContextMenuCleanerTab::buildEntryDetailDocument(const Cont
 
 bool ContextMenuCleanerTab::shellBusy() const
 {
-    return m_shellPromptActive || m_shellPending || m_latencyRunning.load();
+    return m_shellPromptActive || m_shellPending || m_latencyRunning.load()
+        || (m_latencySession && m_latencySession->recoveryPending.load());
 }
 
 void ContextMenuCleanerTab::suspendShellQueries()

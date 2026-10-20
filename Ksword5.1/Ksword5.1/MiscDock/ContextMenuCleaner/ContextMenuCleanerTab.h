@@ -13,6 +13,7 @@
 #include <QVector>
 #include <QJsonObject>
 #include "ContextMenuRegistrySnapshot.h"
+#include "ContextMenuTemporaryOverride.h"
 #include <functional>
 #include <QWidget>
 
@@ -27,13 +28,14 @@
 #endif
 #include <Windows.h>
 
-namespace ks::ui { class AsyncOperation; }
+namespace ks::ui { class AsyncOperation; class RetainedCleanupJob; }
 class QShowEvent;
 class QLabel;
 class QLineEdit;
 class QPoint;
 class QPushButton;
 class QTableWidget;
+class QTableWidgetItem;
 class QTabWidget;
 class QTimer;
 class QVBoxLayout;
@@ -118,6 +120,7 @@ namespace ks::misc
             QTableWidget* table = nullptr;        // table：右键菜单项列表。
             ks::ui::StructuredFieldView* detailEditor = nullptr; // detailEditor：本分类的只读详情编辑器，交由详情布局系统托管。
             QLabel* statusLabel = nullptr;        // statusLabel：当前分类统计与提示。
+            QVector<QTableWidgetItem*> entryAnchors; // GUI-only stable row items; invalidated before each budget rebuild.
             QVector<ContextMenuEntry> entries;    // entries：当前分类最近一次完整枚举结果。
             ks::ui::AsyncOperation* queryOperation = nullptr;
             QTimer* presentationTimer = nullptr;
@@ -191,6 +194,7 @@ namespace ks::misc
         // - 处理：把完整注册表树复制到当前用户 KSword 备份区并原子切换“最近备份”；
         // - 返回：全部备份成功返回 true，否则返回 false 并写错误文本。
         static bool createUrlBindingBackup(const QVector<ContextMenuEntry>& entries, QString* errorTextOut);
+        struct LatencyMeasurementResult;
         enum class ShellTransactionStage { NotAccepted, Completed, BackupFailed, Unknown };
         struct ShellTransactionResult
         {
@@ -201,6 +205,7 @@ namespace ks::misc
             QStringList failures;
             int count = 0;
             QJsonObject payload;
+            std::shared_ptr<LatencyMeasurementResult> latency;
             QString failureText() const
             {
                 if (stage == ShellTransactionStage::NotAccepted)
@@ -311,6 +316,20 @@ namespace ks::misc
             QStringList aliasPaths;
         };
 
+        struct LatencyMeasurementResult
+        {
+            bool cancelled = false;
+            double baselineMs = 0;
+            QVector<double> contributions;
+            QVector<int> measuredEntries;
+            ks::ui::FieldDocument report;
+        };
+        static ShellTransactionResult runLatencyMeasurement(MenuArea area,
+            const QVector<LatencyProbeItem>& items, int truncatedCount, int entryCount,
+            unsigned long explorerPid, std::shared_ptr<shell_transaction::LatencySession> session,
+            std::shared_ptr<ks::ui::RetainedCleanupJob> cleanup);
+        void pollLatencyProgress();
+
         // currentArea：
         // - 输入：无；
         // - 处理：把当前选中的子页签映射回 MenuArea；
@@ -344,7 +363,7 @@ namespace ks::misc
         // - 处理：写耗时列（超过门限标红）、把报告写进详情编辑器、刷新状态栏；
         // - 返回：无。
         void applyLatencyResults(MenuArea area, double baselineMs, const QVector<double>& perEntryMs,
-                                 const ks::ui::FieldDocument& report);
+                                 const ks::ui::FieldDocument& report, const QVector<int>& measuredEntries);
 
         // applySingleLatencyResult：
         // - 输入 area：目标分类；entryIndex：entries 下标；valueMs：该条的贡献（0 表示很短）；
@@ -442,6 +461,11 @@ namespace ks::misc
         // ===================== 耗时测量运行状态 =====================
         std::atomic<bool> m_latencyRunning{ false };            // m_latencyRunning：是否有测量任务在跑。
         std::atomic<bool> m_latencyCancelRequested{ false };    // m_latencyCancelRequested：停止标志。
+        std::shared_ptr<shell_transaction::LatencySession> m_latencySession;
+        std::shared_ptr<ks::ui::RetainedCleanupJob> m_latencyCleanup;
+        QTimer* m_latencyPulseTimer = nullptr;
+        MenuArea m_latencyArea = MenuArea::Desktop;
+        std::uint64_t m_latencySnapshotGeneration = 0;
         int m_latencyProgressPid = 0;                           // m_latencyProgressPid：kProgress 任务 PID。
         AreaWidgets m_ieWidgets;               // m_ieWidgets：IE 右键菜单子页控件组。
         AreaWidgets m_desktopWidgets;          // m_desktopWidgets：桌面右键菜单子页控件组。

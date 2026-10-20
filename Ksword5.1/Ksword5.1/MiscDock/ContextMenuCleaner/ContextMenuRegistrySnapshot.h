@@ -37,6 +37,7 @@ namespace ks::misc::shell_transaction
         virtual ~Port() = default;
         virtual LSTATUS read(const Key&, QVector<Value>&, QStringList&) = 0;
         virtual LSTATUS remove(const Key&) = 0;
+        virtual LSTATUS removeEmptyKey(const Key&) { return ERROR_NOT_SUPPORTED; }
         virtual LSTATUS create(const Key&) = 0;
         virtual LSTATUS write(const Key&, const Value&) = 0;
         virtual LSTATUS eraseValue(const Key&, const QString&) = 0;
@@ -311,6 +312,8 @@ namespace ks::misc::shell_transaction
         }
         LSTATUS remove(const Key& key)override
         {Handle handle;auto status=::RegOpenKeyExW(root(key.root),key.path.toStdWString().c_str(),0,KEY_READ|KEY_WRITE|key.view,&handle.key);if(status!=ERROR_SUCCESS)return status;status=::RegDeleteTreeW(handle.key,nullptr);if(status!=ERROR_SUCCESS)return status;::RegCloseKey(handle.key);handle.key=nullptr;return ::RegDeleteKeyExW(root(key.root),key.path.toStdWString().c_str(),key.view,0);}
+        LSTATUS removeEmptyKey(const Key& key)override
+        {return ::RegDeleteKeyExW(root(key.root),key.path.toStdWString().c_str(),key.view,0);}
         LSTATUS create(const Key& key)override
         {Handle handle;return ::RegCreateKeyExW(root(key.root),key.path.toStdWString().c_str(),0,nullptr,REG_OPTION_NON_VOLATILE,KEY_WRITE|key.view,nullptr,&handle.key,nullptr);}
         LSTATUS createTracked(const Key& key,bool& created)override

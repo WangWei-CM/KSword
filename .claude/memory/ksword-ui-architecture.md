@@ -418,6 +418,10 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 当前这组补丁只做源码、HostX64编译与抽取生产policy的纯逻辑验证；真实主程序Paint region、DPI/背景/外角和首帧仍由用户手测。paint面积变化不能直接宣称FPS或耗时倍数。
 ## 异步事务与退出资源（2026-10-20）
 
+- Shell 关联备份保留 native value 类型/原始 bytes、root/view/path；旧 v1 只能合并已明确记录的键值，不能从缺失数据推断删除。其安全备份/当前 witness 也须显式保留 mergeOnly 语义，不能只让文件 decode 通过，却在真实 prepare→export→apply 链中丢失该语义。
+- 原生键路径和值名可能含孤立 UTF-16 surrogate；JSON 可读文本不能作为唯一身份。v2 同时保存原始 UTF-16 base64，读取严格校验 bytes 与可读投影的一致性，并兼容旧 text-only 文件。
+- 临时注册表测量先取得独立 cleanup lease，再做完整 worker 备份；Stop/退出先置原子停止，不等串行锁。恢复后再次核 Stop 再决定是否启动下一次 probe。关闭只请求首次 cleanup，不能把失败恢复变为隐式重试；仅显式 Retry 再尝试。新建空键使用非递归删除，避免空态见证后外部新建子键被递归删除。
+
 - Checked STOP失败仍拥有session/consumer/thread时，使用`RetainedCleanupJob`强持独立值owner和旧epoch的lease；false/throw不释放也不自动循环。退出提示的用户Retry显式调用`RetryRetainedCleanupJobs`，只重试已请求且失败的job一次；Cancel仅重开新admission，不撤销旧cleanup。只有后台确认STOP/close/join完成并销毁最后值闭包才归还lease。`create(null)`也可能已接纳旧epoch收尾，调用侧必须废弃该service/lifecycle，不能Reopen复用，否则旧STOP会撞新Start。
 
 - 有已接受reservation的持久资源先同步closing拒绝新reserve，再用`RetainedCleanupJob::ReadyToAttempt`短值检查count0；false只延后，不标failed、不占池线程。最后reservation在资源gate外调用`notifyReadyToAttempt()`，只交接初始调度机会；迟到就绪不能把刚失败的initial当成显式Retry。`requestCleanup()`保留外部显式失败重试语义。谓词与reserve共gate且closing后count只能减少，避免lost trigger和单池线程互等。reservation强持job至通知完成，resource owner仅weak job且不持reservation；全部实际cleanup成功后，attempt/stop/readiness值闭包在后台销毁才归还lease。
