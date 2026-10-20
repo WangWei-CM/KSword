@@ -49,12 +49,6 @@ namespace ks::ui
     {
         enum PropertyRole { KindRole = Qt::UserRole + 176, KeyRole, RowRole, ValueRole };
 
-        // 文档模式只比较规范字段，不触及控件；相同采样快照无需再次通知卡片展开/筛选。
-        bool sameFieldNodes(const QVector<FieldNode>& first, const QVector<FieldNode>& second)
-        {
-            return first == second; // 唯一完整规范比较来自 FieldNode::operator==。
-        }
-
         void retireFieldProjection(std::shared_ptr<const FieldTreeProjection> snapshot,
             QHash<QString, bool> expansion = {})
         {
@@ -727,7 +721,7 @@ namespace ks::ui
     {
         if (m_document.title == document.title
             && (m_document.nodes.isSharedWith(document.nodes)
-                || (!m_valueTree && sameFieldNodes(m_document.nodes, document.nodes))))
+                || (!m_valueTree && m_document.nodes == document.nodes)))
         {
             return;
         }
