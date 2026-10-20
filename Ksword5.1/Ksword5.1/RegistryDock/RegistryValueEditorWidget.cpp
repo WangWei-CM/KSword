@@ -278,6 +278,7 @@ RegistryValueEditorWidget::RegistryValueEditorWidget(QWidget* parent) : QWidget(
     connect(m_hex, &ks::ui::HexView::byteEdited, this, [this] {
         if (m_syncing) return;
         m_working = m_hex->buffer();
+        m_comparisonNeedsRefresh = true;
         m_dataError.clear();
         m_operationError.clear();
         m_typedNeedsRefresh = true;
@@ -310,6 +311,8 @@ void RegistryValueEditorWidget::setValue(const QString& keyPath, const QString& 
     m_originalType = type;
     m_original = raw;
     m_working = raw;
+    m_comparisonNeedsRefresh = true;
+    m_comparisonBaselineNeedsRefresh = true;
     m_createMode = createMode;
     m_originalTypedValid = false;
     m_originalTypedText.clear();
@@ -343,8 +346,8 @@ void RegistryValueEditorWidget::setValue(const QString& keyPath, const QString& 
     const bool typed = m_typedPages->currentIndex() != kRawPage;
     m_tabs->setTabEnabled(0, typed);
     m_tabs->setCurrentIndex(typed ? 0 : 1);
-    loadHexEditor();
-    updateComparison();
+    if (m_tabs->currentIndex() == 1) loadHexEditor();
+    if (m_tabs->currentIndex() == 2) updateComparison();
     m_syncing = false;
     updateState();
     emit draftChanged();
@@ -463,7 +466,13 @@ void RegistryValueEditorWidget::loadHexEditor()
 
 void RegistryValueEditorWidget::updateComparison()
 {
-    m_before->setBuffer(0, m_original);
+    if (!m_comparisonNeedsRefresh) return;
+    m_comparisonNeedsRefresh = false;
+    if (m_comparisonBaselineNeedsRefresh)
+    {
+        m_comparisonBaselineNeedsRefresh = false;
+        m_before->setBuffer(0, m_original);
+    }
     m_after->setBuffer(0, m_working);
     m_after->setReference(m_original);
 }
@@ -471,6 +480,7 @@ void RegistryValueEditorWidget::updateComparison()
 void RegistryValueEditorWidget::stageBytes(const QByteArray& bytes)
 {
     m_working = bytes;
+    m_comparisonNeedsRefresh = true;
     if (bytes != m_original) m_formatWarning.clear();
     m_dataError.clear();
     m_operationError.clear();
@@ -557,6 +567,7 @@ void RegistryValueEditorWidget::changeType()
     const bool previousSync = m_syncing;
     m_syncing = true;
     m_working = currentType() == m_originalType ? m_original : defaultData(currentType());
+    m_comparisonNeedsRefresh = true;
     m_dataError.clear();
     m_operationError.clear();
     m_typedNeedsRefresh = true;

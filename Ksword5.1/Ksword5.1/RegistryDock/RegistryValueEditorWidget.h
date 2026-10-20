@@ -99,5 +99,7 @@ private:
     bool m_syncing = false;
     bool m_typedNeedsRefresh = false;
     bool m_hexNeedsRefresh = false;
+    bool m_comparisonNeedsRefresh = true;
+    bool m_comparisonBaselineNeedsRefresh = true;
     quint64 m_revision = 0;
 };
