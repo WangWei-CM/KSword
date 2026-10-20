@@ -1175,6 +1175,9 @@
     <ClInclude Include="Ui\BackgroundWork.h">
       <Filter>Ui</Filter>
     </ClInclude>
+    <ClInclude Include="Ui\ImmutableTextRows.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
     <ClInclude Include="Ui\AsyncTask.h">
       <Filter>Ui</Filter>
     </ClInclude>

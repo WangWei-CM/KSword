@@ -24,7 +24,7 @@ struct KernelObjectNamespaceTreeNodeState;
 struct KernelR0EvidenceSnapshot {
     KernelFeatureId featureId = KernelFeatureId::CpuHardwareSnapshot;
     std::vector<std::wstring> columns;
-    std::vector<std::vector<std::wstring>> rows;
+    Ksword::Ui::ImmutableTextRows rows;
     std::wstring statusText;
     std::wstring selectedRowSignature;
     int topRow = 0;
@@ -366,7 +366,7 @@ private:
     KernelFeatureId directFeatureId_ = KernelFeatureId::ObjectNamespaceOverview;
     bool hasDirectFeatureId_ = false;
     std::vector<std::wstring> currentColumns_;
-    std::vector<std::vector<std::wstring>> currentRows_;
+    Ksword::Ui::ImmutableTextRows currentRows_;
     std::vector<int> currentRowIndents_;
     std::vector<std::wstring> collapsedObjectPaths_;
     std::vector<std::wstring> currentRawColumns_;
@@ -374,7 +374,7 @@ private:
     std::shared_ptr<const KernelRows> currentRawRows_ = std::make_shared<const KernelRows>();
     struct KernelFeatureViewCache {
         std::vector<std::wstring> columns;
-        std::vector<std::vector<std::wstring>> rows;
+        Ksword::Ui::ImmutableTextRows rows;
         std::vector<int> rowIndents;
         std::vector<std::wstring> rawColumns;
         std::shared_ptr<const KernelRows> rawRows;

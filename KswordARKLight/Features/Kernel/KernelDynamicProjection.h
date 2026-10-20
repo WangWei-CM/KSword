@@ -2,6 +2,7 @@
 
 #include "KernelPageLayout.h"
 #include "../../Ui/NumericSortKey.h"
+#include "../../Ui/ImmutableTextRows.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -20,7 +21,7 @@ namespace Ksword::Features::Kernel {
 struct KernelDynamicProjection {
     using Rows = std::vector<std::vector<std::wstring>>;
     std::vector<std::wstring> columns;
-    Rows rows;
+    Ksword::Ui::ImmutableTextRows rows;
     std::shared_ptr<const Rows> rawRows;
 };
 
@@ -72,7 +73,7 @@ inline KernelDynamicProjection BuildKernelDynamicProjection(const KernelFeatureI
         }
         output.rows.push_back(std::move(cells));
     }
-    output.rawRows = std::make_shared<const KernelDynamicProjection::Rows>(output.rows);
+    output.rawRows = output.rows.contiguousSnapshot();
     return output;
 }
 
@@ -98,6 +99,8 @@ struct KernelSortSnapshot {
     int column = -1;
     bool ascending = true;
     std::vector<std::size_t> order;
+    std::vector<std::size_t> inverse;
+    Ksword::Ui::ImmutableTextRows rows;
 };
 
 struct KernelQuerySnapshot {

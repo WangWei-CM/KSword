@@ -5381,7 +5381,7 @@ void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamic
         for (std::size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex) {
             AddDynamicResultRow(static_cast<int>(rowIndex), result.rows[rowIndex], orderedColumns);
         }
-        currentRawRows_ = std::make_shared<const KernelRawRows>(currentRows_);
+        currentRawRows_ = currentRows_.contiguousSnapshot();
     }
     currentRawColumns_ = currentColumns_;
     if (const KernelFeatureDescriptor* descriptor = CurrentDescriptor();
@@ -8495,7 +8495,7 @@ void KernelPage::RequestR0EvidenceRebuild(const KernelFeatureId featureId) {
     }
     std::vector<std::wstring> rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
     const auto rawRows = !currentRawRows_->empty() || currentRows_.empty() ? currentRawRows_ :
-        std::make_shared<const KernelRawRows>(currentRows_);
+        currentRows_.contiguousSnapshot();
     const std::wstring filterText = WindowText(filterEdit_);
     const bool riskOnly = riskOnlyCheck_ && Button_GetCheck(riskOnlyCheck_) == BST_CHECKED;
     const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
@@ -8615,22 +8615,26 @@ void KernelPage::RequestResultSort(const int columnIndex, const bool ascending) 
     const auto featureId = descriptor->id;
     if (featureId == KernelFeatureId::ObjectNamespaceOverview ||
         featureId == KernelFeatureId::ObjectDirectoryRecursive) return;
-    auto cells = std::make_shared<std::vector<std::wstring>>();
-    cells->reserve(currentRows_.size());
-    for (const auto& row : currentRows_) cells->push_back(
-        static_cast<std::size_t>(columnIndex) < row.size() ? row[static_cast<std::size_t>(columnIndex)] : std::wstring{});
+    const auto rows = currentRows_.snapshot();
     const auto revision = rowsRevision_;
     const auto requestId = ++sortRequestId_;
     pendingSorts_[featureId] = {columnIndex, ascending};
     sortTask_->request(
-        [cells, featureId, revision, requestId, columnIndex, ascending] {
+        [rows, featureId, revision, requestId, columnIndex, ascending] {
             KernelSortSnapshot result;
             result.featureId = featureId;
             result.revision = revision;
             result.requestId = requestId;
             result.column = columnIndex;
             result.ascending = ascending;
-            result.order = BuildKernelSortOrder(*cells, ascending);
+            std::vector<std::wstring> cells;
+            cells.reserve(rows->size());
+            for (const auto& row : *rows) cells.push_back(
+                static_cast<std::size_t>(columnIndex) < row->size() ? (*row)[static_cast<std::size_t>(columnIndex)] : std::wstring{});
+            result.order = BuildKernelSortOrder(cells, ascending);
+            result.rows = Ksword::Ui::ImmutableTextRows::reorder(rows, result.order);
+            result.inverse.resize(result.order.size());
+            for (std::size_t index=0; index<result.order.size(); ++index) result.inverse[result.order[index]]=index;
             return result;
         },
         [this](std::uint64_t, std::optional<KernelSortSnapshot>&& result, std::exception_ptr error) {
@@ -8644,22 +8648,19 @@ void KernelPage::RequestResultSort(const int columnIndex, const bool ascending) 
             }
             const int selected = ListView_GetNextItem(resultList_, -1, LVNI_SELECTED);
             const int top = ListView_GetTopIndex(resultList_);
-            int newSelected = -1;
-            int newTop = -1;
-            std::vector<std::vector<std::wstring>> ordered;
-            std::vector<int> indents;
-            ordered.reserve(currentRows_.size());
-            const bool hasIndents = currentRowIndents_.size() == currentRows_.size();
-            if (hasIndents) indents.reserve(currentRowIndents_.size());
-            for (std::size_t index = 0; index < result->order.size(); ++index) {
-                const auto old = result->order[index];
-                if (static_cast<int>(old) == selected) newSelected = static_cast<int>(index);
-                if (static_cast<int>(old) == top) newTop = static_cast<int>(index);
-                ordered.push_back(std::move(currentRows_[old]));
-                if (hasIndents) indents.push_back(currentRowIndents_[old]);
+            const int newSelected = selected >= 0 && static_cast<std::size_t>(selected) < result->inverse.size()
+                ? static_cast<int>(result->inverse[static_cast<std::size_t>(selected)]) : -1;
+            const int newTop = top >= 0 && static_cast<std::size_t>(top) < result->inverse.size()
+                ? static_cast<int>(result->inverse[static_cast<std::size_t>(top)]) : -1;
+            // The worker reordered references; every complete hidden/display
+            // field still belongs to its original immutable row.
+            if (currentRowIndents_.size() == result->order.size()) {
+                std::vector<int> indents;
+                indents.reserve(result->order.size());
+                for (const auto old : result->order) indents.push_back(currentRowIndents_[old]);
+                currentRowIndents_ = std::move(indents);
             }
-            currentRows_ = std::move(ordered);
-            if (hasIndents) currentRowIndents_ = std::move(indents);
+            currentRows_ = std::move(result->rows);
             pendingSorts_.erase(result->featureId);
             Ksword::Ui::ScopedListViewRedrawLock resultListLock(resultList_);
             SyncResultListVirtualRows();
