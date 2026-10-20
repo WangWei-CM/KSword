@@ -1,4 +1,5 @@
 #include "DdmaPage.h"
+#include "../ksword/log/log.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
@@ -1555,39 +1556,33 @@ void DdmaPage::clearSession()
     {
         return;
     }
-    // 侦测会在磁盘上留下一个专属暂存文件。既然那是本页造成的副作用，就必须有
-    // 一条撤销路径——否则用户只能自己去 D 盘找一个隐藏文件。删除放在"清除通道
-    // 配置"里是因为这正是这个文件生命周期的终点：通道都不用了，它也没必要留着。
-    if (!m_scratchFilePath.isEmpty() && QFile::exists(m_scratchFilePath))
+    // Freeze the owned path and decision on GUI; do not ask the filesystem here.
+    // Deletion is queued after earlier accepted DDMA transactions have restored
+    // their scratch. Clearing configuration itself never waits for that queue.
+    const QString scratchFilePath = m_scratchFilePath;
+    const auto sessionAtPrompt = m_session;
+    const auto generationAtPrompt = ksword::memory_backend::ddmaSessionGeneration();
+    m_operationBusy = true;
+    refreshOperationState();
+    bool deleteScratchFile = false;
+    if (!scratchFilePath.isEmpty())
     {
-        const QMessageBox::StandardButton answer = QMessageBox::question(
-            this,
-            QStringLiteral("DDMA"),
+        const QPointer<DdmaPage> alive(this);
+        const auto answer = QMessageBox::question(this, QStringLiteral("DDMA"),
             QStringLiteral("是否同时删除本页创建的专属暂存文件？\n%1\n\n删除后这些簇会交还系统。如果还有别处正在用这个 LBA，请选择“否”。")
-                .arg(m_scratchFilePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-        if (answer == QMessageBox::Yes)
+                .arg(scratchFilePath),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (!alive) { return; }
+        if (generationAtPrompt != ksword::memory_backend::ddmaSessionGeneration()
+            || !sameDdmaSession(sessionAtPrompt, m_session) || m_scratchFilePath != scratchFilePath)
         {
-            if (QFile::remove(m_scratchFilePath))
-            {
-                if (m_scratchDetectLabel != nullptr)
-                {
-                    m_scratchDetectLabel->setText(
-                        QStringLiteral("已删除专属暂存文件 %1。").arg(m_scratchFilePath));
-                    m_scratchDetectLabel->setStyleSheet(
-                        QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
-                }
-            }
-            else if (m_scratchDetectLabel != nullptr)
-            {
-                m_scratchDetectLabel->setText(
-                    QStringLiteral("删除专属暂存文件失败：%1。").arg(m_scratchFilePath));
-                m_scratchDetectLabel->setStyleSheet(
-                    QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-            }
+            m_operationBusy = false;
+            refreshOperationState();
+            return;
         }
+        deleteScratchFile = answer == QMessageBox::Yes;
     }
+    m_operationBusy = deleteScratchFile;
     m_scratchFilePath.clear();
     if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
     if (m_scratchContextView != nullptr)
@@ -1602,6 +1597,27 @@ void DdmaPage::clearSession()
     m_session.transferBytes = m_transferBytes;
     m_session.scratchSectorCount = m_scratchSectorCount;
     refreshSessionState();
+    if (deleteScratchFile)
+    {
+        submitPageTransaction<bool>(this,
+            [scratchFilePath]() {
+                const bool removed = !QFile::exists(scratchFilePath) || QFile::remove(scratchFilePath);
+                if (removed) { info << "DDMA scratch-file cleanup: path=" << scratchFilePath << " removed=1" << eol; }
+                else { warn << "DDMA scratch-file cleanup: path=" << scratchFilePath << " removed=0" << eol; }
+                return removed;
+            }, [this, scratchFilePath](const auto& completed) {
+            m_operationBusy = false;
+            refreshOperationState();
+            if (m_scratchDetectLabel == nullptr) { return; }
+            const bool removed = completed.failure.isEmpty() && completed.value;
+            m_scratchDetectLabel->setText(removed
+                ? QStringLiteral("已删除专属暂存文件 %1。").arg(scratchFilePath)
+                : QStringLiteral("删除专属暂存文件失败：%1。").arg(scratchFilePath));
+            m_scratchDetectLabel->setStyleSheet(QStringLiteral("color:%1;")
+                .arg(removed ? KswordTheme::TextSecondaryHex() : KswordTheme::WarningHex()));
+        });
+    }
+
 }
 
 void DdmaPage::refreshSessionState()
