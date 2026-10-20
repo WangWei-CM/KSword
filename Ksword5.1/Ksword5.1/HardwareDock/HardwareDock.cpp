@@ -7303,12 +7303,16 @@ void HardwareDock::initializePnpAcpiPciTab()
 
 void HardwareDock::ensureDiskMonitorTabInitialized()
 {
-    // 完成真实页面挂载后同步准备可见绑定；已初始化页重显也走同一个出口。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_diskMonitorHostPage);
     if (m_diskMonitorPage != nullptr || m_diskMonitorHostPage == nullptr)
     {
+        if (m_diskMonitorHostPage != nullptr && m_diskMonitorHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_diskMonitorHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_diskMonitorHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_diskMonitorHostPage->layout());
     if (hostLayout == nullptr)
@@ -7336,12 +7340,16 @@ void HardwareDock::ensureDiskMonitorTabInitialized()
 
 void HardwareDock::ensureOtherDevicesTabInitialized()
 {
-    // 完成真实页面挂载后同步准备可见绑定；不提前构造隐藏设备页。
-    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_otherDevicesHostPage);
     if (m_otherDevicesPage != nullptr || m_otherDevicesHostPage == nullptr)
     {
+        if (m_otherDevicesHostPage != nullptr && m_otherDevicesHostPage->isVisible())
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(m_otherDevicesHostPage);
+        }
         return;
     }
+    // 仅真实构造/挂载需要完成守卫；热切只消费已有 dirty。
+    const ks::ui::ScopedWidgetThemePreparation themePreparation(m_otherDevicesHostPage);
 
     QVBoxLayout* hostLayout = qobject_cast<QVBoxLayout*>(m_otherDevicesHostPage->layout());
     if (hostLayout == nullptr)
