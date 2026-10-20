@@ -845,6 +845,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuRegistrySnapshot.h" />
     <ClInclude Include="PrivilegeDock\PrivilegeLegacyValueOperations.h" />
     <ClInclude Include="PrivilegeDock\PrivilegeLegacyReadService.h" />
     <ClInclude Include="MonitorDock\MonitorEventFilterProjection.h" />

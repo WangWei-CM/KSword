@@ -82,6 +82,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuRegistrySnapshot.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="PrivilegeDock\PrivilegeLegacyValueOperations.h">
       <Filter>Header Files</Filter>
     </ClInclude>

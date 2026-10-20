@@ -12,6 +12,7 @@
 
 #include <QVector>
 #include <QJsonObject>
+#include "ContextMenuRegistrySnapshot.h"
 #include <functional>
 #include <QWidget>
 
@@ -267,13 +268,17 @@ namespace ks::misc
         // - 处理：返回备份目录（优先 exe 同级 ContextMenuBackups；不可写时回落
         //   %LOCALAPPDATA%\Ksword\ContextMenuBackups）；
         // - 返回：目录绝对路径（可能尚未创建）。
-        QString contextMenuBackupDirectory() const;
+        static QString contextMenuBackupDirectory();
 
         // exportContextMenuBackupToFile：
         // - 输入 filePathOut/errorTextOut：可为空；
         // - 处理：把本页覆盖的全部菜单注册表位置递归导出为 JSON（含根键与 32/64 视图）；
         // - 返回：成功返回 true 并写回文件路径；失败返回 false 并写回原因。
-        bool exportContextMenuBackupToFile(QString* filePathOut, QString* errorTextOut) const;
+        static bool exportContextMenuBackupToFile(QString* filePathOut, QString* errorTextOut,
+            QJsonObject* snapshotOut = nullptr, const QString& suffix = QString(),
+            const QVector<shell_transaction::Key>& extraScopes = {}, bool mergeOnly = false);
+        static ShellTransactionResult prepareContextMenuRestore(const QString& path);
+        static ShellTransactionResult applyContextMenuRestore(const QJsonObject& plan);
 
         // backupContextMenuToFile：
         // - 输入 showSuccessMessage：true 时弹窗提示路径（按钮触发），false 只写日志（自动备份）；
