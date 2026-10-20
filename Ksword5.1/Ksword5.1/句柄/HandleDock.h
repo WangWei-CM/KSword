@@ -391,6 +391,7 @@ private:
         const ks::handle::HandleFilterRule& rule) const;
     void updateHandleSummaryStatus();
     void sortLoadedRuleRows(int column, Qt::SortOrder order);
+    bool handleTreeRowLessThan(QTreeWidgetItem* left, QTreeWidgetItem* right, int column, Qt::SortOrder order) const;
 
     void loadFilterConfiguration();
     void saveFilterConfiguration() const;

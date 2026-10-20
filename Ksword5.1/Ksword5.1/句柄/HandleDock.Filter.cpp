@@ -342,7 +342,20 @@ void HandleDock::appendNextRuleResultBatch(const QString& ruleId)
             continue;
         }
         item->setData(0, ks::handle::HandleTreeRuleIdRole, ruleId);
-        summaryItem->addChild(item);
+        if (m_handleSortColumn >= 0 && m_handleSortColumn < static_cast<int>(HandleTableColumn::Count))
+        {
+            int first = 0;
+            int last = summaryItem->childCount();
+            while (first < last)
+            {
+                const int middle = first + (last - first) / 2;
+                if (handleTreeRowLessThan(item, summaryItem->child(middle), m_handleSortColumn, m_handleSortOrder))
+                    last = middle;
+                else first = middle + 1;
+            }
+            summaryItem->insertChild(first, item);
+        }
+        else summaryItem->addChild(item);
         sourceRowIndices.push_back(static_cast<qulonglong>(sourceRowIndex));
         newItems.push_back(item);
     }
@@ -360,8 +373,51 @@ void HandleDock::appendNextRuleResultBatch(const QString& ruleId)
                 .arg(state->rowIndices.size()));
         loadMoreItem->setForeground(0, KswordTheme::PrimaryBlueColor);
     }
-    sortLoadedRuleRows(m_handleSortColumn, m_handleSortOrder);
     scheduleProcessIconResolution(sourceRowIndices, newItems);
+}
+
+bool HandleDock::handleTreeRowLessThan(QTreeWidgetItem* left, QTreeWidgetItem* right,
+    const int column, const Qt::SortOrder order) const
+{
+    const std::size_t leftIndex = static_cast<std::size_t>(
+        left->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
+    const std::size_t rightIndex = static_cast<std::size_t>(
+        right->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
+    if (leftIndex >= m_allRows.size() || rightIndex >= m_allRows.size())
+    {
+        return false;
+    }
+    const HandleRow& leftRow = m_allRows[leftIndex];
+    const HandleRow& rightRow = m_allRows[rightIndex];
+    int comparison = 0;
+    switch (static_cast<HandleTableColumn>(column))
+    {
+    case HandleTableColumn::ProcessId:
+        comparison = leftRow.processId < rightRow.processId ? -1 : leftRow.processId > rightRow.processId ? 1 : 0;
+        break;
+    case HandleTableColumn::HandleValue:
+        comparison = leftRow.handleValue < rightRow.handleValue ? -1 : leftRow.handleValue > rightRow.handleValue ? 1 : 0;
+        break;
+    case HandleTableColumn::TypeIndex:
+        comparison = leftRow.typeIndex < rightRow.typeIndex ? -1 : leftRow.typeIndex > rightRow.typeIndex ? 1 : 0;
+        break;
+    case HandleTableColumn::ObjectAddress:
+        comparison = leftRow.objectAddress < rightRow.objectAddress ? -1 : leftRow.objectAddress > rightRow.objectAddress ? 1 : 0;
+        break;
+    case HandleTableColumn::GrantedAccess:
+        comparison = leftRow.grantedAccess < rightRow.grantedAccess ? -1 : leftRow.grantedAccess > rightRow.grantedAccess ? 1 : 0;
+        break;
+    case HandleTableColumn::HandleCount:
+        comparison = leftRow.handleCount < rightRow.handleCount ? -1 : leftRow.handleCount > rightRow.handleCount ? 1 : 0;
+        break;
+    case HandleTableColumn::PointerCount:
+        comparison = leftRow.pointerCount < rightRow.pointerCount ? -1 : leftRow.pointerCount > rightRow.pointerCount ? 1 : 0;
+        break;
+    default:
+        comparison = QString::localeAwareCompare(left->text(column), right->text(column));
+        break;
+    }
+    return order == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
 }
 
 void HandleDock::sortLoadedRuleRows(const int column, const Qt::SortOrder order)
@@ -393,47 +449,7 @@ void HandleDock::sortLoadedRuleRows(const int column, const Qt::SortOrder order)
             }
         }
         const auto compareItems = [this, column, order](QTreeWidgetItem* left, QTreeWidgetItem* right)
-        {
-            const std::size_t leftIndex = static_cast<std::size_t>(
-                left->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
-            const std::size_t rightIndex = static_cast<std::size_t>(
-                right->data(0, ks::handle::HandleTreeSourceRowIndexRole).toULongLong());
-            if (leftIndex >= m_allRows.size() || rightIndex >= m_allRows.size())
-            {
-                return false;
-            }
-            const HandleRow& leftRow = m_allRows[leftIndex];
-            const HandleRow& rightRow = m_allRows[rightIndex];
-            int comparison = 0;
-            switch (static_cast<HandleTableColumn>(column))
-            {
-            case HandleTableColumn::ProcessId:
-                comparison = leftRow.processId < rightRow.processId ? -1 : leftRow.processId > rightRow.processId ? 1 : 0;
-                break;
-            case HandleTableColumn::HandleValue:
-                comparison = leftRow.handleValue < rightRow.handleValue ? -1 : leftRow.handleValue > rightRow.handleValue ? 1 : 0;
-                break;
-            case HandleTableColumn::TypeIndex:
-                comparison = leftRow.typeIndex < rightRow.typeIndex ? -1 : leftRow.typeIndex > rightRow.typeIndex ? 1 : 0;
-                break;
-            case HandleTableColumn::ObjectAddress:
-                comparison = leftRow.objectAddress < rightRow.objectAddress ? -1 : leftRow.objectAddress > rightRow.objectAddress ? 1 : 0;
-                break;
-            case HandleTableColumn::GrantedAccess:
-                comparison = leftRow.grantedAccess < rightRow.grantedAccess ? -1 : leftRow.grantedAccess > rightRow.grantedAccess ? 1 : 0;
-                break;
-            case HandleTableColumn::HandleCount:
-                comparison = leftRow.handleCount < rightRow.handleCount ? -1 : leftRow.handleCount > rightRow.handleCount ? 1 : 0;
-                break;
-            case HandleTableColumn::PointerCount:
-                comparison = leftRow.pointerCount < rightRow.pointerCount ? -1 : leftRow.pointerCount > rightRow.pointerCount ? 1 : 0;
-                break;
-            default:
-                comparison = QString::localeAwareCompare(left->text(column), right->text(column));
-                break;
-            }
-            return order == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
-        };
+        { return handleTreeRowLessThan(left, right, column, order); };
         std::stable_sort(handleItems.begin(), handleItems.end(), compareItems);
         summaryItem->addChildren(handleItems);
         summaryItem->addChildren(trailingItems);
