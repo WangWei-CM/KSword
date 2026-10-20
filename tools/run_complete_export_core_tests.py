@@ -52,6 +52,8 @@ def main() -> int:
     fake_source = Path(__file__).with_name('complete_export_fake_save_file.h')
     (output / 'fixture.cpp').write_bytes(fixture.read_bytes())
     (fake / 'QSaveFile').write_bytes(fake_source.read_bytes())
+    manifest['sources']['fixture.cpp'] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    manifest['sources']['fake/QSaveFile'] = hashlib.sha256(fake_source.read_bytes()).hexdigest()
     vc = Path('C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207')
     if not (vc / 'bin/Hostx64/x64/cl.exe').is_file():
         vc = Path('D:/Software/VS/VC/Tools/MSVC/14.44.35207')

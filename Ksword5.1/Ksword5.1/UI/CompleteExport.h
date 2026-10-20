@@ -94,13 +94,32 @@ namespace ks::ui
         std::function<bool(CompleteExportSink&, const ks::i18n::SourceTextSnapshot&)> serialize;
     };
 
+    namespace complete_export_detail
+    {
+        // Returns an alias whose final release only enqueues a preallocated
+        // owner node. The retained complete value is released by the independent
+        // value retirement thread, including rejection, close and dropped delivery.
+        std::shared_ptr<const void> RetainValue(const std::shared_ptr<const void>& value);
+    }
+
+    // Use the returned handle as the producer's canonical owner as well when
+    // its own model/controller can release a complete root on GUI. Values only.
+    template<class Value>
+    std::shared_ptr<const Value> RetainCompleteExportSnapshot(const std::shared_ptr<const Value>& value)
+    {
+        static_assert(!std::is_base_of_v<QObject, Value>, "Retirement accepts values, never QObject");
+        if (!value) return {};
+        const auto retained = complete_export_detail::RetainValue(value);
+        return std::shared_ptr<const Value>(retained, value.get());
+    }
+
     // Explicit producer port: retain a published immutable value root in O(1).
     // A formatter must be stateless; all finite context belongs in Snapshot.
     // Snapshot must contain values only (no model/widget/document/QObject or
     // borrowed storage). Publishing/capturing it must not deepcopy full source
     // data on GUI; GUI-only models use the separate budgeted capture adapter.
     template<class Snapshot, class Formatter>
-    CompleteExportInput MakeCompleteExportInput(std::shared_ptr<const Snapshot> snapshot,
+    CompleteExportInput MakeCompleteExportInput(const std::shared_ptr<const Snapshot>& snapshot,
         QString sourceIdentity, std::uint64_t sourceVersion,
         std::optional<std::uint64_t> expectedRows, ks::i18n::SourceTextSnapshot translator,
         Formatter formatter)
@@ -114,9 +133,10 @@ namespace ks::ui
         input.expectedRows = expectedRows;
         input.translator = std::move(translator);
         if (!snapshot) return input;
-        input.serialize = [snapshot = std::move(snapshot), formatter](CompleteExportSink& sink,
+        const auto retained = complete_export_detail::RetainValue(snapshot);
+        input.serialize = [retained, formatter](CompleteExportSink& sink,
             const ks::i18n::SourceTextSnapshot& frozen) {
-            return snapshot && formatter(*snapshot, sink, frozen);
+            return retained && formatter(*static_cast<const Snapshot*>(retained.get()), sink, frozen);
         };
         return input;
     }

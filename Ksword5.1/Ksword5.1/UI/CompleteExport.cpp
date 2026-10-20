@@ -8,12 +8,87 @@
 
 #include <algorithm>
 #include <exception>
+#include <condition_variable>
+#include <thread>
 #include <limits>
 #include <map>
 #include <mutex>
 
 namespace ks::ui
 {
+    namespace complete_export_detail
+    {
+        namespace
+        {
+            struct RetiredOwner
+            {
+                std::shared_ptr<const void> value;
+                RetiredOwner* next = nullptr;
+            };
+
+            // Process-lifetime value-only service: destruction of a GUI job or
+            // result never joins a worker or frees the retained full document.
+            // Queue links are allocated when the export input is prepared, so
+            // enqueue itself neither allocates nor falls back to GUI deletion.
+            class RetirementLane final
+            {
+            public:
+                RetirementLane() { std::thread([this]() { run(); }).detach(); }
+                void enqueue(RetiredOwner* owner) noexcept
+                {
+                    {
+                        std::lock_guard lock(m_mutex);
+                        if (m_tail) m_tail->next = owner;
+                        else m_head = owner;
+                        m_tail = owner;
+                    }
+                    m_ready.notify_one();
+                }
+            private:
+                void run() noexcept
+                {
+                    for (;;)
+                    {
+                        RetiredOwner* batch;
+                        {
+                            std::unique_lock lock(m_mutex);
+                            m_ready.wait(lock, [this]() { return m_head != nullptr; });
+                            batch = std::exchange(m_head, nullptr);
+                            m_tail = nullptr;
+                        }
+                        while (batch)
+                        {
+                            auto* next = batch->next;
+                            delete batch; // The complete snapshot's last owner is released here.
+                            batch = next;
+                        }
+                    }
+                }
+                std::mutex m_mutex;
+                std::condition_variable m_ready;
+                RetiredOwner* m_head = nullptr;
+                RetiredOwner* m_tail = nullptr;
+            };
+            RetirementLane& retirementLane()
+            {
+                // Intentional process-lifetime service, independent of Qt
+                // application teardown and thread-pool admission/saturation.
+                static auto* const lane = new RetirementLane;
+                return *lane;
+            }
+        }
+
+        std::shared_ptr<const void> RetainValue(const std::shared_ptr<const void>& value)
+        {
+            if (!value) return {};
+            auto& lane = retirementLane(); // Initialize before transferring any retained ownership.
+            auto* owner = new RetiredOwner{ value };
+            const auto retained = std::shared_ptr<RetiredOwner>(owner, [&lane](RetiredOwner* obsolete) noexcept
+            { lane.enqueue(obsolete); });
+            return std::shared_ptr<const void>(retained, value.get());
+        }
+    }
+
     bool CompleteExportReceipt::terminal() const
     {
         return phase == CompleteExportPhase::FileCommitted || phase == CompleteExportPhase::ClipboardPublished

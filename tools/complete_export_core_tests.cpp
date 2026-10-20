@@ -285,13 +285,95 @@ static void operationTests()
     for (const auto& receipt : journal->receipts()) check(receipt.terminal(), "all admitted journal records settle independently");
 }
 
+struct RetiredProbe
+{
+    std::atomic<int>& releases;
+    std::atomic<int>& guiReleases;
+    std::thread::id gui;
+    std::vector<QString> payload;
+    RetiredProbe(std::atomic<int>& count, std::atomic<int>& guiCount)
+        : releases(count), guiReleases(guiCount), gui(std::this_thread::get_id()), payload(100001, QStringLiteral("complete-value")) {}
+    ~RetiredProbe()
+    {
+        if (std::this_thread::get_id() == gui) ++guiReleases;
+        payload.clear();
+        ++releases;
+    }
+};
+static CompleteExportInput retiredInput(std::atomic<int>& releases, std::atomic<int>& guiReleases)
+{
+    auto source = std::make_shared<const RetiredProbe>(releases, guiReleases);
+    auto result = MakeCompleteExportInput(source, QStringLiteral("retired/source"), 9, 1,
+        ks::i18n::SourceTextSnapshot{}, [](const RetiredProbe& values, CompleteExportSink& sink, const auto&)
+        { return values.payload.size() == 100001 && sink.writeText(QStringLiteral("complete")) && sink.rowsCompleted(); });
+    source.reset(); // The export input now owns the complete root exclusively.
+    return result;
+}
+static void retirementTests()
+{
+    std::atomic<int> releases{0}, guiReleases{0};
+    {
+        auto abandoned = retiredInput(releases, guiReleases);
+        auto copied = abandoned;
+        abandoned = {};
+        check(releases == 0, "retained serializer copy keeps complete root");
+        copied = {};
+        pump([&] { return releases == 1; });
+    }
+    {
+        CompleteExportOperation operation(nullptr);
+        operation.close();
+        check(operation.startCopy(retiredInput(releases, guiReleases), [](const auto&) { return true; }, {}) == 0,
+            "closed owner rejects retained root");
+        pump([&] { return releases == 2; });
+    }
+    {
+        CompleteExportOperation operation(nullptr);
+        auto& registry = AsyncCleanupRegistry::global(); registry.beginShutdown();
+        check(operation.startFile(QStringLiteral("rejected-retained"), retiredInput(releases, guiReleases), {}) == 0,
+            "admission rejection retains safe retirement");
+        registry.cancelShutdown();
+        pump([&] { return releases == 3; });
+    }
+    {
+        CompleteExportOperation operation(nullptr);
+        check(operation.startCopy(retiredInput(releases, guiReleases), [](const auto& text)
+            { return text == QStringLiteral("complete"); }, {}) != 0, "retained complete source accepted");
+        pump([&] { return !operation.isBusy(); });
+        pump([&] { return releases == 4; });
+    }
+    {
+        auto operation = std::make_unique<CompleteExportOperation>(nullptr);
+        check(operation->startFile(QStringLiteral("closed-retained"), retiredInput(releases, guiReleases), {}) != 0,
+            "retained file accepted before owner deletion");
+        operation.reset(); QThreadPool::globalInstance()->waitForDone();
+        pump([&] { return releases == 5; });
+    }
+    {
+        CompleteExportOperation operation(nullptr);
+        check(operation.startCopy(retiredInput(releases, guiReleases), [](const auto&) { return true; }, {}) != 0,
+            "dropped completion has retained source");
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::removePostedEvents(operation.children().front(), QEvent::MetaCall);
+        operation.reconcile();
+        pump([&] { return releases == 6; });
+    }
+    {
+        auto source = std::make_shared<const RetiredProbe>(releases, guiReleases);
+        auto retained = RetainCompleteExportSnapshot(source);
+        source.reset(); retained.reset();
+        pump([&] { return releases == 7; });
+    }
+    check(guiReleases == 0, "all exclusive complete source destructors run on value retirement worker");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try
     {
         auto* pool = QThreadPool::globalInstance(); const int threads = pool->maxThreadCount(); pool->setMaxThreadCount(1);
-        engineTests(); operationTests(); pool->setMaxThreadCount(threads);
+        engineTests(); operationTests(); retirementTests(); pool->setMaxThreadCount(threads);
         std::cout << "COMPLETE_EXPORT_CHECKS=" << checks << "\nGUI_WIDGETS_CREATED=0\nREAL_FILE_WRITES=0\nBUSINESS_IO_CALLS=0\n";
         return 0;
     }
