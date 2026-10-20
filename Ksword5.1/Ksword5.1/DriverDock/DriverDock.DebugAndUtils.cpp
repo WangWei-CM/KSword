@@ -100,7 +100,6 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
     std::function<void()> stateChanged;
     ksword::ark::DriverClient driverClient;
     ksword::ark::DriverHandle driverHandle;
-    std::thread worker;
     std::atomic_bool stopRequested{ false };
     std::atomic_bool finished{ false };
     std::mutex waitMutex;
@@ -116,13 +115,6 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
     }
     const std::shared_ptr<std::mutex> gate = captureGate();
 
-    ~DebugCaptureSession()
-    {
-        // 最后一个所有者可能是已完成 run() 的线程闭包；从不在 GUI 或自身 join。
-        // STOP/close 已在 run() 中完成，闭包也不再借用任何 GUI 对象。
-        if (worker.joinable()) worker.detach();
-    }
-
     void start()
     {
         // 退出冻结新工作前登记；弱回调只置停止标志，不等待驱动或形成引用环。
@@ -132,7 +124,7 @@ struct DriverDock::DebugCaptureSession final : std::enable_shared_from_this<Debu
                 if (const auto session = weakSession.lock()) session->requestStop();
             });
         if (cleanupLease == nullptr) throw std::runtime_error("shutdown gate closed");
-        worker = std::thread([session = shared_from_this()]() { session->run(); });
+        std::thread([session = shared_from_this()]() { session->run(); }).detach();
     }
 
     void requestStop()
