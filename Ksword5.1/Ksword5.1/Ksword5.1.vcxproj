@@ -1203,6 +1203,7 @@
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
     <QtMoc Include="UI\StructuredFieldView.h" />
+    <ClInclude Include="UI\ValueTableSelection.h" />
     <ClInclude Include="UI\FieldTreeModel.h" />
     <ClInclude Include="UI\ComplexReportModel.h" />
     <ClInclude Include="UI\ComplexReportDelegate.h" />

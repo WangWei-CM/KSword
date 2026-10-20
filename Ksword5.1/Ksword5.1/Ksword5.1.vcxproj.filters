@@ -2839,6 +2839,9 @@
     <QtMoc Include="UI\StructuredFieldView.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="UI\ValueTableSelection.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\FieldTreeModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
