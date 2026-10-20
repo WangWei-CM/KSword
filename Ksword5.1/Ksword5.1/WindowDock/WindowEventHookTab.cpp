@@ -1,4 +1,6 @@
 #include "WindowEventHookTab.h"
+#include "WindowSnapshotSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 
@@ -31,7 +33,6 @@
 #include <cstdint>
 #include <iterator>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -100,16 +101,16 @@ namespace
         return QStringLiteral("0x%1").arg(value, 8, 16, QLatin1Char('0')).toUpper();
     }
 
-    QString layoutSourceText(const std::uint32_t source)
+    QString layoutSourceText(const std::uint32_t source, const ks::window::SnapshotTexts& texts)
     {
         switch (source)
         {
         case KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_VALIDATED_DISASSEMBLY:
-            return eventHookText("window.event_hook.layout.exact", QStringLiteral("精确 PE 身份"));
+            return texts.value(QStringLiteral("window.event_hook.layout.exact"), QStringLiteral("精确 PE 身份"));
         case KSWORD_ARK_WIN32K_EVENT_HOOK_LAYOUT_SOURCE_NEAREST_PREVIOUS:
-            return eventHookText("window.event_hook.layout.previous", QStringLiteral("最近旧版回退"));
+            return texts.value(QStringLiteral("window.event_hook.layout.previous"), QStringLiteral("最近旧版回退"));
         default:
-            return eventHookText("window.event_hook.layout.unknown", QStringLiteral("未知"));
+            return texts.value(QStringLiteral("window.event_hook.layout.unknown"), QStringLiteral("未知"));
         }
     }
 
@@ -232,29 +233,27 @@ namespace
         return names.join(QStringLiteral(" | "));
     }
 
-    QString statusName(const std::uint32_t status)
+    QString statusName(const std::uint32_t status, const ks::window::SnapshotTexts& texts)
     {
         switch (status)
         {
         case KSWORD_ARK_WIN32K_STATUS_OK:
-            return eventHookText("window.event_hook.row.ok", QStringLiteral("完整"));
+            return texts.value(QStringLiteral("window.event_hook.row.ok"), QStringLiteral("完整"));
         case KSWORD_ARK_WIN32K_STATUS_PARTIAL:
-            return eventHookText("window.event_hook.row.partial", QStringLiteral("部分"));
+            return texts.value(QStringLiteral("window.event_hook.row.partial"), QStringLiteral("部分"));
         default:
-            return eventHookText("window.event_hook.row.status_code", QStringLiteral("状态 %1")).arg(status);
+            return texts.value(QStringLiteral("window.event_hook.row.status_code"), QStringLiteral("状态 %1")).arg(status);
         }
     }
 
-    EventHookSnapshot collectEventHooks()
+    EventHookSnapshot collectEventHooks(const ks::window::SnapshotTexts& texts)
     {
         EventHookSnapshot snapshot;
         const ksword::ark::Win32kEventHooksResult result =
             ksword::ark::DriverClient().queryWin32kEventHooks();
         if (!result.io.ok)
         {
-            snapshot.statusText = eventHookText(
-                "window.event_hook.status.io_failed",
-                QStringLiteral("状态：事件 Hook 查询失败，Win32=%1，%2"))
+            snapshot.statusText = texts.value(QStringLiteral("window.event_hook.status.io_failed"), QStringLiteral("状态：事件 Hook 查询失败，Win32=%1，%2"))
                 .arg(result.io.win32Error)
                 .arg(QString::fromStdString(result.io.message));
             return snapshot;
@@ -263,9 +262,7 @@ namespace
         const QString detailText = QString::fromStdWString(result.detail);
         if (result.status == KSWORD_ARK_WIN32K_STATUS_UNSUPPORTED || result.unsupported)
         {
-            snapshot.statusText = eventHookText(
-                "window.event_hook.status.unsupported",
-                QStringLiteral("状态：当前 win32k 版本没有精确或可用的最近旧版 tagEVENTHOOK 布局；base=%1/%2，full=%3/%4。%5"))
+            snapshot.statusText = texts.value(QStringLiteral("window.event_hook.status.unsupported"), QStringLiteral("状态：当前 win32k 版本没有精确或可用的最近旧版 tagEVENTHOOK 布局；base=%1/%2，full=%3/%4。%5"))
                 .arg(hex32(result.win32kbaseTimeDateStamp))
                 .arg(hex32(result.win32kbaseImageSize))
                 .arg(hex32(result.win32kfullTimeDateStamp))
@@ -275,9 +272,7 @@ namespace
         }
         if (result.status == KSWORD_ARK_WIN32K_STATUS_WIN32K_NOT_FOUND)
         {
-            snapshot.statusText = eventHookText(
-                "window.event_hook.status.win32k_missing",
-                QStringLiteral("状态：未定位 win32kbase/win32kfull，无法读取事件 Hook。%1"))
+            snapshot.statusText = texts.value(QStringLiteral("window.event_hook.status.win32k_missing"), QStringLiteral("状态：未定位 win32kbase/win32kfull，无法读取事件 Hook。%1"))
                 .arg(detailText);
             return snapshot;
         }
@@ -332,12 +327,10 @@ namespace
                 hex64(entry.callbackOffset),
                 hex64(entry.ownerThreadInfo),
                 hex64(entry.nextHookObject),
-                QStringLiteral("%1 | %2").arg(statusName(entry.status), QString::fromWCharArray(entry.detail)) });
+                QStringLiteral("%1 | %2").arg(statusName(entry.status, texts), QString::fromWCharArray(entry.detail)) });
         }
 
-        snapshot.statusText = eventHookText(
-            "window.event_hook.status.completed",
-            QStringLiteral("状态：Event Hook %1/%2，访问节点 %3，读取失败 %4，损坏链 %5，重复 %6；gpWinEventHooks=%7 -> %8，tagEVENTHOOK=0x%9，布局来源=%10。%11"))
+        snapshot.statusText = texts.value(QStringLiteral("window.event_hook.status.completed"), QStringLiteral("状态：Event Hook %1/%2，访问节点 %3，读取失败 %4，损坏链 %5，重复 %6；gpWinEventHooks=%7 -> %8，tagEVENTHOOK=0x%9，布局来源=%10。%11"))
             .arg(result.returnedCount)
             .arg(result.totalCount)
             .arg(result.visitedNodeCount)
@@ -347,7 +340,7 @@ namespace
             .arg(hex64(result.hookListPointer))
             .arg(hex64(result.hookListHead))
             .arg(result.layout.objectSize, 0, 16)
-            .arg(layoutSourceText(result.layout.source))
+            .arg(layoutSourceText(result.layout.source, texts))
             .arg(detailText);
         return snapshot;
     }
@@ -358,17 +351,45 @@ namespace
         item->setFlags(item->flags() & ~Qt::ItemIsEditable);
         return item;
     }
+    ks::window::SnapshotTexts freezeSnapshotTexts()
+    {
+        return {
+            {QStringLiteral("window.event_hook.layout.exact"), eventHookText("window.event_hook.layout.exact", QStringLiteral("精确 PE 身份"))},
+            {QStringLiteral("window.event_hook.layout.previous"), eventHookText("window.event_hook.layout.previous", QStringLiteral("最近旧版回退"))},
+            {QStringLiteral("window.event_hook.layout.unknown"), eventHookText("window.event_hook.layout.unknown", QStringLiteral("未知"))},
+            {QStringLiteral("window.event_hook.row.ok"), eventHookText("window.event_hook.row.ok", QStringLiteral("完整"))},
+            {QStringLiteral("window.event_hook.row.partial"), eventHookText("window.event_hook.row.partial", QStringLiteral("部分"))},
+            {QStringLiteral("window.event_hook.row.status_code"), eventHookText("window.event_hook.row.status_code", QStringLiteral("状态 %1"))},
+            {QStringLiteral("window.event_hook.status.io_failed"), eventHookText("window.event_hook.status.io_failed", QStringLiteral("状态：事件 Hook 查询失败，Win32=%1，%2"))},
+            {QStringLiteral("window.event_hook.status.unsupported"), eventHookText("window.event_hook.status.unsupported", QStringLiteral("状态：当前 win32k 版本没有精确或可用的最近旧版 tagEVENTHOOK 布局；base=%1/%2，full=%3/%4。%5"))},
+            {QStringLiteral("window.event_hook.status.win32k_missing"), eventHookText("window.event_hook.status.win32k_missing", QStringLiteral("状态：未定位 win32kbase/win32kfull，无法读取事件 Hook。%1"))},
+            {QStringLiteral("window.event_hook.status.completed"), eventHookText("window.event_hook.status.completed", QStringLiteral("状态：Event Hook %1/%2，访问节点 %3，读取失败 %4，损坏链 %5，重复 %6；gpWinEventHooks=%7 -> %8，tagEVENTHOOK=0x%9，布局来源=%10。%11"))} };
+    }
+
+
 }
 
 WindowEventHookTab::WindowEventHookTab(QWidget* parent)
     : QWidget(parent)
 {
+    m_refreshOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
+    m_refreshOperation->setStateChangedCallback([this] { reconcileRefreshState(); });
+}
+
+WindowEventHookTab::~WindowEventHookTab()
+{
+    m_refreshOperation->close();
+    ks::window::retireSnapshotValues(std::move(m_rows));
 }
 
 void WindowEventHookTab::showEvent(QShowEvent* event)
 {
+    const QPointer<WindowEventHookTab> alive(this);
     QWidget::showEvent(event);
+    if (!alive) return;
+    reconcileRefreshState();
+    if (!alive) return;
     if (!m_firstRefreshStarted)
     {
         m_firstRefreshStarted = true;
@@ -442,64 +463,88 @@ void WindowEventHookTab::initializeUi()
     connect(m_table, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) { showCopyMenu(position); });
 }
 
+void WindowEventHookTab::reconcileRefreshState()
+{
+    if (!m_refreshing || m_refreshOperation->isBusy() || m_refreshOperation->isInFlight()) return;
+    const QPointer<WindowEventHookTab> alive(this);
+    m_refreshing = false;
+    m_refreshButton->setEnabled(true);
+    if (alive && !m_refreshOperation->isBusy() && !m_refreshOperation->isInFlight()) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+}
+
 void WindowEventHookTab::refreshAsync()
 {
+    const QPointer<WindowEventHookTab> refreshOwner(this);
+    reconcileRefreshState();
+    if (!refreshOwner) return;
     if (m_refreshing)
     {
         return;
     }
+    const QPointer<WindowEventHookTab> alive(this);
     m_refreshing = true;
     m_firstRefreshStarted = true;
     m_refreshButton->setEnabled(false);
+    if (!alive) return;
     m_statusLabel->setText(eventHookText(
         "window.event_hook.status.refreshing",
         QStringLiteral("状态：正在通过 R0 读取 gpWinEventHooks...")));
-    QPointer<WindowEventHookTab> safeThis(this);
-    std::thread([safeThis]() {
-        EventHookSnapshot snapshot = collectEventHooks();
-        if (safeThis == nullptr)
-        {
-            return;
-        }
-        QMetaObject::invokeMethod(safeThis, [safeThis, snapshot = std::move(snapshot)]() mutable {
-            if (safeThis != nullptr)
-            {
-                safeThis->applySnapshot(std::move(snapshot.rows), snapshot.statusText);
-            }
-        }, Qt::QueuedConnection);
-    }).detach();
+    if (!alive) return;
+    m_refreshOperation->submit<ks::window::SnapshotTexts, std::shared_ptr<const EventHookSnapshot>>(
+        freezeSnapshotTexts(),
+        [](const ks::window::SnapshotTexts& texts, const ks::ui::AsyncOperationToken&) {
+            return ks::window::makeSnapshotValue<EventHookSnapshot>(collectEventHooks(texts));
+        },
+        [this](const std::shared_ptr<const EventHookSnapshot>& snapshot, std::uint64_t ticket) {
+            return applySnapshot(snapshot->rows, snapshot->statusText, ticket);
+        },
+        [this](std::exception_ptr) {
+            const QPointer<WindowEventHookTab> alive(this);
+            const auto failedGeneration = m_refreshOperation->generation();
+            m_refreshing = false;
+            m_refreshButton->setEnabled(true);
+            if (alive && m_refreshOperation->isCurrent(failedGeneration)) m_statusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+        });
 }
 
-void WindowEventHookTab::applySnapshot(QVector<QStringList> rows, const QString& statusText)
+bool WindowEventHookTab::applySnapshot(QVector<QStringList> rows, const QString& statusText, std::uint64_t ticket)
 {
+    if (!m_refreshOperation->isCurrent(ticket)) return true;
     const QPointer<WindowEventHookTab> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
         QStringLiteral("window-event-hook-snapshot-apply"),
         { m_table },
-        [safeThis, rows, statusText]() mutable
+        [safeThis, rows, statusText, ticket]() mutable
         {
-            if (!safeThis.isNull())
-            {
-                safeThis->applySnapshot(std::move(rows), statusText);
-            }
+            if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return;
+            if (safeThis->applySnapshot(std::move(rows), statusText, ticket) && safeThis)
+                safeThis->m_refreshOperation->completeDeferred(ticket);
         }))
     {
-        return;
+        return false;
     }
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
 
     m_refreshing = false;
     m_refreshButton->setEnabled(true);
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
+    ks::window::retireSnapshotValues(std::move(m_rows));
     m_rows = std::move(rows);
     m_statusLabel->setText(statusText);
+    if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return true;
     rebuildTable();
+    return true;
 }
 
 void WindowEventHookTab::rebuildTable()
 {
+    const QPointer<WindowEventHookTab> alive(this);
     const QString keyword = m_filterEdit->text().trimmed();
     m_table->setSortingEnabled(false);
+    if (!alive) return;
     m_table->setRowCount(0);
+    if (!alive) return;
     for (const QStringList& sourceRow : m_rows)
     {
         if (sourceRow.size() < ColumnCount ||
@@ -509,12 +554,15 @@ void WindowEventHookTab::rebuildTable()
         }
         const int tableRow = m_table->rowCount();
         m_table->insertRow(tableRow);
+        if (!alive) return;
         for (int column = 0; column < ColumnCount; ++column)
         {
             m_table->setItem(tableRow, column, readOnlyItem(sourceRow.at(column)));
+            if (!alive) return;
         }
     }
     m_table->setSortingEnabled(true);
+    if (!alive) return;
     m_table->resizeColumnsToContents();
 }
 
