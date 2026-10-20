@@ -23,6 +23,11 @@
 #include "../../../shared/evidence/ObjectIdentity.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QItemSelectionModel>
+#include <QEvent>
+#include <QTableView>
+#include <QTimer>
 #include <QAction>
 #include <QApplication>
 #include <QByteArray>
@@ -203,7 +208,7 @@ namespace
             .arg(KswordTheme::OnAccentDynamicHex());
     }
 
-    void copyArkRiskTableCurrentRow(QTableWidget* table)
+    void copyArkRiskTableCurrentRow(QTableView* table)
     {
         // 输入：风险中心表格。
         // 处理：读取当前显示行的所有列，按 TSV 写入剪贴板。
@@ -213,23 +218,22 @@ namespace
             return;
         }
 
-        const int rowIndex = table->currentRow();
-        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        const int rowIndex = table->currentIndex().row();
+        if (rowIndex < 0 || rowIndex >= table->model()->rowCount())
         {
             return;
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->model()->index(rowIndex, columnIndex).data().toString());
         }
         QApplication::clipboard()->setText(fields.join(QChar('\t')));
     }
 
-    void installArkRiskTableCopyMenu(MonitorDock* dock, QTableWidget* table)
+    void installArkRiskTableCopyMenu(MonitorDock* dock, QTableView* table)
     {
         // 输入：风险中心所属 Dock 与结果表格。
         // 处理：安装“复制当前行”和“转到进程详细信息”的右键菜单；右键点击行时同步当前单元格。
@@ -243,11 +247,11 @@ namespace
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
         QPointer<MonitorDock> guardDock(dock);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [guardDock, table](const QPoint& localPosition) {
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [guardDock, table](const QPoint& localPosition) {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
-                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->setCurrentIndex(clickedIndex);
             }
 
             QMenu menu(table);
@@ -255,15 +259,13 @@ namespace
             QAction* copyRowAction = menu.addAction(QStringLiteral("复制当前行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(table->currentRow() >= 0);
+            copyRowAction->setEnabled(table->currentIndex().row() >= 0);
 
             quint32 processId = 0U;
-            const QTableWidgetItem* scoreItem = table->currentRow() >= 0
-                ? table->item(table->currentRow(), riskColumnIndex(RiskColumn::Score))
-                : nullptr;
+            const QModelIndex scoreItem = table->model()->index(table->currentIndex().row(), riskColumnIndex(RiskColumn::Score));
             bool processIdOk = false;
-            const qulonglong storedProcessId = scoreItem != nullptr
-                ? scoreItem->data(kRiskProcessIdRole).toULongLong(&processIdOk)
+            const qulonglong storedProcessId = scoreItem.isValid()
+                ? scoreItem.data(kRiskProcessIdRole).toULongLong(&processIdOk)
                 : 0ULL;
             if (processIdOk && storedProcessId > 0ULL &&
                 storedProcessId <= static_cast<qulonglong>(std::numeric_limits<quint32>::max()))
@@ -278,7 +280,7 @@ namespace
             // 说明也由判据给。菜单这层提前灰掉只会让用户不知道为什么不能跳。
             openProcessAction->setEnabled(processId != 0U);
 
-            const int currentRow = table->currentRow();
+            const int currentRow = table->currentIndex().row();
             const QAction* selectedAction = menu.exec(table->viewport()->mapToGlobal(localPosition));
             if (selectedAction == copyRowAction)
             {
@@ -673,36 +675,6 @@ namespace
         return entry;
     }
 
-    class ScoreItem final : public QTableWidgetItem
-    {
-    public:
-        explicit ScoreItem(const double score)
-            : QTableWidgetItem(scoreText(score))
-        {
-            // Input: risk score. Processing: store numeric UserRole for sorting. Return: constructor has no return.
-            setData(Qt::UserRole, clampScore(score));
-            setTextAlignment(Qt::AlignVCenter | Qt::AlignRight);
-        }
-
-        bool operator<(const QTableWidgetItem& other) const override
-        {
-            // Input: another table item. Processing: prefer numeric UserRole comparison. Return: sort decision.
-            bool leftOk = false;
-            bool rightOk = false;
-            const double left = data(Qt::UserRole).toDouble(&leftOk);
-            const double right = other.data(Qt::UserRole).toDouble(&rightOk);
-            return (leftOk && rightOk) ? left < right : QTableWidgetItem::operator<(other);
-        }
-    };
-
-    QTableWidgetItem* textItem(const QString& value)
-    {
-        // Input: display text. Processing: create read-only table item. Return: item owned by QTableWidget.
-        QTableWidgetItem* item = new QTableWidgetItem(value);
-        item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        return item;
-    }
-
     QString csvEscape(const QString& value)
     {
         // Input: CSV field. Processing: quote when needed and double embedded quotes. Return: CSV-safe text.
@@ -722,9 +694,7 @@ namespace
         {
             return true;
         }
-        const QString payloadText = QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact));
-        const QStringList fields{ entry.sourceName, entry.category, entry.title, entry.detail, entry.riskScoreText, payloadText };
-        for (const QString& field : fields)
+        for (const QString& field : entry.searchFields)
         {
             if (field.contains(filter, Qt::CaseInsensitive))
             {
@@ -733,6 +703,95 @@ namespace
         }
         return false;
     }
+
+    QString arkRiskColumnText(const MonitorDock::ArkRiskCenterEntry& entry, const int column)
+    {
+        switch (column)
+        {
+        case 0: return entry.riskScoreText;
+        case 1: return entry.sourceName;
+        case 2: return entry.category;
+        case 3: return entry.title;
+        case 4: return entry.detail;
+        default: return {};
+        }
+    }
+
+    std::vector<std::size_t> buildArkRiskProjection(const std::vector<MonitorDock::ArkRiskCenterEntry>& entries,
+        const QString& filter, const bool highOnly, const int sortColumn, const Qt::SortOrder sortOrder)
+    {
+        std::vector<std::size_t> indexes;
+        indexes.reserve(entries.size());
+        for (std::size_t i = 0; i < entries.size(); ++i)
+            if ((!highOnly || entries[i].riskScore >= 50.0) && matchesFilter(entries[i], filter)) indexes.push_back(i);
+        if (sortColumn >= 0 && sortColumn < 5)
+            std::stable_sort(indexes.begin(), indexes.end(), [&entries, sortColumn, sortOrder](const auto left, const auto right) {
+                const int comparison = sortColumn == 0
+                    ? (entries[left].riskScore < entries[right].riskScore ? -1 : entries[left].riskScore > entries[right].riskScore ? 1 : 0)
+                    : QString::localeAwareCompare(arkRiskColumnText(entries[left], sortColumn), arkRiskColumnText(entries[right], sortColumn));
+                return sortOrder == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
+            });
+        return indexes;
+    }
+
+    class ArkRiskSnapshotModel final : public QAbstractTableModel
+    {
+    public:
+        ArkRiskSnapshotModel(QObject* table, std::function<void()> request)
+            : QAbstractTableModel(table), m_request(std::move(request)) { table->installEventFilter(this); }
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() || !m_indexes ? 0 : static_cast<int>(m_indexes->size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 5; }
+        const MonitorDock::ArkRiskCenterEntry* entryAt(const int row) const
+        {
+            if (!m_entries || row < 0 || row >= rowCount()) return nullptr;
+            const auto source = (*m_indexes)[static_cast<std::size_t>(row)];
+            return source < m_entries->size() ? &(*m_entries)[source] : nullptr;
+        }
+        QVariant data(const QModelIndex& index, const int role) const override
+        {
+            const auto* entry = index.isValid() ? entryAt(index.row()) : nullptr;
+            if (!entry || index.column() < 0 || index.column() >= 5) return {};
+            if (role == Qt::DisplayRole || role == Qt::ToolTipRole) return ks::i18n::sourceText(arkRiskColumnText(*entry, index.column()));
+            if (role == Qt::TextAlignmentRole) return int(Qt::AlignVCenter | (index.column() == 0 ? Qt::AlignRight : Qt::AlignLeft));
+            if (index.column() == 0)
+            {
+                if (role == Qt::UserRole || role == ks::ui::NumericSortRole) return entry->riskScore;
+                if (role == kRiskEntryIndexRole) return QVariant::fromValue<qulonglong>((*m_indexes)[static_cast<std::size_t>(index.row())]);
+                if (role == kRiskProcessIdRole) return QVariant::fromValue<qulonglong>(entry->processId);
+                if (role == kRiskEvidenceIdRole) return entry->evidenceId;
+            }
+            return {};
+        }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (role != Qt::DisplayRole) return {};
+            if (orientation == Qt::Vertical) return section + 1;
+            static const QStringList headers{QStringLiteral("riskScore"), QStringLiteral("来源"), QStringLiteral("分类"), QStringLiteral("标题"), QStringLiteral("详情")};
+            return section >= 0 && section < headers.size() ? QVariant(ks::i18n::sourceText(headers[section])) : QVariant();
+        }
+        void sort(int, Qt::SortOrder) override { m_request(); }
+        void replace(std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> entries,
+            std::shared_ptr<const std::vector<std::size_t>> indexes)
+        {
+            beginResetModel();
+            auto previousEntries = std::move(m_entries); auto previousIndexes = std::move(m_indexes);
+            m_entries = std::move(entries); m_indexes = std::move(indexes);
+            endResetModel();
+            QThreadPool::globalInstance()->start(QRunnable::create(
+                [previousEntries = std::move(previousEntries), previousIndexes = std::move(previousIndexes)]() {}));
+        }
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Show) QTimer::singleShot(0, this, m_request);
+            return QAbstractTableModel::eventFilter(watched, event);
+        }
+    private:
+        std::function<void()> m_request;
+        std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> m_entries;
+        std::shared_ptr<const std::vector<std::size_t>> m_indexes;
+    };
 
     void addStatusEntry(std::vector<MonitorDock::ArkRiskCenterEntry>& entries, QStringList& statusLines, const QString& source, const QString& category, const bool ok, const bool unsupported, const ksword::ark::IoResult& io)
     {
@@ -1203,17 +1262,11 @@ void MonitorDock::initializeArkRiskCenterTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_arkRiskCenterPage);
     pageLayout->addWidget(splitter, 1);
 
-    m_arkRiskTable = new ks::ui::VisibleTableWidget(splitter);
+    m_arkRiskTable = new ks::ui::TableActionTableView(splitter);
+    m_arkRiskDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+    m_arkRiskTable->setModel(new ArkRiskSnapshotModel(m_arkRiskTable, [this]() { rebuildArkRiskCenterTable(); }));
     // 风险聚合自带 CSV/JSON 导出，紧凑模式避免再占一行对比入口。
     ks::ui::SetTableActionBarMode(m_arkRiskTable, ks::ui::TableActionBarMode::Compact);
-    m_arkRiskTable->setColumnCount(riskColumnIndex(RiskColumn::Count));
-    m_arkRiskTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("riskScore"),
-        QStringLiteral("来源"),
-        QStringLiteral("分类"),
-        QStringLiteral("标题"),
-        QStringLiteral("详情")
-        });
     m_arkRiskTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_arkRiskTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_arkRiskTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1238,7 +1291,7 @@ void MonitorDock::initializeArkRiskCenterTab()
     connect(m_arkRiskRefreshButton, &QPushButton::clicked, this, [this]() { refreshArkRiskCenterAsync(); });
     connect(m_arkRiskFilterEdit, &QLineEdit::textChanged, this, [this]() { rebuildArkRiskCenterTable(); });
     connect(m_arkRiskHighOnlyCheck, &QCheckBox::toggled, this, [this]() { rebuildArkRiskCenterTable(); });
-    connect(m_arkRiskTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) { showArkRiskCenterDetailForCurrentRow(); });
+    connect(m_arkRiskTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) { showArkRiskCenterDetailForCurrentRow(); });
     connect(m_arkRiskExportJsonButton, &QPushButton::clicked, this, [this]() { exportArkRiskCenterAsJson(); });
     connect(m_arkRiskExportCsvButton, &QPushButton::clicked, this, [this]() { exportArkRiskCenterAsCsv(); });
 
@@ -1328,6 +1381,9 @@ void MonitorDock::refreshArkRiskCenterAsync()
 
         // F-09/F-12：排序定稿后再发证据 id 并固定进程身份，让 id 与最终顺序一一对应。
         attachArkRiskNavigationIdentity(entries, sessionBootId, ticket);
+        for (auto& entry : entries)
+            entry.searchFields = {entry.sourceName, entry.category, entry.title, entry.detail, entry.riskScoreText,
+                QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact))};
 
         if (guardThis == nullptr)
         {
@@ -1356,14 +1412,16 @@ void MonitorDock::refreshArkRiskCenterAsync()
                     {
                         guardThis->m_arkRiskRefreshButton->setEnabled(true);
                     }
-                    guardThis->m_arkRiskCenterEntries = std::move(*deferredEntries);
+                    auto previousEntries = std::move(guardThis->m_arkRiskCenterEntries);
+                    guardThis->m_arkRiskCenterEntries = deferredEntries;
+                    QThreadPool::globalInstance()->start(QRunnable::create([previousEntries = std::move(previousEntries)]() {}));
                     guardThis->rebuildArkRiskCenterTable();
                     guardThis->showArkRiskCenterDetailForCurrentRow();
                     if (guardThis->m_arkRiskStatusLabel != nullptr)
                     {
                         guardThis->m_arkRiskStatusLabel->setText(
                             QStringLiteral("状态：%1 项；%2")
-                            .arg(static_cast<qulonglong>(guardThis->m_arkRiskCenterEntries.size()))
+                            .arg(static_cast<qulonglong>(guardThis->m_arkRiskCenterEntries->size()))
                             .arg(deferredStatusLines->join(QStringLiteral("；"))));
                         guardThis->m_arkRiskStatusLabel->setStyleSheet(
                             QStringLiteral("color:%1; font-weight:700;")
@@ -1388,59 +1446,50 @@ void MonitorDock::refreshArkRiskCenterAsync()
 
 void MonitorDock::rebuildArkRiskCenterTable()
 {
-    // 输入：无，读取风险中心缓存和过滤控件。
-    // 处理：按 high-only 与关键字投影表格；不访问驱动。
-    // 返回：无返回值。
-    if (m_arkRiskTable == nullptr)
+    if (!m_arkRiskTable || !m_arkRiskDispatcher) return;
+    const auto ticket = ++m_arkRiskProjectionTicket;
+    if (!m_arkRiskTable->isVisible()) return;
+    if (!m_arkRiskProjectionDue)
     {
+        if (!m_arkRiskProjectionScheduled)
+        {
+            m_arkRiskProjectionScheduled = true;
+            QTimer::singleShot(120, this, [this]() {
+                m_arkRiskProjectionScheduled = false;
+                m_arkRiskProjectionDue = true;
+                rebuildArkRiskCenterTable();
+            });
+        }
         return;
     }
-
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_arkRiskDetailEdit);
-    const QString filter = m_arkRiskFilterEdit != nullptr ? m_arkRiskFilterEdit->text().trimmed() : QString();
-    const bool highOnly = m_arkRiskHighOnlyCheck != nullptr && m_arkRiskHighOnlyCheck->isChecked();
-
-    std::vector<std::size_t> visibleIndexes;
-    visibleIndexes.reserve(m_arkRiskCenterEntries.size());
-    for (std::size_t index = 0; index < m_arkRiskCenterEntries.size(); ++index)
-    {
-        const auto& entry = m_arkRiskCenterEntries[index];
-        if (highOnly && entry.riskScore < 50.0)
-        {
-            continue;
-        }
-        if (!matchesFilter(entry, filter))
-        {
-            continue;
-        }
-        visibleIndexes.push_back(index);
-    }
-
-    const QSignalBlocker blocker(m_arkRiskTable);
-    m_arkRiskTable->setSortingEnabled(false);
-    m_arkRiskTable->setRowCount(static_cast<int>(visibleIndexes.size()));
-    for (int row = 0; row < static_cast<int>(visibleIndexes.size()); ++row)
-    {
-        const std::size_t cacheIndex = visibleIndexes[static_cast<std::size_t>(row)];
-        const auto& entry = m_arkRiskCenterEntries[cacheIndex];
-        QTableWidgetItem* scoreItem = new ScoreItem(entry.riskScore);
-        scoreItem->setData(kRiskEntryIndexRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
-        // PID 与证据 id 都取自缓存行本身，而不是再解析一遍 payload：
-        // 采集期已经把身份定死了，这里只搬运（F-09）。
-        scoreItem->setData(kRiskProcessIdRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(entry.processId)));
-        scoreItem->setData(kRiskEvidenceIdRole, entry.evidenceId);
-        m_arkRiskTable->setItem(row, riskColumnIndex(RiskColumn::Score), scoreItem);
-        m_arkRiskTable->setItem(row, riskColumnIndex(RiskColumn::Source), textItem(entry.sourceName));
-        m_arkRiskTable->setItem(row, riskColumnIndex(RiskColumn::Category), textItem(entry.category));
-        m_arkRiskTable->setItem(row, riskColumnIndex(RiskColumn::Title), textItem(entry.title));
-        m_arkRiskTable->setItem(row, riskColumnIndex(RiskColumn::Detail), textItem(entry.detail));
-    }
-    if (m_arkRiskTable->rowCount() > 0 && m_arkRiskTable->currentRow() < 0)
-    {
-        m_arkRiskTable->setCurrentCell(0, riskColumnIndex(RiskColumn::Score));
-    }
-    m_arkRiskTable->setSortingEnabled(true);
-    ks::ui::RequestTableColumnAutoFit(m_arkRiskTable);
+    m_arkRiskProjectionDue = false;
+    if (m_arkRiskProjectionRunning) return;
+    m_arkRiskProjectionRunning = true;
+    const auto entries = m_arkRiskCenterEntries;
+    const QString filter = m_arkRiskFilterEdit ? m_arkRiskFilterEdit->text().trimmed() : QString();
+    const bool highOnly = m_arkRiskHighOnlyCheck && m_arkRiskHighOnlyCheck->isChecked();
+    const int sortColumn = m_arkRiskTable->horizontalHeader()->sortIndicatorSection();
+    const auto sortOrder = m_arkRiskTable->horizontalHeader()->sortIndicatorOrder();
+    const auto dispatcher = m_arkRiskDispatcher;
+    QThreadPool::globalInstance()->start(QRunnable::create([this, entries, filter, highOnly, sortColumn, sortOrder, ticket, dispatcher]() {
+        const auto indexes = std::make_shared<const std::vector<std::size_t>>(
+            buildArkRiskProjection(*entries, filter, highOnly, sortColumn, sortOrder));
+        dispatcher->post([this, entries, indexes, ticket]() {
+            m_arkRiskProjectionRunning = false;
+            if (ticket != m_arkRiskProjectionTicket) { rebuildArkRiskCenterTable(); return; }
+            if (!m_arkRiskTable->isVisible()) return;
+            auto commit = [this, entries, indexes, ticket]() {
+                if (ticket != m_arkRiskProjectionTicket || !m_arkRiskTable->isVisible()) return;
+                ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_arkRiskDetailEdit);
+                static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model())->replace(entries, indexes);
+                if (m_arkRiskTable->model()->rowCount() > 0 && !m_arkRiskTable->currentIndex().isValid())
+                    m_arkRiskTable->setCurrentIndex(m_arkRiskTable->model()->index(0, riskColumnIndex(RiskColumn::Score)));
+                showArkRiskCenterDetailForCurrentRow();
+            };
+            if (!ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("monitor-ark-risk-filter-apply"), {m_arkRiskTable}, commit)) commit();
+        });
+    }));
 }
 
 void MonitorDock::showArkRiskCenterDetailForCurrentRow() const
@@ -1452,21 +1501,13 @@ void MonitorDock::showArkRiskCenterDetailForCurrentRow() const
     {
         return;
     }
-    const int row = m_arkRiskTable->currentRow();
-    if (row < 0)
+    const auto* source = static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model())->entryAt(m_arkRiskTable->currentIndex().row());
+    if (source == nullptr)
     {
         m_arkRiskDetailEdit->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择一条风险记录。")));
         return;
     }
-    const QTableWidgetItem* scoreItem = m_arkRiskTable->item(row, riskColumnIndex(RiskColumn::Score));
-    bool ok = false;
-    const qulonglong cacheIndex = scoreItem != nullptr ? scoreItem->data(kRiskEntryIndexRole).toULongLong(&ok) : 0ULL;
-    if (!ok || cacheIndex >= static_cast<qulonglong>(m_arkRiskCenterEntries.size()))
-    {
-        m_arkRiskDetailEdit->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前行缓存索引无效。")));
-        return;
-    }
-    const auto& entry = m_arkRiskCenterEntries[static_cast<std::size_t>(cacheIndex)];
+    const auto& entry = *source;
     ks::ui::FieldDocument detail;
     detail.section(QStringLiteral("ARK 风险详情"));
     detail.field(QStringLiteral("riskScore"), entry.riskScoreText);
@@ -1486,15 +1527,15 @@ void MonitorDock::navigateToProcessDetailFromArkRiskRow(const int tableRow)
     //       风险行是异步采集的，从采集到点击之间目标随时可能退出并让出 PID，
     //       裸 PID 会把操作交给恰好占用该号码的新进程。
     // 返回：无返回值。判据不过时只弹说明，绝不退回裸 PID 跳转。
-    if (m_arkRiskTable == nullptr || tableRow < 0 || tableRow >= m_arkRiskTable->rowCount())
+    if (m_arkRiskTable == nullptr || tableRow < 0 || tableRow >= m_arkRiskTable->model()->rowCount())
     {
         return;
     }
 
     // 证据 id 从表格行上取：F-12 要求导航带得上它。
-    const QTableWidgetItem* scoreItem = m_arkRiskTable->item(tableRow, riskColumnIndex(RiskColumn::Score));
-    const QString evidenceId = scoreItem != nullptr
-        ? scoreItem->data(kRiskEvidenceIdRole).toString()
+    const QModelIndex scoreItem = m_arkRiskTable->model()->index(tableRow, riskColumnIndex(RiskColumn::Score));
+    const QString evidenceId = scoreItem.isValid()
+        ? scoreItem.data(kRiskEvidenceIdRole).toString()
         : QString();
 
     // 按证据 id 反查当前快照，而不是按行号或缓存下标：
@@ -1502,7 +1543,7 @@ void MonitorDock::navigateToProcessDetailFromArkRiskRow(const int tableRow)
     const MonitorDock::ArkRiskCenterEntry* entry = nullptr;
     if (!evidenceId.isEmpty())
     {
-        for (const MonitorDock::ArkRiskCenterEntry& candidate : m_arkRiskCenterEntries)
+        for (const MonitorDock::ArkRiskCenterEntry& candidate : *m_arkRiskCenterEntries)
         {
             if (candidate.evidenceId == evidenceId)
             {
@@ -1651,7 +1692,7 @@ void MonitorDock::exportArkRiskCenterAsJson() const
     // 输入：无，读取风险中心缓存。
     // 处理：用户选择路径后写 JSON 数组；缓存为空时提示。
     // 返回：无返回值。
-    if (m_arkRiskCenterEntries.empty())
+    if (m_arkRiskCenterEntries->empty())
     {
         QMessageBox::information(const_cast<MonitorDock*>(this), QStringLiteral("ARK 风险中心"), QStringLiteral("当前没有可导出的风险记录。"));
         return;
@@ -1663,7 +1704,7 @@ void MonitorDock::exportArkRiskCenterAsJson() const
         return;
     }
     QJsonArray rows;
-    for (const auto& entry : m_arkRiskCenterEntries)
+    for (const auto& entry : *m_arkRiskCenterEntries)
     {
         rows.append(entry.payload);
     }
@@ -1681,7 +1722,7 @@ void MonitorDock::exportArkRiskCenterAsCsv() const
     // 输入：无，读取风险中心缓存。
     // 处理：用户选择路径后写 CSV；缓存为空时提示。
     // 返回：无返回值。
-    if (m_arkRiskCenterEntries.empty())
+    if (m_arkRiskCenterEntries->empty())
     {
         QMessageBox::information(const_cast<MonitorDock*>(this), QStringLiteral("ARK 风险中心"), QStringLiteral("当前没有可导出的风险记录。"));
         return;
@@ -1699,7 +1740,7 @@ void MonitorDock::exportArkRiskCenterAsCsv() const
         return;
     }
     file.write("riskScore,source,category,title,detail,json\n");
-    for (const auto& entry : m_arkRiskCenterEntries)
+    for (const auto& entry : *m_arkRiskCenterEntries)
     {
         const QString jsonText = QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact));
         const QString line = QStringLiteral("%1,%2,%3,%4,%5,%6\n")

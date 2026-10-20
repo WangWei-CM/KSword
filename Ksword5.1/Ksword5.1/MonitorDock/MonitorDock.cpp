@@ -4926,6 +4926,8 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
 MonitorDock::~MonitorDock()
 {
     if (m_wmiFilterProjection) m_wmiFilterProjection->close();
+    if (m_arkRiskDispatcher) m_arkRiskDispatcher->close();
+    ++m_arkRiskProjectionTicket;
     // 析构阶段必须同步等待线程退出，防止对象释放后后台线程仍访问成员。
     stopWmiSubscriptionInternal(true);
     stopEtwCaptureInternal(true);

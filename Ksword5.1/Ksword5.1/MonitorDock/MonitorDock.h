@@ -12,6 +12,7 @@
 #include "ProcessTraceTimelineWidget.h"
 #include "WmiEventArchive.h"
 #include "EtwArchiveMetadata.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../Framework.h"
 
 // F-05：ARK 风险中心的每行进程身份都要带一份采集结果（成功 / 权限不足 / 其它失败
@@ -576,6 +577,7 @@ public:
         QString riskScoreText;
         double riskScore = 0.0;
         QJsonObject payload;
+        QStringList searchFields; // Prepared once after the complete payload/identity is frozen.
 
         // ---- F-09 / F-12：导航所需的身份与证据 id，在采集瞬间固定下来 ----
 
@@ -907,7 +909,7 @@ private:
     QLineEdit* m_arkRiskFilterEdit = nullptr; // 风险中心全字段过滤框。
     QCheckBox* m_arkRiskHighOnlyCheck = nullptr; // 仅显示高风险记录。
     QLabel* m_arkRiskStatusLabel = nullptr; // 风险中心状态标签。
-    QTableWidget* m_arkRiskTable = nullptr; // 风险中心结果表。
+    QTableView* m_arkRiskTable = nullptr; // 风险中心结果表。
     ks::ui::StructuredFieldView* m_arkRiskDetailEdit = nullptr; // 风险中心详情文本，使用统一只读代码编辑器。
 
     QChartView* m_cpuChartView = nullptr;      // CPU 条形图视图。
@@ -1128,5 +1130,10 @@ private:
     bool m_arkRiskCenterInitialDiscoveryDone = false; // 风险中心是否已完成首轮汇总。
     bool m_arkRiskRefreshInProgress = false;         // 风险中心后台刷新互斥标记。
     std::uint64_t m_arkRiskRefreshTicket = 0;        // 风险中心刷新票据。
-    std::vector<ArkRiskCenterEntry> m_arkRiskCenterEntries; // 风险中心缓存。
+    std::shared_ptr<const std::vector<ArkRiskCenterEntry>> m_arkRiskCenterEntries = std::make_shared<const std::vector<ArkRiskCenterEntry>>();
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_arkRiskDispatcher;
+    std::uint64_t m_arkRiskProjectionTicket = 0;
+    bool m_arkRiskProjectionRunning = false;
+    bool m_arkRiskProjectionScheduled = false;
+    bool m_arkRiskProjectionDue = false; // 风险中心缓存。
 };
