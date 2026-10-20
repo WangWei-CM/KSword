@@ -1,4 +1,5 @@
 #include "ProcessDock.h"
+#include "ProcessActivitySeriesCache.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/FlatButtonTheme.h"
 #include "ProcessAffinityUtils.h"
@@ -1518,6 +1519,28 @@ namespace
 class ProcessActivityChartWidget final : public QWidget
 {
 public:
+    struct SnapshotMetrics
+    {
+        std::array<double, 5> values{};
+        std::array<double, 5> denominators{100.0, 1.0, 1.0, 1.0, 100.0};
+    };
+
+    SnapshotMetrics snapshotMetrics(const int sampleIndex, const std::vector<std::string>& selectionKeys)
+    {
+        const std::unordered_set<std::string> keys(selectionKeys.begin(), selectionKeys.end());
+        prepareAggregateCache(selectionKeys, keys);
+        SnapshotMetrics result{};
+        if (m_ownerDock != nullptr && !m_ownerDock->m_activitySamples.empty() && !m_rawSamples.empty())
+        {
+            const auto& samples = m_ownerDock->m_activitySamples;
+            const auto sequence = samples[static_cast<std::size_t>(std::clamp(sampleIndex, 0,
+                static_cast<int>(samples.size()) - 1))].sequence;
+            result.values = m_rawSamples.at(sequence).values;
+            result.denominators = metricDenominators();
+        }
+        return result;
+    }
+
     // 构造函数：
     // - ownerDock：提供样本、选择和指标开关；
     // - parent：Qt 父控件；
@@ -1817,16 +1840,6 @@ private:
         return metricList;
     }
 
-    // MetricScale 作用：
-    // - 保存折线图百分比归一化分母；
-    // - 磁盘/网络使用当前历史窗口最大值作为 100%。
-    struct MetricScale
-    {
-        double memoryDenominatorMB = 1.0;     // memoryDenominatorMB：物理内存总量或历史最大内存。
-        double diskDenominatorMBps = 1.0;     // diskDenominatorMBps：历史最大磁盘吞吐。
-        double networkDenominatorKBps = 1.0;  // networkDenominatorKBps：历史最大网络吞吐。
-    };
-
     struct SeriesPoint
     {
         double timeMs = 0.0;      // 样本真实时间，屏幕位置随连续时钟变化。
@@ -1938,213 +1951,132 @@ private:
         }
     }
 
-    // 单调 Hermite 切线：峰谷处切线归零，同向区间取加权调和均值，平滑且不制造假峰值。
-    void calculateSeriesSlopes(std::vector<SeriesPoint>& points) const
+    // 原始值只为新样本追加一次；选区改变才失效该选区的聚合缓存。
+    void prepareAggregateCache(const std::vector<std::string>& selectionKeys,
+        const std::unordered_set<std::string>& selectionKeySet)
     {
-        if (points.size() < 2U)
+        if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
+            m_rawSamples.clear();
             return;
         }
-        const auto secant = [&points](std::size_t index)
+        const auto& samples = m_ownerDock->m_activitySamples;
+        auto canonicalKeys = selectionKeys;
+        std::sort(canonicalKeys.begin(), canonicalKeys.end());
+        canonicalKeys.erase(std::unique(canonicalKeys.begin(), canonicalKeys.end()), canonicalKeys.end());
+        const bool replace = m_rawRecordingTick != m_ownerDock->m_activityRecordingStartTick100ns ||
+            canonicalKeys != m_rawSelectionKeys || (!m_rawSamples.empty() &&
+                (samples.back().sequence < m_rawSamples.back().sequence ||
+                    (samples.front().sequence > m_rawSamples.back().sequence &&
+                        samples.front().sequence - m_rawSamples.back().sequence > 1U)));
+        if (replace)
         {
-            return (points[index + 1U].percent - points[index].percent)
-                / std::max(1.0, points[index + 1U].timeMs - points[index].timeMs);
-        };
-        points.front().slope = secant(0);
-        points.back().slope = secant(points.size() - 2U);
-        for (std::size_t index = 1; index + 1U < points.size(); ++index)
-        {
-            const double previousSlope = secant(index - 1U);
-            const double nextSlope = secant(index);
-            points[index].slope = 0.0;
-            if (previousSlope * nextSlope > 0.0)
-            {
-                const double previousWidth = std::max(1.0, points[index].timeMs - points[index - 1U].timeMs);
-                const double nextWidth = std::max(1.0, points[index + 1U].timeMs - points[index].timeMs);
-                const double previousWeight = 2.0 * nextWidth + previousWidth;
-                const double nextWeight = nextWidth + 2.0 * previousWidth;
-                points[index].slope = (previousWeight + nextWeight)
-                    / (previousWeight / previousSlope + nextWeight / nextSlope);
-            }
+            m_rawSamples.clear();
         }
+        m_rawRecordingTick = m_ownerDock->m_activityRecordingStartTick100ns;
+        m_rawSelectionKeys = std::move(canonicalKeys);
+        auto first = samples.begin();
+        if (!m_rawSamples.empty())
+        {
+            first = std::upper_bound(samples.begin(), samples.end(), m_rawSamples.back().sequence,
+                [](const std::uint64_t sequence, const ProcessDock::ProcessActivitySample& sample) {
+                    return sequence < sample.sequence;
+                });
+        }
+        for (auto sample = first; sample != samples.end(); ++sample)
+        {
+            ks::ui::activity::SeriesCache::Point point{};
+            point.sequence = sample->sequence;
+            point.timeMs = static_cast<double>(sample->elapsedMs);
+            if (selectionKeySet.empty())
+            {
+                point.values = {sample->totalCpuPercent, sample->totalMemoryMB, sample->totalDiskMBps,
+                    sample->totalNetKBps, sample->totalGpuPercent};
+            }
+            else
+            {
+                // 一次身份匹配同时累计五项，避免每项指标重新扫描所有历史进程。
+                for (const auto& process : sample->processes)
+                {
+                    if (selectionKeySet.find(process.identityKey) == selectionKeySet.end()) continue;
+                    point.values[0] += process.cpuPercent;
+                    point.values[1] += process.workingSetMB;
+                    point.values[2] += process.diskMBps;
+                    point.values[3] += process.netKBps;
+                    point.values[4] += process.gpuPercent;
+                }
+            }
+            const bool appended = m_rawSamples.append(point);
+            Q_ASSERT(appended);
+            (void)appended;
+        }
+        // 保留一个原边缘点维持跨视口曲线；完整历史仍由 owner 持有。
+        const auto firstSequence = samples.front().sequence;
+        m_rawSamples.trimBefore(firstSequence > 0U ? firstSequence - 1U : 0U);
     }
 
-    // 采样、指标开关或选区变化时刷新曲线缓存，60fps 移动不重新扫描每个进程的历史数值。
+    std::array<double, 5> metricDenominators() const
+    {
+        std::array<double, 5> result{100.0, 1.0, 1.0, 1.0, 100.0};
+        if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty() || m_rawSamples.empty()) return result;
+        const auto& samples = m_ownerDock->m_activitySamples;
+        result[1] = std::max(1.0, m_ownerDock->m_activityTotalPhysicalMemoryMB);
+        for (const std::size_t metric : {std::size_t{1}, std::size_t{2}, std::size_t{3}})
+        {
+            if (metric == 1U && result[1] > 1.0) continue;
+            const auto peak = m_rawSamples.extrema(samples.front().sequence, samples.back().sequence, metric);
+            if (peak.valid) result[metric] = std::max(1.0, m_rawSamples.at(peak.maximum).values[metric]);
+        }
+        return result;
+    }
+
+    // 数据代次、轴或物理像素列变化才重新准备投影；paint 不扫描全部历史。
     void updateSeriesCache(const std::vector<ProcessDock::ProcessActivityMetric>& metrics,
         const std::vector<std::string>& selectionKeys,
         const std::unordered_set<std::string>& selectionKeySet)
     {
-        const auto& samples = m_ownerDock->m_activitySamples;
-        const bool sameSelection = selectionKeys == m_cachedSelectionKeys && metrics == m_cachedMetrics;
-        if (!m_seriesDirty && sameSelection && m_cachedFirstSequence == samples.front().sequence
-            && m_cachedLastSequence == samples.back().sequence && m_cachedSampleCount == samples.size())
+        prepareAggregateCache(selectionKeys, selectionKeySet);
+        if (m_rawSamples.empty())
+        {
+            m_cachedSeries.clear();
+            return;
+        }
+        const auto denominators = metricDenominators();
+        const double endTime = windowEndMs();
+        const double startTime = endTime - windowDurationMs();
+        const std::size_t columns = static_cast<std::size_t>(std::max(2.0,
+            std::ceil(chartRect().width() * devicePixelRatioF())));
+        if (!m_seriesDirty && m_projectionRevision == m_rawSamples.revision() &&
+            metrics == m_cachedMetrics && denominators == m_projectionDenominators &&
+            m_projectionStartMs == startTime && m_projectionEndMs == endTime && m_projectionColumns == columns)
         {
             return;
         }
-        const MetricScale scale = calculateMetricScale(metrics, selectionKeySet);
         std::vector<CachedSeries> seriesList;
         seriesList.reserve(metrics.size());
         for (const auto metric : metrics)
         {
-            CachedSeries series;
+            const auto metricIndex = static_cast<std::size_t>(metric);
+            CachedSeries series{};
             series.metric = metric;
-            series.points.reserve(samples.size() + 2U);
-            // 保留刚淘汰的边缘采样直到它移出画布，避免历史满载时左缘突然截断。
-            if (sameSelection)
+            const auto sequences = m_rawSamples.project(metricIndex, startTime, endTime, columns);
+            series.points.reserve(sequences.size());
+            for (const auto sequence : sequences)
             {
-                for (const auto& previous : m_cachedSeries)
-                {
-                    if (previous.metric != metric)
-                    {
-                        continue;
-                    }
-                    const double earliest = windowEndMs() - windowDurationMs()
-                        - static_cast<double>(m_ownerDock->refreshIntervalMillisecondsFromInput());
-                    for (const auto& point : previous.points)
-                    {
-                        if (point.timeMs >= static_cast<double>(samples.front().elapsedMs))
-                        {
-                            break;
-                        }
-                        if (point.timeMs >= earliest)
-                        {
-                            series.points.push_back(point);
-                        }
-                    }
-                }
+                series.points.push_back({m_rawSamples.at(sequence).timeMs,
+                    m_rawSamples.normalizedValue(sequence, metricIndex, denominators[metricIndex]),
+                    m_rawSamples.slope(sequence, metricIndex, denominators[metricIndex])});
             }
-            for (const auto& sample : samples)
-            {
-                series.points.push_back({static_cast<double>(sample.elapsedMs),
-                    samplePercentMetricValue(sample, metric, selectionKeySet, scale), 0.0});
-            }
-            calculateSeriesSlopes(series.points);
             seriesList.push_back(std::move(series));
         }
         m_cachedSeries = std::move(seriesList);
         m_cachedMetrics = metrics;
-        m_cachedSelectionKeys = selectionKeys;
-        m_cachedFirstSequence = samples.front().sequence;
-        m_cachedLastSequence = samples.back().sequence;
-        m_cachedSampleCount = samples.size();
+        m_projectionRevision = m_rawSamples.revision();
+        m_projectionDenominators = denominators;
+        m_projectionStartMs = startTime;
+        m_projectionEndMs = endTime;
+        m_projectionColumns = columns;
         m_seriesDirty = false;
-    }
-
-    // sampleRawMetricValue：
-    // - 读取某个采样点的原始单项指标；
-    // - selectionKeySet 为空时返回总体聚合，否则通过哈希集合返回选中进程之和。
-    double sampleRawMetricValue(
-        const ProcessDock::ProcessActivitySample& sample,
-        const ProcessDock::ProcessActivityMetric metric,
-        const std::unordered_set<std::string>& selectionKeySet) const
-    {
-        if (selectionKeySet.empty())
-        {
-            switch (metric)
-            {
-            case ProcessDock::ProcessActivityMetric::Cpu:
-                return sample.totalCpuPercent;
-            case ProcessDock::ProcessActivityMetric::Memory:
-                return sample.totalMemoryMB;
-            case ProcessDock::ProcessActivityMetric::Disk:
-                return sample.totalDiskMBps;
-            case ProcessDock::ProcessActivityMetric::Network:
-                return sample.totalNetKBps;
-            case ProcessDock::ProcessActivityMetric::Gpu:
-                return sample.totalGpuPercent;
-            default:
-                return 0.0;
-            }
-        }
-
-        double value = 0.0;
-        for (const ProcessDock::ProcessActivityProcessPoint& processPoint : sample.processes)
-        {
-            if (selectionKeySet.find(processPoint.identityKey) == selectionKeySet.end())
-            {
-                continue;
-            }
-            switch (metric)
-            {
-            case ProcessDock::ProcessActivityMetric::Cpu:
-                value += processPoint.cpuPercent;
-                break;
-            case ProcessDock::ProcessActivityMetric::Memory:
-                value += processPoint.workingSetMB;
-                break;
-            case ProcessDock::ProcessActivityMetric::Disk:
-                value += processPoint.diskMBps;
-                break;
-            case ProcessDock::ProcessActivityMetric::Network:
-                value += processPoint.netKBps;
-                break;
-            case ProcessDock::ProcessActivityMetric::Gpu:
-                value += processPoint.gpuPercent;
-                break;
-            default:
-                break;
-            }
-        }
-        return value;
-    }
-
-    // calculateMetricScale：
-    // - 每次绘制都重新扫描历史最大值；
-    // - 当磁盘/网络出现新峰值时，本轮立刻重算百分比并重绘。
-    MetricScale calculateMetricScale(
-        const std::vector<ProcessDock::ProcessActivityMetric>& metricList,
-        const std::unordered_set<std::string>& selectionKeySet) const
-    {
-        MetricScale scale{};
-        if (m_ownerDock == nullptr)
-        {
-            return scale;
-        }
-
-        scale.memoryDenominatorMB = std::max(1.0, m_ownerDock->m_activityTotalPhysicalMemoryMB);
-        double maxMemoryMB = 0.0;
-        double maxDiskMBps = 0.0;
-        double maxNetworkKBps = 0.0;
-        for (const ProcessDock::ProcessActivitySample& sample : m_ownerDock->m_activitySamples)
-        {
-            maxMemoryMB = std::max(maxMemoryMB, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Memory, selectionKeySet));
-            maxDiskMBps = std::max(maxDiskMBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Disk, selectionKeySet));
-            maxNetworkKBps = std::max(maxNetworkKBps, sampleRawMetricValue(sample, ProcessDock::ProcessActivityMetric::Network, selectionKeySet));
-        }
-        if (scale.memoryDenominatorMB <= 1.0 && maxMemoryMB > 0.0)
-        {
-            scale.memoryDenominatorMB = maxMemoryMB;
-        }
-        scale.diskDenominatorMBps = std::max(1.0, maxDiskMBps);
-        scale.networkDenominatorKBps = std::max(1.0, maxNetworkKBps);
-        (void)metricList;
-        return scale;
-    }
-
-    // samplePercentMetricValue：
-    // - 把原始指标统一转换为百分比；
-    // - 磁盘/网络按历史最大值归一化，CPU/GPU 天然是百分比。
-    double samplePercentMetricValue(
-        const ProcessDock::ProcessActivitySample& sample,
-        const ProcessDock::ProcessActivityMetric metric,
-        const std::unordered_set<std::string>& selectionKeySet,
-        const MetricScale& scale) const
-    {
-        const double rawValue = sampleRawMetricValue(sample, metric, selectionKeySet);
-        switch (metric)
-        {
-        case ProcessDock::ProcessActivityMetric::Cpu:
-        case ProcessDock::ProcessActivityMetric::Gpu:
-            return clampPercentValue(rawValue);
-        case ProcessDock::ProcessActivityMetric::Memory:
-            return clampPercentValue((rawValue / std::max(1.0, scale.memoryDenominatorMB)) * 100.0);
-        case ProcessDock::ProcessActivityMetric::Disk:
-            return clampPercentValue((rawValue / std::max(1.0, scale.diskDenominatorMBps)) * 100.0);
-        case ProcessDock::ProcessActivityMetric::Network:
-            return clampPercentValue((rawValue / std::max(1.0, scale.networkDenominatorKBps)) * 100.0);
-        default:
-            return 0.0;
-        }
     }
 
     // sampleIndexAtX：
@@ -2283,9 +2215,7 @@ private:
             }
             const std::size_t firstIndex = static_cast<std::size_t>(std::distance(points.begin(), first));
             const std::size_t endIndex = static_cast<std::size_t>(std::distance(points.begin(), last));
-            const std::size_t visibleCount = endIndex - firstIndex;
-            const std::size_t maximumPoints = static_cast<std::size_t>(std::max(2.0, plotRect.width()));
-            const std::size_t stride = std::max<std::size_t>(1U, (visibleCount + maximumPoints - 1U) / maximumPoints);
+            if (firstIndex == endIndex) continue;
             QPainterPath path;
             path.moveTo(position(points[firstIndex]));
             std::size_t previousIndex = firstIndex;
@@ -2307,7 +2237,7 @@ private:
                         plotRect.bottom() - control2 / 100.0 * plotRect.height()), to);
                 previousIndex = index;
             };
-            for (std::size_t index = firstIndex + stride; index < endIndex; index += stride)
+            for (std::size_t index = firstIndex + 1U; index < endIndex; ++index)
             {
                 appendCurve(index);
             }
@@ -2339,24 +2269,21 @@ private:
         {
             return;
         }
-        const double sampleTime = static_cast<double>(m_ownerDock->m_activitySamples[
-            static_cast<std::size_t>(sampleIndex)].elapsedMs);
+        const auto sequence = m_ownerDock->m_activitySamples[static_cast<std::size_t>(sampleIndex)].sequence;
+        if (m_rawSamples.empty()) return;
+        const double sampleTime = m_rawSamples.at(sequence).timeMs;
+        const auto denominators = metricDenominators();
         const double endTime = windowEndMs();
         const double duration = windowDurationMs();
         painter.save();
         painter.setClipRect(plotRect);
         for (const auto& series : m_cachedSeries)
         {
-            const auto point = std::lower_bound(series.points.begin(), series.points.end(), sampleTime,
-                [](const SeriesPoint& value, double time) { return value.timeMs < time; });
-            if (point == series.points.end() || point->timeMs != sampleTime)
-            {
-                continue;
-            }
             painter.setPen(QPen(KswordTheme::SurfaceColor(), 1.4));
             painter.setBrush(processActivityMetricColor(series.metric));
-            const double x = plotRect.right() + (point->timeMs - endTime) / duration * plotRect.width();
-            const double y = plotRect.bottom() - point->percent / 100.0 * plotRect.height();
+            const double x = plotRect.right() + (sampleTime - endTime) / duration * plotRect.width();
+            const double y = plotRect.bottom() - m_rawSamples.normalizedValue(sequence, static_cast<std::size_t>(series.metric),
+                denominators[static_cast<std::size_t>(series.metric)]) / 100.0 * plotRect.height();
             painter.drawEllipse(QPointF(x, y), 3.4, 3.4);
         }
         painter.restore();
@@ -2430,12 +2357,17 @@ private:
     bool m_hoverActive = false; // 只在鼠标位于实际曲线画布内显示圆点。
     std::uint64_t m_hoveredSequence = 0; // 合并同一采样的 tooltip 更新。
     bool m_seriesDirty = true; // 新样本触发重建，逐帧移动只使用缓存。
-    std::uint64_t m_cachedFirstSequence = 0; // 缓存左端样本身份。
-    std::uint64_t m_cachedLastSequence = 0; // 缓存右端样本身份。
-    std::size_t m_cachedSampleCount = 0; // 检测清空和历史淘汰。
-    std::vector<CachedSeries> m_cachedSeries; // 已归一化的时间/数值/切线。
-    std::vector<ProcessDock::ProcessActivityMetric> m_cachedMetrics; // 当前指标组合。
-    std::vector<std::string> m_cachedSelectionKeys; // 当前进程选择，变更后重新聚合。
+    ks::ui::activity::SeriesCache m_rawSamples;
+    std::uint64_t m_rawRecordingTick = 0;
+    std::vector<std::string> m_rawSelectionKeys;
+    std::uint64_t m_projectionRevision = 0;
+    double m_projectionStartMs = 0.0;
+    double m_projectionEndMs = 0.0;
+    std::size_t m_projectionColumns = 0;
+    std::array<double, 5> m_projectionDenominators{};
+    std::vector<CachedSeries> m_cachedSeries; // 每物理像素列最多两个真实极值点。
+    std::vector<ProcessDock::ProcessActivityMetric> m_cachedMetrics;
+
 };
 
 class ProcessActivityTimelineSlider final : public QSlider
@@ -10011,18 +9943,33 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
         return m_activitySnapshotTextCache;
     }
 
-    const double cpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys);
-    const double memoryValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys);
-    const double diskValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys);
-    const double netValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Network, selectionKeys);
-    const double gpuValue = processActivitySampleMetricValue(sample, ProcessActivityMetric::Gpu, selectionKeys);
-    double maxDiskValue = 0.0;
-    double maxNetValue = 0.0;
-    for (const ProcessActivitySample& historySample : m_activitySamples)
+    ProcessActivityChartWidget::SnapshotMetrics cachedMetrics{};
+    if (m_activityChartWidget != nullptr)
     {
-        maxDiskValue = std::max(maxDiskValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Disk, selectionKeys));
-        maxNetValue = std::max(maxNetValue, processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
+        cachedMetrics = m_activityChartWidget->snapshotMetrics(safeIndex, selectionKeys);
     }
+    else
+    {
+        cachedMetrics.values = {processActivitySampleMetricValue(sample, ProcessActivityMetric::Cpu, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Memory, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Disk, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Network, selectionKeys),
+            processActivitySampleMetricValue(sample, ProcessActivityMetric::Gpu, selectionKeys)};
+        for (const auto& historySample : m_activitySamples)
+        {
+            cachedMetrics.denominators[2] = std::max(cachedMetrics.denominators[2],
+                processActivitySampleMetricValue(historySample, ProcessActivityMetric::Disk, selectionKeys));
+            cachedMetrics.denominators[3] = std::max(cachedMetrics.denominators[3],
+                processActivitySampleMetricValue(historySample, ProcessActivityMetric::Network, selectionKeys));
+        }
+    }
+    const double cpuValue = cachedMetrics.values[0];
+    const double memoryValue = cachedMetrics.values[1];
+    const double diskValue = cachedMetrics.values[2];
+    const double netValue = cachedMetrics.values[3];
+    const double gpuValue = cachedMetrics.values[4];
+    const double maxDiskValue = cachedMetrics.denominators[2];
+    const double maxNetValue = cachedMetrics.denominators[3];
     const double memoryPercent = clampPercentValue(
         (memoryValue / std::max(1.0, m_activityTotalPhysicalMemoryMB)) * 100.0);
     const double diskPercent = clampPercentValue((diskValue / std::max(1.0, maxDiskValue)) * 100.0);
@@ -10071,7 +10018,7 @@ QString ProcessDock::buildProcessActivitySnapshotText(const int sampleIndex) con
     {
         if (isProcessActivityMetricEnabled(metric))
         {
-            const double metricValue = processActivitySampleMetricValue(sample, metric, selectionKeys);
+            const double metricValue = cachedMetrics.values[static_cast<std::size_t>(metric)];
             double percentValue = 0.0;
             switch (metric)
             {
