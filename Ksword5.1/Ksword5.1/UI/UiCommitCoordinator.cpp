@@ -3,6 +3,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QKeyEvent>
 #include <QTimer>
@@ -39,11 +40,14 @@ namespace ks::ui
 {
     UiCommitCoordinator::UiCommitCoordinator(
         QApplication* application,
-        UiCommitInteractionProbes probes)
+        UiCommitInteractionProbes probes,
+        UiCommitDrainOptions drainOptions)
         : QObject(application)
         , m_application(application)
         , m_probes(std::move(probes))
+        , m_drainOptions(std::move(drainOptions))
     {
+        m_drainOptions.softBudgetNanoseconds = std::max<qint64>(1, m_drainOptions.softBudgetNanoseconds);
         // 默认探针保持只检测左 Ctrl 的已有产品行为，右 Ctrl 不阻塞刷新。
         if (!m_probes.leftCtrlHeld)
         {
@@ -129,31 +133,36 @@ namespace ks::ui
         return isBlocked(views);
     }
 
+    void UiCommitCoordinator::removeIndex(const PendingCommit& pending)
+    {
+        auto owner = m_pendingIndex.find(pending.ownerIdentity);
+        if (owner == m_pendingIndex.end()) return;
+        owner->remove(pending.key);
+        if (owner->isEmpty()) m_pendingIndex.erase(owner);
+    }
+
     void UiCommitCoordinator::removeMatching(QObject* owner, const QString& key)
     {
-        m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
-            [owner, &key](const PendingCommit& pending)
-            {
-                return pending.owner.data() == owner && pending.key == key;
-            }), m_pending.end());
+        const auto ownerEntry = m_pendingIndex.constFind(owner);
+        if (ownerEntry == m_pendingIndex.cend()) return;
+        const auto keyEntry = ownerEntry->constFind(key);
+        if (keyEntry == ownerEntry->cend()) return;
+        const auto pending = m_pending.find(keyEntry.value());
+        if (pending == m_pending.end()) return;
+        removeIndex(pending.value());
+        m_pending.erase(pending);
     }
 
     // 立即释放被销毁页面的捕获快照，避免下拉菜单长期开启时保留大块数据。
     void UiCommitCoordinator::watchOwner(QObject* owner)
     {
-        if (m_watchedOwners.contains(owner))
-        {
-            return;
-        }
+        if (m_watchedOwners.contains(owner)) return;
         m_watchedOwners.insert(owner);
         connect(owner, &QObject::destroyed, this, [this, owner]()
         {
             m_watchedOwners.remove(owner);
-            m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
-                [](const PendingCommit& pending)
-                {
-                    return pending.owner.isNull();
-                }), m_pending.end());
+            const auto generations = m_pendingIndex.take(owner);
+            for (const quint64 generation : generations) m_pending.remove(generation);
         });
     }
 
@@ -163,7 +172,12 @@ namespace ks::ui
         const QList<QAbstractItemView*>& views,
         std::function<void()> action)
     {
-        return deferChecked(owner, key, views, action);
+        // 旧入口常缓存 [this]{ refresh(); }，refresh 顶部会再次进入同一个 defer guard。
+        // 只放行这一次 guard，避免永久自排队；submit 的新快照不享有这个许可。
+        const bool executingLegacyGuard = m_flushing && m_legacyGuardAvailable
+            && m_executingOwner.data() == owner && m_executingKey == key;
+        if (executingLegacyGuard) m_legacyGuardAvailable = false;
+        return deferChecked(owner, key, views, action, executingLegacyGuard);
     }
 
     // 同一次输入状态只查询一次；未阻塞时保留 action，避免两次探针间松键丢提交。
@@ -171,7 +185,8 @@ namespace ks::ui
         QObject* owner,
         const QString& key,
         const QList<QAbstractItemView*>& views,
-        std::function<void()>& action)
+        std::function<void()>& action,
+        const bool executingLegacyGuard)
     {
         if (owner == nullptr || key.isEmpty() || !action)
         {
@@ -179,15 +194,16 @@ namespace ks::ui
         }
         // 先淘汰同键旧提交。松开 Ctrl 后先收到新快照时，旧快照不可随后覆盖它。
         removeMatching(owner, key);
-        if (!isBlocked(views))
+        if (!isBlocked(views) && (executingLegacyGuard || (!m_flushing && !m_roundActive && !m_continuationPending)))
         {
-            if (!m_pending.isEmpty())
+            if (!m_pending.isEmpty() && !m_flushing)
             {
                 notifyInteractionEnded();
             }
             return false;
         }
         PendingCommit pending;
+        pending.ownerIdentity = owner;
         pending.owner = owner;
         pending.key = key;
         pending.action = std::move(action);
@@ -199,7 +215,10 @@ namespace ks::ui
             }
         }
         watchOwner(owner);
-        m_pending.append(std::move(pending));
+        const quint64 generation = ++m_nextGeneration;
+        m_pendingIndex[owner].insert(key, generation);
+        m_pending.insert(generation, std::move(pending));
+        if (m_flushing || m_roundActive || m_continuationPending) scheduleContinuation();
         return true;
     }
 
@@ -241,11 +260,18 @@ namespace ks::ui
                 guardedView->setProperty(kMenuDepthProperty,
                     std::max(0, guardedView->property(kMenuDepthProperty).toInt() - 1));
             }
-            flush();
+            notifyInteractionEnded();
         });
     }
 
     void UiCommitCoordinator::notifyInteractionEnded()
+    {
+        // 已扫描但受屏障阻塞的项也必须在实际交互结束后重新检查。
+        m_flushRequested = true;
+        scheduleFlush();
+    }
+
+    void UiCommitCoordinator::scheduleFlush()
     {
         if (m_flushScheduled || m_pending.isEmpty())
         {
@@ -259,38 +285,86 @@ namespace ks::ui
         });
     }
 
+    void UiCommitCoordinator::scheduleContinuation()
+    {
+        m_continuationPending = true;
+        scheduleFlush();
+    }
+
     void UiCommitCoordinator::flush()
     {
         if (m_flushing)
         {
+            m_flushRequested = true;
             return;
         }
         m_flushing = true;
-        for (qsizetype index = 0; index < m_pending.size();)
+        m_continuationPending = false;
+        if (m_flushRequested)
         {
-            if (!targetsAlive(m_pending.at(index)))
+            m_roundActive = false;
+            m_flushRequested = false;
+        }
+        if (!m_roundActive)
+        {
+            m_roundActive = true;
+            m_roundCutoff = m_nextGeneration;
+            m_roundCursor = 0;
+        }
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const auto clock = m_drainOptions.monotonicNanoseconds;
+        const qint64 started = clock ? clock() : 0;
+        const auto budgetExpired = [&]()
+        {
+            return (clock ? clock() - started : elapsed.nsecsElapsed())
+                >= m_drainOptions.softBudgetNanoseconds;
+        };
+        while (true)
+        {
+            // 每次按代次重新查找：用户回调可覆盖任何 key 或销毁任意 owner。
+            const auto next = m_pending.upperBound(m_roundCursor);
+            if (next == m_pending.end() || next.key() > m_roundCutoff)
             {
-                m_pending.removeAt(index);
-                continue;
+                m_roundActive = false;
+                break;
             }
-            if (pendingBlocked(m_pending.at(index)))
+            m_roundCursor = next.key();
+            if (!targetsAlive(next.value()))
             {
-                ++index;
-                continue;
+                removeIndex(next.value());
+                m_pending.erase(next);
             }
-            // 移出记录后才执行用户代码，重入改变队列不会留下悬空引用。
-            PendingCommit pending = std::move(m_pending[index]);
-            m_pending.removeAt(index);
-            const QPointer<UiCommitCoordinator> self(this);
-            pending.action();
-            // 回调可能关闭整个应用或销毁协调器，不再访问已释放的成员。
-            if (self.isNull())
+            else if (!pendingBlocked(next.value()))
             {
-                return;
+                // 原子目标组不拆开；预算只能约束多个 action 的串联，不能抢占单个 action。
+                PendingCommit pending = std::move(next.value());
+                removeIndex(pending);
+                m_pending.erase(next);
+                const QPointer<UiCommitCoordinator> self(this);
+                m_executingOwner = pending.owner;
+                m_executingKey = pending.key;
+                m_legacyGuardAvailable = true;
+                pending.action();
+                if (self.isNull()) return;
+                m_legacyGuardAvailable = false;
+                m_executingOwner.clear();
+                m_executingKey.clear();
             }
-            index = 0;
+            // 连屏障检查也计入同一份预算；游标跨续轮保存，避免反复从头扫描饥饿。
+            if (budgetExpired()) break;
         }
         m_flushing = false;
+        if (m_pending.isEmpty())
+        {
+            m_roundActive = false;
+            m_continuationPending = false;
+            return;
+        }
+        if (m_roundActive || m_nextGeneration > m_roundCutoff || m_flushRequested)
+        {
+            scheduleContinuation();
+        }
     }
 
     qsizetype UiCommitCoordinator::pendingCount() const
