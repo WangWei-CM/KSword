@@ -840,3 +840,15 @@ void WelcomeDock::retranslateUi()
         m_performanceCards[4]->setTitleText(welcomeText("hardware.utilization.card.network.prefix", QStringLiteral("以太网")));
     }
 }
+
+ks::ui::PageNavigationCatalog WelcomeDock::navigationCatalog(const WelcomeDock*)
+{
+    // 欢迎页只有一个正文，不把按钮/外链/性能卡伪装成独立内嵌导航页。
+    return {};
+}
+QWidget* WelcomeDock::activateNavigationDescriptor(const QString&)
+{
+    return nullptr;
+}
+namespace { const bool kWelcomeNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<WelcomeDock>(QStringLiteral("welcome")); }

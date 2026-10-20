@@ -2,6 +2,7 @@
 
 #include "../UI/StructuredFieldView.h"
 #include <QWidget>
+#include "../UI/PageNavigationCatalog.h"
 #include <QLabel>
 #include <QPushButton>
 #include <QHBoxLayout>
@@ -22,6 +23,8 @@ class WelcomeDock : public QWidget
 {
     Q_OBJECT
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const WelcomeDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
     explicit WelcomeDock(QWidget* parent = nullptr);
 
