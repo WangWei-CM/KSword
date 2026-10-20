@@ -457,12 +457,7 @@ void DriverDock::initializeUnloadedPiddbTab()
     m_unloadedPiddbStatusLabel->setWordWrap(true);
     m_unloadedPiddbLayout->addWidget(m_unloadedPiddbStatusLabel);
 
-    m_tabWidget->addTab(
-        m_unloadedPiddbPage,
-        QIcon(QStringLiteral(":/Icon/process_uncritical.svg")),
-        driverText(
-            "driver.tab.unloaded_piddb",
-            QStringLiteral("已卸载驱动")));
+    addNavigationPage(m_tabWidget,m_unloadedPiddbPage,"unloaded",QIcon(QStringLiteral(":/Icon/process_uncritical.svg")));
 
     // 来源变化立即查询；过滤相关控件只重绘本地缓存。
     const auto connectSource = [this](QRadioButton* radio) {

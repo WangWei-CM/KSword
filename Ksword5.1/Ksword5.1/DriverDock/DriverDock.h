@@ -15,6 +15,7 @@
 #include "../Framework.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QPointer>
 #include <QWidget>
@@ -33,6 +34,7 @@ namespace ks::ui { class AsyncOperation; class AsyncOperationToken; }
 
 // Qt 前置声明：减少头文件编译耦合。
 class QCheckBox;
+class QIcon;
 class QButtonGroup;
 class QComboBox;
 class CodeEditorWidget;
@@ -76,6 +78,8 @@ public:
     // - 处理：将动态偏移/驱动状态作为驱动 Dock 一级页展示，不复制业务逻辑；
     // - 输出：无，重复调用同一页面时保持幂等。
     void attachKswordSelfDriverPage(QWidget* page, QWidget* fallbackOwner);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const DriverDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 protected:
     // showEvent：
@@ -91,6 +95,10 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    static QString navigationTitle(const char* id);
+    QWidget* navigationPage(const QString& id) const;
+    int addNavigationPage(QTabWidget* tabs, QWidget* page, const char* id, const QIcon& icon);
+
     // DriverServiceRecord：
     // - 作用：描述一条驱动服务记录的展示字段。
     struct DriverServiceRecord

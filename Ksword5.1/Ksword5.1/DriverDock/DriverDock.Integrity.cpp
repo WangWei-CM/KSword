@@ -424,10 +424,7 @@ void DriverDock::initializeIntegrityTab()
     ks::ui::DetailLayoutRegistry::registerStructuredHost(
         m_integrityTable, m_integrityDetailEdit, m_integrityPage);
 
-    m_tabWidget->addTab(
-        m_integrityPage,
-        QIcon(QStringLiteral(":/Icon/process_critical.svg")),
-        driverText("driver.tab.integrity", QStringLiteral("驱动完整性")));
+    addNavigationPage(m_tabWidget,m_integrityPage,"integrity",QIcon(QStringLiteral(":/Icon/process_critical.svg")));
 
     rebuildModuleCrossViewTable();
 }

@@ -598,10 +598,7 @@ void DriverDock::attachKswordSelfDriverPage(QWidget* page, QWidget* fallbackOwne
 
     m_kswordSelfDriverPage = page;
     m_kswordSelfDriverFallbackOwner = fallbackOwner;
-    m_kswordSelfDriverTabIndex = m_tabWidget->addTab(
-        page,
-        QIcon(QStringLiteral(":/Icon/process_priority.svg")),
-        driverText("driver.tab.self_driver", QStringLiteral("Ksword自身驱动")));
+    m_kswordSelfDriverTabIndex = addNavigationPage(m_tabWidget,page,"self_driver",QIcon(QStringLiteral(":/Icon/process_priority.svg")));
     m_tabWidget->setTabToolTip(
         m_kswordSelfDriverTabIndex,
         driverText(
