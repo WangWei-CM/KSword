@@ -46,6 +46,9 @@
     <Filter Include="Header Files\MemoryWorkbench\Shared">
       <UniqueIdentifier>{a8a0d876-0ad9-417d-bfbe-2bff029a73d1}</UniqueIdentifier>
     </Filter>
+    <ClCompile Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="PrivilegeDock\PrivilegeAccessPage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -67,6 +70,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryWriteOperation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\BudgetedPlainTextTransfer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
