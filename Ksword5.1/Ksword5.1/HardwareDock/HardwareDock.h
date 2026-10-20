@@ -22,6 +22,7 @@
 #include <QVector>
 #include <QWidget>
 
+#include <array>
 #include <atomic>   // std::atomic_bool：异步探测任务互斥。
 #include <cstdint>  // std::uint64_t：保存采样累计值与时间戳。
 #include <utility>
@@ -810,6 +811,8 @@ private:
     int m_sampleCounter = 60;                 // m_sampleCounter：采样序号（从历史长度起步避免首段无图）。
     QString m_cachedSensorText;               // m_cachedSensorText：CPU 温度/电压缓存。
     QString m_lastSensorLogSignatureText;     // m_lastSensorLogSignatureText：最近一次传感器日志去重签名。
+    std::array<quint64, 7> m_staticDataRevisions{{1, 1, 1, 1, 1, 1, 1}};
+    std::array<quint64, 7> m_staticPresentedRevisions{};
     ks::ui::FieldDocument m_cachedOverviewFields;       // 概览字段快照。
     ks::ui::FieldDocument m_cachedGpuFields;            // 显卡字段快照。
     ks::ui::FieldDocument m_cachedMemoryFields;         // 内存字段快照。

@@ -8,6 +8,7 @@
 #include "../UI/FloatingScrollbars.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "DiskMonitorPage.h"
 #include "MemoryCompositionHistoryWidget.h"
@@ -76,6 +77,8 @@
 #include <QResizeEvent>
 #include <QRunnable>
 #include <QScrollArea>
+#include <QSet>
+#include <QSignalBlocker>
 #include <QScreen>
 #include <QSpacerItem>
 #include <QScrollBar>
@@ -321,7 +324,7 @@ namespace
 
     // applyDeviceAuditTableFilter 作用：
     // - 输入：设备审计表和搜索框文本；
-    // - 处理：仅通过 setRowHidden 本地过滤，避免重复 R0 查询；
+    // - 处理：提交业务过滤身份层，保留共享 search/freeze 隐藏位，避免重复 R0 查询；
     // - 返回：无，空表格指针直接忽略。
     void applyDeviceAuditTableFilter(QTableWidget* table, const QString& filterText)
     {
@@ -331,12 +334,13 @@ namespace
         }
 
         const QString normalizedFilterText = filterText.trimmed();
+        QSet<QPersistentModelIndex> excluded;
         for (int rowIndex = 0; rowIndex < table->rowCount(); ++rowIndex)
         {
-            table->setRowHidden(
-                rowIndex,
-                !rowMatchesDeviceAuditFilter(table, rowIndex, normalizedFilterText));
+            if (!rowMatchesDeviceAuditFilter(table, rowIndex, normalizedFilterText))
+                excluded.insert(QPersistentModelIndex(table->model()->index(rowIndex, 0)));
         }
+        ks::ui::ApplyTableRowFilter(table, excluded);
     }
 
     // buildDeviceAuditSearchStyle 作用：
@@ -1204,13 +1208,26 @@ namespace
         return rows;
     }
 
+    class DeviceAuditItem final : public QTableWidgetItem
+    {
+    public:
+        explicit DeviceAuditItem(const QString& text) : QTableWidgetItem(text) {}
+        bool operator<(const QTableWidgetItem& other) const override
+        {
+            if (tableWidget() != nullptr
+                && tableWidget()->property("kswordDeviceAuditCanonicalSort").toBool())
+                return data(Qt::UserRole + 28).toInt() < other.data(Qt::UserRole + 28).toInt();
+            return QTableWidgetItem::operator<(other);
+        }
+    };
+
     // makeDeviceAuditItem 作用：
     // - 输入：单元格文本；
     // - 处理：创建只读 QTableWidgetItem；
     // - 返回：由表格接管生命周期的 item 指针。
     QTableWidgetItem* makeDeviceAuditItem(const QString& text)
     {
-        QTableWidgetItem* item = new QTableWidgetItem(text);
+        QTableWidgetItem* item = new DeviceAuditItem(text);
         item->setFlags(item->flags() & ~Qt::ItemIsEditable);
         item->setTextAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         return item;
@@ -1227,22 +1244,122 @@ namespace
             return;
         }
 
+        const QSignalBlocker blocker(table);
+        const QSignalBlocker selectionBlocker(table->selectionModel());
         const bool wasSortingEnabled = table->isSortingEnabled();
+        const int sortColumn = table->horizontalHeader()->sortIndicatorSection();
+        const Qt::SortOrder sortOrder = table->horizontalHeader()->sortIndicatorOrder();
         table->setSortingEnabled(false);
-        table->setRowCount(rows.size());
-        for (int rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
+        constexpr int identityRole = Qt::UserRole + 27;
+        const auto identityForRow = [](const QStringList& row) {
+            QString key;
+            // 对象地址、链路身份和类型组成稳定身份；不把可变风险/状态文字当身份。
+            for (const int column : {0, 1, 2, 6, 7, 12, 13, 14, 15, 16})
+            {
+                const QString part = row.value(column);
+                key += QString::number(part.size()) + QLatin1Char(':') + part;
+            }
+            return key;
+        };
+        QStringList desiredKeys;
+        QHash<QString, int> duplicateCounts;
+        for (const auto& row : rows)
         {
-            const QStringList& row = rows.at(rowIndex);
+            const QString base = identityForRow(row);
+            desiredKeys.append(base + QLatin1Char('#') + QString::number(duplicateCounts[base]++));
+        }
+        QStringList existingKeys;
+        duplicateCounts.clear();
+        QSet<QString> selectedKeys;
+        QString currentKey;
+        const int currentColumn = table->currentColumn();
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            QString key = first != nullptr ? first->data(identityRole).toString() : QString();
+            if (key.isEmpty())
+            {
+                QStringList values;
+                for (int column = 0; column < table->columnCount(); ++column)
+                {
+                    auto* item = table->item(row, column);
+                    values.append(item != nullptr ? item->text() : QString());
+                }
+                const QString base = identityForRow(values);
+                key = base + QLatin1Char('#') + QString::number(duplicateCounts[base]++);
+            }
+            if (first != nullptr && first->data(identityRole).toString() != key)
+                first->setData(identityRole, key);
+            existingKeys.append(key);
+            if (first != nullptr && first->isSelected()) selectedKeys.insert(key);
+            if (row == table->currentRow()) currentKey = key;
+        }
+        // Existing rows keep their slots until Qt emits removal/layout notifications. Taking
+        // cells out and reinstalling them would transfer persistent indexes to another object.
+        table->clearSelection();
+        table->selectionModel()->clearCurrentIndex();
+        const QSet<QString> wanted(desiredKeys.cbegin(), desiredKeys.cend());
+        for (int row = table->rowCount() - 1; row >= 0; --row)
+            if (!wanted.contains(existingKeys.at(row))) table->removeRow(row);
+        QHash<QString, int> rowByKey;
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            // Install the migration identity before matching; first population has no old rows.
+            if (first != nullptr) rowByKey.insert(first->data(identityRole).toString(), row);
+        }
+        for (int rank = 0; rank < rows.size(); ++rank)
+        {
+            const QString& key = desiredKeys.at(rank);
+            int rowIndex = rowByKey.value(key, -1);
+            if (rowIndex < 0)
+            {
+                rowIndex = table->rowCount();
+                table->insertRow(rowIndex);
+                rowByKey.insert(key, rowIndex);
+            }
+            const QStringList& row = rows.at(rank);
             for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
             {
-                const QString cellText = columnIndex < row.size() ? row.at(columnIndex) : QString();
-                table->setItem(rowIndex, columnIndex, makeDeviceAuditItem(cellText));
+                auto* item = table->item(rowIndex, columnIndex);
+                const QString cellText = row.value(columnIndex);
+                if (item == nullptr)
+                {
+                    item = makeDeviceAuditItem(cellText);
+                    table->setItem(rowIndex, columnIndex, item);
+                }
+                else if (item->text() != cellText) item->setText(cellText);
+                if (columnIndex == 0)
+                {
+                    if (item->data(identityRole).toString() != key) item->setData(identityRole, key);
+                    if (item->data(Qt::UserRole + 28).toInt() != rank
+                        || !item->data(Qt::UserRole + 28).isValid())
+                        item->setData(Qt::UserRole + 28, rank);
+                }
             }
         }
-        table->setSortingEnabled(wasSortingEnabled);
-        applyDeviceAuditTableFilter(
-            table,
-            table->property("kswordDeviceAuditFilter").toString());
+        if (wasSortingEnabled) table->setSortingEnabled(true);
+        else
+        {
+            // sortItems performs a layout move with persistent-index remapping. The temporary
+            // comparator restores source order when there is no active user sort.
+            table->setProperty("kswordDeviceAuditCanonicalSort", true);
+            table->sortItems(0, Qt::AscendingOrder);
+            table->setProperty("kswordDeviceAuditCanonicalSort", false);
+            const QSignalBlocker headerBlocker(table->horizontalHeader());
+            table->horizontalHeader()->setSortIndicator(sortColumn, sortOrder);
+        }
+        for (int row = 0; row < table->rowCount(); ++row)
+        {
+            auto* first = table->item(row, 0);
+            const QString key = first->data(identityRole).toString();
+            if (!currentKey.isEmpty() && key == currentKey && currentColumn >= 0)
+                table->setCurrentItem(table->item(row, currentColumn), QItemSelectionModel::NoUpdate);
+            if (selectedKeys.contains(key))
+                for (int column = 0; column < table->columnCount(); ++column)
+                    table->item(row, column)->setSelected(true);
+        }
+        applyDeviceAuditTableFilter(table, table->property("kswordDeviceAuditFilter").toString());
     }
 
     // createHardwareDeferredPlaceholder 作用：
@@ -4362,6 +4479,7 @@ void HardwareDock::showEvent(QShowEvent* showEventPointer)
     }
 
     startPerformanceSampling(SamplingScope::HardwareDetails);
+    refreshStaticHardwareTexts(false);
 
     // splitter 在 Dock 首次显示前可能还没有最终宽度，因此分两轮尝试应用
     // 300px 默认左栏；成功后不再覆盖用户后续拖动结果。
@@ -4496,6 +4614,7 @@ void HardwareDock::initializeUi()
                 }
 
                 QWidget* currentTabWidget = m_sideTabWidget->currentWidget();
+                refreshStaticHardwareTexts(false);
                 if (currentTabWidget == m_diskMonitorHostPage)
                 {
                     // 硬盘监控会启动 ETW 与进程 IO 扫描，必须等用户真正进入该子页再创建。
@@ -11704,37 +11823,29 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
         }
     }
 
-    if (m_overviewEditor != nullptr && !m_cachedOverviewFields.isEmpty())
+    const auto present = [this](const std::size_t index, QWidget* page,
+        ks::ui::StructuredFieldView* editor, const ks::ui::FieldDocument& document,
+        QTableWidget* table = nullptr, const QVector<QStringList>* rows = nullptr)
     {
-        m_overviewEditor->setDocument(m_cachedOverviewFields);
-    }
-    if (m_gpuEditor != nullptr && !m_cachedGpuFields.isEmpty())
-    {
-        m_gpuEditor->setDocument(m_cachedGpuFields);
-    }
-    if (m_memoryEditor != nullptr && !m_cachedMemoryFields.isEmpty())
-    {
-        m_memoryEditor->setDocument(m_cachedMemoryFields);
-    }
-    if (m_deviceStackEditor != nullptr && !m_cachedDeviceStackFields.isEmpty())
-    {
-        m_deviceStackEditor->setDocument(m_cachedDeviceStackFields);
-    }
-    populateDeviceAuditTable(m_deviceStackTable, m_cachedDeviceStackRows);
-    if (m_keyboardMouseHidEditor != nullptr && !m_cachedKeyboardMouseHidFields.isEmpty())
-    {
-        m_keyboardMouseHidEditor->setDocument(m_cachedKeyboardMouseHidFields);
-    }
-    populateDeviceAuditTable(m_keyboardMouseHidTable, m_cachedKeyboardMouseHidRows);
-    if (m_usbTopologyEditor != nullptr && !m_cachedUsbTopologyFields.isEmpty())
-    {
-        m_usbTopologyEditor->setDocument(m_cachedUsbTopologyFields);
-    }
-    populateDeviceAuditTable(m_usbTopologyTable, m_cachedUsbTopologyRows);
-    if (m_pnpAcpiPciEditor != nullptr && !m_cachedPnpAcpiPciFields.isEmpty())
-    {
-        m_pnpAcpiPciEditor->setDocument(m_cachedPnpAcpiPciFields);
-    }
+        if (page == nullptr || !page->isVisible()
+            || m_staticPresentedRevisions[index] == m_staticDataRevisions[index])
+        {
+            return;
+        }
+        if (editor != nullptr) editor->setDocument(document);
+        if (table != nullptr && rows != nullptr) populateDeviceAuditTable(table, *rows);
+        m_staticPresentedRevisions[index] = m_staticDataRevisions[index];
+    };
+    present(0, m_overviewPage, m_overviewEditor, m_cachedOverviewFields);
+    present(1, m_gpuPage, m_gpuEditor, m_cachedGpuFields);
+    present(2, m_memoryPage, m_memoryEditor, m_cachedMemoryFields);
+    present(3, m_deviceStackPage, m_deviceStackEditor, m_cachedDeviceStackFields,
+        m_deviceStackTable, &m_cachedDeviceStackRows);
+    present(4, m_keyboardMouseHidPage, m_keyboardMouseHidEditor, m_cachedKeyboardMouseHidFields,
+        m_keyboardMouseHidTable, &m_cachedKeyboardMouseHidRows);
+    present(5, m_usbTopologyPage, m_usbTopologyEditor, m_cachedUsbTopologyFields,
+        m_usbTopologyTable, &m_cachedUsbTopologyRows);
+    present(6, m_pnpAcpiPciPage, m_pnpAcpiPciEditor, m_cachedPnpAcpiPciFields);
 }
 
 void HardwareDock::requestAsyncStaticInfoRefresh()
@@ -11777,11 +11888,24 @@ void HardwareDock::requestAsyncStaticInfoRefresh()
                     return;
                 }
 
-                safeThis->m_cachedOverviewFields = overviewFields;
+                if (safeThis->m_cachedOverviewFields != overviewFields)
+                {
+                    safeThis->m_cachedOverviewFields = overviewFields;
+                    ++safeThis->m_staticDataRevisions[0];
+                }
                 if (includeHardwareDetails)
                 {
-                    safeThis->m_cachedGpuFields = buildGpuHardwareSummaryFields(gpuSummary, gpuWmiFields);
-                    safeThis->m_cachedMemoryFields = memoryFields;
+                    const auto gpuFields = buildGpuHardwareSummaryFields(gpuSummary, gpuWmiFields);
+                    if (safeThis->m_cachedGpuFields != gpuFields)
+                    {
+                        safeThis->m_cachedGpuFields = gpuFields;
+                        ++safeThis->m_staticDataRevisions[1];
+                    }
+                    if (safeThis->m_cachedMemoryFields != memoryFields)
+                    {
+                        safeThis->m_cachedMemoryFields = memoryFields;
+                        ++safeThis->m_staticDataRevisions[2];
+                    }
                     safeThis->m_memorySpeedMhz = memorySummary.speedMhz;
                     safeThis->m_memorySlotUsed = memorySummary.usedSlots;
                     safeThis->m_memorySlotTotal = memorySummary.totalSlots;
@@ -11945,24 +12069,31 @@ void HardwareDock::applyDeviceAuditRefreshResult(
         return;
     }
 
-    if ((requestedMask & DeviceStackAuditRefresh) != 0U)
+    if ((requestedMask & DeviceStackAuditRefresh) != 0U
+        && (m_cachedDeviceStackFields != deviceStackSnapshot.summaryFields || m_cachedDeviceStackRows != deviceStackSnapshot.rows))
     {
         m_cachedDeviceStackFields = std::move(deviceStackSnapshot.summaryFields);
         m_cachedDeviceStackRows = std::move(deviceStackSnapshot.rows);
+        ++m_staticDataRevisions[3];
     }
-    if ((requestedMask & InputStackAuditRefresh) != 0U)
+    if ((requestedMask & InputStackAuditRefresh) != 0U
+        && (m_cachedKeyboardMouseHidFields != inputStackSnapshot.summaryFields || m_cachedKeyboardMouseHidRows != inputStackSnapshot.rows))
     {
         m_cachedKeyboardMouseHidFields = std::move(inputStackSnapshot.summaryFields);
         m_cachedKeyboardMouseHidRows = std::move(inputStackSnapshot.rows);
+        ++m_staticDataRevisions[4];
     }
-    if ((requestedMask & UsbTopologyAuditRefresh) != 0U)
+    if ((requestedMask & UsbTopologyAuditRefresh) != 0U
+        && (m_cachedUsbTopologyFields != usbTopologySnapshot.summaryFields || m_cachedUsbTopologyRows != usbTopologySnapshot.rows))
     {
         m_cachedUsbTopologyFields = std::move(usbTopologySnapshot.summaryFields);
         m_cachedUsbTopologyRows = std::move(usbTopologySnapshot.rows);
+        ++m_staticDataRevisions[5];
     }
-    if ((requestedMask & PnpAcpiPciRefresh) != 0U)
+    if ((requestedMask & PnpAcpiPciRefresh) != 0U && m_cachedPnpAcpiPciFields != pnpAcpiPciFields)
     {
         m_cachedPnpAcpiPciFields = std::move(pnpAcpiPciFields);
+        ++m_staticDataRevisions[6];
     }
 
     refreshStaticHardwareTexts(false);
