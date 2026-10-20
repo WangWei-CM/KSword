@@ -139,6 +139,9 @@
     <ClInclude Include="UI\MemoryPageNavigationSchema.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MemoryDock\MemoryDock.ReadOnlyModels.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UI\TableRowFilterIdentityState.h">
       <Filter>Header Files</Filter>
     </ClInclude>

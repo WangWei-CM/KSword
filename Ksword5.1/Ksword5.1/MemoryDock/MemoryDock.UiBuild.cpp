@@ -18,6 +18,8 @@
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/PerfTrace.h"
 #include <QFormLayout>
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QCompleter> // 进程下拉的包含式补全需要完整类型。
@@ -129,6 +131,7 @@ MemoryDock::MemoryDock(QWidget* parent, const PageScope scope)
 
 MemoryDock::~MemoryDock()
 {
+    cancelCoreProjection(true);
     // 首先关闭后台投递门禁；正在读取的区域转储将在下一分块边界取消原子文件发布。
     if (m_regionDumpOperation != nullptr)
     {
@@ -1019,8 +1022,7 @@ void MemoryDock::initializeProcessModuleTab()
     moduleLayout->addWidget(moduleToolbar);
     ks::ui::NormalizeToolbarRow(moduleTopBarLayout);
 
-    m_moduleTable = new QTreeWidget(modulePanel);
-    m_moduleTable->setColumnCount(static_cast<int>(ModuleTreeColumn::Count));
+    m_moduleTable = new MemoryTreeView(modulePanel);
     m_moduleTable->setHeaderLabels(ModuleTreeHeaders);
     m_moduleTable->setRootIsDecorated(false);
     m_moduleTable->setItemsExpandable(false);
@@ -1030,6 +1032,7 @@ void MemoryDock::initializeProcessModuleTab()
     m_moduleTable->setAlternatingRowColors(true);
     m_moduleTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_moduleTable->setSortingEnabled(true);
+    m_moduleTable->header()->setSortIndicator(0, Qt::AscendingOrder);
     m_moduleTable->setColumnWidth(toModuleTreeColumnIndex(ModuleTreeColumn::Path), 460);
     m_moduleTable->setColumnWidth(toModuleTreeColumnIndex(ModuleTreeColumn::Size), 110);
     m_moduleTable->setColumnWidth(toModuleTreeColumnIndex(ModuleTreeColumn::Signature), 220);
@@ -1037,6 +1040,7 @@ void MemoryDock::initializeProcessModuleTab()
     m_moduleTable->setColumnWidth(toModuleTreeColumnIndex(ModuleTreeColumn::State), 100);
     m_moduleTable->setColumnWidth(toModuleTreeColumnIndex(ModuleTreeColumn::ThreadId), 180);
     moduleLayout->addWidget(m_moduleTable, 1);
+    initializeCoreProjection(CoreKind::Modules);
 
     splitter->addWidget(processPanel);
     splitter->addWidget(modulePanel);
@@ -1109,10 +1113,9 @@ void MemoryDock::initializeMemoryRegionTab()
     ks::ui::NormalizeToolbarRow(filterLayout);
     tabLayout->addWidget(filterGroup);
 
-    m_regionTable = new ks::ui::VisibleTableWidget(m_tabRegions);
+    m_regionTable = new MemoryTableView(m_tabRegions);
     // 区域清单需要前后快照排查映射变化，保留完整操作栏。
     ks::ui::SetTableActionBarMode(m_regionTable, ks::ui::TableActionBarMode::Full);
-    m_regionTable->setColumnCount(6);
     m_regionTable->setHorizontalHeaderLabels(QStringList{
         "基址", "大小", "保护属性", "状态", "类型", "映射文件"
         });
@@ -1124,7 +1127,11 @@ void MemoryDock::initializeMemoryRegionTab()
     m_regionTable->setContextMenuPolicy(Qt::CustomContextMenu);
     m_regionTable->verticalHeader()->setVisible(false);
     m_regionTable->horizontalHeader()->setStretchLastSection(true);
+    m_regionTable->horizontalHeader()->setDefaultSectionSize(128);
+    ks::ui::SetTableColumnAutoFitEnabled(m_regionTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_regionTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     tabLayout->addWidget(m_regionTable, 1);
+    initializeCoreProjection(CoreKind::Regions);
 
     m_tabWidget->addTab(m_tabRegions, "内存区域");
     ks::i18n::LanguageManager::instance().bindTab(

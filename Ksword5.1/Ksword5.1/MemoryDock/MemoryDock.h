@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "MemoryDock.ReadOnlyModels.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../UI/KernelDisassemblyDialog.h" // ks::ui::DisassemblyRow：驱动读写页反汇编视图的行缓存需要完整类型。
 #include "../UI/WindowPickerButton.h" // ks::ui::WindowPickerButton：十字准星拾取按钮，按值出现在成员指针里。
@@ -483,6 +484,23 @@ private:
     // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
     // - 返回：无。
     void rebuildModuleTableFromCache();
+    enum class CoreKind { Modules, Regions };
+    struct CoreProjectionData;
+    struct CoreProjectionJob;
+    struct RegionRefreshJob;
+    void initializeCoreProjection(CoreKind kind);
+    void requestCoreProjection(CoreKind kind, bool debounce = false);
+    void pollCoreProjection();
+    void publishCoreProjection(const std::shared_ptr<CoreProjectionData>& data);
+    std::shared_ptr<CoreProjectionData> captureCoreRequest(CoreKind kind) const;
+    static bool sameCoreRequest(const CoreProjectionData& left, const CoreProjectionData& right);
+    static QString coreRowKey(const CoreProjectionData& data, std::size_t row);
+    static QVariant coreCell(const CoreProjectionData& data, std::size_t row, int column, int role);
+    static void buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& job);
+    bool coreProjectionIsCurrent(CoreKind kind) const;
+    void startPendingRegionRefresh();
+    void pollRegionRefresh();
+    void cancelCoreProjection(bool closing);
 
     // syncTamperDetectionTargets：
     // - 作用：把当前附加进程与模块列表同步给“篡改检测”页；
@@ -561,7 +579,7 @@ private:
     // - 作用：刷新内存区域缓存并应用过滤展示。
     // - 参数 forceRequery：是否强制重新调用 VirtualQueryEx。
     // - 返回：无。
-    void refreshMemoryRegionList(bool forceRequery);
+    void refreshMemoryRegionList(bool forceRequery, bool requireSynchronousPrerequisite = false);
 
     // requestDumpMemoryRegion：菜单前冻结进程句柄/创建时间和区域，选择路径后异步导出。
     // pid/processName 用于身份和提示；targetProcess 为独立租约；region/backend 固定导出范围和通道。
@@ -877,7 +895,7 @@ private:
     QPushButton* m_moduleRefreshButton = nullptr; // 模块刷新按钮。
     QCheckBox* m_moduleSignatureCheck = nullptr;  // 模块刷新时是否校验签名。
     QLabel* m_moduleStatusLabel = nullptr;        // 模块刷新状态标签。
-    QTreeWidget* m_moduleTable = nullptr;         // 模块列表表格（树形表头风格）。
+    MemoryTreeView* m_moduleTable = nullptr;         // 模块列表表格（树形表头风格）。
 
     // ========================================================
     // Tab2：内存区域
@@ -890,7 +908,7 @@ private:
     QCheckBox* m_regionCommittedOnlyCheck = nullptr; // 仅已提交区域过滤。
     QCheckBox* m_regionImageOnlyCheck = nullptr;     // 仅 IMAGE 类型过滤。
     QCheckBox* m_regionReadableOnlyCheck = nullptr;  // 仅可读区域过滤。
-    QTableWidget* m_regionTable = nullptr;    // 内存区域表格。
+    MemoryTableView* m_regionTable = nullptr;    // 内存区域表格。
 
     // ========================================================
     // Tab3：内存搜索
@@ -1014,7 +1032,7 @@ private:
     std::atomic<std::uint64_t> m_processAttachmentGeneration{ 0 }; // 附加上下文代次（丢弃旧句柄任务结果）。
 
     std::vector<ProcessEntry> m_processCache; // 进程缓存（Tab1/工具栏复用）。
-    std::vector<ModuleEntry> m_moduleCache;   // 模块缓存（Tab1 使用）。
+    std::shared_ptr<const std::vector<ModuleEntry>> m_moduleCache = ks::memory_detail::ValueStorage<std::vector<ModuleEntry>>();   // 模块缓存（Tab1 使用）。
     std::atomic<bool> m_moduleRefreshInProgress{ false }; // 模块刷新是否进行中（异步任务状态）。
     std::atomic<std::uint64_t> m_moduleRefreshTicket{ 0 }; // 模块刷新票据（丢弃过期结果）。
     struct ModuleRefreshRequest { std::uint32_t pid = 0; std::uint64_t creation = 0; bool signatures = false; };
@@ -1027,7 +1045,7 @@ private:
     ks::ui::AsyncOperation* m_regionDumpOperation = nullptr; // QObject 子对象，串行管理区域转储。
     std::shared_ptr<std::atomic<RegionDumpPhase>> m_regionDumpPhase; // 提交与取消的仲裁状态。
     int m_regionDumpProgressPid = 0;         // 区域转储独立进度，避免与整进程 Dump 互相覆盖。
-    std::vector<RegionEntry> m_regionCache;   // 区域缓存（Tab2/Tab3 复用）。
+    std::shared_ptr<const std::vector<RegionEntry>> m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>();   // 区域缓存（Tab2/Tab3 复用）。
 
     std::vector<SearchResultEntry> m_searchResultCache; // 扫描结果缓存（Tab3）。
     std::size_t m_searchResultVisibleCount = 0;         // 当前结果表实际显示条数（可能小于缓存总数）。
@@ -1102,6 +1120,19 @@ private:
 
     // 模块表当前缓存对应的进程：模块表可以预览一个并未附加的进程，双击模块基址时必须按
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。
+    QTimer* m_coreProjectionPoll = nullptr;
+    QTimer* m_coreProjectionDebounce = nullptr;
+    std::array<bool, 2> m_coreInitialized{};
+    std::array<int, 2> m_coreSortColumns{0, 0};
+    std::array<Qt::SortOrder, 2> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder};
+    std::array<std::shared_ptr<CoreProjectionData>, 2> m_corePublished, m_coreReady, m_coreFailed;
+    std::shared_ptr<CoreProjectionJob> m_coreProjectionJob;
+    std::shared_ptr<RegionRefreshJob> m_regionRefreshJob, m_regionRefreshPendingJob;
+    std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);
+    std::uint64_t m_coreLocaleGeneration = 0;
+    QString m_moduleCacheStatusTemplate;
+    bool m_regionCachePartial = false;
+    std::uint32_t m_regionCacheError = 0;
     std::uint32_t m_moduleCachePid = 0;
     // 上面那个进程在缓存落地时的创建时间（100ns，0=没取到）：钉住预览进程时用它核对"仍是同一个进程实例"。
     std::uint64_t m_moduleCacheCreateTime = 0;

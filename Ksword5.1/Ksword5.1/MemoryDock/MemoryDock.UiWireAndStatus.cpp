@@ -23,19 +23,18 @@ namespace
     // - 输入：MemoryDock 中的普通表格和目标行号；
     // - 处理：按当前列顺序读取文本并使用 TSV 拼接；
     // - 返回：可直接写入剪贴板的整行文本。
-    QString memoryTableRowText(QTableWidget* table, const int rowIndex)
+    QString memoryTableRowText(QTableView* table, const int rowIndex)
     {
-        if (table == nullptr || rowIndex < 0 || rowIndex >= table->rowCount())
+        if (table == nullptr || rowIndex < 0 || (!table->model() || rowIndex >= table->model()->rowCount(table->rootIndex())))
         {
             return QString();
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount(table->rootIndex()));
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(table->rootIndex()); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->model()->index(rowIndex, columnIndex, table->rootIndex()).data(Qt::DisplayRole).toString());
         }
         return fields.join(QLatin1Char('\t'));
     }
@@ -44,7 +43,7 @@ namespace
     // - 输入：MemoryDock 表格和目标行号；
     // - 处理：复制当前行全部列，包含隐藏列，便于审计时保留 PID/会话等上下文；
     // - 返回：无，剪贴板不可用或行无效时静默返回。
-    void copyMemoryTableRow(QTableWidget* table, const int rowIndex)
+    void copyMemoryTableRow(QTableView* table, const int rowIndex)
     {
         if (table == nullptr || QApplication::clipboard() == nullptr)
         {
@@ -62,21 +61,14 @@ namespace
     // - 输入：模块树和当前节点；
     // - 处理：复制当前节点所有列，保持和模块表可见字段一致；
     // - 返回：无，剪贴板不可用或节点为空时直接返回。
-    void copyMemoryTreeRow(QTreeWidget* tree, QTreeWidgetItem* item)
+    void copyMemoryTreeRow(QTreeView* tree, const QModelIndex& item)
     {
-        if (tree == nullptr || item == nullptr || QApplication::clipboard() == nullptr)
-        {
-            return;
-        }
-
+        if (!tree || !item.isValid() || !QApplication::clipboard()) { return; }
         QStringList fields;
-        fields.reserve(tree->columnCount());
-        for (int columnIndex = 0; columnIndex < tree->columnCount(); ++columnIndex)
-        {
-            fields.push_back(item->text(columnIndex));
-        }
+        for (int column = 0; column < tree->model()->columnCount(); ++column) { fields.append(item.siblingAtColumn(column).data(Qt::DisplayRole).toString()); }
         QApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
     }
+
 }
 
 void MemoryDock::initializeConnections()
@@ -566,41 +558,16 @@ void MemoryDock::initializeProcessConnections()
         });
 
     connect(m_moduleFilterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        // 过滤输入改为“只重绘缓存”，避免每敲一个字都重新做模块枚举和签名校验。
-        kLogEvent moduleFilterEvent;
-        dbg << moduleFilterEvent
-            << "[MemoryDock] 模块过滤条件变化, filter="
-            << m_moduleFilterEdit->text().trimmed().toStdString()
-            << ", cacheCount="
-            << m_moduleCache.size()
-            << eol;
+        requestCoreProjection(CoreKind::Modules, true);
+    });
 
-        rebuildModuleTableFromCache();
-        if (m_moduleStatusLabel != nullptr)
-        {
-            m_moduleStatusLabel->setText(
-                QString("● 模块:%1 显示:%2 (过滤)")
-                .arg(m_moduleCache.size())
-                .arg(m_moduleTable->topLevelItemCount()));
-            if (!m_moduleRefreshInProgress.load())
-            {
-                m_moduleStatusLabel->setStyleSheet(
-                    QStringLiteral("color:%1; font-weight:600;")
-                        .arg(KswordTheme::SuccessColor().name(QColor::HexRgb)));
-            }
-        }
-        });
-
-    connect(m_moduleTable, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
+    connect(m_moduleTable, &QTreeView::doubleClicked, this, [this](const QModelIndex& item) {
         // 双击模块任意列时，按模块基址跳转到内存查看器。
-        Q_UNUSED(column);
-        if (item == nullptr)
+        if (!item.isValid() || !coreProjectionIsCurrent(CoreKind::Modules))
         {
             return;
         }
-        const std::uint64_t baseAddress = item->data(
-            toModuleTreeColumnIndex(ModuleTreeColumn::Path),
-            Qt::UserRole).toULongLong();
+        const std::uint64_t baseAddress = item.siblingAtColumn(toModuleTreeColumnIndex(ModuleTreeColumn::Path)).data(Qt::UserRole).toULongLong();
         kLogEvent moduleJumpEvent;
         info << moduleJumpEvent
             << "[MemoryDock] 模块表双击跳转查看器, address="
@@ -609,20 +576,25 @@ void MemoryDock::initializeProcessConnections()
         jumpToModuleBase(baseAddress);
         });
 
-    connect(m_moduleTable, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
-        QTreeWidgetItem* clickedItem = m_moduleTable->itemAt(localPosition);
-        if (clickedItem == nullptr)
+    connect(m_moduleTable, &QTreeView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        const QPointer<MemoryDock> owner(this);
+        const QPersistentModelIndex clickedItem(m_moduleTable->indexAt(localPosition));
+        if (!clickedItem.isValid() || !coreProjectionIsCurrent(CoreKind::Modules))
         {
             return;
         }
-        m_moduleTable->setCurrentItem(clickedItem);
+        m_moduleTable->setCurrentIndex(clickedItem);
+        if (!owner || !clickedItem.isValid() || !coreProjectionIsCurrent(CoreKind::Modules)) { return; }
 
-        const std::uint64_t baseAddress = clickedItem->data(
-            toModuleTreeColumnIndex(ModuleTreeColumn::Path),
-            Qt::UserRole).toULongLong();
+        const std::uint64_t baseAddress = QModelIndex(clickedItem).siblingAtColumn(toModuleTreeColumnIndex(ModuleTreeColumn::Path)).data(Qt::UserRole).toULongLong();
         const QString baseText = formatAddress(baseAddress);
 
-        QMenu menu(this);
+
+        const auto menuSource = m_corePublished[0];
+        QStringList copiedFields;
+        for (int column = 0; column < m_moduleTable->model()->columnCount(); ++column) { copiedFields.append(QModelIndex(clickedItem).siblingAtColumn(column).data(Qt::DisplayRole).toString()); }
+        const QString menuRow = copiedFields.join(QLatin1Char('\t'));
+        QMenu menu;
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* copyBaseAction = menu.addAction("复制基址");
         QAction* copyRowAction = menu.addAction("复制当前行");
@@ -630,7 +602,7 @@ void MemoryDock::initializeProcessConnections()
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
         QAction* jumpViewerAction = menu.addAction("跳转到内存查看器");
         QAction* selectedAction = menu.exec(m_moduleTable->viewport()->mapToGlobal(localPosition));
-        if (selectedAction == nullptr)
+        if (!owner || selectedAction == nullptr)
         {
             return;
         }
@@ -647,7 +619,7 @@ void MemoryDock::initializeProcessConnections()
         }
         if (selectedAction == copyRowAction)
         {
-            copyMemoryTreeRow(m_moduleTable, clickedItem);
+            QApplication::clipboard()->setText(menuRow);
             kLogEvent copyRowEvent;
             dbg << copyRowEvent
                 << "[MemoryDock] 模块表右键复制当前行, base="
@@ -655,7 +627,7 @@ void MemoryDock::initializeProcessConnections()
                 << eol;
             return;
         }
-        if (selectedAction == jumpViewerAction)
+        if (selectedAction == jumpViewerAction && coreProjectionIsCurrent(CoreKind::Modules) && m_corePublished[0] == menuSource)
         {
             kLogEvent contextJumpEvent;
             info << contextJumpEvent
@@ -685,7 +657,7 @@ void MemoryDock::initializeRegionConnections()
             << ", readableOnly="
             << (m_regionReadableOnlyCheck->isChecked() ? "true" : "false")
             << eol;
-        applyRegionFilterAndRebuildTable();
+        requestCoreProjection(CoreKind::Regions, true);
         };
     connect(m_regionCommittedOnlyCheck, &QCheckBox::toggled, this, applyRegionFilter);
     connect(m_regionImageOnlyCheck, &QCheckBox::toggled, this, applyRegionFilter);
@@ -693,7 +665,7 @@ void MemoryDock::initializeRegionConnections()
 
     // 关键字过滤只重排已有缓存，不重新枚举，输入时即时生效。
     connect(m_regionFilterEdit, &QLineEdit::textChanged, this, [this](const QString&) {
-        applyRegionFilterAndRebuildTable();
+        requestCoreProjection(CoreKind::Regions, true);
         });
 
     // 手动刷新会强制重新枚举一次区域，用于目标进程刚分配完内存的场景。
@@ -705,15 +677,15 @@ void MemoryDock::initializeRegionConnections()
         refreshMemoryRegionList(true);
         });
 
-    connect(m_regionTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+    connect(m_regionTable, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+        if (!coreProjectionIsCurrent(CoreKind::Regions)) { return; }
+        const int row = index.row(), column = index.column();
         Q_UNUSED(column);
         if (row < 0)
         {
             return;
         }
-        const QString baseText = m_regionTable->item(row, 0) != nullptr
-            ? m_regionTable->item(row, 0)->text()
-            : QString();
+        const QString baseText = m_regionTable->model()->index(row, 0).data(Qt::DisplayRole).toString();
         std::uint64_t baseAddress = 0;
         if (parseAddressText(baseText, baseAddress))
         {
@@ -726,31 +698,30 @@ void MemoryDock::initializeRegionConnections()
         }
         });
 
-    connect(m_regionTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
-        QTableWidgetItem* clickedItem = m_regionTable->itemAt(localPosition);
-        if (clickedItem == nullptr)
+    connect(m_regionTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        const QPointer<MemoryDock> owner(this);
+        const QModelIndex clickedItem = m_regionTable->indexAt(localPosition);
+        if (!clickedItem.isValid() || !coreProjectionIsCurrent(CoreKind::Regions))
         {
             return;
         }
 
-        const int row = clickedItem->row();
-        const QString baseText = m_regionTable->item(row, 0) != nullptr
-            ? m_regionTable->item(row, 0)->text()
-            : QString();
+        const int row = clickedItem.row();
+        const QString baseText = m_regionTable->model()->index(row, 0).data(Qt::DisplayRole).toString();
 
-        m_regionTable->setCurrentCell(row, clickedItem->column());
+        m_regionTable->setCurrentIndex(clickedItem);
+        if (!owner || !coreProjectionIsCurrent(CoreKind::Regions)) { return; }
+        const auto menuRegionSource = m_corePublished[1];
 
         // 排序/筛选后的行号不能索引缓存；菜单前按原始地址、大小冻结区域与目标租约。
-        const QTableWidgetItem* exportBaseItem = m_regionTable->item(row, 0);
-        const QTableWidgetItem* exportSizeItem = m_regionTable->item(row, 1);
-        const std::uint64_t exportBase = exportBaseItem != nullptr ? exportBaseItem->data(Qt::UserRole).toULongLong() : 0;
-        const std::uint64_t exportSize = exportSizeItem != nullptr ? exportSizeItem->data(Qt::UserRole).toULongLong() : 0;
-        const auto cachedRegion = std::find_if(m_regionCache.cbegin(), m_regionCache.cend(),
-            [exportBase, exportSize](const RegionEntry& entry)
-            {
-                return entry.baseAddress == exportBase && entry.regionSize == exportSize;
-            });
-        const RegionEntry exportRegion = cachedRegion != m_regionCache.cend() ? *cachedRegion : RegionEntry{};
+        const QModelIndex exportBaseItem = m_regionTable->model()->index(row, 0);
+        const QModelIndex exportSizeItem = m_regionTable->model()->index(row, 1);
+        const std::uint64_t exportBase = exportBaseItem.isValid() ? exportBaseItem.data(Qt::UserRole).toULongLong() : 0;
+        const std::uint64_t exportSize = exportSizeItem.isValid() ? exportSizeItem.data(Qt::UserRole).toULongLong() : 0;
+        const auto sourceRow = clickedItem.data(ks::memory_detail::CoreSourceIndexRole).toULongLong();
+        const RegionEntry exportRegion = sourceRow < m_regionCache->size()
+            && (*m_regionCache)[sourceRow].baseAddress == exportBase && (*m_regionCache)[sourceRow].regionSize == exportSize
+                ? (*m_regionCache)[sourceRow] : RegionEntry{};
         const std::uint32_t exportPid = m_attachedPid; // 本次菜单所属进程，不在模态菜单结束后重取。
         const QString exportProcessName = m_attachedProcessName;
         const std::shared_ptr<void> attachedLease = duplicateAttachedProcessHandleForWorker();
@@ -782,6 +753,7 @@ void MemoryDock::initializeRegionConnections()
 
         // 无 QObject 父级避免页面销毁时删除栈上菜单；返回后仍须检查页面寿命。
         QPointer<MemoryDock> guardThis(this);
+        const QString regionRowText = memoryTableRowText(m_regionTable, row);
         QMenu menu;
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());
         QAction* viewAction = menu.addAction("查看此区域");
@@ -858,7 +830,7 @@ void MemoryDock::initializeRegionConnections()
         }
         if (selectedAction == copyRowAction)
         {
-            copyMemoryTableRow(m_regionTable, row);
+            QApplication::clipboard()->setText(regionRowText);
             kLogEvent regionCopyRowEvent;
             dbg << regionCopyRowEvent
                 << "[MemoryDock] 区域表右键复制当前行, row="
@@ -867,6 +839,7 @@ void MemoryDock::initializeRegionConnections()
             return;
         }
 
+        if (!coreProjectionIsCurrent(CoreKind::Regions) || m_corePublished[1] != menuRegionSource) { return; }
         std::uint64_t baseAddress = 0;
         if (!parseAddressText(baseText, baseAddress))
         {
@@ -890,12 +863,12 @@ void MemoryDock::initializeRegionConnections()
             // - 处理：工作台路由开启时在内存工作台里用标准驱动通道打开区域起点；
             //   关闭时填充旧驱动读写页为“从区域基址向后读”，最多单次读取 4KB；
             // - 返回：无返回值，结果由工作台状态条或旧驱动读写页状态栏和 HexEditor 展示。
-            const QTableWidgetItem* baseItem = m_regionTable->item(row, 0);
-            const QTableWidgetItem* sizeItem = m_regionTable->item(row, 1);
-            if (baseItem != nullptr && sizeItem != nullptr)
+            const QModelIndex baseItem = m_regionTable->model()->index(row, 0);
+            const QModelIndex sizeItem = m_regionTable->model()->index(row, 1);
+            if (baseItem.isValid() && sizeItem.isValid())
             {
-                const std::uint64_t regionBase = baseItem->data(Qt::UserRole).toULongLong();
-                const std::uint64_t regionSize = sizeItem->data(Qt::UserRole).toULongLong();
+                const std::uint64_t regionBase = baseItem.data(Qt::UserRole).toULongLong();
+                const std::uint64_t regionSize = sizeItem.data(Qt::UserRole).toULongLong();
                 const std::uint64_t bytesToRead = std::min<std::uint64_t>(
                     regionSize == 0ULL ? 4096ULL : regionSize,
                     4096ULL);
@@ -915,12 +888,12 @@ void MemoryDock::initializeRegionConnections()
             // 搜索此区域：切换到 Tab3 并填充起止地址。
             // 注意：区域表启用了排序，row 与 m_regionCache 下标不再等价。
             // 因此基于表格 item 的 UserRole 中缓存的 base/size 进行计算。
-            const QTableWidgetItem* baseItem = m_regionTable->item(row, 0);
-            const QTableWidgetItem* sizeItem = m_regionTable->item(row, 1);
-            if (baseItem != nullptr && sizeItem != nullptr)
+            const QModelIndex baseItem = m_regionTable->model()->index(row, 0);
+            const QModelIndex sizeItem = m_regionTable->model()->index(row, 1);
+            if (baseItem.isValid() && sizeItem.isValid())
             {
-                const std::uint64_t regionBase = baseItem->data(Qt::UserRole).toULongLong();
-                const std::uint64_t regionSize = sizeItem->data(Qt::UserRole).toULongLong();
+                const std::uint64_t regionBase = baseItem.data(Qt::UserRole).toULongLong();
+                const std::uint64_t regionSize = sizeItem.data(Qt::UserRole).toULongLong();
                 if (regionSize > 0)
                 {
                     const std::uint64_t regionEnd = regionBase + regionSize - 1;

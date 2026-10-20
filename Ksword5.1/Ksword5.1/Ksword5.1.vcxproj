@@ -874,6 +874,7 @@
     <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h" />
     <ClInclude Include="include\ads\ads_version.h" />
     <ClInclude Include="UI\MemoryPageNavigationSchema.h" />
+    <ClInclude Include="MemoryDock\MemoryDock.ReadOnlyModels.h" />
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />
     <ClInclude Include="PluginHost.h" />

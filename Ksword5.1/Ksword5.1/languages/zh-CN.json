@@ -7137,6 +7137,7 @@
     "User-mode residency worker failed": "用户态驻留扫描工作线程失败",
     "Memory table projection failed": "内存表格投影失败",
     "Updating memory table...": "正在更新内存表格...",
+    "Region enumeration is partial (Win32: %1)": "区域枚举未完成（Win32: %1）",
     " bytesDone=": " bytesDone=",
     "DDMA scratch restore failed: disk=": "DDMA 暂存区还原失败：磁盘=",
     "响应中的 Content-Length 无效或超出文件大小上限。": "响应中的 Content-Length 无效或超出文件大小上限。",

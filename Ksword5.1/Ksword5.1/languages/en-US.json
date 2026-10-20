@@ -7137,6 +7137,7 @@
     "User-mode residency worker failed": "User-mode residency worker failed",
     "Memory table projection failed": "Memory table projection failed",
     "Updating memory table...": "Updating memory table...",
+    "Region enumeration is partial (Win32: %1)": "Region enumeration is partial (Win32: %1)",
     " bytesDone=": " bytesDone=",
     "DDMA scratch restore failed: disk=": "DDMA scratch restore failed: disk=",
     "响应中的 Content-Length 无效或超出文件大小上限。": "The response Content-Length is invalid or exceeds the file size limit.",

@@ -295,12 +295,12 @@ bool MemoryDock::collectSearchRegionsFromUi(
     }
 
     // 区域缓存为空时主动刷新一次，避免首次进入扫描页时没有范围数据。
-    if (m_regionCache.empty())
+    if (m_regionCache->empty())
     {
-        refreshMemoryRegionList(true);
+        refreshMemoryRegionList(true, true);
     }
 
-    if (m_regionCache.empty())
+    if (m_regionCache->empty())
     {
         errorTextOut = "当前没有可用的内存区域，请先刷新区域列表。";
         kLogEvent collectRegionEmptyCacheEvent;
@@ -366,9 +366,9 @@ bool MemoryDock::collectSearchRegionsFromUi(
     }
 
     regionsOut.clear();
-    regionsOut.reserve(m_regionCache.size());
+    regionsOut.reserve(m_regionCache->size());
 
-    for (const RegionEntry& region : m_regionCache)
+    for (const RegionEntry& region : *m_regionCache)
     {
         // 只扫描已提交 + 可读区域，避免大量无效访问或 NOACCESS 报错。
         if (region.state != MEM_COMMIT || !isReadableProtect(region.protect))
