@@ -15,6 +15,8 @@ namespace ks::ui
         std::uint64_t generation = 0; // 请求创建后保持不变的代次。
         std::atomic_bool canceled{ false }; // 合作式查询取消门禁。
         std::atomic_bool settled{ false }; // 成功、取消和丢队列共用一次收尾。
+        std::atomic_bool workerFinished{ false }; // 事务关闭时不能提前释放worker所借值资源。
+        bool transaction = false; // 请求发布前写入，此后只读。
         AsyncOperation::Cleanup cleanup; // 只持值资源的最终回调。
 
         // 所有终态竞争同一个 CAS；收尾不能把异常带入 Qt functor 析构。
@@ -47,8 +49,13 @@ namespace ks::ui
         void drop(const std::shared_ptr<AsyncOperationRequestState>& request)
         {
             std::shared_ptr<AsyncOperationRequestState> abandonedPending; // 锁外收尾。
+            auto outcome = AsyncOperationOutcome::DeliveryDropped;
             {
                 std::lock_guard<std::mutex> lock(mutex);
+                if (closed && request->transaction)
+                {
+                    outcome = AsyncOperationOutcome::OwnerClosed;
+                }
                 if (active == request)
                 {
                     active.reset();
@@ -57,7 +64,7 @@ namespace ks::ui
                 }
             }
             request->canceled.store(true);
-            request->settle(AsyncOperationOutcome::DeliveryDropped);
+            request->settle(outcome);
             if (abandonedPending)
             {
                 abandonedPending->canceled.store(true);
@@ -94,6 +101,7 @@ namespace ks::ui
         }
         const auto shared = m_shared; // 共享的非 UI 请求状态。
         const auto request = m_request; // 本次请求身份。
+        request->workerFinished.store(true);
         AsyncOperation* const receiver = m_receiver; // 仅在排队回调中使用。
         m_dispatcher->post([receiver, request, result = std::move(result), failure]()
         {
@@ -127,6 +135,8 @@ namespace ks::ui
         reconcileDroppedJobs();
         auto request = std::make_shared<AsyncOperationRequestState>(); // 新请求的值状态。
         request->cleanup = std::move(cleanup);
+        request->transaction = job.transaction;
+        auto rejection = AsyncOperationOutcome::OwnerClosed;
         std::shared_ptr<AsyncOperationRequestState> replaced; // 旧 pending 的收尾对象。
         std::shared_ptr<AsyncOperationRequestState> deferred; // worker 已结束的旧请求。
         bool launch = false; // 本次请求是否立即启动。
@@ -135,6 +145,13 @@ namespace ks::ui
             if (m_shared->closed)
             {
                 request->canceled.store(true);
+            }
+            else if ((job.transaction && (m_shared->active || m_shared->pending))
+                || (m_shared->active && m_shared->active->transaction))
+            {
+                // 事务不排latest pending；普通查询也不能使已接受事务失效。
+                request->canceled.store(true);
+                rejection = AsyncOperationOutcome::BusyRejected;
             }
             else
             {
@@ -168,7 +185,7 @@ namespace ks::ui
         // cleanup 可调用其他有锁值资源，必须在请求状态锁外执行。
         if (!request->generation)
         {
-            request->settle(AsyncOperationOutcome::OwnerClosed);
+            request->settle(rejection);
             return 0;
         }
         for (const auto& oldRequest : { replaced, deferred })
@@ -180,8 +197,16 @@ namespace ks::ui
             }
         }
         const QPointer<AsyncOperation> guard(this); // 状态回调可同步关闭或销毁所属对象。
-        notifyStateChanged();
-        if (!guard.isNull() && launch)
+        if (launch && request->transaction)
+        {
+            // 接受返回前先交线程池；状态通知可同步close/删除控制器。
+            launchActive();
+        }
+        if (!guard.isNull())
+        {
+            notifyStateChanged();
+        }
+        if (!guard.isNull() && launch && !request->transaction)
         {
             launchActive();
         }
@@ -204,6 +229,7 @@ namespace ks::ui
         }
         catch (...)
         {
+            request->workerFinished.store(true); // 构造/排队失败时没有worker再负责deliver。
             if (!guard.isNull() && m_active && m_active->request == request)
             {
                 complete(request, {}, std::current_exception());
@@ -321,6 +347,10 @@ namespace ks::ui
         std::shared_ptr<AsyncOperationRequestState> pending; // 尚未启动的请求。
         {
             std::lock_guard<std::mutex> lock(m_shared->mutex);
+            if (m_shared->active && m_shared->active->transaction)
+            {
+                return; // 已接受事务不能被查询取消入口中断或丢弃最终回执。
+            }
             ++m_shared->generation;
             active = m_shared->active;
             pending = std::move(m_shared->pending);
@@ -362,7 +392,10 @@ namespace ks::ui
             if (request)
             {
                 request->canceled.store(true);
-                request->settle(AsyncOperationOutcome::OwnerClosed);
+                if (!request->transaction || request->workerFinished.load())
+                {
+                    request->settle(AsyncOperationOutcome::OwnerClosed);
+                }
             }
         }
     }

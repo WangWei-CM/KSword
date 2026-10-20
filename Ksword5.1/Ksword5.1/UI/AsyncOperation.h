@@ -29,7 +29,8 @@ namespace ks::ui
         Canceled,
         OwnerClosed,
         DeliveryDropped,
-        Failed
+        Failed,
+        BusyRejected
     };
 
     // 令牌不借用页面对象；后台查询可在昂贵步骤之间读取取消状态。
@@ -71,22 +72,45 @@ namespace ks::ui
         std::uint64_t submit(Request request, Worker worker, Apply apply,
             Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
+            return submitImpl<Request, Result>(std::move(request), std::move(worker),
+                std::move(apply), std::move(failure), std::move(cleanup), workerPriority, false);
+        }
+
+        // 已接受的副作用事务不合并、不取消；忙/关闭返回0，worker只接值请求。
+        // worker与值资源收尾独立于页面存活；成功回执仍只交给有效UI拥有者。
+        template<class Request, class Result, class Worker, class Apply, class Failure>
+        std::uint64_t submitTransaction(Request request, Worker worker, Apply apply,
+            Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
+        {
+            return submitImpl<Request, Result>(std::move(request),
+                [worker = std::move(worker)](const Request& value, const AsyncOperationToken&)
+                {
+                    return worker(value);
+                }, std::move(apply), std::move(failure), std::move(cleanup), workerPriority, true);
+        }
+
+    private:
+        template<class Request, class Result, class Worker, class Apply, class Failure>
+        std::uint64_t submitImpl(Request request, Worker worker, Apply apply,
+            Failure failure, Cleanup cleanup, int workerPriority, bool transaction)
+        {
             Job job; // 主线程保存应用回调，后台任务不捕获它们。
+            job.transaction = transaction;
             job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
             {
                 const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
                 return apply(*result, ticket);
             };
             job.failure = std::move(failure);
-            job.launch = [request = std::move(request), worker = std::move(worker), workerPriority](
+            job.launch = [request = std::move(request), worker = std::move(worker), workerPriority, transaction](
                 const AsyncOperationToken& token)
             {
                 // worker 不持页面守卫；业务查询仍使用既有全局 Qt 线程池。
-                auto* task = QRunnable::create([request, worker, token]()
+                auto* task = QRunnable::create([request, worker, token, transaction]()
                 {
                     try
                     {
-                        if (token.isCanceled())
+                        if (!transaction && token.isCanceled())
                         {
                             token.deliver({});
                             return;
@@ -105,6 +129,7 @@ namespace ks::ui
             return enqueue(std::move(job), std::move(cleanup));
         }
 
+    public:
         // 主线程取消当前/待执行请求；仍等已运行 worker 返回，避免叠加实际查询。
         void cancel();
         // 析构前关闭门禁并取消全部值资源；可以重复调用。
@@ -130,6 +155,7 @@ namespace ks::ui
             std::function<void(std::exception_ptr)> failure; // UI 错误入口。
             bool awaitingCommit = false; // worker 已结束，等待 UI 屏障。
             bool launched = false; // 状态回调重入时仍只允许启动一次实际 worker。
+            bool transaction = false; // 已接受事务只允许最终完成，不作latest-only合并。
         };
 
         std::uint64_t enqueue(Job job, Cleanup cleanup);

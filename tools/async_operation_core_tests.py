@@ -19,6 +19,7 @@ fixture = r'''
 #include "AsyncOperation.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QSemaphore>
 #include <atomic>
 #include <iostream>
@@ -29,6 +30,71 @@ fixture = r'''
 static int checks=0;
 static void check(bool value,const char* message){if(!value)throw std::runtime_error(message);++checks;}
 template<class Predicate>void pump(Predicate predicate){QElapsedTimer t;t.start();while(!predicate()&&t.elapsed()<5000){QCoreApplication::processEvents();std::this_thread::yield();}check(predicate(),"completion timeout");}
+static void transactionTests(){
+ using Op=ks::ui::AsyncOperation;using Outcome=ks::ui::AsyncOperationOutcome;
+ auto* pool=QThreadPool::globalInstance();
+ {
+  QSemaphore entered,release;pool->start(QRunnable::create([&]{entered.release();release.acquire();}));check(entered.tryAcquire(1,5000),"transaction pool blocker entered");
+  std::atomic_int work=0,applied=0,cleaned=0,unexpected=0;auto op=std::make_unique<Op>(nullptr);
+  op->setStateChangedCallback([&]{op.reset();});
+  const auto ticket=op->submitTransaction<int,int>(42,[&](int value){++work;return value;},[&](int,std::uint64_t){++applied;return true;},[&](std::exception_ptr){++unexpected;},[&](Outcome state){if(state!=Outcome::OwnerClosed)++unexpected;++cleaned;});
+  check(ticket!=0&&!op,"accepted before state callback destroys owner");check(work==0&&cleaned==0,"queued transaction retains values after owner close");release.release();
+  pump([&]{return cleaned==1;});pool->waitForDone();check(work==1&&applied==0&&unexpected==0,"accepted closed transaction runs once and releases without GUI callback");
+ }
+ {
+  Op op(nullptr);QSemaphore entered,release;int applied=0,rejected=0,settled=0;std::atomic_int work=0;
+  std::uint64_t ticket=0;ticket=op.submitTransaction<int,int>(7,[&](int value){++work;entered.release();release.acquire();return value;},[&](int value,std::uint64_t generation){check(value==7&&generation==ticket,"transaction keeps result identity");++applied;return true;},[](std::exception_ptr){throw std::runtime_error("unexpected transaction error");},[&](Outcome state){check(state==Outcome::Applied,"accepted transaction applied");++settled;});
+  check(entered.tryAcquire(1,5000),"transaction worker entered");
+  auto reject=[&](Outcome state){check(state==Outcome::BusyRejected,"busy has explicit rejection outcome");++rejected;};
+  check(op.submitTransaction<int,int>(8,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},reject)==0,"second transaction rejected");
+  check(op.submit<int,int>(9,[](int v,const ks::ui::AsyncOperationToken&){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},reject)==0,"query cannot replace accepted transaction");
+  op.cancel();check(op.isCurrent(ticket)&&op.isBusy()&&!op.hasPending(),"cancel preserves accepted transaction and generation");release.release();pump([&]{return !op.isInFlight();});check(work==1&&applied==1&&settled==1&&rejected==2,"busy requests do not execute or steal receipt");
+ }
+ {
+  Op op(nullptr);int applied=0,settled=0;Outcome state=Outcome::Applied;
+  op.submitTransaction<int,int>(1,[](int value){return value;},[&](int,std::uint64_t){++applied;return false;},[](std::exception_ptr){},[&](Outcome value){++settled;state=value;});
+  pump([&]{return applied==1;});check(settled==0&&op.isInFlight(),"deferred transaction keeps completion slot");op.close();check(settled==1&&state==Outcome::OwnerClosed,"close settles finished deferred transaction");op.close();check(settled==1,"close cleanup exactly once");
+ }
+ {
+  Op op(nullptr);int failed=0,settled=0;
+  op.submitTransaction<int,int>(1,[](int)->int{throw std::runtime_error("fake backend error");},[](int,std::uint64_t)->bool{throw std::runtime_error("must not apply failure");},[&](std::exception_ptr error){check(bool(error),"failure value preserved");++failed;},[&](Outcome state){check(state==Outcome::Failed,"failure final state");++settled;});
+  pump([&]{return !op.isInFlight();});check(failed==1&&settled==1,"transaction exception reports and settles once");
+ }
+ {
+  Op op(nullptr);QSemaphore entered,release;std::vector<int> started,applied;std::mutex mutex;
+  auto worker=[&](int value,const ks::ui::AsyncOperationToken&){std::lock_guard lock(mutex);started.push_back(value);if(value==1){entered.release();release.acquire();}return value;};
+  auto apply=[&](int value,std::uint64_t){applied.push_back(value);return true;};
+  op.submit<int,int>(1,worker,apply,[](std::exception_ptr){});check(entered.tryAcquire(1,5000),"ordinary query entered");op.submit<int,int>(2,worker,apply,[](std::exception_ptr){});op.submit<int,int>(3,worker,apply,[](std::exception_ptr){});check(op.hasPending(),"ordinary latest pending preserved");release.release();pump([&]{return !op.isInFlight();});check(started==std::vector<int>({1,3})&&applied==std::vector<int>({3}),"ordinary latest-only behavior unchanged");
+ }
+ {
+  Op op(nullptr);QSemaphore entered,release;int rejected=0,applied=0;
+  op.submit<int,int>(1,[&](int value,const ks::ui::AsyncOperationToken&){entered.release();release.acquire();return value;},[](int,std::uint64_t){return true;},[](std::exception_ptr){});check(entered.tryAcquire(1,5000),"cancelable query entered");op.cancel();check(!op.isBusy()&&op.isInFlight(),"canceled query still owns physical slot");
+  check(op.submitTransaction<int,int>(2,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome state){if(state==Outcome::BusyRejected)++rejected;})==0&&rejected==1,"transaction rejects canceled but running query");release.release();pump([&]{return !op.isInFlight();});
+  check(op.submitTransaction<int,int>(3,[](int v){return v;},[&](int,std::uint64_t){++applied;return true;},[](std::exception_ptr){})!=0,"transaction accepted after physical slot released");pump([&]{return !op.isInFlight();});check(applied==1,"later transaction receipt applied");
+ }
+ {
+  Op op(nullptr);int settled=0,applied=0;
+  op.submitTransaction<int,int>(1,[](int v){return v;},[&](int,std::uint64_t){++applied;return true;},[](std::exception_ptr){},[&](Outcome state){check(state==Outcome::DeliveryDropped,"dropped transaction callback outcome");++settled;});pool->waitForDone();QCoreApplication::removePostedEvents(&op,QEvent::MetaCall);check(settled==1&&applied==0&&!op.isInFlight(),"dropped GUI delivery releases transaction exactly once");
+ }
+ {
+  Op op(nullptr);op.close();int settled=0;
+  check(op.submitTransaction<int,int>(1,[](int v){return v;},[](int,std::uint64_t){return true;},[](std::exception_ptr){},[&](Outcome state){check(state==Outcome::OwnerClosed,"closed transaction rejection outcome");++settled;})==0&&settled==1,"closed controller rejects once");
+ }
+}
+struct ThrowCopyRequest {
+ std::shared_ptr<std::atomic_int> copies;
+ explicit ThrowCopyRequest(std::shared_ptr<std::atomic_int> value):copies(std::move(value)){}
+ ThrowCopyRequest(ThrowCopyRequest&&)=default;
+ ThrowCopyRequest(const ThrowCopyRequest& other):copies(other.copies){++*copies;throw std::runtime_error("launch request copy failed");}
+};
+static void launchFailureTests(){
+ using Op=ks::ui::AsyncOperation;using Outcome=ks::ui::AsyncOperationOutcome;
+ for(int mode=0;mode<3;++mode){
+  auto op=std::make_unique<Op>(nullptr);auto copies=std::make_shared<std::atomic_int>(0);int failure=0,cleaned=0,work=0,applied=0;Outcome outcome=Outcome::Applied;
+  const auto ticket=op->submitTransaction<ThrowCopyRequest,int>(ThrowCopyRequest(copies),[&](const ThrowCopyRequest&){++work;return 1;},[&](int,std::uint64_t){++applied;return true;},[&](std::exception_ptr error){check(bool(error),"launch failure retains exception");++failure;if(mode==0)op->close();else if(mode==1)op.reset();},[&](Outcome state){outcome=state;++cleaned;});
+  check(ticket!=0&&copies->load()==1&&work==0&&applied==0,"request copy throws before worker accepts work");check(failure==1&&cleaned==1,"launch failure close/delete/default each settle cleanup once");check(outcome==(mode==2?Outcome::Failed:Outcome::OwnerClosed),"launch failure final outcome follows owner lifecycle");
+ }
+}
 int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  auto* pool=QThreadPool::globalInstance();const int threads=pool->maxThreadCount();pool->setMaxThreadCount(1);
  QSemaphore entered,release;pool->start(QRunnable::create([&]{entered.release();release.acquire();}));check(entered.tryAcquire(1,5000),"pool blocker entered");
@@ -43,7 +109,7 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
  check(order.empty(),"tasks queue behind actual pool worker");release.release();
  pump([&]{return !low.isInFlight()&&!normal.isInFlight()&&!high.isInFlight();});
  check(order==std::vector<int>({1,0,-1}),"real pool executes high/default/low");check(applied==3&&cleaned==2&&errors==0,"legacy and priority callbacks settle normally");
- pool->waitForDone();pool->setMaxThreadCount(threads);
+ pool->waitForDone();transactionTests();launchFailureTests();pool->setMaxThreadCount(threads);
  std::cout<<"ASYNC_CORE_CHECKS="<<checks<<"\nPOOL_ORDER=high,default,low\nGUI_WIDGETS_CREATED=0\nBUSINESS_IO_CALLS=0\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
 '''
