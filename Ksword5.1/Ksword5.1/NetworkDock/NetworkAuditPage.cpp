@@ -52,6 +52,7 @@
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QSplitter>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -1402,23 +1403,29 @@ NetworkAuditPage::AuditSnapshot NetworkAuditPage::buildAuditSnapshot(const bool 
     const bool tcpOk = ks::network::EnumerateTcpConnectionRecords(tcpRecords, &tcpError);
     const bool udpOk = ks::network::EnumerateUdpEndpointRecords(udpRecords, &udpError);
 
-    std::unordered_map<std::uint32_t, CrossViewRow> crossMap;
+    struct CrossViewAggregate
+    {
+        CrossViewRow row;
+        QStringList tcpSummaryLines;
+        QStringList udpSummaryLines;
+    };
+    std::unordered_map<std::uint32_t, CrossViewAggregate> crossMap;
     snapshot.tcpEndpointRows.reserve(tcpRecords.size());
     for (const ks::network::TcpConnectionRecord& tcpRecord : tcpRecords)
     {
-        CrossViewRow& row = crossMap[tcpRecord.processId];
+        CrossViewAggregate& aggregate = crossMap[tcpRecord.processId];
+        CrossViewRow& row = aggregate.row;
         row.processId = tcpRecord.processId;
         row.processName = QString::fromUtf8(tcpRecord.processName.c_str());
         ++row.tcpCount;
-        row.tcpSummary = joinCompactLines({
-            row.tcpSummary,
+        aggregate.tcpSummaryLines.push_back(
             QStringLiteral("%1:%2 -> %3:%4 (%5)")
             .arg(QString::fromUtf8(tcpRecord.localAddressText.c_str()))
             .arg(tcpRecord.localPort)
             .arg(QString::fromUtf8(tcpRecord.remoteAddressText.c_str()))
             .arg(tcpRecord.remotePort)
             .arg(QString::fromUtf8(tcpRecord.tcpStateText.c_str()))
-        });
+        );
 
         TcpEndpointRow endpointRow;
         endpointRow.processId = tcpRecord.processId;
@@ -1440,16 +1447,16 @@ NetworkAuditPage::AuditSnapshot NetworkAuditPage::buildAuditSnapshot(const bool 
     snapshot.udpEndpointRows.reserve(udpRecords.size());
     for (const ks::network::UdpEndpointRecord& udpRecord : udpRecords)
     {
-        CrossViewRow& row = crossMap[udpRecord.processId];
+        CrossViewAggregate& aggregate = crossMap[udpRecord.processId];
+        CrossViewRow& row = aggregate.row;
         row.processId = udpRecord.processId;
         row.processName = QString::fromUtf8(udpRecord.processName.c_str());
         ++row.udpCount;
-        row.udpSummary = joinCompactLines({
-            row.udpSummary,
+        aggregate.udpSummaryLines.push_back(
             QStringLiteral("%1:%2")
             .arg(QString::fromUtf8(udpRecord.localAddressText.c_str()))
             .arg(udpRecord.localPort)
-        });
+        );
 
         UdpEndpointRow endpointRow;
         endpointRow.processId = udpRecord.processId;
@@ -1464,7 +1471,9 @@ NetworkAuditPage::AuditSnapshot NetworkAuditPage::buildAuditSnapshot(const bool 
     snapshot.crossViewRows.reserve(crossMap.size());
     for (auto& pair : crossMap)
     {
-        snapshot.crossViewRows.push_back(pair.second);
+        pair.second.row.tcpSummary = joinCompactLines(pair.second.tcpSummaryLines);
+        pair.second.row.udpSummary = joinCompactLines(pair.second.udpSummaryLines);
+        snapshot.crossViewRows.push_back(std::move(pair.second.row));
     }
     std::sort(snapshot.crossViewRows.begin(), snapshot.crossViewRows.end(), [](const CrossViewRow& left, const CrossViewRow& right)
     {
@@ -2198,6 +2207,10 @@ void NetworkAuditPage::refreshCrossViewTable(const AuditSnapshot& snapshot)
         std::size_t udpR0Count = 0U;
         QString tcpR0Summary;
         QString udpR0Summary;
+        QStringList tcpR3SummaryLines;
+        QStringList udpR3SummaryLines;
+        QStringList tcpR0SummaryLines;
+        QStringList udpR0SummaryLines;
     };
     std::unordered_map<std::uint32_t, CrossViewAggregate> crossMap;
     for (const TcpEndpointRow& endpointRow : m_tcpEndpointCache)
@@ -2215,12 +2228,12 @@ void NetworkAuditPage::refreshCrossViewTable(const AuditSnapshot& snapshot)
         if (endpointRow.isR0Snapshot)
         {
             ++aggregate.tcpR0Count;
-            aggregate.tcpR0Summary = joinCompactLines({ aggregate.tcpR0Summary, endpointSummary });
+            aggregate.tcpR0SummaryLines.push_back(endpointSummary);
         }
         else
         {
             ++aggregate.row.tcpCount;
-            aggregate.row.tcpSummary = joinCompactLines({ aggregate.row.tcpSummary, endpointSummary });
+            aggregate.tcpR3SummaryLines.push_back(endpointSummary);
         }
     }
     for (const UdpEndpointRow& endpointRow : m_udpEndpointCache)
@@ -2235,18 +2248,22 @@ void NetworkAuditPage::refreshCrossViewTable(const AuditSnapshot& snapshot)
         if (isR0Snapshot)
         {
             ++aggregate.udpR0Count;
-            aggregate.udpR0Summary = joinCompactLines({ aggregate.udpR0Summary, endpointRow.localEndpointText });
+            aggregate.udpR0SummaryLines.push_back(endpointRow.localEndpointText);
         }
         else
         {
             ++aggregate.row.udpCount;
-            aggregate.row.udpSummary = joinCompactLines({ aggregate.row.udpSummary, endpointRow.localEndpointText });
+            aggregate.udpR3SummaryLines.push_back(endpointRow.localEndpointText);
         }
     }
     std::vector<CrossViewAggregate> effectiveCrossRows;
     effectiveCrossRows.reserve(crossMap.size());
     for (auto& pair : crossMap)
     {
+        pair.second.row.tcpSummary = joinCompactLines(pair.second.tcpR3SummaryLines);
+        pair.second.row.udpSummary = joinCompactLines(pair.second.udpR3SummaryLines);
+        pair.second.tcpR0Summary = joinCompactLines(pair.second.tcpR0SummaryLines);
+        pair.second.udpR0Summary = joinCompactLines(pair.second.udpR0SummaryLines);
         effectiveCrossRows.push_back(std::move(pair.second));
     }
     std::sort(effectiveCrossRows.begin(), effectiveCrossRows.end(), [](const CrossViewAggregate& left, const CrossViewAggregate& right)
