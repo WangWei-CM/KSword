@@ -1052,6 +1052,7 @@
     <ClInclude Include="UI\IntegrityRiskPresentation.h" />
     <ClInclude Include="UI\TableInteractionSupport.h" />
     <ClInclude Include="UI\TableContextMenu.h" />
+    <ClInclude Include="UI\HvmRehearsalResource.h" />
     <ClInclude Include="UI\ThemeBinding.h" />
     <ClInclude Include="UI\FlatButtonTheme.h" />
     <ClInclude Include="UI\FloatingScrollbars.h" />

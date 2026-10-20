@@ -903,6 +903,8 @@ namespace ks::ui
             }
             return;
         }
+        std::shared_ptr<HvmRehearsalResource::Reservation> rehearsalAccess;
+        if (!retainRehearsalAccess(rehearsalAccess)) return;
         m_verifyStaticInFlight = true;
         const quint64 sequence = ++m_verifyStaticSequence;
         const quint64 pageBase = m_plan.pageBasePhysical;
@@ -915,7 +917,7 @@ namespace ks::ui
         }
 
         QPointer<HvmHookWizard> safeThis(this);
-        std::thread([safeThis, sequence, pageBase]() {
+        std::thread([safeThis, sequence, pageBase, rehearsalAccess]() {
             const VerifyStaticSnapshot snapshot =
                 collectVerifyStaticSnapshot(pageBase);
             if (safeThis == nullptr)

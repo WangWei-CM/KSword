@@ -3252,6 +3252,9 @@
     <ClInclude Include="Framework\NotificationCardManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\HvmRehearsalResource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Framework\DestructiveActionConfirmation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
