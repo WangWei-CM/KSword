@@ -15,6 +15,98 @@
 
 namespace
 {
+    // queryLightweightProcessPath：
+    // - 作用：只查询当前页面展示需要的进程路径；
+    // - 与完整静态详情不同，这里不读取命令行/签名等高成本字段。
+    QString queryLightweightProcessPath(const HANDLE processHandle)
+    {
+        std::vector<wchar_t> pathBuffer(32768, L'\0');
+        DWORD pathLength = static_cast<DWORD>(pathBuffer.size());
+        if (::QueryFullProcessImageNameW(processHandle, 0, pathBuffer.data(), &pathLength) == FALSE
+            || pathLength == 0)
+        {
+            return QString();
+        }
+
+        return QString::fromWCharArray(pathBuffer.data(), static_cast<int>(pathLength));
+    }
+
+    // queryLightweightProcessUser：
+    // - 作用：以最小权限读取进程所属用户；
+    // - 仅服务于监控页表格展示，不做额外令牌分析。
+    QString queryLightweightProcessUser(const HANDLE processHandle)
+    {
+        HANDLE processToken = nullptr;
+        if (::OpenProcessToken(processHandle, TOKEN_QUERY, &processToken) == FALSE)
+        {
+            return QString();
+        }
+
+        DWORD requiredLength = 0;
+        ::GetTokenInformation(processToken, TokenUser, nullptr, 0, &requiredLength);
+        if (requiredLength == 0)
+        {
+            ::CloseHandle(processToken);
+            return QString();
+        }
+
+        std::vector<BYTE> tokenBuffer(requiredLength, 0);
+        if (::GetTokenInformation(
+            processToken,
+            TokenUser,
+            tokenBuffer.data(),
+            requiredLength,
+            &requiredLength) == FALSE)
+        {
+            ::CloseHandle(processToken);
+            return QString();
+        }
+        ::CloseHandle(processToken);
+
+        const auto* tokenUser = reinterpret_cast<const TOKEN_USER*>(tokenBuffer.data());
+        if (tokenUser == nullptr || tokenUser->User.Sid == nullptr)
+        {
+            return QString();
+        }
+
+        DWORD nameLength = 0;
+        DWORD domainLength = 0;
+        SID_NAME_USE sidType = SidTypeUnknown;
+        ::LookupAccountSidW(nullptr, tokenUser->User.Sid, nullptr, &nameLength, nullptr, &domainLength, &sidType);
+        if (nameLength == 0)
+        {
+            return QString();
+        }
+
+        std::vector<wchar_t> nameBuffer(nameLength, L'\0');
+        std::vector<wchar_t> domainBuffer(domainLength > 0 ? domainLength : 1, L'\0');
+        if (::LookupAccountSidW(
+            nullptr,
+            tokenUser->User.Sid,
+            nameBuffer.data(),
+            &nameLength,
+            domainBuffer.data(),
+            &domainLength,
+            &sidType) == FALSE)
+        {
+            return QString();
+        }
+
+        const QString accountName = QString::fromWCharArray(nameBuffer.data());
+        const QString domainName = domainLength > 0
+            ? QString::fromWCharArray(domainBuffer.data())
+            : QString();
+        if (accountName.isEmpty())
+        {
+            return QString();
+        }
+
+        return domainName.isEmpty()
+            ? accountName
+            : QStringLiteral("%1\\%2").arg(domainName, accountName);
+    }
+
+
     struct ProviderSelectionResolved
     {
         QString providerName;
@@ -273,17 +365,20 @@ void ProcessTraceMonitorWidget::pollCaptureState()
 {
     const auto state = m_capture;
     if (state->finished.load() && m_captureCleanup && !m_captureCleanup->isCleanupRequested()) m_captureCleanup->requestCleanup();
-    bool targetChanged = false;
+    std::vector<TargetProcessEntry> targets;
+    bool changed = false;
     {
         std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
         if (m_appliedTargetVersion != state->targetVersion)
         {
-            m_targetProcessList = state->targets;
+            targets = state->targets;
             m_appliedTargetVersion = state->targetVersion;
-            targetChanged = true;
+            changed = true;
         }
     }
-    if (targetChanged) refreshTargetTable();
+    if (changed) m_targetProcessList = std::move(targets);
+    if (changed || m_targetProjectionDirty) refreshTargetTable();
+    scheduleTargetEnrichment(state);
     if (state->finished.load() && !m_captureCompletionApplied)
     {
         m_captureCompletionApplied = true;
@@ -310,16 +405,18 @@ void ProcessTraceMonitorWidget::refreshTrackedProcessSnapshotAsync()
 {
     const auto state = m_capture;
     if (!state->m_captureRunning.load() || state->m_captureStopFlag.load() || state->m_runtimeRefreshPending.exchange(true)) return;
+    std::uint64_t snapshotVersion = 0;
+    { std::lock_guard<std::mutex> lock(state->m_runtimeMutex); snapshotVersion = state->targetVersion; }
     const auto lease = ks::ui::AsyncCleanupRegistry::global().acquire();
     if (!lease) { state->m_runtimeRefreshPending.store(false); return; }
     try
     {
-        QThreadPool::globalInstance()->start(QRunnable::create([lease, state]()
+        QThreadPool::globalInstance()->start(QRunnable::create([lease, state, snapshotVersion]()
         {
             try
             {
                 if (!state->m_captureStopFlag.load())
-                    syncTrackedProcessTree(*state, ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto));
+                    syncTrackedProcessTree(*state, ks::process::EnumerateProcesses(ks::process::ProcessEnumStrategy::Auto), snapshotVersion);
             }
             catch (...) {}
             state->m_runtimeRefreshPending.store(false);
@@ -432,7 +529,7 @@ void ProcessTraceMonitorWidget::seedTrackedProcessTree(CaptureState& state, cons
     }
 }
 
-void ProcessTraceMonitorWidget::syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList)
+void ProcessTraceMonitorWidget::syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList, const std::uint64_t snapshotVersion)
 {
     // Expensive closure/pruning runs on a private value snapshot. GUI readers only
     // contend with short copy/swap sections, never the system-sized tree walk.
@@ -441,6 +538,7 @@ void ProcessTraceMonitorWidget::syncTrackedProcessTree(CaptureState& state, cons
     std::uint64_t baseRuntimeRevision = 0;
     {
         std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        if (state.targetVersion != snapshotVersion) return;
         baseVersion = state.targetVersion;
         baseRuntimeRevision = state.runtimeRevision;
         next.targets = state.targets;
@@ -608,5 +706,166 @@ void ProcessTraceMonitorWidget::pruneStaleTrackedProcesses(CaptureState& state)
     for (const std::uint32_t pidValue : pidListNeedErase)
     {
         state.m_trackedProcessMap.erase(pidValue);
+    }
+}
+
+
+void ProcessTraceMonitorWidget::publishTargetCreate(CaptureState& state, TargetProcessEntry entry, const std::uint64_t eventTime100ns)
+{
+    {
+        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+        const auto found = std::find_if(state.targets.begin(), state.targets.end(), [&entry](const auto& value) { return value.pid == entry.pid; });
+        if (found != state.targets.end() && (found->identityEventTime100ns > eventTime100ns || found->creationTime100ns > eventTime100ns)) return;
+        entry.identityEventTime100ns = eventTime100ns;
+        entry.identitySequence = ++state.targetVersion;
+        entry.identityLookupPending = true;
+        entry.pendingProcessName = entry.processName;
+        entry.pendingImagePath = entry.imagePath;
+        if (found == state.targets.end())
+        {
+            entry.creationTime100ns = 0;
+            state.targets.push_back(std::move(entry));
+        }
+        else
+        {
+            // Keep the last proved identity until the asynchronous handle check completes.
+            // The event's sparse hints are separate from the existing complete fields.
+            const QString remark = found->remarkText;
+            found->pendingProcessName = entry.pendingProcessName;
+            found->pendingImagePath = entry.pendingImagePath;
+            found->identityEventTime100ns = entry.identityEventTime100ns;
+            found->identitySequence = entry.identitySequence;
+            found->identityLookupPending = true;
+            if (remark.trimmed().isEmpty() || remark.contains(QStringLiteral("ETW 自动加入"), Qt::CaseInsensitive))
+                found->remarkText = entry.remarkText;
+        }
+    }
+    scheduleTargetEnrichment(state.shared_from_this());
+}
+
+void ProcessTraceMonitorWidget::publishTargetExit(CaptureState& state, const std::uint32_t pid, const std::uint64_t eventTime100ns)
+{
+    std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
+    const auto end = std::remove_if(state.targets.begin(), state.targets.end(), [pid, eventTime100ns](const auto& value)
+    {
+        return value.pid == pid && value.identityEventTime100ns <= eventTime100ns
+            && (!value.creationTime100ns || value.creationTime100ns <= eventTime100ns);
+    });
+    if (end != state.targets.end()) { state.targets.erase(end, state.targets.end()); ++state.targetVersion; }
+}
+
+ks::process::ProcessRecord ProcessTraceMonitorWidget::lookupTargetIdentity(CaptureState& state, const std::uint32_t pid,
+    const std::uint64_t expectedCreation, const std::uint64_t eventTime100ns)
+{
+    std::lock_guard<std::mutex> query(state.identityGate);
+    ks::process::ProcessRecord record;
+    record.pid = pid;
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return record;
+    struct Handle { HANDLE value; ~Handle() { ::CloseHandle(value); } } owned{ process };
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!::GetProcessTimes(process, &created, &exited, &kernel, &user)) return record;
+    ULARGE_INTEGER time{}; time.LowPart = created.dwLowDateTime; time.HighPart = created.dwHighDateTime;
+    const std::uint64_t creation = time.QuadPart;
+    if (!creation || (expectedCreation && expectedCreation != creation) || (eventTime100ns && creation > eventTime100ns)) return record;
+    const std::string key = std::to_string(pid) + ":" + std::to_string(creation);
+    if (const auto found = state.identityCache.find(key); found != state.identityCache.end()) return found->second;
+    record.creationTime100ns = creation;
+    record.imagePath = queryLightweightProcessPath(process).toUtf8().toStdString();
+    record.userName = queryLightweightProcessUser(process).toUtf8().toStdString();
+    const QString path = QString::fromUtf8(record.imagePath.c_str());
+    const int slash = std::max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    record.processName = (slash < 0 ? path : path.mid(slash+1)).toUtf8().toStdString();
+    if (state.identityCache.size() >= 1024) state.identityCache.clear();
+    if (!record.imagePath.empty() && !record.userName.empty()) state.identityCache.emplace(key, record);
+    return record;
+}
+
+void ProcessTraceMonitorWidget::scheduleTargetEnrichment(const std::shared_ptr<CaptureState>& state)
+{
+    {
+        std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+        if (state->identityWorkerRunning || !std::any_of(state->targets.begin(), state->targets.end(), [](const auto& value) { return value.identityLookupPending; })) return;
+        state->identityWorkerRunning = true;
+    }
+    const auto lease = ks::ui::AsyncCleanupRegistry::global().acquire();
+    if (!lease) { std::lock_guard<std::mutex> lock(state->m_runtimeMutex); state->identityWorkerRunning = false; return; }
+    try
+    {
+        QThreadPool::globalInstance()->start(QRunnable::create([lease, state]()
+        {
+            try
+            {
+                for (;;)
+                {
+                    // Bound the temporary query batch; the canonical target tree carries pending state.
+                    std::vector<TargetProcessEntry> batch;
+                    {
+                        std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+                        for (auto& entry : state->targets)
+                        {
+                            if (!entry.identityLookupPending) continue;
+                            entry.identityLookupPending = false;
+                            entry.identityLookupInFlight = true;
+                            batch.push_back(entry);
+                            if (batch.size() == 128) break;
+                        }
+                        if (batch.empty()) { state->identityWorkerRunning = false; return; }
+                        ++state->targetVersion; // Pending identity flags are part of the snapshot version.
+                    }
+                    for (const auto& input : batch)
+                    {
+                        const auto record = lookupTargetIdentity(*state, input.pid, 0, input.identityEventTime100ns);
+                        std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+                        const auto found = std::find_if(state->targets.begin(), state->targets.end(), [&input](const auto& value) { return value.pid == input.pid && value.identitySequence == input.identitySequence; });
+                        if (found == state->targets.end()) continue;
+                        found->identityLookupInFlight = false;
+                        if (record.creationTime100ns == 0)
+                        {
+                            found->alive = false; // Last proved metadata stays attached to its old identity.
+                            ++state->targetVersion;
+                            continue;
+                        }
+                        const bool sameIdentity = found->creationTime100ns != 0 && found->creationTime100ns == record.creationTime100ns;
+                        if (!sameIdentity)
+                        {
+                            found->processName = found->pendingProcessName;
+                            found->imagePath = found->pendingImagePath;
+                            found->userName.clear();
+                        }
+                        else
+                        {
+                            if (!found->pendingProcessName.trimmed().isEmpty()) found->processName = found->pendingProcessName;
+                            if (!found->pendingImagePath.trimmed().isEmpty()) found->imagePath = found->pendingImagePath;
+                        }
+                        if (found->processName.trimmed().isEmpty()) found->processName = QString::fromStdString(record.processName);
+                        if (found->imagePath.trimmed().isEmpty()) found->imagePath = QString::fromStdString(record.imagePath);
+                        if (found->userName.trimmed().isEmpty()) found->userName = QString::fromStdString(record.userName);
+                        found->creationTime100ns = record.creationTime100ns;
+                        found->alive = true;
+                        found->pendingProcessName.clear(); found->pendingImagePath.clear();
+                        if (const auto tracked = state->m_trackedProcessMap.find(input.pid); tracked != state->m_trackedProcessMap.end()
+                            && (!tracked->second.creationTime100ns || tracked->second.creationTime100ns <= record.creationTime100ns))
+                        {
+                            tracked->second.creationTime100ns = record.creationTime100ns;
+                            tracked->second.processName = found->processName;
+                            tracked->second.imagePath = found->imagePath;
+                            ++state->runtimeRevision;
+                        }
+                        ++state->targetVersion;
+                    }
+                }
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+                state->identityWorkerRunning = false;
+            }
+        }));
+    }
+    catch (...)
+    {
+        std::lock_guard<std::mutex> lock(state->m_runtimeMutex);
+        state->identityWorkerRunning = false;
     }
 }

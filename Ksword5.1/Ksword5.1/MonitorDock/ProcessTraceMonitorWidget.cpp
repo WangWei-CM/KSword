@@ -46,6 +46,9 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
     info << initEvent << "[ProcessTraceMonitorWidget] 开始初始化进程定向监控页。" << eol;
 
     initializeUi();
+    if (m_targetTable) m_targetTable->installEventFilter(this);
+    if (m_availableTable) ks::ui::SetTableRowFilterBusinessOwnership(m_availableTable,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
     initializeConnections();
     refreshAvailableProcessListAsync();
     updateActionState();
@@ -57,6 +60,7 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
 ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
 {
     if (m_eventFilterProjection) m_eventFilterProjection->close();
+    if (m_targetLookup) m_targetLookup->close();
     m_uiDispatcher->close();
     // Only signal and enqueue retained value cleanup; the GUI never joins capture workers.
     stopMonitoringInternal(true);
@@ -303,6 +307,7 @@ void ProcessTraceMonitorWidget::updateActionState()
 {
     const bool hasTargets = !m_targetProcessList.empty();
     const bool running = m_capture->m_captureRunning.load();
+    const bool lookingUp = m_targetLookup && m_targetLookup->isInFlight();
     const bool paused = m_capture->m_capturePaused.load();
 
     if (m_availableRefreshButton != nullptr)
@@ -319,7 +324,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_addManualPidButton != nullptr)
     {
-        m_addManualPidButton->setEnabled(!running);
+        m_addManualPidButton->setEnabled(!running && !lookingUp);
     }
     if (m_removeTargetButton != nullptr)
     {
@@ -331,7 +336,7 @@ void ProcessTraceMonitorWidget::updateActionState()
     }
     if (m_startButton != nullptr)
     {
-        m_startButton->setEnabled((!running && hasTargets) || (running && paused));
+        m_startButton->setEnabled((!running && hasTargets && !lookingUp) || (running && paused));
         m_startButton->setIcon(QIcon(paused
             ? QStringLiteral(":/Icon/process_resume.svg")
             : QStringLiteral(":/Icon/process_start.svg")));
@@ -413,4 +418,11 @@ void ProcessTraceMonitorWidget::updateStatusLabel()
         m_statusLabel->setText(QStringLiteral("● 空闲  %1").arg(summaryText));
         ks::ui::ApplyStatusRole(m_statusLabel, ks::ui::StatusRole::Idle);
     }
+}
+
+bool ProcessTraceMonitorWidget::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_targetTable && event->type() == QEvent::Show)
+        QTimer::singleShot(0, this, [this]() { if (m_targetProjectionDirty) refreshTargetTable(); });
+    return QWidget::eventFilter(watched, event);
 }

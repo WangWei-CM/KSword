@@ -29007,6 +29007,7 @@
     "● 停止失败，可重试（错误码=%1）  %2": "● Stop failed; retry available (error=%1)  %2",
     "● 正在停止  %1": "● Stopping  %1",
     "● 准备中  %1": "● Preparing  %1",
+    "核验中": "Verifying",
     "进程定向监控": "Monitor process targets",
     "进程定向监控结束": "Stop monitoring process targets",
     "进程定向监控详情 - %1": "Process monitoring details - %1",

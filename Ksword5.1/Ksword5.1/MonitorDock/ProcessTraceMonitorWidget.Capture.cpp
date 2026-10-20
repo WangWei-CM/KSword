@@ -880,9 +880,14 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
                 // parentRootPidValue：先拷贝父根 PID，避免 map 插入导致指针失效后仍访问父节点。
                 const std::uint32_t parentRootPidValue = parentTrackedProcess->rootPid;
                 auto childIt = state.m_trackedProcessMap.find(propertyPidValue);
+                const auto currentTarget = std::find_if(state.targets.begin(), state.targets.end(), [propertyPidValue](const auto& value) { return value.pid == propertyPidValue; });
+                const bool currentCreate = (currentTarget == state.targets.end() || (currentTarget->identityEventTime100ns <= eventTimestamp100ns && currentTarget->creationTime100ns <= eventTimestamp100ns))
+                    && (childIt == state.m_trackedProcessMap.end() || childIt->second.creationTime100ns <= eventTimestamp100ns);
+                RuntimeTrackedProcess childTrackedProcess;
+                if (currentCreate)
+                {
                 if (childIt == state.m_trackedProcessMap.end())
                 {
-                    RuntimeTrackedProcess childTrackedProcess;
                     childTrackedProcess.pid = propertyPidValue;
                     childTrackedProcess.parentPid = parentPidValue;
                     childTrackedProcess.rootPid = parentRootPidValue;
@@ -901,6 +906,7 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
                 {
                     childIt->second.parentPid = parentPidValue;
                     childIt->second.rootPid = parentRootPidValue;
+                    childIt->second.creationTime100ns = 0;
                     childIt->second.alive = true;
                     childIt->second.isRoot = false;
                     childIt->second.staleSnapshotRounds = 0;
@@ -913,7 +919,17 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
                     }
                 }
 
-                const RuntimeTrackedProcess& childTrackedProcess = childIt->second;
+                    childTrackedProcess = childIt->second;
+                }
+                else
+                {
+                    // Keep the historical event, but do not mutate a newer PID instance.
+                    childTrackedProcess.pid = propertyPidValue;
+                    childTrackedProcess.parentPid = parentPidValue;
+                    childTrackedProcess.rootPid = parentRootPidValue;
+                    childTrackedProcess.processName = processHintText;
+                    childTrackedProcess.imagePath = processHintText;
+                }
                 relevant = true;
                 displayPidValue = propertyPidValue;
                 rootPidValue = childTrackedProcess.rootPid;
@@ -923,7 +939,7 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
                 needsLazyDetailLookup = childTrackedProcess.alive
                     && processNameText.trimmed().isEmpty()
                     && displayPidValue != 0;
-                shouldSyncAutoAddTargetList = true;
+                shouldSyncAutoAddTargetList = currentCreate;
                 autoAddPidValue = childTrackedProcess.pid;
                 autoAddParentPidValue = childTrackedProcess.parentPid;
                 autoAddProcessNameText = childTrackedProcess.processName;
@@ -976,16 +992,15 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
             && isProcessStopEvent(providerTypeText, eventNameText))
         {
             auto found = state.m_trackedProcessMap.find(displayPidValue);
-            if (found != state.m_trackedProcessMap.end())
+            const auto target = std::find_if(state.targets.begin(), state.targets.end(), [displayPidValue](const auto& value) { return value.pid == displayPidValue; });
+            const bool currentIdentity = (found == state.m_trackedProcessMap.end() || !found->second.creationTime100ns || found->second.creationTime100ns <= eventTimestamp100ns)
+                && (target == state.targets.end() || target->identityEventTime100ns <= eventTimestamp100ns);
+            if (currentIdentity)
             {
-                found->second.alive = false;
-                found->second.lastRelatedEventTime100ns = eventTimestamp100ns;
-                ++state.runtimeRevision;
-                state.m_trackedProcessMap.erase(found);
-                ++state.runtimeRevision;
+                if (found != state.m_trackedProcessMap.end()) { state.m_trackedProcessMap.erase(found); ++state.runtimeRevision; }
+                shouldAutoRemoveTargetList = true;
+                autoRemovePidValue = displayPidValue;
             }
-            shouldAutoRemoveTargetList = true;
-            autoRemovePidValue = displayPidValue;
         }
     }
 
@@ -1002,7 +1017,8 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
         ks::process::ProcessRecord detailRecord;
         // ETW 捕获线程只需要名称/路径用于显示，不能同步做签名校验。
         // includeSignatureCheck=false 可避免事件处理被 WinVerifyTrust 拖慢。
-        if (ks::process::QueryProcessStaticDetailByPid(displayPidValue, detailRecord, false))
+        if (ks::process::QueryProcessStaticDetailByPid(displayPidValue, detailRecord, false)
+            && detailRecord.creationTime100ns != 0 && detailRecord.creationTime100ns <= eventTimestamp100ns)
         {
             processNameText = QString::fromStdString(detailRecord.processName);
             processPathText = QString::fromStdString(detailRecord.imagePath);
@@ -1063,20 +1079,11 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
         entry.creationTime100ns = autoAddCreationTime100ns;
         entry.alive = true;
         entry.remarkText = QStringLiteral("ETW 自动加入（父PID=%1）").arg(autoAddParentPidValue);
-        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
-        const auto found = std::find_if(state.targets.begin(), state.targets.end(), [&entry](const auto& value) { return value.pid == entry.pid; });
-        if (found == state.targets.end()) state.targets.push_back(std::move(entry));
-        else if (!entry.creationTime100ns || !found->creationTime100ns || entry.creationTime100ns >= found->creationTime100ns) *found = std::move(entry);
-        ++state.targetVersion;
+        publishTargetCreate(state, std::move(entry), eventTimestamp100ns);
     }
     if (shouldAutoRemoveTargetList && autoRemovePidValue != 0)
     {
-        std::lock_guard<std::mutex> lock(state.m_runtimeMutex);
-        state.targets.erase(std::remove_if(state.targets.begin(), state.targets.end(), [autoRemovePidValue, eventTimestamp100ns](const auto& value)
-        {
-            return value.pid == autoRemovePidValue && (!value.creationTime100ns || value.creationTime100ns <= eventTimestamp100ns);
-        }), state.targets.end());
-        ++state.targetVersion;
+        publishTargetExit(state, autoRemovePidValue, eventTimestamp100ns);
     }
 
     if (displayPidValue != 0 && !shouldAutoRemoveTargetList)
@@ -1085,7 +1092,7 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(CaptureState& state,
         const auto found = state.m_trackedProcessMap.find(displayPidValue);
         if (found != state.m_trackedProcessMap.end())
         {
-            found->second.lastRelatedEventTime100ns = eventTimestamp100ns;
+            found->second.lastRelatedEventTime100ns = std::max(found->second.lastRelatedEventTime100ns, eventTimestamp100ns);
             ++state.runtimeRevision;
         }
     }

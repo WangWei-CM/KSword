@@ -40,6 +40,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSet>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -721,6 +722,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
         : QString();
 
     int visibleRowCount = 0;
+    QSet<QPersistentModelIndex> excluded;
     for (int row = 0; row < m_availableTable->rowCount(); ++row)
     {
         QStringList rowTextList;
@@ -733,7 +735,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
         const QString mergedText = rowTextList.join(QStringLiteral(" | "));
         const bool visible = keywordText.isEmpty()
             || mergedText.contains(keywordText, Qt::CaseInsensitive);
-        m_availableTable->setRowHidden(row, !visible);
+        if (!visible) excluded.insert(QPersistentModelIndex(m_availableTable->model()->index(row, 0, m_availableTable->rootIndex())));
         if (visible)
         {
             ++visibleRowCount;
@@ -748,6 +750,7 @@ void ProcessTraceMonitorWidget::applyAvailableProcessFilter()
             .arg(m_availableTable->rowCount()));
         ks::ui::ApplyStatusRole(m_availableStatusLabel, ks::ui::StatusRole::Idle);
     }
+    ks::ui::ApplyTableRowFilterIncrementally(m_availableTable, excluded);
 }
 
 void ProcessTraceMonitorWidget::addSelectedAvailableProcesses()
@@ -1110,26 +1113,36 @@ void ProcessTraceMonitorWidget::addTargetProcessByPid(const std::uint32_t pidVal
     }
     else
     {
-        ks::process::ProcessRecord detailRecord = buildLightweightMonitorProcessRecord(pidValue);
-        targetEntry.processName = QString::fromStdString(detailRecord.processName);
-        targetEntry.imagePath = QString::fromStdString(detailRecord.imagePath);
-        targetEntry.userName = QString::fromStdString(detailRecord.userName);
-        targetEntry.creationTime100ns = detailRecord.creationTime100ns;
-        targetEntry.alive = !detailRecord.imagePath.empty()
-            || !detailRecord.userName.empty()
-            || detailRecord.creationTime100ns != 0;
-
-        if (!targetEntry.alive)
-        {
-            targetEntry.processName = targetEntry.processName.trimmed().isEmpty()
-                ? QStringLiteral("<Unknown>")
-                : targetEntry.processName;
-            targetEntry.remarkText += QStringLiteral("；无法读取静态详情");
-        }
+        if (!m_targetLookup) m_targetLookup = new ks::ui::AsyncOperation(this);
+        const auto epoch = m_capture;
+        const auto ticket = m_targetLookup->submitTransaction<TargetProcessEntry, TargetProcessEntry>(targetEntry,
+            [](const TargetProcessEntry& input)
+            {
+                auto result = input;
+                const auto detail = buildLightweightMonitorProcessRecord(input.pid);
+                result.processName = QString::fromStdString(detail.processName);
+                result.imagePath = QString::fromStdString(detail.imagePath);
+                result.userName = QString::fromStdString(detail.userName);
+                result.creationTime100ns = detail.creationTime100ns;
+                result.alive = !detail.imagePath.empty() || !detail.userName.empty() || detail.creationTime100ns != 0;
+                if (!result.alive) result.remarkText += QStringLiteral("；无法读取静态详情");
+                return result;
+            },
+            [this, epoch](const TargetProcessEntry& result, std::uint64_t)
+            {
+                QTimer::singleShot(0, this, [this]() { updateActionState(); updateStatusLabel(); });
+                if (m_capture != epoch || m_capture->m_captureRunning.load()) return true;
+                const auto found = std::find_if(m_targetProcessList.begin(), m_targetProcessList.end(), [&result](const auto& value) { return value.pid == result.pid; });
+                if (found == m_targetProcessList.end()) m_targetProcessList.push_back(result);
+                syncTargetEditsToCapture(); refreshTargetTable(); updateActionState(); updateStatusLabel();
+                return true;
+            }, [this](std::exception_ptr) { QTimer::singleShot(0, this, [this]() { updateActionState(); updateStatusLabel(); }); });
+        if (ticket) updateActionState();
+        return;
     }
 
     m_targetProcessList.push_back(targetEntry);
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
@@ -1158,117 +1171,9 @@ void ProcessTraceMonitorWidget::updateTargetProcessRemarkByPid(
     }
 
     found->remarkText = remarkText;
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
-}
-
-void ProcessTraceMonitorWidget::upsertAutoTrackedProcessInTargetList(
-    const std::uint32_t pidValue,
-    const std::uint32_t parentPidValue,
-    const QString& processNameText,
-    const QString& processPathText,
-    const std::uint64_t creationTime100ns)
-{
-    if (pidValue == 0)
-    {
-        return;
-    }
-
-    // normalizedProcessName/normalizedProcessPath：清理 ETW 事件中可能携带的空白文本。
-    const QString normalizedProcessName = processNameText.trimmed();
-    const QString normalizedProcessPath = processPathText.trimmed();
-    // autoRemarkText：用于明确标记“该条目是 ETW 自动加入”。
-    const QString autoRemarkText = QStringLiteral("ETW 自动加入（父PID=%1）").arg(parentPidValue);
-
-    auto targetIt = std::find_if(
-        m_targetProcessList.begin(),
-        m_targetProcessList.end(),
-        [pidValue](const TargetProcessEntry& entry) {
-            return entry.pid == pidValue;
-        });
-
-    bool targetAdded = false;
-    if (targetIt == m_targetProcessList.end())
-    {
-        TargetProcessEntry targetEntry;
-        targetEntry.pid = pidValue;
-        targetEntry.processName = normalizedProcessName;
-        targetEntry.imagePath = normalizedProcessPath;
-        targetEntry.creationTime100ns = creationTime100ns;
-        targetEntry.alive = true;
-        targetEntry.remarkText = autoRemarkText;
-        m_targetProcessList.push_back(targetEntry);
-        targetIt = std::prev(m_targetProcessList.end());
-        targetAdded = true;
-    }
-    else
-    {
-        targetIt->alive = true;
-        if (!normalizedProcessName.isEmpty())
-        {
-            targetIt->processName = normalizedProcessName;
-        }
-        if (!normalizedProcessPath.isEmpty())
-        {
-            targetIt->imagePath = normalizedProcessPath;
-        }
-        if (creationTime100ns != 0)
-        {
-            targetIt->creationTime100ns = creationTime100ns;
-        }
-
-        const bool canRewriteRemark = targetIt->remarkText.trimmed().isEmpty()
-            || targetIt->remarkText.contains(QStringLiteral("ETW 自动加入"), Qt::CaseInsensitive);
-        if (canRewriteRemark)
-        {
-            targetIt->remarkText = autoRemarkText;
-        }
-    }
-
-    // needDetailLookup：当 ETW 没带全字段时，按 PID 补一轮轻量静态详情。
-    const bool needDetailLookup = targetIt->processName.trimmed().isEmpty()
-        || targetIt->imagePath.trimmed().isEmpty()
-        || targetIt->userName.trimmed().isEmpty()
-        || targetIt->creationTime100ns == 0;
-    if (needDetailLookup)
-    {
-        const ks::process::ProcessRecord detailRecord = buildLightweightMonitorProcessRecord(pidValue);
-        if (targetIt->processName.trimmed().isEmpty())
-        {
-            targetIt->processName = QString::fromStdString(detailRecord.processName);
-        }
-        if (targetIt->imagePath.trimmed().isEmpty())
-        {
-            targetIt->imagePath = QString::fromStdString(detailRecord.imagePath);
-        }
-        if (targetIt->userName.trimmed().isEmpty())
-        {
-            targetIt->userName = QString::fromStdString(detailRecord.userName);
-        }
-        if (targetIt->creationTime100ns == 0)
-        {
-            targetIt->creationTime100ns = detailRecord.creationTime100ns;
-        }
-
-        // 这里保持 alive=true：
-        // - 触发来源是“ETW 进程创建事件”，说明该 PID 在事件时刻可达；
-        // - 即便轻量详情补全失败，也不应把其误判成已退出。
-        targetIt->alive = true;
-    }
-
-    refreshTargetTable();
-    updateStatusLabel();
-
-    kLogEvent autoAddEvent;
-    info << autoAddEvent
-        << "[ProcessTraceMonitorWidget] ETW自动同步监控目标, pid="
-        << pidValue
-        << ", parentPid="
-        << parentPidValue
-        << ", action="
-        << (targetAdded ? "add" : "update")
-        << eol;
 }
 
 void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
@@ -1295,7 +1200,7 @@ void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
     const std::size_t removedCount = static_cast<std::size_t>(m_targetProcessList.end() - removeBegin);
     m_targetProcessList.erase(removeBegin, m_targetProcessList.end());
 
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateStatusLabel();
 
     kLogEvent autoRemoveEvent;
@@ -1311,40 +1216,59 @@ void ProcessTraceMonitorWidget::removeTrackedProcessFromTargetListByPid(
 
 void ProcessTraceMonitorWidget::refreshTargetTable()
 {
-    if (m_targetTable == nullptr)
+    if (!m_targetTable) return;
+    if (!m_targetTable->isVisible()) { m_targetProjectionDirty = true; return; }
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("process-trace-target-projection"), { m_targetTable }, [this]() { refreshTargetTable(); }))
+    { m_targetProjectionDirty = true; return; }
+    m_targetProjectionDirty = false;
+    constexpr int identityRole = Qt::UserRole + 42;
+    const auto identity = [](const TargetProcessEntry& entry) { return QStringLiteral("%1:%2").arg(entry.pid).arg(entry.creationTime100ns); };
+    QSet<QString> selectedIdentities;
+    for (const auto* item : m_targetTable->selectedItems())
+        if (const auto* first = m_targetTable->item(item->row(), 0)) selectedIdentities.insert(first->data(identityRole).toString());
+    const bool sorting = m_targetTable->isSortingEnabled();
+    m_targetTable->setSortingEnabled(false);
+    QSet<QString> retainedKeys;
+    for (const auto& entry : m_targetProcessList) retainedKeys.insert(identity(entry));
+    // Remove obsolete identities first. A single exit must not move every survivor row.
+    for (int row = m_targetTable->rowCount() - 1; row >= 0; --row)
     {
-        return;
+        const auto* first = m_targetTable->item(row, 0);
+        if (!first || !retainedKeys.contains(first->data(identityRole).toString())) m_targetTable->removeRow(row);
     }
-
-    m_targetTable->clearContents();
-    m_targetTable->setRowCount(static_cast<int>(m_targetProcessList.size()));
-
     int aliveCount = 0;
     for (int row = 0; row < static_cast<int>(m_targetProcessList.size()); ++row)
     {
-        const TargetProcessEntry& entry = m_targetProcessList[static_cast<std::size_t>(row)];
-
-        QTableWidgetItem* stateItem = createReadOnlyItem(entry.alive
-            ? QStringLiteral("运行中")
-            : QStringLiteral("未知/已退出"));
-        if (entry.alive)
+        const auto& entry = m_targetProcessList[static_cast<std::size_t>(row)];
+        const QString key = identity(entry);
+        if (row >= m_targetTable->rowCount() || !m_targetTable->item(row, 0) || m_targetTable->item(row, 0)->data(identityRole).toString() != key)
         {
-            ++aliveCount;
-            stateItem->setForeground(QBrush(KswordTheme::SuccessColor()));
+            int sourceRow = row;
+            while (sourceRow < m_targetTable->rowCount() && (!m_targetTable->item(sourceRow, 0) || m_targetTable->item(sourceRow, 0)->data(identityRole).toString() != key)) ++sourceRow;
+            m_targetTable->insertRow(row);
+            if (sourceRow + 1 < m_targetTable->rowCount())
+            {
+                for (int column = 0; column < TargetProcessColumnCount; ++column)
+                    m_targetTable->setItem(row, column, m_targetTable->takeItem(sourceRow + 1, column));
+                m_targetTable->removeRow(sourceRow + 1);
+            }
         }
-        else
+        const QStringList cells{ (entry.identityLookupPending || entry.identityLookupInFlight) ? QStringLiteral("核验中") : (entry.alive ? QStringLiteral("运行中") : QStringLiteral("未知/已退出")), QString::number(entry.pid), entry.processName, entry.imagePath, entry.userName, entry.remarkText };
+        for (int column = 0; column < TargetProcessColumnCount; ++column)
         {
-            stateItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
+            auto* item = m_targetTable->item(row, column);
+            if (!item) { item = createReadOnlyItem(cells[column]); m_targetTable->setItem(row, column, item); }
+            else if (item->text() != cells[column]) item->setText(cells[column]);
+            if (selectedIdentities.contains(key)) item->setSelected(true);
         }
-
-        m_targetTable->setItem(row, TargetProcessColumnState, stateItem);
-        m_targetTable->setItem(row, TargetProcessColumnPid, createReadOnlyItem(QString::number(entry.pid)));
-        m_targetTable->setItem(row, TargetProcessColumnName, createReadOnlyItem(entry.processName));
-        m_targetTable->setItem(row, TargetProcessColumnPath, createReadOnlyItem(entry.imagePath));
-        m_targetTable->setItem(row, TargetProcessColumnUser, createReadOnlyItem(entry.userName));
-        m_targetTable->setItem(row, TargetProcessColumnRemark, createReadOnlyItem(entry.remarkText));
+        auto* first = m_targetTable->item(row, 0);
+        first->setData(identityRole, key);
+        const QBrush foreground(entry.alive ? KswordTheme::SuccessColor() : KswordTheme::TextSecondaryColor());
+        if (first->foreground() != foreground) first->setForeground(foreground);
+        if (entry.alive) ++aliveCount;
     }
-
+    while (m_targetTable->rowCount() > static_cast<int>(m_targetProcessList.size())) m_targetTable->removeRow(m_targetTable->rowCount()-1);
+    m_targetTable->setSortingEnabled(sorting);
     if (m_targetStatusLabel != nullptr)
     {
         m_targetStatusLabel->setText(
@@ -1365,37 +1289,23 @@ void ProcessTraceMonitorWidget::removeSelectedTargetProcesses()
         return;
     }
 
-    std::set<int, std::greater<int>> selectedRowSet;
-    const QList<QTableWidgetItem*> itemList = m_targetTable->selectedItems();
-    for (QTableWidgetItem* itemPointer : itemList)
-    {
-        if (itemPointer != nullptr)
-        {
-            selectedRowSet.insert(itemPointer->row());
-        }
-    }
+    QSet<QString> selectedKeys;
+    for (const auto* item : m_targetTable->selectedItems())
+        if (const auto* first = m_targetTable->item(item->row(), 0)) selectedKeys.insert(first->data(Qt::UserRole + 42).toString());
+    if (selectedKeys.isEmpty()) return;
+    const auto oldSize = m_targetProcessList.size();
+    m_targetProcessList.erase(std::remove_if(m_targetProcessList.begin(), m_targetProcessList.end(), [&selectedKeys](const auto& entry)
+    { return selectedKeys.contains(QStringLiteral("%1:%2").arg(entry.pid).arg(entry.creationTime100ns)); }), m_targetProcessList.end());
+    const auto removedCount = oldSize - m_targetProcessList.size();
 
-    if (selectedRowSet.empty())
-    {
-        return;
-    }
-
-    for (const int row : selectedRowSet)
-    {
-        if (row >= 0 && row < static_cast<int>(m_targetProcessList.size()))
-        {
-            m_targetProcessList.erase(m_targetProcessList.begin() + row);
-        }
-    }
-
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
     kLogEvent event;
     info << event
         << "[ProcessTraceMonitorWidget] 已移除选中监控目标, removedCount="
-        << selectedRowSet.size()
+        << removedCount
         << eol;
 }
 
@@ -1407,7 +1317,7 @@ void ProcessTraceMonitorWidget::clearTargetProcesses()
     }
 
     m_targetProcessList.clear();
-    refreshTargetTable();
+    syncTargetEditsToCapture(); refreshTargetTable();
     updateActionState();
     updateStatusLabel();
 
@@ -1984,4 +1894,11 @@ void ProcessTraceMonitorWidget::appendEventRow(const CapturedEventRow& rowValue)
     // Provider 是未翻译的 ETW 机器身份；类别标签换语言不会改变事件所在轨道。
     pointValue.categoryId = ks::ui::TimelineCategoryForEtwProvider(rowValue.providerText, rowValue.eventName);
     m_timelineEventPoints.push_back(std::move(pointValue));
+}
+
+void ProcessTraceMonitorWidget::syncTargetEditsToCapture()
+{
+    std::lock_guard<std::mutex> lock(m_capture->m_runtimeMutex);
+    m_capture->targets = m_targetProcessList;
+    m_appliedTargetVersion = ++m_capture->targetVersion;
 }

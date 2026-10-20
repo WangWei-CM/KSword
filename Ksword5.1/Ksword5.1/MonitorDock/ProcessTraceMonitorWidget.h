@@ -13,6 +13,7 @@
 #include "../Framework.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "../UI/RetainedCleanupJob.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <QWidget>
@@ -130,6 +131,11 @@ public:
         std::uint64_t creationTime100ns = 0;
         bool alive = false;
         QString remarkText;
+        std::uint64_t identityEventTime100ns = 0;
+        std::uint64_t identitySequence = 0;
+        bool identityLookupPending = false;
+        bool identityLookupInFlight = false;
+        QString pendingProcessName, pendingImagePath;
     };
 
     // RuntimeTrackedProcess：
@@ -239,22 +245,11 @@ private:
     // - 入参 processNameText/processPathText：ETW 属性里带出的进程名与路径提示；
     // - 入参 creationTime100ns：创建时间（若 ETW 暂未提供则为 0）；
     // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
-    void upsertAutoTrackedProcessInTargetList(
-        std::uint32_t pidValue,
-        std::uint32_t parentPidValue,
-        const QString& processNameText,
-        const QString& processPathText,
-        std::uint64_t creationTime100ns);
-    // removeTrackedProcessFromTargetListByPid：
-    // - 作用：当 ETW 明确报告进程退出时，从监听列表自动取消追踪；
-    // - 调用：ETW 线程通过 QueuedConnection 回到 UI 线程后调用；
-    // - 入参 pidValue：需要移除的 PID；
-    // - 入参 reasonText：本次移除的原因说明（用于日志审计）；
-    // - 出参：无（内部更新 m_targetProcessList 与目标表格）。
-    void removeTrackedProcessFromTargetListByPid(
-        std::uint32_t pidValue,
-        const QString& reasonText);
+    void removeTrackedProcessFromTargetListByPid(std::uint32_t pidValue, const QString& reasonText);
     void refreshTargetTable();
+    void syncTargetEditsToCapture();
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    bool m_targetProjectionDirty = false;
     void removeSelectedTargetProcesses();
     void clearTargetProcesses();
     // showAvailableContextMenu：
@@ -302,7 +297,7 @@ private:
     void setMonitoringPaused(bool paused);
     void refreshTrackedProcessSnapshotAsync();
     static void seedTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList);
-    static void syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList);
+    static void syncTrackedProcessTree(CaptureState& state, const std::vector<ks::process::ProcessRecord>& processList, std::uint64_t snapshotVersion);
     static void pruneStaleTrackedProcesses(CaptureState& state);
 
     // ========================= ETW 采集 ==========================
@@ -344,7 +339,7 @@ private:
 
 private:
     // Value capture epoch. Workers and ETW callback context never borrow QWidget.
-    struct CaptureState
+    struct CaptureState : std::enable_shared_from_this<CaptureState>
     {
         std::vector<ProviderEntry> m_activeProviderList;                // m_activeProviderList：本轮监控成功启用的 Provider。
         std::unordered_map<std::uint32_t, RuntimeTrackedProcess> m_trackedProcessMap; // m_trackedProcessMap：运行期目标进程树。
@@ -370,10 +365,21 @@ private:
         std::vector<TargetProcessEntry> targets;
         std::uint64_t targetVersion = 0; // under m_runtimeMutex
         std::uint64_t runtimeRevision = 0; // every tracked map mutation, under m_runtimeMutex
+        bool identityWorkerRunning = false; // under m_runtimeMutex; max one worker
+        std::mutex identityGate;
+        std::unordered_map<std::string, ks::process::ProcessRecord> identityCache; // bounded, under identityGate
+
     };
     static void runCapture(const std::shared_ptr<CaptureState>& state);
     static bool cleanupCapture(const std::shared_ptr<CaptureState>& state);
     void pollCaptureState();
+    static void publishTargetCreate(CaptureState& state, TargetProcessEntry entry, std::uint64_t eventTime100ns);
+    static void publishTargetExit(CaptureState& state, std::uint32_t pid, std::uint64_t eventTime100ns);
+    static void scheduleTargetEnrichment(const std::shared_ptr<CaptureState>& state);
+    static ks::process::ProcessRecord lookupTargetIdentity(CaptureState& state, std::uint32_t pid,
+        std::uint64_t expectedCreation, std::uint64_t eventTime100ns);
+    ks::ui::AsyncOperation* m_targetLookup = nullptr;
+
     std::shared_ptr<CaptureState> m_capture = std::make_shared<CaptureState>();
     std::shared_ptr<ks::ui::RetainedCleanupJob> m_captureCleanup;
     std::uint64_t m_appliedTargetVersion = 0;
