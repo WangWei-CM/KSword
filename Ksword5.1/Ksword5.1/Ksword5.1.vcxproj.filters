@@ -3369,6 +3369,9 @@
     <ClInclude Include="ksword\network\network_process_etw_monitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="RegistryDock\OfflineHiveWorker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ksword\network\network_request_tools.h">
       <Filter>Header Files</Filter>
     </ClInclude>

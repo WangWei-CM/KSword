@@ -852,6 +852,7 @@
     <ClInclude Include="MiscDock\ContextMenuCleaner\ContextMenuRegistrySnapshot.h" />
     <ClInclude Include="PrivilegeDock\PrivilegeLegacyValueOperations.h" />
     <ClInclude Include="PrivilegeDock\PrivilegeLegacyReadService.h" />
+    <ClInclude Include="RegistryDock\OfflineHiveWorker.h" />
     <ClInclude Include="MonitorDock\MonitorEventFilterProjection.h" />
     <ClInclude Include="UI\TableCompleteExport.h" />
     <ClInclude Include="UI\CompleteExportCapture.h" />
