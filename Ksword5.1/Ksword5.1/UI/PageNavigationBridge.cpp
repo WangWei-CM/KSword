@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./PageNavigationBridge.h"
+#include "./AsyncUiDispatcher.h"
 #include "../include/ads/DockWidget.h"
 #include <QAbstractItemView>
 #include <QJsonArray>
@@ -7,6 +8,9 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QPointer>
+#include <QQueue>
+#include <QRunnable>
+#include <QThreadPool>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimer>
@@ -39,11 +43,96 @@ namespace ks::ui
         quint64 generation = 0;
         bool collecting = false;
 
-        // 消息在原生处理栈外发送，接收方停止响应时最多等待短时间。
+        struct Delivery
+        {
+            HWND destination = nullptr;
+            HWND source = nullptr;
+            QByteArray bytes;
+            quint64 generation = 0;
+        };
+        std::shared_ptr<AsyncUiDispatcher> deliveryDispatcher;
+        QQueue<Delivery> deliveries;
+        bool deliveryInFlight = false;
+        bool collectWaitingForDelivery = false;
+
+        static bool sendDelivery(const Delivery& delivery)
+        {
+            // 此函数仅在worker触碰Win32句柄和值字节，不读取QObject或控件。
+            if (!::GetPropW(delivery.destination, page_navigation::ClientProperty)
+                || !page_navigation::IsCompanionWindow(delivery.destination, page_navigation::TaskbarFileName)
+                || !::GetPropW(delivery.source, page_navigation::ServerProperty)
+                || !page_navigation::IsCompanionWindow(delivery.source, page_navigation::MainFileName))
+            {
+                return false;
+            }
+            COPYDATASTRUCT packet{page_navigation::ReplyTag, static_cast<DWORD>(delivery.bytes.size()),
+                const_cast<char*>(delivery.bytes.constData())};
+            DWORD_PTR accepted = 0;
+            return ::SendMessageTimeoutW(delivery.destination, WM_COPYDATA,
+                reinterpret_cast<WPARAM>(delivery.source), reinterpret_cast<LPARAM>(&packet),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 750, &accepted) != 0 && accepted != 0;
+        }
+
+        void finishDelivery(quint64 expected, bool delivered)
+        {
+            deliveryInFlight = false;
+            if (expected == generation && !delivered)
+            {
+                // 一次拒绝或超时即作废本代；不会继续等待其余目录包。
+                collecting = false;
+                collectWaitingForDelivery = false;
+                deliveries.clear();
+                ++generation;
+                return;
+            }
+            pumpDelivery(); // 旧代ACK只释放在途槽，不改变新代收集状态。
+            if (!deliveryInFlight && deliveries.isEmpty() && collecting && collectWaitingForDelivery)
+            {
+                collectWaitingForDelivery = false;
+                const quint64 next = generation;
+                QTimer::singleShot(0, owner, [this, next]() { collectNext(next); });
+            }
+        }
+
+        void pumpDelivery()
+        {
+            if (deliveryInFlight || deliveries.isEmpty())
+            {
+                return;
+            }
+            const Delivery delivery = deliveries.dequeue();
+            deliveryInFlight = true;
+            const auto dispatcher = deliveryDispatcher;
+            try
+            {
+                auto* task = QRunnable::create([delivery, dispatcher, state = this]()
+                {
+                    bool delivered = false;
+                    try
+                    {
+                        delivered = sendDelivery(delivery);
+                    }
+                    catch (...)
+                    {
+                        // 路径身份验证分配失败与传输失败走同一终态，不能越出QRunnable。
+                    }
+                    dispatcher->post([state, expected = delivery.generation, delivered]()
+                    {
+                        state->finishDelivery(expected, delivered); // 仅在仍存活的GUI门禁内借用state。
+                    });
+                });
+                QThreadPool::globalInstance()->start(task, -1);
+            }
+            catch (...)
+            {
+                finishDelivery(delivery.generation, false);
+            }
+        }
+
+        // GUI只序列化小包；每次最多一个值化packet在worker中等待接收方。
         void reply(QJsonObject message)
         {
-            if (!host || !::GetPropW(client, page_navigation::ClientProperty)
-                || !page_navigation::IsCompanionWindow(client, page_navigation::TaskbarFileName))
+            if (!host)
             {
                 collecting = false;
                 return;
@@ -53,13 +142,14 @@ namespace ks::ui
             const QByteArray bytes = QJsonDocument(message).toJson(QJsonDocument::Compact);
             if (bytes.size() > page_navigation::MaxMessageBytes)
             {
+                collecting = false;
+                deliveries.clear();
+                collectWaitingForDelivery = false;
+                ++generation;
                 return;
             }
-            COPYDATASTRUCT packet{page_navigation::ReplyTag, static_cast<DWORD>(bytes.size()),
-                const_cast<char*>(bytes.constData())};
-            DWORD_PTR result = 0;
-            ::SendMessageTimeoutW(client, WM_COPYDATA, static_cast<WPARAM>(host->winId()),
-                reinterpret_cast<LPARAM>(&packet), SMTO_ABORTIFHUNG | SMTO_BLOCK, 750, &result);
+            deliveries.enqueue(Delivery{client, server, bytes, generation});
+            pumpDelivery();
         }
 
         QString addRoute(ads::CDockWidget* dock, QWidget* page)
@@ -134,6 +224,12 @@ namespace ks::ui
             {
                 return;
             }
+            if (deliveryInFlight || !deliveries.isEmpty())
+            {
+                // 一列的所有包确认后才构造下一列，队列规模不随整份目录累积。
+                collectWaitingForDelivery = true;
+                return;
+            }
             if (nextDock >= pending.size())
             {
                 collecting = false;
@@ -171,6 +267,8 @@ namespace ks::ui
 
         void begin(HWND sender, const QString& token)
         {
+            deliveries.clear();
+            collectWaitingForDelivery = false;
             client = sender;
             request = token;
             epoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -246,6 +344,7 @@ namespace ks::ui
         : QObject(host), m_state(std::make_unique<State>())
     {
         m_state->owner = this;
+        m_state->deliveryDispatcher = std::make_shared<AsyncUiDispatcher>(this);
         m_state->host = host;
         m_state->list = std::move(list);
         m_state->prepare = std::move(prepare);
@@ -261,6 +360,8 @@ namespace ks::ui
 
     PageNavigationBridge::~PageNavigationBridge()
     {
+        m_state->deliveryDispatcher->close(); // state与原生身份移除前先关闭worker回投门禁。
+        m_state->deliveries.clear();
         if (::IsWindow(m_state->server))
         {
             ::RemovePropW(m_state->server, page_navigation::ServerProperty);
@@ -295,6 +396,8 @@ namespace ks::ui
                 if (operation == QStringLiteral("cancel"))
                 {
                     m_state->collecting = false;
+                    m_state->deliveries.clear();
+                    m_state->collectWaitingForDelivery = false;
                     ++m_state->generation;
                 }
                 else if (operation == QStringLiteral("navigate"))
