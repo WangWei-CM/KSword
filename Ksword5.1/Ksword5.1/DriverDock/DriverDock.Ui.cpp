@@ -1392,6 +1392,19 @@ void DriverDock::initializeConnections()
             showSelectedModuleEvidenceDetail();
         });
 
+    // Revisions identify the exact form submitted, including programmatic selection fills.
+    for (QLineEdit* edit : { m_serviceNameEdit, m_displayNameEdit,
+             m_binaryPathEdit, m_descriptionEdit })
+    {
+        connect(edit, &QLineEdit::textChanged, this,
+            [this]() { ++m_serviceFormRevision; });
+    }
+    for (QComboBox* combo : { m_startTypeCombo, m_errorControlCombo })
+    {
+        connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this]() { ++m_serviceFormRevision; });
+    }
+
     // 操作页：浏览路径、注册更新、挂载卸载、删除、状态查询。
     connect(m_browsePathButton, &QPushButton::clicked, this, [this]()
         {

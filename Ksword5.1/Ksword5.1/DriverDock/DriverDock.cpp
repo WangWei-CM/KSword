@@ -1,4 +1,5 @@
 #include "DriverDock.Internal.h"
+#include "../UI/AsyncOperation.h"
 
 namespace ksword::driver_dock_internal
 {
@@ -498,8 +499,13 @@ DriverDock::DriverDock(QWidget* parent)
         << driverText("driver.log.initializing", QStringLiteral("[DriverDock] 开始初始化驱动页。"))
         << eol;
 
+    m_serviceStatusOperation = new ks::ui::AsyncOperation(this);
+    m_serviceRegistrationOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
     initializeConnections();
+    const auto recoverDelivery = [this]() { recoverServiceFormDeliveryState(); };
+    m_serviceStatusOperation->setStateChangedCallback(recoverDelivery);
+    m_serviceRegistrationOperation->setStateChangedCallback(recoverDelivery);
     updateDebugCaptureButtonState();
 
     info << initEvent
@@ -535,12 +541,11 @@ void DriverDock::showEvent(QShowEvent* event)
 
 DriverDock::~DriverDock()
 {
-    // Close capture and evidence delivery before derived state is released.
+    // Close delivery gates before any derived-page member or child disappears.
     m_debugCaptureDispatcher->close();
-    if (m_moduleEvidenceOperation != nullptr)
-    {
-        m_moduleEvidenceOperation->close();
-    }
+    if (m_moduleEvidenceOperation != nullptr) { m_moduleEvidenceOperation->close(); }
+    if (m_serviceStatusOperation) { m_serviceStatusOperation->close(); }
+    if (m_serviceRegistrationOperation) { m_serviceRegistrationOperation->close(); }
     releaseDebugOutputCapture();
 
     // 自身驱动页的业务对象仍由 KernelDock 持有；独立销毁 DriverDock 时将页面接回，

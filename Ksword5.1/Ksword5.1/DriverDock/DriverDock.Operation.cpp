@@ -5,6 +5,8 @@
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include "DriverDock.ModuleDumpFile.h"
+#include "DriverDock.ServiceAction.h"
+#include "../UI/AsyncOperation.h"
 #include "../MemoryDock/MemoryAccessBackend.h"
 #include "../Framework/PrivilegeElevationPrompt.h"
 #include "../OnlineScan/SandboxUploadActions.h"
@@ -1687,12 +1689,16 @@ namespace
         QPushButton* loadDriverButton,
         QPushButton* unloadDriverButton,
         QPushButton* deleteServiceButton,
-        const bool enabledState)
+        const bool enabledState,
+        QPushButton* registerOrUpdateButton,
+        QPushButton* refreshStateButton)
     {
         // setDriverServiceControlButtonsEnabled：
         // - 入参：挂载/卸载/删除三个按钮指针与目标可用状态；
         // - 处理：逐个判空后设置 enabled，让后台 SCM 操作期间的“进行中”状态对用户可见；
         // - 返回：无。
+        if (registerOrUpdateButton != nullptr) { registerOrUpdateButton->setEnabled(enabledState); }
+        if (refreshStateButton != nullptr) { refreshStateButton->setEnabled(enabledState); }
         if (loadDriverButton != nullptr)
         {
             loadDriverButton->setEnabled(enabledState);
@@ -4390,157 +4396,262 @@ void DriverDock::syncOperateFormBySelectedService()
     }
 }
 
-void DriverDock::refreshSelectedServiceStateToForm()
+void DriverDock::recoverServiceFormDeliveryState()
 {
-    if (m_serviceNameEdit == nullptr)
+    // A Qt queue can discard a completed delivery while the owner remains alive.
+    // Observe only our two explicit controllers; never release another action's gate.
+    if (!m_serviceFormOwnsBusy)
     {
         return;
     }
+    if (m_serviceStatusOperation->isInFlight() || m_serviceRegistrationOperation->isInFlight())
+    {
+        return;
+    }
+    m_serviceFormOwnsBusy = false;
+    endDriverServiceControlOperation(this);
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.service.delivery_dropped",
+        QStringLiteral("服务 %1 的结果未能回投；请刷新核对实际状态或配置，再决定是否重试。"))
+        .arg(m_serviceFormSubmittedName));
+}
 
+void DriverDock::refreshSelectedServiceStateToForm()
+{
+    if (m_serviceNameEdit == nullptr || m_serviceStatusOperation == nullptr)
+    {
+        return;
+    }
     kLogEvent queryEvent;
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.query.empty_name", QStringLiteral("查询失败：服务名不能为空。")));
-        warn << queryEvent
-            << driverText("driver.log.query.empty_name", QStringLiteral("[DriverDock] 查询状态失败：服务名为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.query.empty_name", QStringLiteral("查询失败：服务名不能为空。")));
+        warn << queryEvent << driverText("driver.log.query.empty_name", QStringLiteral("[DriverDock] 查询状态失败：服务名为空。")) << eol;
         return;
     }
-
-    // UI adapter only: the reusable service layer owns SCM open/query/close details.
-    ks::service::ServiceStatus statusInfo;
-    std::string errorText;
-    std::uint32_t errorCode = 0;
-    if (!ks::service::QueryServiceStatus(
-        toWideString(serviceNameText),
-        &statusInfo,
-        &errorText,
-        &errorCode))
+    if (m_serviceStatusOperation->isInFlight() ||
+        !tryBeginDriverServiceControlOperation(this))
     {
-        appendOperateLogLine(
-            driverText("driver.operation.query.failed", QStringLiteral("查询失败：%1"))
-            .arg(QString::fromUtf8(errorText.c_str())));
-        warn << queryEvent
-            << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
-            << serviceNameText.toStdString()
-            << ", error=" << errorCode
-            << ", detail=" << errorText
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
         return;
     }
+    m_serviceFormOwnsBusy = true;
+    m_serviceFormSubmittedName = serviceNameText;
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, false, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.query.running", QStringLiteral("正在查询服务 %1 的状态。"))
+        .arg(serviceNameText));
 
-    appendOperateLogLine(
-        driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
-        .arg(serviceNameText)
-        .arg(serviceStateToText(statusInfo.currentState)));
-
-    info << queryEvent
-        << driverText("driver.log.query.succeeded", QStringLiteral("[DriverDock] 查询状态成功, service="))
-        << serviceNameText.toStdString()
-        << ", state=" << statusInfo.currentState
-        << eol;
+    using namespace ksword::driver_service_action;
+    const StatusRequest request{ toWideString(serviceNameText), m_serviceFormRevision };
+    const auto finishBusy = [this]()
+    {
+        m_serviceFormOwnsBusy = false;
+        endDriverServiceControlOperation(this);
+        setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+            m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    };
+    const std::uint64_t ticket = m_serviceStatusOperation->submit<StatusRequest, StatusReceipt>(
+        request,
+        [](const StatusRequest& value, const ks::ui::AsyncOperationToken&)
+        {
+            StatusReceipt receipt;
+            receipt.request = value;
+            receipt.succeeded = ks::service::QueryServiceStatus(value.serviceName,
+                &receipt.status, &receipt.errorText, &receipt.errorCode);
+            return receipt;
+        },
+        [this, queryEvent, finishBusy](const StatusReceipt& receipt, std::uint64_t)
+        {
+            finishBusy();
+            const QString name = QString::fromStdWString(receipt.request.serviceName);
+            if (receipt.request.formRevision != m_serviceFormRevision)
+            {
+                appendOperateLogLine(driverText("driver.operation.service.form_changed",
+                    QStringLiteral("当前表单已更改；以下结果仅对应已提交的服务 %1，未回填当前输入。")) .arg(name));
+            }
+            if (!receipt.succeeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.query.failed_target",
+                    QStringLiteral("服务 %1 状态查询失败：%2（错误码 %3）。"))
+                    .arg(name, QString::fromUtf8(receipt.errorText.c_str())).arg(receipt.errorCode));
+                warn << queryEvent << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
+                    << name.toStdString() << ", error=" << receipt.errorCode
+                    << ", detail=" << receipt.errorText << eol;
+            }
+            else
+            {
+                appendOperateLogLine(driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
+                    .arg(name, serviceStateToText(receipt.status.currentState)));
+                info << queryEvent << driverText("driver.log.query.succeeded", QStringLiteral("[DriverDock] 查询状态成功, service="))
+                    << name.toStdString() << ", state=" << receipt.status.currentState << eol;
+            }
+            return true;
+        },
+        [this, queryEvent, finishBusy, serviceNameText](std::exception_ptr failure)
+        {
+            finishBusy();
+            QString detail;
+            try { if (failure) { std::rethrow_exception(failure); } }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) { detail = QStringLiteral("unknown exception"); }
+            appendOperateLogLine(driverText("driver.operation.query.failed_target",
+                QStringLiteral("服务 %1 状态查询失败：%2（错误码 %3）。"))
+                .arg(serviceNameText, detail).arg(0));
+            err << queryEvent << driverText("driver.log.query.failed", QStringLiteral("[DriverDock] 查询状态失败, service="))
+                << serviceNameText.toStdString() << ", detail=" << detail.toStdString() << eol;
+        });
+    if (ticket == 0)
+    {
+        finishBusy();
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
+    }
 }
-
 
 void DriverDock::registerOrUpdateDriverService()
 {
-    if (m_serviceNameEdit == nullptr ||
-        m_binaryPathEdit == nullptr ||
-        m_startTypeCombo == nullptr ||
-        m_errorControlCombo == nullptr)
+    if (m_serviceNameEdit == nullptr || m_binaryPathEdit == nullptr ||
+        m_startTypeCombo == nullptr || m_errorControlCombo == nullptr ||
+        m_serviceRegistrationOperation == nullptr)
     {
         return;
     }
-
     kLogEvent operationEvent;
     const QString serviceNameText = m_serviceNameEdit->text().trimmed();
-    const QString displayNameText = (m_displayNameEdit == nullptr)
-        ? QString()
-        : m_displayNameEdit->text().trimmed();
-    const QString descriptionText = (m_descriptionEdit == nullptr)
-        ? QString()
-        : m_descriptionEdit->text().trimmed();
     const QString binaryPathText = normalizeDriverBinaryPath(m_binaryPathEdit->text().trimmed());
-
     if (serviceNameText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.register.empty_service", QStringLiteral("注册/更新失败：服务名不能为空。")));
-        warn << operationEvent
-            << driverText("driver.log.register.empty_service", QStringLiteral("[DriverDock] 注册/更新失败：服务名为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.register.empty_service", QStringLiteral("注册/更新失败：服务名不能为空。")));
+        warn << operationEvent << driverText("driver.log.register.empty_service", QStringLiteral("[DriverDock] 注册/更新失败：服务名为空。")) << eol;
         return;
     }
     if (binaryPathText.isEmpty())
     {
-        appendOperateLogLine(
-            driverText("driver.operation.register.empty_path", QStringLiteral("注册/更新失败：驱动路径不能为空。")));
-        warn << operationEvent
-            << driverText("driver.log.register.empty_path", QStringLiteral("[DriverDock] 注册/更新失败：路径为空。"))
-            << eol;
+        appendOperateLogLine(driverText("driver.operation.register.empty_path", QStringLiteral("注册/更新失败：驱动路径不能为空。")));
+        warn << operationEvent << driverText("driver.log.register.empty_path", QStringLiteral("[DriverDock] 注册/更新失败：路径为空。")) << eol;
+        return;
+    }
+    if (m_serviceRegistrationOperation->isInFlight() ||
+        !tryBeginDriverServiceControlOperation(this))
+    {
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
         return;
     }
 
+    using namespace ksword::driver_service_action;
+    RegistrationRequest request;
+    request.config.serviceName = toWideString(serviceNameText);
+    request.config.displayName = toWideString(m_displayNameEdit ? m_displayNameEdit->text().trimmed() : QString());
+    request.config.description = toWideString(m_descriptionEdit ? m_descriptionEdit->text().trimmed() : QString());
+    request.config.binaryPath = toWideString(binaryPathText);
+    request.config.startType = static_cast<std::uint32_t>(m_startTypeCombo->currentData().toInt());
+    request.config.errorControl = static_cast<std::uint32_t>(m_errorControlCombo->currentData().toInt());
     const QString unquotedPathText = trimQuotedText(binaryPathText);
-    if (!QFileInfo::exists(unquotedPathText) &&
-        !unquotedPathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive) &&
-        !unquotedPathText.startsWith(QStringLiteral("%SystemRoot%"), Qt::CaseInsensitive))
+    request.unquotedPath = toWideString(unquotedPathText);
+    request.systemRootPath =
+        unquotedPathText.startsWith(QStringLiteral("\\SystemRoot\\"), Qt::CaseInsensitive) ||
+        unquotedPathText.startsWith(QStringLiteral("%SystemRoot%"), Qt::CaseInsensitive);
+    request.formRevision = m_serviceFormRevision;
+
+    m_serviceFormOwnsBusy = true;
+    m_serviceFormSubmittedName = serviceNameText;
+    setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+        m_deleteServiceButton, false, m_registerOrUpdateButton, m_refreshStateButton);
+    appendOperateLogLine(driverText("driver.operation.register.running",
+        QStringLiteral("正在注册/更新服务 %1；提交参数已固定。")) .arg(serviceNameText));
+    const auto finishBusy = [this]()
     {
-        appendOperateLogLine(
-            driverText(
-                "driver.operation.register.path_unavailable",
-                QStringLiteral("警告：驱动路径当前不可访问，仍将尝试注册。")));
-    }
-
-    ks::service::KernelDriverServiceConfig serviceConfig;
-    serviceConfig.serviceName = toWideString(serviceNameText);
-    serviceConfig.displayName = toWideString(displayNameText);
-    serviceConfig.description = toWideString(descriptionText);
-    serviceConfig.binaryPath = toWideString(binaryPathText);
-    serviceConfig.startType = static_cast<std::uint32_t>(m_startTypeCombo->currentData().toInt());
-    serviceConfig.errorControl = static_cast<std::uint32_t>(m_errorControlCombo->currentData().toInt());
-
-    bool created = false;
-    std::string errorText;
-    std::uint32_t errorCode = 0;
-    if (!ks::service::CreateOrUpdateKernelDriverService(
-        serviceConfig,
-        &created,
-        &errorText,
-        &errorCode))
+        m_serviceFormOwnsBusy = false;
+        endDriverServiceControlOperation(this);
+        setDriverServiceControlButtonsEnabled(m_loadDriverButton, m_unloadDriverButton,
+            m_deleteServiceButton, true, m_registerOrUpdateButton, m_refreshStateButton);
+    };
+    // A dedicated transaction controller never uses latest-only submit/cancel.
+    // The shared API guarantees that an accepted worker runs even after close.
+    const std::uint64_t ticket = m_serviceRegistrationOperation->submitTransaction<RegistrationRequest, RegistrationReceipt>(
+        std::move(request),
+        [](const RegistrationRequest& value)
+        {
+            return RunRegistration(value,
+                [](const std::wstring& path) { return QFileInfo::exists(QString::fromStdWString(path)); },
+                [](const ks::service::KernelDriverServiceConfig& config, bool* created,
+                    std::string* error, std::uint32_t* code)
+                {
+                    // Preserve every backend allowScmMutation gate.
+                    return ks::service::CreateOrUpdateKernelDriverService(config, created, error, code);
+                },
+                [](const std::wstring& name, ks::service::ServiceStatus* status,
+                    std::string* error, std::uint32_t* code)
+                {
+                    return ks::service::QueryServiceStatus(name, status, error, code);
+                });
+        },
+        [this, operationEvent, finishBusy](const RegistrationReceipt& receipt, std::uint64_t)
+        {
+            finishBusy();
+            const QString name = QString::fromStdWString(receipt.request.config.serviceName);
+            if (receipt.request.formRevision != m_serviceFormRevision)
+            {
+                appendOperateLogLine(driverText("driver.operation.service.form_changed",
+                    QStringLiteral("当前表单已更改；以下结果仅对应已提交的服务 %1，未回填当前输入。")) .arg(name));
+            }
+            if (receipt.pathUnavailable)
+            {
+                appendOperateLogLine(driverText("driver.operation.register.path_unavailable_target",
+                    QStringLiteral("驱动路径检查时不可访问；已按提交参数尝试服务 %1 的注册/更新。")) .arg(name));
+            }
+            if (!receipt.succeeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.register.failed_target",
+                    QStringLiteral("服务 %1 注册/更新失败：%2（错误码 %3）；请刷新核对实际配置。"))
+                    .arg(name, QString::fromUtf8(receipt.errorText.c_str())).arg(receipt.errorCode));
+                err << operationEvent << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
+                    << name.toStdString() << ", error=" << receipt.errorCode
+                    << ", detail=" << receipt.errorText << eol;
+                (void)ks::ui::promptForPrivilegeFailure(this, QStringLiteral("注册或更新驱动服务"), receipt.errorCode);
+                return true;
+            }
+            appendOperateLogLine(driverText("driver.operation.register.succeeded", QStringLiteral("%1成功：service=%2"))
+                .arg(receipt.created
+                    ? driverText("driver.operation.register.created", QStringLiteral("注册"))
+                    : driverText("driver.operation.register.updated", QStringLiteral("更新")))
+                .arg(name));
+            info << operationEvent << driverText("driver.log.register.succeeded", QStringLiteral("[DriverDock] 注册/更新成功, created="))
+                << (receipt.created ? "true" : "false") << ", service=" << name.toStdString() << eol;
+            if (receipt.readbackSucceeded)
+            {
+                appendOperateLogLine(driverText("driver.operation.query.status", QStringLiteral("服务 %1 当前状态：%2"))
+                    .arg(name, serviceStateToText(receipt.status.currentState)));
+            }
+            else
+            {
+                appendOperateLogLine(driverText("driver.operation.register.readback_failed",
+                    QStringLiteral("服务 %1 注册/更新已成功，但状态回读失败：%2（错误码 %3）；请刷新核对。"))
+                    .arg(name, QString::fromUtf8(receipt.readbackErrorText.c_str())).arg(receipt.readbackErrorCode));
+            }
+            refreshDriverServiceRecords();
+            return true;
+        },
+        [this, operationEvent, finishBusy, serviceNameText](std::exception_ptr failure)
+        {
+            finishBusy();
+            QString detail;
+            try { if (failure) { std::rethrow_exception(failure); } }
+            catch (const std::exception& error) { detail = QString::fromUtf8(error.what()); }
+            catch (...) { detail = QStringLiteral("unknown exception"); }
+            appendOperateLogLine(driverText("driver.operation.register.exception",
+                QStringLiteral("服务 %1 注册/更新发生异常，最终配置待核实：%2；请刷新后再决定是否重试。"))
+                .arg(serviceNameText, detail));
+            err << operationEvent << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
+                << serviceNameText.toStdString() << ", detail=" << detail.toStdString() << eol;
+        });
+    if (ticket == 0)
     {
-        (void)ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("注册或更新驱动服务"),
-            errorCode);
-        appendOperateLogLine(
-            driverText("driver.operation.register.failed", QStringLiteral("注册/更新失败：%1"))
-            .arg(QString::fromUtf8(errorText.c_str())));
-        err << operationEvent
-            << driverText("driver.log.register.failed", QStringLiteral("[DriverDock] 注册/更新失败, service="))
-            << serviceNameText.toStdString()
-            << ", error=" << errorCode
-            << ", detail=" << errorText
-            << eol;
-        return;
+        finishBusy();
+        appendOperateLogLine(driverText("driver.operation.service.busy", QStringLiteral("服务操作正在进行，本次请求未提交。")));
     }
-
-    appendOperateLogLine(
-        driverText("driver.operation.register.succeeded", QStringLiteral("%1成功：service=%2"))
-        .arg(created
-            ? driverText("driver.operation.register.created", QStringLiteral("注册"))
-            : driverText("driver.operation.register.updated", QStringLiteral("更新")))
-        .arg(serviceNameText));
-
-    info << operationEvent
-        << driverText("driver.log.register.succeeded", QStringLiteral("[DriverDock] 注册/更新成功, created="))
-        << (created ? "true" : "false")
-        << ", service=" << serviceNameText.toStdString()
-        << eol;
-
-    refreshDriverServiceRecords();
 }
 
 
@@ -4577,7 +4688,7 @@ void DriverDock::loadSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const QString binaryPathText =
         (m_binaryPathEdit == nullptr) ? QString() : m_binaryPathEdit->text().trimmed();
@@ -4622,7 +4733,7 @@ void DriverDock::loadSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!startSucceeded)
                     {
@@ -4719,7 +4830,7 @@ void DriverDock::unloadSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const std::wstring serviceNameWide = toWideString(serviceNameText);
     const QPointer<DriverDock> guardThis(this);
@@ -4761,7 +4872,7 @@ void DriverDock::unloadSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!stopSucceeded)
                     {
@@ -4840,7 +4951,7 @@ void DriverDock::deleteSelectedDriverService()
         m_loadDriverButton,
         m_unloadDriverButton,
         m_deleteServiceButton,
-        false);
+        false, m_registerOrUpdateButton, m_refreshStateButton);
 
     const std::wstring serviceNameWide = toWideString(serviceNameText);
     const QPointer<DriverDock> guardThis(this);
@@ -4879,7 +4990,7 @@ void DriverDock::deleteSelectedDriverService()
                         guardThis->m_loadDriverButton,
                         guardThis->m_unloadDriverButton,
                         guardThis->m_deleteServiceButton,
-                        true);
+                        true, guardThis->m_registerOrUpdateButton, guardThis->m_refreshStateButton);
 
                     if (!deleteSucceeded)
                     {

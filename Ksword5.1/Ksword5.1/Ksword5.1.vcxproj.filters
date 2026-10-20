@@ -2797,6 +2797,9 @@
     <ClInclude Include="..\..\shared\evidence\memory_workbench\MemoryPatchByteStore.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>
+    <ClInclude Include="DriverDock\DriverDock.ServiceAction.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\shared\evidence\memory_workbench\Int3PatchLedger.h">
       <Filter>Header Files\MemoryWorkbench\Shared</Filter>
     </ClInclude>

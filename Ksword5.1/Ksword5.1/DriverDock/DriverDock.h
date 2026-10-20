@@ -50,6 +50,7 @@ class QTableWidget;
 class QTabWidget;
 class QVBoxLayout;
 class KernelThreadAuditTab;
+namespace ks::ui { class AsyncOperation; }
 
 // DriverDock：
 // - 驱动页主控件；
@@ -540,6 +541,7 @@ private:
     // refreshSelectedServiceStateToForm：
     // - 作用：按表单服务名回查 SCM 并刷新状态日志。
     void refreshSelectedServiceStateToForm();
+    void recoverServiceFormDeliveryState();
 
     // ========================= 驱动操作 =========================
     // registerOrUpdateDriverService：
@@ -690,6 +692,11 @@ private:
     QComboBox* m_startTypeCombo = nullptr;            // 启动类型下拉框。
     QComboBox* m_errorControlCombo = nullptr;         // 错误控制下拉框。
     QPushButton* m_browsePathButton = nullptr;        // 浏览路径按钮。
+    ks::ui::AsyncOperation* m_serviceStatusOperation = nullptr; // Replaceable status reads only.
+    ks::ui::AsyncOperation* m_serviceRegistrationOperation = nullptr; // Accepted writes, never cancel on edit/hide.
+    std::uint64_t m_serviceFormRevision = 0;
+    bool m_serviceFormOwnsBusy = false;
+    QString m_serviceFormSubmittedName;
     QPushButton* m_registerOrUpdateButton = nullptr;  // 注册/更新按钮。
     QPushButton* m_loadDriverButton = nullptr;        // 挂载按钮。
     QPushButton* m_unloadDriverButton = nullptr;      // 卸载按钮。
