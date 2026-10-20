@@ -10280,6 +10280,30 @@ namespace
                     {
                         realPage = buildMetadataTab();
                     }
+                    else if (lazyKey == QStringLiteral("metadata_name"))
+                    {
+                        realPage = buildMetadataNameAndFilesystemPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_shell"))
+                    {
+                        realPage = buildMetadataShellPropertyPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_ads"))
+                    {
+                        realPage = buildMetadataAdsPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_ea"))
+                    {
+                        realPage = buildMetadataEaPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_security"))
+                    {
+                        realPage = buildMetadataSecurityPage(tabGuard.data());
+                    }
+                    else if (lazyKey == QStringLiteral("metadata_pe"))
+                    {
+                        realPage = buildMetadataPeAndReparsePage(tabGuard.data());
+                    }
                     else if (lazyKey == QStringLiteral("security"))
                     {
                         realPage = buildSecurityTab();
@@ -10339,6 +10363,7 @@ namespace
                         return;
                     }
 
+                    ks::ui::ScopedWidgetThemePreparation prepareTheme(tabGuard.data());
                     const QString titleText = tabGuard->tabText(tabIndex);
                     // 编辑表单由共享详情框架按页面内部用途适配；禁止在整个 Tab 外再套滚动区。
                     tabGuard->removeTab(tabIndex);
@@ -10346,7 +10371,12 @@ namespace
                     // 新建的懒加载页也必须立即拿到 Surface 调色板，不能回退到系统 Base。
                     realPage->setMinimumSize(0, 0);
                     realPage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-                    tabGuard->tabBar()->hide();
+                    // Only the outer detail navigation owns a hidden tab bar.
+                    // Metadata keeps its original seven visible inner tabs.
+                    if (tabGuard.data() == m_tabWidget)
+                    {
+                        tabGuard->tabBar()->hide();
+                    }
                     ks::ui::InstallDetailWindowFramework(this);
                     applyThemeStyle();
                     tabGuard->setCurrentIndex(tabIndex);
@@ -11704,12 +11734,16 @@ namespace
             tabs->addTab(
                 buildMetadataBasicPropertiesPage(tabs),
                 ks::i18n::sourceText(QStringLiteral("基础属性")));
-            tabs->addTab(buildMetadataNameAndFilesystemPage(tabs), QStringLiteral("名称与文件系统"));
-            tabs->addTab(buildMetadataShellPropertyPage(tabs), QStringLiteral("Shell 属性"));
-            tabs->addTab(buildMetadataAdsPage(tabs), QStringLiteral("ADS"));
-            tabs->addTab(buildMetadataEaPage(tabs), QStringLiteral("EA"));
-            tabs->addTab(buildMetadataSecurityPage(tabs), QStringLiteral("安全描述符"));
-            tabs->addTab(buildMetadataPeAndReparsePage(tabs), QStringLiteral("重解析点 / PE / 签名"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_name")), QStringLiteral("名称与文件系统"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_shell")), QStringLiteral("Shell 属性"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_ads")), QStringLiteral("ADS"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_ea")), QStringLiteral("EA"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_security")), QStringLiteral("安全描述符"));
+            tabs->addTab(buildDeferredTab(QStringLiteral("metadata_pe")), QStringLiteral("重解析点 / PE / 签名"));
+            connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](const int tabIndex)
+                {
+                    activateDeferredTab(tabs, tabIndex);
+                });
             return tabs;
         }
 
