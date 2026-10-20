@@ -122,7 +122,8 @@ namespace service_dock_detail
     bool enumerateRegistryServiceSnapshots(
         std::vector<RegistryServiceSnapshot>* snapshotListOut,
         QString* errorTextOut = nullptr,
-        DWORD* errorCodeOut = nullptr);
+        DWORD* errorCodeOut = nullptr,
+        const std::function<bool()>& shouldStop = {});
 
     // queryRegistryServiceSnapshot 作用：读取单个服务注册表配置快照。
     // 入参：serviceNameText 为不含路径分隔符的服务短名；snapshotOut 接收快照。

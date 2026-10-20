@@ -158,8 +158,17 @@ private:
 
     // ===================== 刷新与枚举 =====================
     void requestAsyncRefresh(bool forceRefresh);
-    void applyRefreshResult(std::vector<ServiceEntry> serviceList, const QString& errorText, bool success);
-    void enumerateServiceList(std::vector<ServiceEntry>* serviceListOut, QString* errorTextOut) const;
+    struct ServiceRefreshResult {
+        int progressPid = 0;
+        std::shared_ptr<std::vector<ServiceEntry>> rows;
+        QString errorText;
+        bool success = false;
+        bool stopped = false;
+    };
+    bool applyRefreshResult(const ServiceRefreshResult& result, std::uint64_t ticket);
+    void reconcileRefreshState();
+    static void enumerateServiceList(std::vector<ServiceEntry>* serviceListOut, QString* errorTextOut,
+        const std::function<bool()>& shouldStop);
     bool querySingleServiceByName(const QString& serviceNameText, ServiceEntry* entryOut, QString* errorTextOut) const;
 
     // ===================== 列表与详情 =====================
@@ -344,7 +353,7 @@ private:
     std::vector<ServiceEntry> m_serviceList;          // m_serviceList：服务缓存列表。
     std::atomic_bool m_refreshInProgress{ false };    // m_refreshInProgress：后台刷新进行中标志。
     std::atomic_bool m_refreshQueued{ false };        // m_refreshQueued：刷新排队标志。
-    std::unique_ptr<std::thread> m_refreshThread;     // m_refreshThread：后台枚举线程句柄。
+    std::unique_ptr<ks::ui::AsyncOperation> m_refreshOperation;     // m_refreshThread：后台枚举线程句柄。
     bool m_initialRefreshDone = false;                // m_initialRefreshDone：首轮懒加载完成标志。
     int m_progressPid = 0;                            // m_progressPid：当前进度任务 PID。
     QString m_pendingFocusServiceName;                // m_pendingFocusServiceName：跨页跳转待定位服务名。

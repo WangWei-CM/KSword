@@ -466,7 +466,8 @@ namespace
 
 void ServiceDock::enumerateServiceList(
     std::vector<ServiceEntry>* serviceListOut,
-    QString* errorTextOut) const
+    QString* errorTextOut,
+    const std::function<bool()>& shouldStop)
 {
     if (serviceListOut == nullptr)
     {
@@ -483,6 +484,7 @@ void ServiceDock::enumerateServiceList(
         errorTextOut->clear();
     }
 
+    if (shouldStop()) return;
     std::vector<ks::service::ServiceRecord> serviceRecordList;
     std::string errorText;
     if (!ks::service::EnumerateServiceRecords(
@@ -498,14 +500,17 @@ void ServiceDock::enumerateServiceList(
         return;
     }
 
+    if (shouldStop()) return;
+
     // 注册表作为独立来源一次性扫描；扫描失败时保留 SCM 列表，但不产生伪造的来源差异。
     std::vector<service_dock_detail::RegistryServiceSnapshot> registrySnapshotList;
     QString registryErrorText;
     const bool registryScanCompleted =
         service_dock_detail::enumerateRegistryServiceSnapshots(
             &registrySnapshotList,
-            &registryErrorText);
+            &registryErrorText, nullptr, shouldStop);
 
+    if (shouldStop()) return;
     QHash<QString, int> registryIndexByLowerName;
     if (registryScanCompleted)
     {
@@ -514,6 +519,7 @@ void ServiceDock::enumerateServiceList(
             registryIndex < static_cast<int>(registrySnapshotList.size());
             ++registryIndex)
         {
+            if (shouldStop()) return;
             const QString lowerNameText = registrySnapshotList[
                 static_cast<std::size_t>(registryIndex)].serviceNameText.toLower();
             if (!lowerNameText.isEmpty())
@@ -528,6 +534,7 @@ void ServiceDock::enumerateServiceList(
     serviceListOut->reserve(serviceRecordList.size() + registrySnapshotList.size());
     for (const ks::service::ServiceRecord& serviceRecord : serviceRecordList)
     {
+        if (shouldStop()) return;
         ServiceEntry serviceEntry;
         QString buildErrorText;
         if (buildServiceEntryFromRecord(serviceRecord, &serviceEntry, &buildErrorText, false))
@@ -548,6 +555,7 @@ void ServiceDock::enumerateServiceList(
         // 避免把 .NET 性能提供程序键和 per-user 服务模板误报为 rootkit。
         for (const service_dock_detail::RegistryServiceSnapshot& registrySnapshot : registrySnapshotList)
         {
+            if (shouldStop()) return;
             const QString lowerNameText = registrySnapshot.serviceNameText.toLower();
             if (lowerNameText.isEmpty() || scmNameSet.contains(lowerNameText))
             {

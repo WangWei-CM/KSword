@@ -1,6 +1,7 @@
 #include "ServiceDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/AsyncCleanupRegistry.h"
 #include "../UI/TableRowFilterSupport.h"
 #include "../Internationalization/LanguageManager.h"
 
@@ -9,6 +10,8 @@ using namespace service_dock_detail;
 ServiceDock::ServiceDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_refreshOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_refreshOperation->setStateChangedCallback([this]() { reconcileRefreshState(); });
     m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
     initializeUi();
@@ -22,10 +25,7 @@ ServiceDock::ServiceDock(QWidget* parent)
 ServiceDock::~ServiceDock()
 {
     m_exportOperation->close();
-    if (m_refreshThread != nullptr && m_refreshThread->joinable())
-    {
-        m_refreshThread->join();
-    }
+    m_refreshOperation->close();
 
     kLogEvent destroyEvent;
     info << destroyEvent << "[ServiceDock] 服务管理页面已析构。" << eol;
@@ -103,136 +103,118 @@ void ServiceDock::focusServiceByName(const QString& serviceNameText)
     }
 }
 
+void ServiceDock::reconcileRefreshState()
+{
+    if (m_refreshInProgress && !m_refreshOperation->isInFlight())
+    {
+        m_refreshInProgress = false;
+        if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("状态：服务刷新未返回有效结果，保留上次列表，请重试。")));
+        if (m_refreshQueued) QTimer::singleShot(0, this, [this]() {
+            if (!m_refreshInProgress && m_refreshQueued) requestAsyncRefresh(false);
+        });
+    }
+}
+
 void ServiceDock::requestAsyncRefresh(const bool forceRefresh)
 {
+    reconcileRefreshState();
     if (m_refreshInProgress)
     {
-        if (forceRefresh)
-        {
-            m_refreshQueued = true;
-        }
-        if (m_summaryLabel != nullptr)
-        {
-            m_summaryLabel->setText(QStringLiteral("状态：服务刷新进行中，已排队新的请求"));
-        }
+        if (forceRefresh) m_refreshQueued = true;
+        if (m_summaryLabel) m_summaryLabel->setText(QStringLiteral("状态：服务刷新进行中，已排队新的请求"));
         return;
     }
-
-    if (m_refreshThread != nullptr && m_refreshThread->joinable())
+    struct Request {
+        int progressPid;
+        std::shared_ptr<std::atomic_bool> stopping;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+        QString readProgress, sortProgress;
+    } request;
+    request.stopping = std::make_shared<std::atomic_bool>(false);
+    request.lease = ks::ui::AsyncCleanupRegistry::global().acquire([flag = request.stopping]() { flag->store(true); });
+    if (!request.lease)
     {
-        m_refreshThread->join();
+        m_refreshQueued = false;
+        if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("状态：宿主正在关闭，服务刷新未提交。")));
+        return;
     }
-
     m_refreshInProgress = true;
     m_refreshQueued = false;
     m_progressPid = kPro.add(this, "服务管理", "枚举服务列表");
     kPro.set(m_progressPid, "打开服务控制管理器", 0, 10.0f);
-    if (m_summaryLabel != nullptr)
-    {
-        m_summaryLabel->setText(QStringLiteral("状态：后台正在枚举服务..."));
-    }
-
-    // 整个刷新链路统一使用一个 kLogEvent，便于后续按 GUID 跟踪完整过程。
+    if (m_summaryLabel) m_summaryLabel->setText(QStringLiteral("状态：后台正在枚举服务..."));
+    request.progressPid = m_progressPid;
+    request.readProgress = ks::i18n::sourceText(QStringLiteral("读取 Win32 服务列表"));
+    request.sortProgress = ks::i18n::sourceText(QStringLiteral("整理服务列表数据"));
     const kLogEvent refreshEvent;
     info << refreshEvent << "[ServiceDock] 开始后台刷新服务列表。" << eol;
-
-    const QPointer<ServiceDock> safeThis(this);
-    m_refreshThread = std::make_unique<std::thread>([safeThis, refreshEvent]()
-        {
-            if (safeThis.isNull())
-            {
-                return;
-            }
-
-            std::vector<ServiceEntry> serviceList;
-            serviceList.reserve(512);
-            QString errorText;
-            bool success = true;
-
-            kPro.set(safeThis->m_progressPid, "读取 Win32 服务列表", 0, 45.0f);
-            safeThis->enumerateServiceList(&serviceList, &errorText);
-            if (!errorText.trimmed().isEmpty())
-            {
-                success = false;
-            }
-
-            kPro.set(safeThis->m_progressPid, "整理服务列表数据", 0, 88.0f);
-            if (safeThis.isNull())
-            {
-                return;
-            }
-
-            QMetaObject::invokeMethod(
-                safeThis,
-                [safeThis, refreshEvent, serviceList = std::move(serviceList), errorText, success]() mutable
-                {
-                    if (safeThis.isNull())
-                    {
-                        return;
-                    }
-
-                    safeThis->applyRefreshResult(std::move(serviceList), errorText, success);
-                    if (success)
-                    {
-                        info << refreshEvent << "[ServiceDock] 后台刷新服务列表成功。" << eol;
-                    }
-                    else
-                    {
-                        err << refreshEvent
-                            << "[ServiceDock] 后台刷新服务列表失败, error="
-                            << errorText.toStdString()
-                            << eol;
-                    }
-                },
-                Qt::QueuedConnection);
+    const QString stoppedProgress = ks::i18n::sourceText(QStringLiteral("服务刷新已停止"));
+    const QString droppedProgress = ks::i18n::sourceText(QStringLiteral("服务刷新未返回有效结果"));
+    const auto ticket = m_refreshOperation->submit<Request, ServiceRefreshResult>(std::move(request),
+        [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+            ServiceRefreshResult result;
+            result.progressPid = input.progressPid;
+            result.rows = std::make_shared<std::vector<ServiceEntry>>();
+            const auto shouldStop = [&]() { return token.isCanceled() || input.stopping->load(); };
+            if (shouldStop()) { result.stopped = true; return result; }
+            kPro.set(input.progressPid, input.readProgress.toUtf8().constData(), 0, 45.0f);
+            enumerateServiceList(result.rows.get(), &result.errorText, shouldStop);
+            if (shouldStop()) { result.stopped = true; return result; }
+            result.success = result.errorText.trimmed().isEmpty();
+            kPro.set(input.progressPid, input.sortProgress.toUtf8().constData(), 0, 88.0f);
+            std::sort(result.rows->begin(), result.rows->end(), [](const ServiceEntry& left, const ServiceEntry& right) {
+                const int display = QString::compare(left.displayNameText, right.displayNameText, Qt::CaseInsensitive);
+                return display == 0 ? QString::compare(left.serviceNameText, right.serviceNameText, Qt::CaseInsensitive) < 0 : display < 0;
+            });
+            if (shouldStop()) result.stopped = true;
+            return result;
+        },
+        [this, refreshEvent](const ServiceRefreshResult& result, const std::uint64_t generation) {
+            const bool applied = applyRefreshResult(result, generation);
+            if (result.stopped) return applied;
+            if (result.success) info << refreshEvent << "[ServiceDock] 后台刷新服务列表成功。" << eol;
+            else err << refreshEvent << "[ServiceDock] 后台刷新服务列表失败, error=" << result.errorText.toStdString() << eol;
+            return applied;
+        },
+        [this](std::exception_ptr) {
+            const bool queued = m_refreshQueued;
+            m_refreshInProgress = false;
+            m_refreshQueued = queued;
+            if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("状态：服务刷新未返回有效结果，保留上次列表，请重试。")));
+            if (queued) QTimer::singleShot(0, this, [this]() { if (!m_refreshInProgress && m_refreshQueued) requestAsyncRefresh(false); });
+        },
+        [pid = m_progressPid, stoppedProgress, droppedProgress](const ks::ui::AsyncOperationOutcome outcome) {
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied)
+                kPro.set(pid, (outcome == ks::ui::AsyncOperationOutcome::DeliveryDropped ? droppedProgress : stoppedProgress).toUtf8().constData(), 0, 100.0f);
         });
+    if (!ticket) reconcileRefreshState();
 }
 
-void ServiceDock::applyRefreshResult(
-    std::vector<ServiceEntry> serviceList,
-    const QString& errorText,
-    const bool success)
+bool ServiceDock::applyRefreshResult(const ServiceRefreshResult& result, const std::uint64_t ticket)
 {
+    if (!m_refreshOperation->isCurrent(ticket)) return true;
+    if (result.stopped)
+    {
+        m_refreshInProgress = false;
+        m_refreshQueued = false;
+        kPro.set(result.progressPid, ks::i18n::sourceText(QStringLiteral("服务刷新已停止")).toUtf8().constData(), 0, 100.0f);
+        if (m_summaryLabel) m_summaryLabel->setText(ks::i18n::sourceText(QStringLiteral("服务刷新已停止")));
+        return true;
+    }
     if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_serviceTable}))
     {
         const QPointer<ServiceDock> safeThis(this);
-        ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("service-table-refresh-apply"),
-            {m_serviceTable},
-            [safeThis,
-                serviceList = std::move(serviceList),
-                errorText,
-                success]() mutable
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->applyRefreshResult(
-                        std::move(serviceList),
-                        errorText,
-                        success);
-                }
+        ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("service-table-refresh-apply"), {m_serviceTable},
+            [safeThis, result, ticket]() {
+                if (!safeThis || !safeThis->m_refreshOperation->isCurrent(ticket)) return;
+                if (safeThis->applyRefreshResult(result, ticket) && safeThis) safeThis->m_refreshOperation->completeDeferred(ticket);
             });
-        return;
+        return false;
     }
-
-    std::sort(
-        serviceList.begin(),
-        serviceList.end(),
-        [](const ServiceEntry& left, const ServiceEntry& right)
-        {
-            const int displayCompareResult = QString::compare(
-                left.displayNameText,
-                right.displayNameText,
-                Qt::CaseInsensitive);
-            if (displayCompareResult != 0)
-            {
-                return displayCompareResult < 0;
-            }
-            return QString::compare(left.serviceNameText, right.serviceNameText, Qt::CaseInsensitive) < 0;
-        });
-
-    m_serviceList = std::move(serviceList);
+    const QPointer<ServiceDock> guarded(this);
+    const QString& errorText = result.errorText;
+    const bool success = result.success;
+    m_serviceList = std::move(*result.rows);
     m_serviceIndexByName.clear();
     m_serviceIndexByName.reserve(static_cast<qsizetype>(m_serviceList.size()));
     for (int index = 0; index < static_cast<int>(m_serviceList.size()); ++index)
@@ -274,6 +256,7 @@ void ServiceDock::applyRefreshResult(
             this,
             QStringLiteral("服务管理"),
             QStringLiteral("服务列表刷新失败：\n%1").arg(errorText));
+        if (!guarded) return true;
     }
 
     m_refreshInProgress = false;
@@ -282,6 +265,7 @@ void ServiceDock::applyRefreshResult(
     {
         requestAsyncRefresh(false);
     }
+    return true;
 }
 
 void ServiceDock::applyServiceUpdateToCache(const ServiceEntry& updatedEntry)

@@ -8,6 +8,14 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "service.refresh.delivery_missing": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
+    "状态：服务刷新未返回有效结果，保留上次列表，请重试。": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
+    "service.refresh.shutdown_rejected": "Status: The host is closing. Service refresh was not submitted.",
+    "状态：宿主正在关闭，服务刷新未提交。": "Status: The host is closing. Service refresh was not submitted.",
+    "service.refresh.stopped": "Service refresh stopped",
+    "服务刷新已停止": "Service refresh stopped",
+    "service.refresh.receipt_missing": "Service refresh returned no valid result",
+    "服务刷新未返回有效结果": "Service refresh returned no valid result",
     "service.export.receipt_missing": "The export returned no valid receipt. Check the destination file before trying again.",
     "导出未返回有效回执，请检查目标文件后再重试。": "The export returned no valid receipt. Check the destination file before trying again.",
     "window.layer.status.z_order_exported_incomplete": "Z order was exported with an incomplete traversal; see the complete and walkLimit fields.",
@@ -6984,6 +6992,10 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "状态：服务刷新未返回有效结果，保留上次列表，请重试。": "Status: Service refresh returned no valid result. The previous list is retained. Retry.",
+    "状态：宿主正在关闭，服务刷新未提交。": "Status: The host is closing. Service refresh was not submitted.",
+    "服务刷新已停止": "Service refresh stopped",
+    "服务刷新未返回有效结果": "Service refresh returned no valid result",
     "导出未返回有效回执，请检查目标文件后再重试。": "The export returned no valid receipt. Check the destination file before trying again.",
     "状态：电源操作已结束但未收到完整回执，请刷新当前状态，勿自动重发。": "Status: The power operation ended without a complete receipt. Refresh the current state; do not automatically resend it.",
     "状态：当前忙碌或正在退出，未接受新的电源操作。": "Status: Busy or exiting; the new power operation was not accepted.",

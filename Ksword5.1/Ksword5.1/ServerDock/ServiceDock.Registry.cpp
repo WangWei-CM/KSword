@@ -201,7 +201,8 @@ namespace
 bool service_dock_detail::enumerateRegistryServiceSnapshots(
     std::vector<RegistryServiceSnapshot>* snapshotListOut,
     QString* errorTextOut,
-    DWORD* errorCodeOut)
+    DWORD* errorCodeOut,
+    const std::function<bool()>& shouldStop)
 {
     clearRegistryErrorOutputs(errorTextOut, errorCodeOut);
     if (snapshotListOut == nullptr)
@@ -261,6 +262,11 @@ bool service_dock_detail::enumerateRegistryServiceSnapshots(
         L'\0');
     for (DWORD subKeyIndex = 0;; ++subKeyIndex)
     {
+        if (shouldStop && shouldStop())
+        {
+            ::RegCloseKey(servicesRootKey);
+            return setRegistryError(QStringLiteral("枚举 Services 注册表子键"), ERROR_OPERATION_ABORTED, errorTextOut, errorCodeOut);
+        }
         DWORD serviceNameLength = static_cast<DWORD>(nameBuffer.size() - 1);
         FILETIME lastWriteTime{};
         LONG enumerateResult = ::RegEnumKeyExW(
