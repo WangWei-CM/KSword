@@ -70,6 +70,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="MonitorDock\ProcessTraceEventMetadata.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="WindowDock\WindowSnapshotSupport.h">
       <Filter>Header Files</Filter>
     </ClInclude>

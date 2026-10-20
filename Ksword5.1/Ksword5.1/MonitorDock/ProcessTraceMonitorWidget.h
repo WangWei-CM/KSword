@@ -313,7 +313,7 @@ private:
         CapturedEventRow* rowOut);
     bool extractEventProperties(
         const struct _EVENT_RECORD* eventRecordPtr,
-        std::vector<EtwPropertyValue>* propertyListOut) const;
+        std::vector<EtwPropertyValue>* propertyListOut, bool identityOnly = false, const std::vector<EtwPropertyValue>* knownIdentity = nullptr) const;
     ks::ui::FieldDocument buildEventDetailDocument(
         const QString& providerGuidText,
         const struct _EVENT_RECORD* eventRecordPtr,

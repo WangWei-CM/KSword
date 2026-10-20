@@ -1,3 +1,4 @@
+#include "ProcessTraceEventMetadata.h"
 #include "ProcessTraceMonitorWidget.h"
 
 // ============================================================
@@ -567,7 +568,7 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECOR
     }
 
     std::vector<EtwPropertyValue> propertyList;
-    extractEventProperties(eventRecordPtr, &propertyList);
+    extractEventProperties(eventRecordPtr, &propertyList, true);
 
     CapturedEventRow rowValue;
     if (!buildRelevantEventRow(eventRecordPtr, providerNameText, providerTypeText, propertyList, &rowValue))
@@ -588,7 +589,7 @@ void ProcessTraceMonitorWidget::enqueueEventFromRecord(const struct _EVENT_RECOR
 
 bool ProcessTraceMonitorWidget::extractEventProperties(
     const struct _EVENT_RECORD* eventRecordPtr,
-    std::vector<EtwPropertyValue>* propertyListOut) const
+    std::vector<EtwPropertyValue>* propertyListOut, const bool identityOnly, const std::vector<EtwPropertyValue>* knownIdentity) const
 {
     if (propertyListOut == nullptr)
     {
@@ -602,40 +603,26 @@ bool ProcessTraceMonitorWidget::extractEventProperties(
         return false;
     }
 
-    DWORD infoBufferSize = 0;
-    ULONG status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        nullptr,
-        &infoBufferSize);
-    if (status != ERROR_INSUFFICIENT_BUFFER || infoBufferSize == 0)
-    {
-        return false;
-    }
-
-    std::vector<unsigned char> infoBuffer(infoBufferSize, 0);
-    auto* eventInfo = reinterpret_cast<PTRACE_EVENT_INFO>(infoBuffer.data());
-    status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        eventInfo,
-        &infoBufferSize);
-    if (status != ERROR_SUCCESS || eventInfo == nullptr)
-    {
-        return false;
-    }
+    const auto metadata = ks::monitor::processTraceMetadataForThread().get(eventRecord);
+    if (!metadata) return false;
+    const auto* eventInfo = reinterpret_cast<const TRACE_EVENT_INFO*>(metadata->data());
+    ULONG status = ERROR_SUCCESS;
 
     propertyListOut->reserve(eventInfo->TopLevelPropertyCount);
     for (ULONG indexValue = 0; indexValue < eventInfo->TopLevelPropertyCount; ++indexValue)
     {
         const EVENT_PROPERTY_INFO& propertyInfo = eventInfo->EventPropertyInfoArray[indexValue];
-        const wchar_t* propertyNamePointer = reinterpret_cast<const wchar_t*>(
-            reinterpret_cast<const unsigned char*>(eventInfo) + propertyInfo.NameOffset);
-        const QString propertyNameText = propertyNamePointer != nullptr
-            ? QString::fromWCharArray(propertyNamePointer)
-            : QStringLiteral("<Unknown>");
+        const QString propertyNameText = ks::monitor::ProcessTraceEventMetadata::text(metadata, propertyInfo.NameOffset);
+        if (propertyNameText.isEmpty()) continue;
+        const QString normalizedName = normalizePropertyName(propertyNameText);
+        if (identityOnly && !propertyNameLooksLikeProcessId(normalizedName)
+            && !propertyNameLooksLikeParentProcessId(normalizedName) && !propertyNameLooksLikeProcessName(normalizedName)) continue;
+        const wchar_t* propertyNamePointer = reinterpret_cast<const wchar_t*>(metadata->data() + propertyInfo.NameOffset);
+        if (knownIdentity)
+        {
+            const auto known = std::find_if(knownIdentity->begin(), knownIdentity->end(), [&propertyNameText](const auto& value) { return value.nameText == propertyNameText; });
+            if (known != knownIdentity->end()) { propertyListOut->push_back(*known); continue; }
+        }
 
         if ((propertyInfo.Flags & PropertyStruct) != 0)
         {
@@ -652,11 +639,8 @@ bool ProcessTraceMonitorWidget::extractEventProperties(
                 }
 
                 const EVENT_PROPERTY_INFO& memberInfo = eventInfo->EventPropertyInfoArray[memberIndex];
-                const wchar_t* memberNamePointer = reinterpret_cast<const wchar_t*>(
-                    reinterpret_cast<const unsigned char*>(eventInfo) + memberInfo.NameOffset);
-                const QString memberNameText = memberNamePointer != nullptr
-                    ? QString::fromWCharArray(memberNamePointer)
-                    : QStringLiteral("<UnknownMember>");
+                const QString member = ks::monitor::ProcessTraceEventMetadata::text(metadata, memberInfo.NameOffset);
+                const QString memberNameText = member.isEmpty() ? QStringLiteral("<UnknownMember>") : member;
                 memberNameList << memberNameText;
             }
 
@@ -1056,7 +1040,11 @@ bool ProcessTraceMonitorWidget::buildRelevantEventRow(
     rowOut->relationText = relationText.trimmed().isEmpty()
         ? QStringLiteral("命中")
         : relationText;
-    rowOut->detailDocument = buildEventDetailDocument(providerGuidText, eventRecordPtr, propertyList);
+    // Only accepted relevant events need full property formatting. The minimal pass above
+    // retains every exact PID/parent/name predicate used by the unchanged relevance logic.
+    std::vector<EtwPropertyValue> fullProperties;
+    extractEventProperties(eventRecordPtr, &fullProperties, false, &propertyList);
+    rowOut->detailDocument = buildEventDetailDocument(providerGuidText, eventRecordPtr, fullProperties);
     rowOut->activityIdText = guidToText(eventRecord->EventHeader.ActivityId);
 
     // UI 同步：

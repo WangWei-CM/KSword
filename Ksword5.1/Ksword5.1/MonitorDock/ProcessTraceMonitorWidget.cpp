@@ -1,3 +1,4 @@
+#include "ProcessTraceEventMetadata.h"
 #include "ProcessTraceMonitorWidget.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeStatusRole.h"
@@ -217,65 +218,8 @@ QString ProcessTraceMonitorWidget::guidToText(const GUID& guidValue)
 
 QString ProcessTraceMonitorWidget::queryEtwEventName(const struct _EVENT_RECORD* eventRecordPtr)
 {
-    const auto textAtOffset = [](const unsigned char* bufferPointer, const ULONG offsetValue) -> QString {
-        if (bufferPointer == nullptr || offsetValue == 0)
-        {
-            return QString();
-        }
-
-        const wchar_t* textPointer = reinterpret_cast<const wchar_t*>(bufferPointer + offsetValue);
-        if (textPointer == nullptr || *textPointer == L'\0')
-        {
-            return QString();
-        }
-        return QString::fromWCharArray(textPointer).trimmed();
-    };
-
-    const EVENT_RECORD* eventRecord = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
-    if (eventRecord == nullptr)
-    {
-        return QString();
-    }
-
-    DWORD bufferSize = 0;
-    ULONG status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        nullptr,
-        &bufferSize);
-    if (status != ERROR_INSUFFICIENT_BUFFER || bufferSize == 0)
-    {
-        return QString();
-    }
-
-    std::vector<unsigned char> infoBuffer(bufferSize, 0);
-    auto* eventInfo = reinterpret_cast<PTRACE_EVENT_INFO>(infoBuffer.data());
-    status = ::TdhGetEventInformation(
-        const_cast<EVENT_RECORD*>(eventRecord),
-        0,
-        nullptr,
-        eventInfo,
-        &bufferSize);
-    if (status != ERROR_SUCCESS || eventInfo == nullptr)
-    {
-        return QString();
-    }
-
-    const unsigned char* infoBufferPointer = infoBuffer.data();
-    const QString eventNameText = textAtOffset(infoBufferPointer, eventInfo->EventNameOffset);
-    if (!eventNameText.isEmpty())
-    {
-        return eventNameText;
-    }
-
-    const QString taskNameText = textAtOffset(infoBufferPointer, eventInfo->TaskNameOffset);
-    if (!taskNameText.isEmpty())
-    {
-        return taskNameText;
-    }
-
-    return textAtOffset(infoBufferPointer, eventInfo->OpcodeNameOffset);
+    const auto* record = reinterpret_cast<const EVENT_RECORD*>(eventRecordPtr);
+    return ks::monitor::ProcessTraceEventMetadata::eventName(ks::monitor::processTraceMetadataForThread().get(record));
 }
 
 bool ProcessTraceMonitorWidget::textMatch(
