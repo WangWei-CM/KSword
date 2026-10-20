@@ -6259,6 +6259,9 @@ namespace
             }
             if (m_savePreflightCancel != nullptr) m_savePreflightCancel->store(true);
             if (m_generalReadCancel != nullptr) m_generalReadCancel->store(true);
+            if (m_stagingSnapshotCancel != nullptr) m_stagingSnapshotCancel->store(true);
+            for (const auto& state : m_metadataReadStates)
+                if (state != nullptr && state->cancel != nullptr) state->cancel->store(true);
             if (m_usageScanCancelRequested != nullptr)
             {
                 m_usageScanCancelRequested->store(true);
@@ -9039,7 +9042,7 @@ namespace
 
         void refreshMetadataEditor()
         {
-            if (m_metadataStatusLabel == nullptr || m_metadataEditorBusy)
+            if (m_metadataStatusLabel == nullptr || m_metadataEditorBusy || m_stagingSnapshotBusy || m_transactionBusy)
             {
                 return;
             }
@@ -9236,35 +9239,457 @@ namespace
                 }));
         }
 
-        bool ensurePendingPatchesForStaging()
+        struct MetadataReadValue
         {
-            if (!m_pendingPatches.isEmpty())
+            DWORD error = ERROR_SUCCESS;
+            QString text;
+            QByteArray bytes;
+            QString name;
+            int format = -1;
+            bool needEa = false;
+        };
+
+        class MetadataReadState final : public QObject
+        {
+        public:
+            explicit MetadataReadState(QObject* parent) : QObject(parent) {}
+            ~MetadataReadState() override { if (cancel != nullptr) cancel->store(true); }
+            quint64 generation = 0;
+            bool active = false;
+            bool projecting = false;
+            bool readOnly = false;
+            bool undoEnabled = false;
+            bool layoutEnabled = true;
+            int revision = 0;
+            QString toolTip;
+            QVector<QPair<QPointer<QObject>, QVariant>> projectionInputs;
+            std::shared_ptr<std::atomic_bool> cancel;
+            QPointer<QPushButton> button;
+            QPointer<QPlainTextEdit> editor;
+        };
+
+        static QThreadPool& metadataReadPool()
+        {
+            // The application owns the read queue; closing a page never waits for OS I/O.
+            static QThreadPool* pool = []()
+                {
+                    auto* value = new QThreadPool(qApp);
+                    value->setMaxThreadCount(2);
+                    return value;
+                }();
+            return *pool;
+        }
+
+        static QString formatMetadataHex(const QByteArray& bytes,
+            const std::shared_ptr<std::atomic_bool>& cancel)
+        {
+            static constexpr char digits[] = "0123456789ABCDEF";
+            QByteArray text;
+            if (!bytes.isEmpty()) text.reserve(bytes.size() * 3 - 1);
+            for (qsizetype index = 0; index < bytes.size(); ++index)
             {
-                return true;
+                if (index % 256 == 0 && cancel->load()) return {};
+                if (index > 0) text.append(index % 256 == 0 ? '\n' : ' ');
+                const auto byte = static_cast<unsigned char>(bytes.at(index));
+                text.append(digits[byte >> 4]);
+                text.append(digits[byte & 15]);
             }
-            QList<ks::file::metadata::TargetPatch> patches;
-            for (const QString& path : m_filePaths)
+            return QString::fromLatin1(text);
+        }
+
+        static bool sameMetadataReadIdentity(
+            const ks::file::metadata::FileSnapshot& before,
+            const ks::file::metadata::FileSnapshot& after)
+        {
+            return before.ok && after.ok && before.identity.available && after.identity.available &&
+                before.identity.volumeSerialNumber == after.identity.volumeSerialNumber &&
+                before.identity.fileIndex == after.identity.fileIndex &&
+                before.basicInfo.LastWriteTime.QuadPart == after.basicInfo.LastWriteTime.QuadPart &&
+                before.basicInfo.ChangeTime.QuadPart == after.basicInfo.ChangeTime.QuadPart;
+        }
+
+        bool metadataReadBusy() const
+        {
+            for (const auto& state : m_metadataReadStates)
+                if (state != nullptr && state->active) return true;
+            return false;
+        }
+
+        void finishMetadataRead(MetadataReadState* state)
+        {
+            if (state == nullptr) return;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<MetadataReadState> stateGuard(state);
+            state->active = false;
+            if (state->projecting && state->editor != nullptr)
             {
-                const ks::file::metadata::FileSnapshot snapshot =
-                    ks::file::metadata::readFileSnapshot(path);
+                const QPointer<QPlainTextEdit> editor(state->editor);
+                const bool readOnly = state->readOnly;
+                const bool undoEnabled = state->undoEnabled;
+                const bool layoutEnabled = state->layoutEnabled;
+                state->projecting = false;
+                editor->setReadOnly(readOnly);
+                if (owner == nullptr || stateGuard == nullptr || editor == nullptr) return;
+                editor->setUndoRedoEnabled(undoEnabled);
+                if (owner == nullptr || stateGuard == nullptr || editor == nullptr) return;
+                editor->document()->setLayoutEnabled(layoutEnabled);
+            }
+            if (owner == nullptr || stateGuard == nullptr) return;
+            if (state->button != nullptr)
+            {
+                const QPointer<QPushButton> button(state->button);
+                const QString toolTip = state->toolTip;
+                const bool enabled = !m_transactionBusy;
+                button->setToolTip(toolTip);
+                if (owner == nullptr || stateGuard == nullptr || button == nullptr) return;
+                button->setEnabled(enabled);
+            }
+            if (owner != nullptr) updatePendingSaveUi();
+        }
+
+        static ks::file::metadata::FileSnapshot metadataReadSnapshot(const QString& path, bool followTarget)
+        {
+            ks::file::metadata::FileSnapshot result;
+            const auto native = QDir::toNativeSeparators(path).toStdWString();
+            const HANDLE handle = ::CreateFileW(native.c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | (followTarget ? 0U : FILE_FLAG_OPEN_REPARSE_POINT), nullptr);
+            if (handle == INVALID_HANDLE_VALUE) { result.win32Error = ::GetLastError(); return result; }
+            BY_HANDLE_FILE_INFORMATION identity{};
+            const BOOL basicOk = ::GetFileInformationByHandleEx(handle, FileBasicInfo, &result.basicInfo, sizeof(result.basicInfo));
+            const DWORD basicError = basicOk ? ERROR_SUCCESS : ::GetLastError();
+            const BOOL identityOk = ::GetFileInformationByHandle(handle, &identity);
+            result.win32Error = !basicOk ? basicError : (identityOk ? ERROR_SUCCESS : ::GetLastError());
+            ::CloseHandle(handle);
+            result.ok = basicOk && identityOk;
+            result.identity.available = identityOk;
+            result.identity.volumeSerialNumber = identity.dwVolumeSerialNumber;
+            result.identity.fileIndex = (static_cast<quint64>(identity.nFileIndexHigh) << 32U) | identity.nFileIndexLow;
+            return result;
+        }
+
+        template <typename Work, typename Apply>
+        void runMetadataRead(QWidget* output, QPushButton* button, const QString& path,
+            Work work, Apply apply, bool followTarget = false)
+        {
+            if (output == nullptr || button == nullptr || m_transactionBusy || m_stagingSnapshotBusy) return;
+            auto state = m_metadataReadStates.value(output);
+            if (state == nullptr)
+            {
+                state = new MetadataReadState(output);
+                m_metadataReadStates.insert(output, state);
+                if (auto* editor = qobject_cast<QPlainTextEdit*>(output))
+                {
+                    const QPointer<QPlainTextEdit> editorGuard(editor);
+                    connect(editor->document(), &QTextDocument::contentsChange, state,
+                        [state, editorGuard](int, int removed, int added)
+                        {
+                            if (state == nullptr || editorGuard == nullptr || state->projecting || (removed == 0 && added == 0)) return;
+                            // Undo/retyping can revisit a Qt document revision; a real
+                            // edit always invalidates both the old read and raw-byte cache.
+                            editorGuard->setProperty("ks_file_metadata_original_bytes", QVariant());
+                            editorGuard->setProperty("ks_file_metadata_incomplete", false);
+                            if (state->active && state->cancel != nullptr) state->cancel->store(true);
+                        });
+                }
+            }
+            if (state->active) return;
+            state->active = true;
+            state->cancel = std::make_shared<std::atomic_bool>(false);
+            state->button = button;
+            state->toolTip = button->toolTip();
+            const auto cancel = state->cancel;
+            const quint64 generation = ++state->generation;
+            const QStringList paths = m_filePaths;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QWidget> outputGuard(output);
+            const QPointer<QPushButton> buttonGuard(button);
+            button->setEnabled(false);
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            if (buttonGuard == nullptr) { finishMetadataRead(state); return; }
+            button->setToolTip(ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            updatePendingSaveUi();
+            if (owner == nullptr || outputGuard == nullptr || state == nullptr) return;
+            metadataReadPool().start(QRunnable::create(
+                [owner, outputGuard, state, cancel, generation, paths, path, followTarget, work = std::move(work), apply = std::move(apply)]()
+                {
+                    auto result = std::shared_ptr<MetadataReadValue>(new MetadataReadValue(), [](MetadataReadValue* value)
+                        { QThreadPool::globalInstance()->start(QRunnable::create([value]() { delete value; })); });
+                    const auto before = metadataReadSnapshot(path, followTarget);
+                    if (!cancel->load())
+                    {
+                        if (!before.ok) result->error = before.win32Error;
+                        else
+                        {
+                            *result = work(cancel);
+                            if (!cancel->load() && result->error == ERROR_SUCCESS)
+                            {
+                                const auto after = metadataReadSnapshot(path, followTarget);
+                                if (!sameMetadataReadIdentity(before, after)) result->error = ERROR_FILE_INVALID;
+                            }
+                        }
+                    }
+                    QMetaObject::invokeMethod(qApp,
+                        [owner, outputGuard, state, cancel, generation, paths, result, apply]()
+                        {
+                            if (owner == nullptr || outputGuard == nullptr || state == nullptr || state->generation != generation) return;
+                            if (cancel->load() || owner->m_filePaths != paths)
+                            {
+                                owner->finishMetadataRead(state);
+                                return;
+                            }
+                            // A true return keeps the read active until full document publication ends.
+                            if (!apply(*result, state) && owner != nullptr && state != nullptr)
+                                owner->finishMetadataRead(state);
+                        }, Qt::QueuedConnection);
+                }));
+        }
+
+        static qsizetype metadataTextSliceLength(const QString& text, const qsizetype offset)
+        {
+            if (offset < 0 || offset >= text.size()) return 0;
+            qsizetype count = std::min<qsizetype>(8192, text.size() - offset);
+            if (offset + count < text.size() && text.at(offset + count - 1).isHighSurrogate()) --count;
+            return count;
+        }
+
+        void continueMetadataTextProjection(const QPointer<MetadataReadState>& state,
+            const std::shared_ptr<const MetadataReadValue>& result, qsizetype offset)
+        {
+            if (state == nullptr || state->editor == nullptr || !state->active) return;
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<QPlainTextEdit> editor(state->editor);
+            if (state->cancel->load() || editor->document()->revision() != state->revision ||
+                !stagingInputsUnchanged(state->projectionInputs, stagingWidgetValue))
+            {
+                // A partial document is never a replacement payload. Preserve changed
+                // parameter intent and require a fresh complete read or explicit new text.
+                editor->clear();
+                if (owner == nullptr || state == nullptr || editor == nullptr) return;
+                editor->setProperty("ks_file_metadata_incomplete", true);
+                finishMetadataRead(state);
+                return;
+            }
+            QElapsedTimer budget;
+            budget.start();
+            do
+            {
+                const qsizetype count = metadataTextSliceLength(result->text, offset);
+                QTextCursor cursor(editor->document());
+                cursor.movePosition(QTextCursor::End);
+                cursor.insertText(result->text.mid(offset, count));
+                if (owner == nullptr || state == nullptr || editor == nullptr) return;
+                offset += count;
+                state->revision = editor->document()->revision();
+            } while (offset < result->text.size() && budget.nsecsElapsed() < 4'000'000);
+            if (offset < result->text.size())
+            {
+                QTimer::singleShot(0, this, [owner, state, result, offset]()
+                    { if (owner != nullptr) owner->continueMetadataTextProjection(state, result, offset); });
+                return;
+            }
+            editor->setProperty("ks_file_metadata_incomplete", false);
+            editor->setProperty("ks_file_metadata_original_bytes", result->bytes);
+            editor->setProperty("ks_file_metadata_original_revision", state->revision);
+            editor->setProperty("ks_file_metadata_original_format", result->format);
+            QTextCursor first(editor->document());
+            first.movePosition(QTextCursor::Start);
+            editor->setTextCursor(first);
+            if (owner != nullptr && state != nullptr) finishMetadataRead(state);
+            if (owner != nullptr && editor != nullptr)
+                editor->setProperty("ks_file_metadata_original_revision", editor->document()->revision());
+        }
+
+        void publishMetadataText(QPlainTextEdit* editor, MetadataReadState* state, const MetadataReadValue& value, const QList<QObject*>& inputs = {})
+        {
+            const QPointer<FileDetailDialog> owner(this);
+            const QPointer<MetadataReadState> stateGuard(state);
+            const QPointer<QPlainTextEdit> editorGuard(editor);
+            state->editor = editor;
+            state->projecting = true;
+            state->readOnly = editor->isReadOnly();
+            state->undoEnabled = editor->isUndoRedoEnabled();
+            state->layoutEnabled = editor->document()->isLayoutEnabled();
+            editor->setReadOnly(true);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->setUndoRedoEnabled(false);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->document()->setLayoutEnabled(false);
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->setProperty("ks_file_metadata_original_bytes", QVariant());
+            editor->setProperty("ks_file_metadata_incomplete", true);
+            if (!editor->property("ks_file_metadata_text_wrap_mode").isValid())
+                editor->setProperty("ks_file_metadata_text_wrap_mode", static_cast<int>(editor->lineWrapMode()));
+            editor->setLineWrapMode(value.format == 1 ? QPlainTextEdit::NoWrap :
+                static_cast<QPlainTextEdit::LineWrapMode>(editor->property("ks_file_metadata_text_wrap_mode").toInt()));
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            editor->clear();
+            if (owner == nullptr || stateGuard == nullptr || editorGuard == nullptr) return;
+            state->revision = editor->document()->revision();
+            state->projectionInputs.clear();
+            for (QObject* input : inputs)
+            {
+                const auto value = stagingWidgetValue(input);
+                if (value.isValid()) state->projectionInputs.push_back({input, value});
+            }
+            auto snapshot = std::shared_ptr<const MetadataReadValue>(new MetadataReadValue(value), [](const MetadataReadValue* retired)
+                { QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; })); });
+            QTimer::singleShot(0, this, [owner, stateGuard, snapshot]()
+                { if (owner != nullptr) owner->continueMetadataTextProjection(stateGuard, snapshot, 0); });
+        }
+
+        using StagingInputValue = QPair<QPointer<QObject>, QVariant>;
+
+        static QVariant stagingWidgetValue(QObject* object)
+        {
+            if (auto* edit = qobject_cast<QPlainTextEdit*>(object)) return edit->document()->revision();
+            if (auto* date = qobject_cast<QDateTimeEdit*>(object)) return date->dateTime();
+            if (auto* spin = qobject_cast<QSpinBox*>(object)) return spin->value();
+            if (auto* combo = qobject_cast<QComboBox*>(object))
+                return QVariantList{ combo->currentIndex(), combo->currentData() };
+            if (auto* line = qobject_cast<QLineEdit*>(object))
+            {
+                if (qobject_cast<QAbstractSpinBox*>(line->parentWidget()) != nullptr ||
+                    qobject_cast<QComboBox*>(line->parentWidget()) != nullptr) return {};
+                return line->text();
+            }
+            if (auto* check = qobject_cast<QCheckBox*>(object)) return static_cast<int>(check->checkState());
+            if (auto* button = qobject_cast<QAbstractButton*>(object))
+                return button->isCheckable() ? QVariant(button->isChecked()) : QVariant();
+            if (auto* table = qobject_cast<QTableView*>(object))
+            {
+                const auto current = table->currentIndex();
+                QVariantList value{ QVariant::fromValue<qulonglong>(reinterpret_cast<quintptr>(table->model())),
+                    current.row(), current.column() };
+                if (current.isValid())
+                {
+                    for (int column = 0; column < table->model()->columnCount(); ++column)
+                        value.push_back(current.sibling(current.row(), column).data());
+                    const auto first = current.sibling(current.row(), 0);
+                    for (int role = Qt::UserRole + 3; role <= Qt::UserRole + 6; ++role) value.push_back(first.data(role));
+                }
+                return value;
+            }
+            return {};
+        }
+
+        static bool stagingInputsUnchanged(const QVector<StagingInputValue>& inputs,
+            const std::function<QVariant(QObject*)>& value)
+        {
+            for (const auto& input : inputs)
+                if (input.first == nullptr || value(input.first) != input.second) return false;
+            return true;
+        }
+
+        struct StagingSnapshotResult
+        {
+            QList<ks::file::metadata::TargetPatch> patches;
+            QString failedPath;
+            DWORD error = ERROR_SUCCESS;
+            bool cancelled = false;
+        };
+
+        static StagingSnapshotResult collectStagingSnapshots(const QStringList& paths,
+            const std::shared_ptr<std::atomic_bool>& cancel,
+            const std::function<ks::file::metadata::FileSnapshot(const QString&)>& read)
+        {
+            StagingSnapshotResult result;
+            result.patches.reserve(paths.size());
+            for (const QString& path : paths)
+            {
+                if (cancel->load()) { result.cancelled = true; result.patches.clear(); return result; }
+                const auto snapshot = read(path);
                 if (!snapshot.ok)
                 {
-                    QMessageBox::warning(
-                        this,
-                        ks::i18n::sourceText(QStringLiteral("元数据编辑")),
-                        ks::i18n::sourceText(QStringLiteral("无法读取目标快照：%1\n%2"))
-                            .arg(QDir::toNativeSeparators(path))
-                            .arg(formatWin32ErrorText(snapshot.win32Error)));
-                    return false;
+                    result.failedPath = path;
+                    result.error = snapshot.win32Error;
+                    result.patches.clear();
+                    return result;
                 }
                 ks::file::metadata::TargetPatch patch;
                 patch.originalPath = path;
                 patch.snapshot = snapshot;
-                patches.push_back(patch);
+                result.patches.push_back(std::move(patch));
             }
-            m_pendingPatches = patches;
-            return !m_pendingPatches.isEmpty();
+            if (cancel->load()) { result.cancelled = true; result.patches.clear(); }
+            return result;
         }
+
+        bool ensurePendingPatchesForStaging()
+        {
+            if (metadataReadBusy() || m_stagingSnapshotBusy || m_transactionBusy)
+            {
+                QMessageBox::information(this, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                    ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据...")));
+                return false;
+            }
+            if (!m_pendingPatches.isEmpty()) return true;
+            const QPointer<QAbstractButton> intent(qobject_cast<QAbstractButton*>(sender()));
+            if (intent == nullptr) return false;
+            QVector<StagingInputValue> inputs;
+            QWidget* const scope = m_tabWidget != nullptr ? m_tabWidget->currentWidget() : this;
+            if (scope != nullptr)
+            {
+                // A one-shot explicit staging snapshot, not a theme or paint observer.
+                for (QWidget* widget : scope->findChildren<QWidget*>())
+                {
+                    if (!widget->isVisibleTo(scope)) continue;
+                    const QVariant value = stagingWidgetValue(widget);
+                    if (value.isValid()) inputs.push_back({ widget, value });
+                }
+            }
+            m_stagingSnapshotBusy = true;
+            m_stagingSnapshotCancel = std::make_shared<std::atomic_bool>(false);
+            const auto cancel = m_stagingSnapshotCancel;
+            const auto generation = ++m_metadataOperationGeneration;
+            const auto paths = m_filePaths;
+            setMetadataEditorBusy(true);
+            if (m_tabWidget != nullptr) m_tabWidget->setEnabled(false);
+            if (m_tabNavigation != nullptr) m_tabNavigation->setEnabled(false);
+            updatePendingSaveUi();
+            const QPointer<FileDetailDialog> owner(this);
+            metadataReadPool().start(QRunnable::create([owner, intent, paths, cancel, generation, inputs]()
+                {
+                    auto result = std::shared_ptr<const StagingSnapshotResult>(
+                        new StagingSnapshotResult(collectStagingSnapshots(paths, cancel,
+                            [](const QString& path) { return ks::file::metadata::readFileSnapshot(path); })),
+                        [](const StagingSnapshotResult* retired)
+                        { QThreadPool::globalInstance()->start(QRunnable::create([retired]() { delete retired; })); });
+                    QMetaObject::invokeMethod(qApp, [owner, intent, paths, cancel, generation, inputs, result]()
+                        {
+                            if (owner == nullptr || owner->m_metadataOperationGeneration != generation) return;
+                            owner->m_stagingSnapshotBusy = false;
+                            owner->m_stagingSnapshotCancel.reset();
+                            owner->setMetadataEditorBusy(false);
+                            if (owner == nullptr) return;
+                            if (owner->m_tabWidget != nullptr) owner->m_tabWidget->setEnabled(true);
+                            if (owner == nullptr) return;
+                            if (owner->m_tabNavigation != nullptr) owner->m_tabNavigation->setEnabled(true);
+                            if (owner == nullptr) return;
+                            owner->updatePendingSaveUi();
+                            if (owner == nullptr) return;
+                            if (cancel->load() || result->cancelled || owner->m_filePaths != paths || intent == nullptr) return;
+                            if (result->error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(owner, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                                    ks::i18n::sourceText(QStringLiteral("无法读取目标快照：%1\n%2"))
+                                        .arg(QDir::toNativeSeparators(result->failedPath)).arg(formatWin32ErrorText(result->error)));
+                                return;
+                            }
+                            if (!stagingInputsUnchanged(inputs, stagingWidgetValue))
+                            {
+                                QMessageBox::information(owner, ks::i18n::sourceText(QStringLiteral("元数据编辑")),
+                                    ks::i18n::sourceText(QStringLiteral("暂存输入已变化，请检查当前内容后重新暂存。")));
+                                return;
+                            }
+                            owner->m_pendingPatches = result->patches;
+                            if (!result->patches.isEmpty()) intent->click();
+                        }, Qt::QueuedConnection);
+                }));
+            return false;
+        }
+
 
         int pendingOperationCount() const
         {
@@ -9300,9 +9725,12 @@ namespace
         {
             const int targetCount = pendingTargetCount();
             const int operationCount = pendingOperationCount();
+            const bool reading = m_stagingSnapshotBusy || metadataReadBusy();
             if (m_pendingChangesLabel != nullptr)
             {
-                m_pendingChangesLabel->setText(targetCount > 0
+                m_pendingChangesLabel->setText(reading
+                    ? ks::i18n::sourceText(QStringLiteral("● 正在后台读取文件元数据..."))
+                    : targetCount > 0
                     ? ks::i18n::sourceText(QStringLiteral(
                         "● 已暂存：%1 个目标，%2 类操作。文件尚未发生变化。"))
                         .arg(targetCount)
@@ -9311,11 +9739,11 @@ namespace
             }
             if (m_saveAllButton != nullptr)
             {
-                m_saveAllButton->setEnabled(targetCount > 0 && !m_transactionBusy);
+                m_saveAllButton->setEnabled(targetCount > 0 && !m_transactionBusy && !reading);
             }
             if (m_discardPendingButton != nullptr)
             {
-                m_discardPendingButton->setEnabled(targetCount > 0 && !m_transactionBusy);
+                m_discardPendingButton->setEnabled(targetCount > 0 && !m_transactionBusy && !reading);
             }
         }
 
@@ -9330,7 +9758,7 @@ namespace
 
         void discardPendingChanges()
         {
-            if (m_transactionBusy)
+            if (m_transactionBusy || m_stagingSnapshotBusy || metadataReadBusy())
             {
                 return;
             }
@@ -9640,7 +10068,7 @@ namespace
 
         void saveAllPendingChanges()
         {
-            if (m_transactionBusy)
+            if (m_transactionBusy || m_stagingSnapshotBusy || metadataReadBusy())
             {
                 return;
             }
@@ -10237,6 +10665,20 @@ namespace
                 if (okOut != nullptr) *okOut = false;
                 return {};
             }
+            if (editor->property("ks_file_metadata_incomplete").toBool())
+            {
+                if (okOut != nullptr) *okOut = false;
+                return {};
+            }
+            const QVariant original = editor->property("ks_file_metadata_original_bytes");
+            const int format = formatCombo == nullptr ? 0 : formatCombo->currentIndex();
+            if (original.isValid() &&
+                editor->property("ks_file_metadata_original_revision").toInt() == editor->document()->revision() &&
+                editor->property("ks_file_metadata_original_format").toInt() == format)
+            {
+                if (okOut != nullptr) *okOut = true;
+                return original.toByteArray();
+            }
             if (formatCombo != nullptr && formatCombo->currentIndex() == 1)
             {
                 return parseMetadataHexText(editor->toPlainText(), okOut);
@@ -10423,13 +10865,23 @@ namespace
             layout->addStretch(1);
 
             connect(queryHardLinksButton, &QPushButton::clicked, this,
-                [this, hardLinkQueryResult]()
+                [this, queryHardLinksButton, hardLinkQueryResult]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QStringList links = ks::file::metadata::enumerateHardLinks(m_filePath, &error);
-                    hardLinkQueryResult->setText(error == ERROR_SUCCESS
-                        ? links.join(QStringLiteral(" | "))
-                        : QStringLiteral("枚举失败：%1").arg(formatWin32ErrorText(error)));
+                    const QString path = m_filePath;
+                    runMetadataRead(hardLinkQueryResult, queryHardLinksButton, path,
+                        [path](const auto&)
+                        {
+                            MetadataReadValue result;
+                            const auto links = ks::file::metadata::enumerateHardLinks(path, &result.error);
+                            result.text = links.join(QStringLiteral(" | "));
+                            return result;
+                        },
+                        [this, hardLinkQueryResult](const MetadataReadValue& result, MetadataReadState*)
+                        {
+                            hardLinkQueryResult->setText(result.error == ERROR_SUCCESS ? result.text
+                                : QStringLiteral("枚举失败：%1").arg(formatWin32ErrorText(result.error)));
+                            return false;
+                        });
                 });
 
             connect(stageButton, &QPushButton::clicked, this,
@@ -10672,30 +11124,44 @@ namespace
                         content += QStringLiteral("HostUrl=%1\r\n").arg(hostEdit->text().trimmed());
                     dataEdit->setPlainText(content);
                 });
-            connect(loadButton, &QPushButton::clicked, this, [this, table, nameEdit, formatCombo, dataEdit]()
+            connect(loadButton, &QPushButton::clicked, this, [this, table, loadButton, nameEdit, formatCombo, dataEdit]()
                 {
                     const int row = table->currentRow();
                     if (row < 0 || table->item(row, 0) == nullptr || table->item(row, 1) == nullptr) return;
                     const QString path = table->item(row, 0)->text();
                     const QString name = table->item(row, 1)->text();
-                    nameEdit->setText(name);
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readStream(path, name, &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("ADS"),
-                            QStringLiteral("读取数据流失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    const bool printable = std::all_of(data.cbegin(), data.cend(), [](const char value)
+                    const QString inputName = nameEdit->text();
+                    const int revision = dataEdit->document()->revision();
+                    runMetadataRead(dataEdit, loadButton, path,
+                        [path, name](const auto& cancel)
                         {
-                            const unsigned char byte = static_cast<unsigned char>(value);
-                            return byte == '\r' || byte == '\n' || byte == '\t' || byte >= 0x20U;
-                        });
-                    formatCombo->setCurrentIndex(printable ? 0 : 1);
-                    dataEdit->setPlainText(printable
-                        ? QString::fromUtf8(data)
-                        : QString::fromLatin1(data.toHex(' ').toUpper()));
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readStream(path, name, &result.error);
+                            result.name = name;
+                            const bool printable = std::all_of(result.bytes.cbegin(), result.bytes.cend(), [](char value)
+                                { const auto byte = static_cast<unsigned char>(value); return byte == '\r' || byte == '\n' || byte == '\t' || byte >= 0x20U; });
+                            result.format = printable ? 0 : 1;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                                result.text = printable ? QString::fromUtf8(result.bytes) : formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, table, nameEdit, formatCombo, dataEdit, path, name, inputName, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            const int selected = table->currentRow();
+                            if (dataEdit->document()->revision() != revision || nameEdit->text() != inputName || selected < 0 ||
+                                table->item(selected, 0) == nullptr || table->item(selected, 1) == nullptr ||
+                                table->item(selected, 0)->text() != path || table->item(selected, 1)->text() != name) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("ADS"),
+                                    QStringLiteral("读取数据流失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            nameEdit->setText(name);
+                            formatCombo->setCurrentIndex(result.format);
+                            publishMetadataText(dataEdit, state, result, {table, nameEdit, formatCombo});
+                            return true;
+                        }, true);
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, nameEdit, formatCombo, removeCheck, dataEdit]()
@@ -10790,29 +11256,50 @@ namespace
             connect(refreshButton, &QPushButton::clicked, this,
                 [this, table]() { refreshMetadataEaTable(table); });
             connect(loadButton, &QPushButton::clicked, this,
-                [this, table, nameEdit, formatCombo, dataEdit, needEaCheck]()
+                [this, table, loadButton, nameEdit, formatCombo, dataEdit, needEaCheck]()
                 {
                     const int row = table->currentRow();
                     if (row < 0 || table->item(row, 0) == nullptr || table->item(row, 1) == nullptr) return;
-                    DWORD error = ERROR_SUCCESS;
-                    const auto entries = ks::file::metadata::enumerateExtendedAttributes(
-                        table->item(row, 0)->text(), &error);
+                    const QString path = table->item(row, 0)->text();
                     const QString name = table->item(row, 1)->text();
-                    const auto iterator = std::find_if(entries.cbegin(), entries.cend(),
-                        [&name](const ks::file::metadata::ExtendedAttributeEntry& item)
+                    const QString inputName = nameEdit->text();
+                    const int revision = dataEdit->document()->revision();
+                    const bool needEa = needEaCheck->isChecked();
+                    runMetadataRead(dataEdit, loadButton, path,
+                        [path, name](const auto& cancel)
                         {
-                            return item.name == name;
+                            MetadataReadValue result;
+                            const auto entries = ks::file::metadata::enumerateExtendedAttributes(path, &result.error);
+                            const auto found = std::find_if(entries.cbegin(), entries.cend(), [&name](const auto& item) { return item.name == name; });
+                            if (result.error == ERROR_SUCCESS && found == entries.cend()) result.error = ERROR_NOT_FOUND;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                            {
+                                result.name = found->name;
+                                result.needEa = found->needEa;
+                                result.bytes = found->value;
+                                result.format = 1;
+                                result.text = formatMetadataHex(result.bytes, cancel);
+                            }
+                            return result;
+                        },
+                        [this, table, nameEdit, formatCombo, dataEdit, needEaCheck, path, name, inputName, revision, needEa](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            const int selected = table->currentRow();
+                            if (dataEdit->document()->revision() != revision || nameEdit->text() != inputName || needEaCheck->isChecked() != needEa || selected < 0 ||
+                                table->item(selected, 0) == nullptr || table->item(selected, 1) == nullptr ||
+                                table->item(selected, 0)->text() != path || table->item(selected, 1)->text() != name) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("EA"),
+                                    QStringLiteral("读取 EA 失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            nameEdit->setText(result.name);
+                            needEaCheck->setChecked(result.needEa);
+                            formatCombo->setCurrentIndex(1);
+                            publishMetadataText(dataEdit, state, result, {table, nameEdit, formatCombo, needEaCheck});
+                            return true;
                         });
-                    if (error != ERROR_SUCCESS || iterator == entries.cend())
-                    {
-                        QMessageBox::warning(this, QStringLiteral("EA"),
-                            QStringLiteral("读取 EA 失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    nameEdit->setText(iterator->name);
-                    needEaCheck->setChecked(iterator->needEa);
-                    formatCombo->setCurrentIndex(1);
-                    dataEdit->setPlainText(QString::fromLatin1(iterator->value.toHex(' ').toUpper()));
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, nameEdit, formatCombo, dataEdit, needEaCheck, removeCheck]()
@@ -10948,18 +11435,26 @@ namespace
                     QThreadPool::globalInstance()->start(task);
                 });
             connect(effectiveButton, &QPushButton::clicked, this,
-                [this, effectiveTrusteeEdit, effectiveResult]()
+                [this, effectiveButton, effectiveTrusteeEdit, effectiveResult]()
                 {
-                    DWORD accessMask = 0U;
-                    const DWORD error = ks::file::metadata::queryEffectiveAccessMask(
-                        m_filePath,
-                        effectiveTrusteeEdit->text(),
-                        &accessMask);
-                    effectiveResult->setText(error == ERROR_SUCCESS
-                        ? QStringLiteral("Mask: 0x%1 · %2")
-                            .arg(accessMask, 8, 16, QLatin1Char('0'))
-                            .arg(accessMaskToText(accessMask))
-                        : QStringLiteral("检查失败：%1").arg(formatWin32ErrorText(error)));
+                    const QString path = m_filePath;
+                    const QString trustee = effectiveTrusteeEdit->text();
+                    runMetadataRead(effectiveResult, effectiveButton, path,
+                        [path, trustee](const auto&)
+                        {
+                            MetadataReadValue result;
+                            DWORD mask = 0;
+                            result.error = ks::file::metadata::queryEffectiveAccessMask(path, trustee, &mask);
+                            result.text = QStringLiteral("Mask: 0x%1 · %2").arg(mask, 8, 16, QLatin1Char('0')).arg(accessMaskToText(mask));
+                            return result;
+                        },
+                        [effectiveTrusteeEdit, effectiveResult, trustee](const MetadataReadValue& result, MetadataReadState*)
+                        {
+                            if (effectiveTrusteeEdit->text() != trustee) return false;
+                            effectiveResult->setText(result.error == ERROR_SUCCESS ? result.text
+                                : QStringLiteral("检查失败：%1").arg(formatWin32ErrorText(result.error)));
+                            return false;
+                        });
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, sddlEdit, ownerCheck, groupCheck, daclCheck, saclCheck,
@@ -11095,38 +11590,64 @@ namespace
                         resourceFormatCombo->setCurrentIndex(0);
                     }
                 });
-            connect(loadReparseButton, &QPushButton::clicked, this, [this, reparseEdit]()
+            connect(loadReparseButton, &QPushButton::clicked, this, [this, loadReparseButton, reparseEdit]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readRawReparseData(m_filePath, &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("重解析点"),
-                            QStringLiteral("读取原始缓冲失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    reparseEdit->setPlainText(QString::fromLatin1(data.toHex(' ').toUpper()));
+                    const QString path = m_filePath;
+                    const int revision = reparseEdit->document()->revision();
+                    runMetadataRead(reparseEdit, loadReparseButton, path,
+                        [path](const auto& cancel)
+                        {
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readRawReparseData(path, &result.error);
+                            result.format = 1;
+                            if (result.error == ERROR_SUCCESS && !cancel->load()) result.text = formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, reparseEdit, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            if (reparseEdit->document()->revision() != revision) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("重解析点"),
+                                    QStringLiteral("读取原始缓冲失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            publishMetadataText(reparseEdit, state, result);
+                            return true;
+                        });
                 });
             connect(loadResourceButton, &QPushButton::clicked, this,
-                [this, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin,
-                 resourceFormatCombo, resourceDataEdit]()
+                [this, loadResourceButton, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo, resourceDataEdit]()
                 {
-                    DWORD error = ERROR_SUCCESS;
-                    const QByteArray data = ks::file::metadata::readPeResource(
-                        m_filePath,
-                        resourceTypeEdit->text(),
-                        resourceNameEdit->text(),
-                        static_cast<WORD>(resourceLanguageSpin->value()),
-                        &error);
-                    if (error != ERROR_SUCCESS)
-                    {
-                        QMessageBox::warning(this, QStringLiteral("PE 资源"),
-                            QStringLiteral("读取资源失败：%1").arg(formatWin32ErrorText(error)));
-                        return;
-                    }
-                    resourceDataEdit->setPlainText(resourceFormatCombo->currentIndex() == 0
-                        ? QString::fromUtf8(data)
-                        : QString::fromLatin1(data.toHex(' ').toUpper()));
+                    const QString path = m_filePath;
+                    const QString type = resourceTypeEdit->text();
+                    const QString name = resourceNameEdit->text();
+                    const int language = resourceLanguageSpin->value();
+                    const int format = resourceFormatCombo->currentIndex();
+                    const int revision = resourceDataEdit->document()->revision();
+                    runMetadataRead(resourceDataEdit, loadResourceButton, path,
+                        [path, type, name, language, format](const auto& cancel)
+                        {
+                            MetadataReadValue result;
+                            result.bytes = ks::file::metadata::readPeResource(path, type, name, static_cast<WORD>(language), &result.error);
+                            result.format = format;
+                            if (result.error == ERROR_SUCCESS && !cancel->load())
+                                result.text = format == 0 ? QString::fromUtf8(result.bytes) : formatMetadataHex(result.bytes, cancel);
+                            return result;
+                        },
+                        [this, resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo, resourceDataEdit, type, name, language, format, revision](const MetadataReadValue& result, MetadataReadState* state)
+                        {
+                            if (resourceTypeEdit->text() != type || resourceNameEdit->text() != name || resourceLanguageSpin->value() != language ||
+                                resourceFormatCombo->currentIndex() != format || resourceDataEdit->document()->revision() != revision) return false;
+                            if (result.error != ERROR_SUCCESS)
+                            {
+                                QMessageBox::warning(this, QStringLiteral("PE 资源"),
+                                    QStringLiteral("读取资源失败：%1").arg(formatWin32ErrorText(result.error)));
+                                return false;
+                            }
+                            publishMetadataText(resourceDataEdit, state, result, {resourceTypeEdit, resourceNameEdit, resourceLanguageSpin, resourceFormatCombo});
+                            return true;
+                        }, true);
                 });
             connect(stageButton, &QPushButton::clicked, this,
                 [this, reparseAction, reparseEdit, resourceTypeEdit, resourceNameEdit,
@@ -11346,7 +11867,17 @@ namespace
 
             m_metadataHasSnapshot = false;
             setMetadataEditorBusy(false);
-            QMetaObject::invokeMethod(page, [this]() { refreshMetadataEditor(); }, Qt::QueuedConnection);
+            if (!m_pendingPatches.isEmpty())
+            {
+                QList<ks::file::metadata::FileSnapshot> snapshots;
+                snapshots.reserve(m_pendingPatches.size());
+                for (const auto& patch : m_pendingPatches) snapshots.push_back(patch.snapshot);
+                applyBatchMetadataSnapshotsToEditor(snapshots);
+            }
+            else
+            {
+                QMetaObject::invokeMethod(page, [this]() { refreshMetadataEditor(); }, Qt::QueuedConnection);
+            }
             return page;
         }
 
@@ -13382,6 +13913,9 @@ namespace
         QLabel* m_pendingChangesLabel = nullptr; // 底部统一保存栏的待处理摘要。
         QPushButton* m_discardPendingButton = nullptr; // 放弃全部未写入补丁。
         QPushButton* m_saveAllButton = nullptr; // 唯一会触发文件写入的入口。
+        QHash<QObject*, QPointer<MetadataReadState>> m_metadataReadStates;
+        bool m_stagingSnapshotBusy = false;
+        std::shared_ptr<std::atomic_bool> m_stagingSnapshotCancel;
         bool m_transactionBusy = false; // 保存事务运行期间锁定编辑和重复提交。
         std::shared_ptr<std::atomic_bool> m_savePreflightCancel; // 只读签名预检可以取消，不中断已确认的写事务。
         quint64 m_savePreflightGeneration = 0; // 取消/重试后旧签名计划不能进入确认或写入。

@@ -6959,6 +6959,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "暂存输入已变化，请检查当前内容后重新暂存。": "暂存输入已变化，请检查当前内容后重新暂存。",
     "● 归档失败: %1": "● 归档失败: %1",
     "WMI：归档 %1，显示跳过 %2，待显示 %3": "WMI：归档 %1，显示跳过 %2，待显示 %3",
     "DDMA operation is running; accepted transactions finish and retain recovery records after this window closes.": "DDMA 操作正在执行；窗口关闭后，已接受的事务仍会完成并保留还原记录。",
