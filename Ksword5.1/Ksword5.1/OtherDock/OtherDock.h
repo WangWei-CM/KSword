@@ -62,10 +62,13 @@ public:
     static ks::ui::PageNavigationCatalog navigationCatalog(const OtherDock* existing = nullptr);
     QWidget* activateNavigationDescriptor(const QString& id);
 
+    enum class PageScope { Main, WindowListOnly };
+
     // 构造函数：
     // - 作用：初始化窗口列表页与工具栏，并触发首轮枚举。
     // - 参数 parent：Qt 父控件。
     explicit OtherDock(QWidget* parent = nullptr);
+    OtherDock(QWidget* parent, PageScope scope, const QVector<quint32>& processIds);
 
     // 析构函数：
     // - 作用：停止自动刷新定时器，确保后台流程退出安全。
@@ -202,6 +205,7 @@ private:
 
 private:
     // 顶层布局与工具栏。
+    PageScope m_pageScope = PageScope::Main;
     QVBoxLayout* m_rootLayout = nullptr;          // 根布局。
     QWidget* m_toolBarWidget = nullptr;           // 顶部工具栏容器。
     QHBoxLayout* m_toolBarLayout = nullptr;       // 顶部工具栏布局。

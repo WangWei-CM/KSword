@@ -3675,14 +3675,26 @@ std::unordered_map<DWORD, std::vector<std::shared_ptr<WindowMessagePort>>> Windo
 std::unordered_map<HWINEVENTHOOK, std::shared_ptr<WindowMessagePort>> WindowDetailDialog::s_eventHookMap;
 
 OtherDock::OtherDock(QWidget* parent)
-    : QWidget(parent)
+    : OtherDock(parent, PageScope::Main, {})
 {
+}
+
+OtherDock::OtherDock(QWidget* parent, PageScope scope, const QVector<quint32>& processIds)
+    : QWidget(parent), m_pageScope(scope)
+{
+    // Caller scope is complete before controls or the first sampling/projection
+    // request exist. A process detail host never creates a hidden desktop page.
+    for (quint32 pid : processIds)
+        if (pid != 0) m_externalProcessIdFilterSet.insert(pid);
+
     kLogEvent event;
     info << event << "[OtherDock] 构造开始，初始化窗口管理页。" << eol;
 
     m_windowState = makeWindowBackgroundValue<ks::windowlist::Snapshot>();
-    m_desktopOperation = new ks::ui::AsyncOperation(this);
-    m_desktopPresentationOperation = new ks::ui::AsyncOperation(this);
+    if (m_pageScope == PageScope::Main) {
+        m_desktopOperation = new ks::ui::AsyncOperation(this);
+        m_desktopPresentationOperation = new ks::ui::AsyncOperation(this);
+    }
     m_windowRefreshOperation = new ks::ui::AsyncOperation(this);
     m_windowProjectionOperation = new ks::ui::AsyncOperation(this);
     m_windowFilterTimer = new QTimer(this);
@@ -3813,7 +3825,7 @@ void OtherDock::initializeUi()
     m_clearExternalProcessFilterButton->setToolTip(QStringLiteral("清除进程页跳转带入的 PID 筛选"));
     m_clearExternalProcessFilterButton->setStyleSheet(blueButtonStyle());
     m_clearExternalProcessFilterButton->setFixedWidth(32);
-    m_clearExternalProcessFilterButton->setEnabled(false);
+    m_clearExternalProcessFilterButton->setEnabled(!m_externalProcessIdFilterSet.isEmpty());
 
     m_autoRefreshCheck = new QCheckBox(QStringLiteral("自动"), m_toolBarWidget);
     m_autoRefreshCheck->setToolTip(QStringLiteral("启用自动刷新窗口列表"));
@@ -4034,69 +4046,73 @@ void OtherDock::initializeUi()
     m_navigationTabs.add(kWindowNavigation[0], m_contentTabWidget, m_windowListPage);
 
     // 桌面管理页：列出窗口站与桌面，并补充 SessionId / SID / 权限状态等上下文。
-    m_desktopPage = new QWidget(m_contentTabWidget);
-    m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
-    m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
-    m_desktopPageLayout->setSpacing(6);
+    if (m_pageScope == PageScope::Main)
+    {
+        m_desktopPage = new QWidget(m_contentTabWidget);
+        m_desktopPageLayout = new QVBoxLayout(m_desktopPage);
+        m_desktopPageLayout->setContentsMargins(0, 0, 0, 0);
+        m_desktopPageLayout->setSpacing(6);
 
-    m_desktopToolLayout = new QHBoxLayout();
-    m_desktopToolLayout->setContentsMargins(0, 0, 0, 0);
-    m_desktopToolLayout->setSpacing(6);
+        m_desktopToolLayout = new QHBoxLayout();
+        m_desktopToolLayout->setContentsMargins(0, 0, 0, 0);
+        m_desktopToolLayout->setSpacing(6);
 
-    m_desktopRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_desktopPage);
-    m_desktopRefreshButton->setToolTip(QStringLiteral("刷新可用桌面列表"));
-    m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
-    m_desktopRefreshButton->setFixedWidth(32);
+        m_desktopRefreshButton = new QPushButton(QIcon(":/Icon/process_refresh.svg"), QString(), m_desktopPage);
+        m_desktopRefreshButton->setToolTip(QStringLiteral("刷新可用桌面列表"));
+        m_desktopRefreshButton->setStyleSheet(blueButtonStyle());
+        m_desktopRefreshButton->setFixedWidth(32);
 
-    m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/desktop_switch.svg"), QString(), m_desktopPage);
-    m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
-    m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
-    m_desktopSwitchButton->setFixedWidth(32);
+        m_desktopSwitchButton = new QPushButton(QIcon(":/Icon/desktop_switch.svg"), QString(), m_desktopPage);
+        m_desktopSwitchButton->setToolTip(QStringLiteral("切换到选中桌面（SwitchDesktop）"));
+        m_desktopSwitchButton->setStyleSheet(blueButtonStyle());
+        m_desktopSwitchButton->setFixedWidth(32);
 
-    m_desktopCreateButton = new QPushButton(QIcon(":/Icon/desktop_create.svg"), QString(), m_desktopPage);
-    m_desktopCreateButton->setToolTip(QStringLiteral("新建桌面：在弹出窗口中设置名称、权限、安全描述符和私有访问参数"));
-    m_desktopCreateButton->setStyleSheet(blueButtonStyle());
-    m_desktopCreateButton->setFixedWidth(32);
+        m_desktopCreateButton = new QPushButton(QIcon(":/Icon/desktop_create.svg"), QString(), m_desktopPage);
+        m_desktopCreateButton->setToolTip(QStringLiteral("新建桌面：在弹出窗口中设置名称、权限、安全描述符和私有访问参数"));
+        m_desktopCreateButton->setStyleSheet(blueButtonStyle());
+        m_desktopCreateButton->setFixedWidth(32);
 
-    m_desktopStatusLabel = new QLabel(
-        QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
-        m_desktopPage);
-    m_desktopStatusLabel->setWordWrap(true);
+        m_desktopStatusLabel = new QLabel(
+            QStringLiteral("支持枚举窗口站/桌面；切换会尝试“桌面名”和“窗口站\\\\桌面名”两种方式。"),
+            m_desktopPage);
+        m_desktopStatusLabel->setWordWrap(true);
 
-    m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopCreateButton, 0);
-    m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
-    ks::ui::NormalizeToolbarRow(m_desktopToolLayout);
-    m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
+        m_desktopToolLayout->addWidget(m_desktopRefreshButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopSwitchButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopCreateButton, 0);
+        m_desktopToolLayout->addWidget(m_desktopStatusLabel, 1);
+        ks::ui::NormalizeToolbarRow(m_desktopToolLayout);
+        m_desktopPageLayout->addLayout(m_desktopToolLayout, 0);
 
-    m_desktopTable = new ks::ui::TableActionTableView(m_desktopPage);
-    initializeDesktopTableModel();
-    m_desktopTable->installEventFilter(this);
-    m_desktopStatusLabel->setToolTip(m_desktopStatusLabel->text());
-    m_desktopStatusLabel->setText(QStringLiteral("未读取"));
-    m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_desktopTable->setAlternatingRowColors(true);
-    m_desktopTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(11, QHeaderView::ResizeToContents);
-    m_desktopTable->horizontalHeader()->setSectionResizeMode(12, QHeaderView::Stretch);
-    m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
-    m_desktopPageLayout->addWidget(m_desktopTable, 1);
+        m_desktopTable = new ks::ui::TableActionTableView(m_desktopPage);
+        initializeDesktopTableModel();
+        m_desktopTable->installEventFilter(this);
+        m_desktopStatusLabel->setToolTip(m_desktopStatusLabel->text());
+        m_desktopStatusLabel->setText(QStringLiteral("未读取"));
+        m_desktopTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_desktopTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_desktopTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_desktopTable->setAlternatingRowColors(true);
+        m_desktopTable->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(8, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(11, QHeaderView::ResizeToContents);
+        m_desktopTable->horizontalHeader()->setSectionResizeMode(12, QHeaderView::Stretch);
+        m_desktopTable->horizontalHeader()->setStyleSheet(blueHeaderStyle());
+        m_desktopPageLayout->addWidget(m_desktopTable, 1);
 
-    m_navigationTabs.add(kWindowNavigation[1], m_contentTabWidget, m_desktopPage);
+        m_navigationTabs.add(kWindowNavigation[1], m_contentTabWidget, m_desktopPage);
+
+    }
 
     // 底部状态栏：展示总数、可见数、系统窗口数和当前选中信息。
     m_statusBar = new QStatusBar(this);
@@ -4335,26 +4351,29 @@ void OtherDock::initializeConnections()
         QMessageBox::information(this, QStringLiteral("窗口截图"), QStringLiteral("截图已保存：%1").arg(savePath));
     });
 
-    // 桌面管理页连接：刷新、切换、新建、双击和右键菜单分别进入对应桌面操作链路。
-    connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
-        kLogEvent event;
-        info << event
-            << "[OtherDock] 用户点击刷新桌面列表。"
-            << eol;
-        refreshDesktopList();
-    });
-    connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
-        switchToSelectedDesktop();
-    });
-    connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
-        showCreateDesktopDialog();
-    });
-    connect(m_desktopTable, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
-        switchToSelectedDesktop();
-    });
-    connect(m_desktopTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
-        showDesktopContextMenu(pos);
-    });
+    if (m_desktopTable != nullptr)
+    {
+        // 桌面管理页连接：刷新、切换、新建、双击和右键菜单分别进入对应桌面操作链路。
+        connect(m_desktopRefreshButton, &QPushButton::clicked, this, [this]() {
+            kLogEvent event;
+            info << event
+                << "[OtherDock] 用户点击刷新桌面列表。"
+                << eol;
+            refreshDesktopList();
+        });
+        connect(m_desktopSwitchButton, &QPushButton::clicked, this, [this]() {
+            switchToSelectedDesktop();
+        });
+        connect(m_desktopCreateButton, &QPushButton::clicked, this, [this]() {
+            showCreateDesktopDialog();
+        });
+        connect(m_desktopTable, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
+            switchToSelectedDesktop();
+        });
+        connect(m_desktopTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& pos) {
+            showDesktopContextMenu(pos);
+        });
+    }
 }
 
 void OtherDock::applyViewMode()
