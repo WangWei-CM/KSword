@@ -126,6 +126,7 @@
 #include <QStatusBar>
 #include <QStorageInfo>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QStringList>
 #include <QStackedWidget>
 #include <QTabWidget>
@@ -2218,111 +2219,251 @@ namespace
         return content;
     }
 
-    // 仅为请求显示的单元格排队。查询无论多慢都不占用模型/UI 线程；
-    // 一次至多查询 32 项，空结果也缓存，重置后用代次和路径复核拒绝旧结果。
-    class AsyncReparseMarkerCache final : public QObject
+    // 展示需求只由面板视口发布。data() 只读缓存，不为排序、复制或尺寸计算入队。
+    struct FileVisualDemand
+    {
+        QString path;
+        QPersistentModelIndex index;
+        int pathRole = Qt::UserRole;
+
+        bool operator==(const FileVisualDemand& other) const
+        {
+            return path == other.path && index == other.index && pathRole == other.pathRole;
+        }
+    };
+
+    constexpr int FileVisualDemandLimit = 512;
+
+    // 同批、同父项、连续行共用通知；隐藏/过期需求不会产生展示通知。
+    void notifyFileVisualRows(QAbstractItemModel* model, const QVector<QModelIndex>& changed,
+        const int firstColumn, const int lastColumn, const QList<int>& roles)
+    {
+        QPointer<QAbstractItemModel> guard(model);
+        QHash<QPersistentModelIndex, QVector<int>> groups;
+        for (const QModelIndex& index : changed)
+            groups[QPersistentModelIndex(index.parent())].push_back(index.row());
+        for (auto it = groups.begin(); it != groups.end(); ++it)
+        {
+            auto& rows = it.value();
+            std::sort(rows.begin(), rows.end());
+            rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+            for (qsizetype begin = 0; begin < rows.size();)
+            {
+                qsizetype end = begin;
+                while (end + 1 < rows.size() && rows[end + 1] == rows[end] + 1)
+                    ++end;
+                emit model->dataChanged(model->index(rows[begin], firstColumn, it.key()),
+                    model->index(rows[end], lastColumn, it.key()), roles);
+                if (!guard)
+                    return;
+                begin = end + 1;
+            }
+        }
+    }
+
+    template<class Result, class Cached = Result>
+    class AsyncFileVisualCache final : public QObject
     {
     public:
-        explicit AsyncReparseMarkerCache(
-            QObject* parent, std::function<void(const QModelIndex&)> changed)
-            : QObject(parent), m_changed(std::move(changed)), m_timer(this)
+        using Canceled = std::function<bool()>;
+        using Query = std::function<Result(const QString&, const Canceled&)>;
+        using Convert = std::function<Cached(Result, const QModelIndex&)>;
+
+        AsyncFileVisualCache(QObject* parent, const int batchSize, Query query, Convert convert,
+            std::function<void(const QVector<QModelIndex>&)> changed)
+            : QObject(parent), m_batchSize(batchSize), m_query(std::move(query)),
+              m_convert(std::move(convert)), m_changed(std::move(changed)), m_timer(this),
+              m_dispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
         {
             m_timer.setSingleShot(true);
             connect(&m_timer, &QTimer::timeout, this, [this]() { startBatch(); });
         }
 
-        QString marker(const QString& path, const QModelIndex& index)
+        ~AsyncFileVisualCache() override
+        {
+            m_dispatcher->close();
+            m_epoch->fetch_add(1);
+        }
+
+        const Cached* lookup(const QString& path) const
         {
             const auto cached = m_cache.constFind(path);
-            if (cached != m_cache.cend())
+            return cached == m_cache.cend() ? nullptr : &cached.value();
+        }
+
+        void setDemand(const QVector<FileVisualDemand>& requested)
+        {
+            QVector<FileVisualDemand> demand;
+            QSet<QString> paths;
+            demand.reserve(std::min<qsizetype>(requested.size(), FileVisualDemandLimit));
+            for (const auto& item : requested)
             {
-                return cached.value();
+                if (!valid(item) || paths.contains(item.path))
+                    continue;
+                paths.insert(item.path);
+                demand.push_back(item);
+                if (demand.size() == FileVisualDemandLimit)
+                    break;
             }
-            if (!m_pending.contains(path) && !m_inFlight.contains(path))
-            {
-                m_pending.insert(path, QPersistentModelIndex(index.siblingAtColumn(0)));
-            }
-            if (!m_running && !m_timer.isActive())
-            {
-                m_timer.start(0);
-            }
-            return QString();
+            if (demand == m_demand)
+                return;
+            m_demand = std::move(demand);
+            m_demandPaths = std::move(paths);
+            m_epoch->fetch_add(1);
+            rebuildPending();
         }
 
         void reset()
         {
             ++m_generation;
+            m_epoch->fetch_add(1);
+            m_timer.stop();
             m_cache.clear();
+            m_cacheOrder.clear();
+            m_demand.clear();
+            m_demandPaths.clear();
             m_pending.clear();
-            m_inFlight.clear();
         }
 
     private:
+        static bool valid(const FileVisualDemand& item)
+        {
+            return item.index.isValid() && !item.path.isEmpty()
+                && item.index.data(item.pathRole).toString() == item.path;
+        }
+
+        void rebuildPending()
+        {
+            m_pending.clear();
+            // 新视口顺序覆盖旧队列；当前有界批次完成后立即处理最新项。
+            for (const auto& item : m_demand)
+                if (!m_cache.contains(item.path) && !m_inFlight.contains(item.path) && valid(item))
+                    m_pending.push_back(item);
+            if (!m_running && !m_pending.isEmpty() && !m_timer.isActive())
+                m_timer.start(0);
+            else if (m_pending.isEmpty())
+                m_timer.stop();
+        }
+
+        void cacheResult(const QString& path, Cached value)
+        {
+            if (!m_cache.contains(path) && m_cache.size() >= FileVisualDemandLimit)
+            {
+                // 优先淘汰旧视口结果，不能在稳定的 512 项需求中反复淘汰可见项。
+                auto victim = std::find_if(m_cacheOrder.begin(), m_cacheOrder.end(),
+                    [this](const QString& key) { return !m_demandPaths.contains(key); });
+                if (victim == m_cacheOrder.end())
+                    victim = m_cacheOrder.begin();
+                m_cache.remove(*victim);
+                m_cacheOrder.erase(victim);
+            }
+            if (!m_cache.contains(path))
+                m_cacheOrder.push_back(path);
+            m_cache.insert(path, std::move(value)); // 查询失败/空标记同样缓存。
+        }
+
         void startBatch()
         {
             if (m_running || m_pending.isEmpty())
-            {
                 return;
-            }
-            QHash<QString, QPersistentModelIndex> batch;
-            while (!m_pending.isEmpty() && batch.size() < 32)
+            QVector<FileVisualDemand> batch;
+            const int count = std::min<int>(m_batchSize, static_cast<int>(m_pending.size()));
+            batch.reserve(count);
+            for (int i = 0; i < count; ++i)
             {
-                auto next = m_pending.begin();
-                batch.insert(next.key(), next.value());
-                m_inFlight.insert(next.key());
-                m_pending.erase(next);
+                batch.push_back(m_pending[i]);
+                m_inFlight.insert(m_pending[i].path);
             }
+            m_pending.remove(0, count);
             m_running = true;
             const int generation = m_generation;
-            QPointer<AsyncReparseMarkerCache> guard(this);
-            QThreadPool::globalInstance()->start(QRunnable::create([guard, generation, batch]() {
-                QHash<QString, QString> results;
-                for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                {
-                    results.insert(it.key(), reparseKindMarkerForPath(it.key()));
-                }
-                // QPointer 只在 UI 线程解引用，不在工作线程与模型销毁竞争。
-                QMetaObject::invokeMethod(qApp, [guard, generation, batch, results]() {
-                    if (!guard)
+            const auto epoch = m_epoch;
+            const auto expectedEpoch = epoch->load();
+            const auto dispatcher = m_dispatcher;
+            const Query query = m_query;
+            // 持久索引只在 UI 回调中读取；worker 只使用路径与共享取消代次。
+            QStringList paths;
+            for (const auto& item : batch)
+                paths.push_back(item.path);
+            QPointer<AsyncFileVisualCache> guard(this);
+            QThreadPool::globalInstance()->start(QRunnable::create(
+                [guard, dispatcher, generation, epoch, expectedEpoch, batch, paths, query]() {
+                    const Canceled canceled = [epoch, expectedEpoch]() {
+                        return epoch->load() != expectedEpoch;
+                    };
+                    QHash<QString, Result> results;
+                    for (const QString& path : paths)
                     {
-                        return;
+                        if (canceled())
+                            break;
+                        Result result = query(path, canceled);
+                        if (canceled())
+                            break;
+                        results.insert(path, std::move(result));
                     }
-                    guard->m_running = false;
-                    if (guard->m_generation == generation)
-                    {
-                        for (auto it = batch.cbegin(); it != batch.cend(); ++it)
+                    dispatcher->post([guard, generation, batch, results = std::move(results)]() mutable {
+                        if (!guard)
+                            return;
+                        guard->m_running = false;
+                        for (const auto& item : batch)
+                            guard->m_inFlight.remove(item.path);
+                        QVector<QModelIndex> changed;
+                        if (guard->m_generation == generation)
                         {
-                            guard->m_inFlight.remove(it.key());
-                            const QModelIndex index = it.value();
-                            const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
-                            if (!index.isValid() || (fs ? fs->filePath(index) :
-                                index.data(Qt::UserRole).toString()) != it.key())
+                            for (const auto& item : batch)
                             {
-                                continue;
-                            }
-                            const QString markerText = results.value(it.key());
-                            guard->m_cache.insert(it.key(), markerText);
-                            if (!markerText.isEmpty())
-                            {
-                                guard->m_changed(index);
+                                auto result = results.find(item.path);
+                                if (result == results.end() || !valid(item))
+                                    continue;
+                                guard->cacheResult(item.path,
+                                    guard->m_convert(std::move(result.value()), item.index));
+                                if (guard->m_demandPaths.contains(item.path))
+                                    changed.push_back(item.index);
                             }
                         }
-                    }
-                    if (!guard->m_pending.isEmpty())
-                    {
-                        guard->m_timer.start(0);
-                    }
-                }, Qt::QueuedConnection);
-            }));
+                        guard->rebuildPending();
+                        if (!changed.isEmpty())
+                            guard->m_changed(changed);
+                    });
+                }));
         }
 
-        std::function<void(const QModelIndex&)> m_changed;
+        int m_batchSize;
+        Query m_query;
+        Convert m_convert;
+        std::function<void(const QVector<QModelIndex>&)> m_changed;
         QTimer m_timer;
-        QHash<QString, QString> m_cache;
-        QHash<QString, QPersistentModelIndex> m_pending;
+        QHash<QString, Cached> m_cache;
+        QStringList m_cacheOrder;
+        QVector<FileVisualDemand> m_demand;
+        QSet<QString> m_demandPaths;
+        QVector<FileVisualDemand> m_pending;
         QSet<QString> m_inFlight;
+        std::shared_ptr<std::atomic<quint64>> m_epoch = std::make_shared<std::atomic<quint64>>(0);
+        std::shared_ptr<ks::ui::AsyncUiDispatcher> m_dispatcher;
         int m_generation = 0;
         bool m_running = false;
+    };
+
+    class AsyncReparseMarkerCache final
+    {
+    public:
+        AsyncReparseMarkerCache(QObject* parent,
+            std::function<void(const QVector<QModelIndex>&)> changed)
+            : m_cache(parent, 32,
+                [](const QString& path, const auto&) { return reparseKindMarkerForPath(path); },
+                [](QString value, const QModelIndex&) { return value; }, std::move(changed)) {}
+
+        QString marker(const QString& path) const
+        {
+            const QString* value = m_cache.lookup(path);
+            return value ? *value : QString();
+        }
+        void setDemand(const QVector<FileVisualDemand>& demand) { m_cache.setDemand(demand); }
+        void reset() { m_cache.reset(); }
+
+    private:
+        AsyncFileVisualCache<QString> m_cache;
     };
 
     struct FilePresentation
@@ -2331,7 +2472,8 @@ namespace
         QString type;
     };
 
-    FilePresentation queryFilePresentation(const QString& path)
+    FilePresentation queryFilePresentation(const QString& path,
+        const std::function<bool()>& canceled)
     {
         FilePresentation result;
         const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -2346,6 +2488,9 @@ namespace
         if (SUCCEEDED(comResult))
             ::CoUninitialize();
 
+        // Shell 已开始的调用允许安全结束，隐藏/换视口后不再启动下一次阻塞调用。
+        if (canceled())
+            return result;
         // MIME 数据库初始化、名称匹配及内容嗅探全部在工作线程。
         const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);
         result.type = mime.comment();
@@ -2354,104 +2499,36 @@ namespace
         return result;
     }
 
-    // 只为被视图请求的项补充展示信息；QPixmap 和持久索引只在 UI 线程使用。
-    class AsyncFilePresentationCache final : public QObject
+    // QPixmap 仅在 UI 回填创建；未富化项保持 QFileSystemModel 的原缓存值。
+    class AsyncFilePresentationCache final
     {
     public:
         explicit AsyncFilePresentationCache(QObject* parent)
-            : QObject(parent), m_timer(this)
-        {
-            m_timer.setSingleShot(true);
-            connect(&m_timer, &QTimer::timeout, this, [this]() { startBatch(); });
-        }
+            : m_cache(parent, 8, queryFilePresentation,
+                [](FilePresentation result, const QModelIndex& index) {
+                    CachedPresentation cached;
+                    if (!result.icon.isNull())
+                        cached.icon = QIcon(QPixmap::fromImage(result.icon));
+                    const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
+                    if (fs && !fs->isDir(index) && !result.type.isEmpty())
+                        cached.type = result.type;
+                    return cached;
+                }, [parent](const QVector<QModelIndex>& changed) {
+                    notifyFileVisualRows(static_cast<QAbstractItemModel*>(parent), changed, 0, 2,
+                        { Qt::DecorationRole, Qt::DisplayRole });
+                }) {}
 
-        QVariant value(const QString& path, const QModelIndex& index, const int role)
+        QVariant value(const QString& path, const int role) const
         {
-            const auto cached = m_cache.constFind(path);
-            if (cached != m_cache.cend())
-                return role == Qt::DecorationRole ? cached->icon : cached->type;
-            if (!m_pending.contains(path) && !m_inFlight.contains(path))
-                m_pending.insert(path, QPersistentModelIndex(index.siblingAtColumn(0)));
-            if (!m_running && !m_timer.isActive())
-                m_timer.start(0);
-            return QVariant();
+            const auto* value = m_cache.lookup(path);
+            return value ? (role == Qt::DecorationRole ? value->icon : value->type) : QVariant();
         }
-
-        void reset()
-        {
-            ++m_generation;
-            m_cache.clear();
-            m_pending.clear();
-            m_inFlight.clear();
-        }
+        void setDemand(const QVector<FileVisualDemand>& demand) { m_cache.setDemand(demand); }
+        void reset() { m_cache.reset(); }
 
     private:
-        struct CachedPresentation
-        {
-            QVariant icon;
-            QVariant type;
-        };
-
-        void startBatch()
-        {
-            if (m_running || m_pending.isEmpty())
-                return;
-            QHash<QString, QPersistentModelIndex> batch;
-            while (!m_pending.isEmpty() && batch.size() < 8)
-            {
-                auto next = m_pending.begin();
-                batch.insert(next.key(), next.value());
-                m_inFlight.insert(next.key());
-                m_pending.erase(next);
-            }
-            m_running = true;
-            const int generation = m_generation;
-            QPointer<AsyncFilePresentationCache> guard(this);
-            QThreadPool::globalInstance()->start(QRunnable::create([guard, generation, batch]() {
-                QHash<QString, FilePresentation> results;
-                for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                    results.insert(it.key(), queryFilePresentation(it.key()));
-                QMetaObject::invokeMethod(qApp, [guard, generation, batch, results]() {
-                    if (!guard)
-                        return;
-                    guard->m_running = false;
-                    if (guard->m_generation == generation)
-                    {
-                        for (auto it = batch.cbegin(); it != batch.cend(); ++it)
-                        {
-                            guard->m_inFlight.remove(it.key());
-                            const QModelIndex index = it.value();
-                            const auto* fs = qobject_cast<const QFileSystemModel*>(index.model());
-                            if (!index.isValid() || !fs || fs->filePath(index) != it.key())
-                                continue;
-                            const FilePresentation result = results.value(it.key());
-                            CachedPresentation cached;
-                            if (!result.icon.isNull())
-                                cached.icon = QIcon(QPixmap::fromImage(result.icon));
-                            if (!fs->isDir(index) && !result.type.isEmpty())
-                                cached.type = result.type;
-                            // 限制图标的 GUI 资源数量，切目录时也只需释放有界缓存。
-                            if (guard->m_cache.size() >= 512)
-                                guard->m_cache.erase(guard->m_cache.begin());
-                            // 包括失败结果，避免绘制时重复投递慢查询。
-                            guard->m_cache.insert(it.key(), cached);
-                            auto* model = const_cast<QFileSystemModel*>(fs);
-                            emit model->dataChanged(index, index.siblingAtColumn(2),
-                                { Qt::DecorationRole, Qt::DisplayRole });
-                        }
-                    }
-                    if (!guard->m_pending.isEmpty())
-                        guard->m_timer.start(0);
-                }, Qt::QueuedConnection);
-            }));
-        }
-
-        QTimer m_timer;
-        QHash<QString, CachedPresentation> m_cache;
-        QHash<QString, QPersistentModelIndex> m_pending;
-        QSet<QString> m_inFlight;
-        int m_generation = 0;
-        bool m_running = false;
+        struct CachedPresentation { QVariant icon; QVariant type; };
+        AsyncFileVisualCache<FilePresentation, CachedPresentation> m_cache;
     };
 
     // Qt 6.9 在 UI 线程为目录整批结果调用 icon/type；这条路径只读已 stat 的
@@ -2489,9 +2566,8 @@ namespace
     {
     public:
         explicit ReparseAwareFileSystemModel(QObject* parent = nullptr)
-            : QFileSystemModel(parent), m_presentation(this), m_markers(this, [this](const QModelIndex& index) {
-                emit dataChanged(index, index.siblingAtColumn(2),
-                    { Qt::DisplayRole, Qt::ToolTipRole });
+            : QFileSystemModel(parent), m_presentation(this), m_markers(this, [this](const QVector<QModelIndex>& changed) {
+                notifyFileVisualRows(this, changed, 0, 2, { Qt::DisplayRole, Qt::ToolTipRole });
             })
         {
             setIconProvider(&m_iconProvider);
@@ -2500,7 +2576,13 @@ namespace
             connect(this, &QAbstractItemModel::modelReset, this,
                 [this]() { m_markers.reset(); m_presentation.reset(); });
             connect(this, &QFileSystemModel::fileRenamed, this,
-                [this](const QString&, const QString&, const QString&) { m_presentation.reset(); });
+                [this](const QString&, const QString&, const QString&) { m_markers.reset(); m_presentation.reset(); });
+        }
+
+        void setVisualDemand(const QVector<FileVisualDemand>& demand)
+        {
+            m_markers.setDemand(demand);
+            m_presentation.setDemand(demand);
         }
 
         QVariant data(const QModelIndex& index, const int role = Qt::DisplayRole) const override
@@ -2514,7 +2596,7 @@ namespace
             if ((role == Qt::DecorationRole && index.column() == 0)
                 || (role == Qt::DisplayRole && index.column() == 2 && !isDir(index)))
             {
-                const QVariant enriched = m_presentation.value(filePath(index), index, role);
+                const QVariant enriched = m_presentation.value(filePath(index), role);
                 if (enriched.isValid())
                     baseValue = enriched;
             }
@@ -2538,7 +2620,7 @@ namespace
                 localizedBaseValue = ks::i18n::displayText(baseValue.toString());
             }
 
-            const QString markerText = m_markers.marker(filePath(index), index);
+            const QString markerText = m_markers.marker(filePath(index));
             if (markerText.isEmpty())
             {
                 return localizedBaseValue;
@@ -2588,8 +2670,8 @@ namespace
 
     private:
         FastFileIconProvider m_iconProvider;
-        mutable AsyncFilePresentationCache m_presentation;
-        mutable AsyncReparseMarkerCache m_markers;
+        AsyncFilePresentationCache m_presentation;
+        AsyncReparseMarkerCache m_markers;
     };
 
     // ExplorerFileSortProxyModel：
@@ -4448,9 +4530,8 @@ namespace
             : QAbstractTableModel(parent), m_sizeText(std::move(sizeText)),
               m_directoryIcon(QApplication::style()->standardIcon(QStyle::SP_DirIcon)),
               m_fileIcon(QApplication::style()->standardIcon(QStyle::SP_FileIcon)),
-              m_markers(this, [this](const QModelIndex& index) {
-                  emit dataChanged(index.siblingAtColumn(2), index.siblingAtColumn(2),
-                      { Qt::DisplayRole, Qt::ToolTipRole });
+              m_markers(this, [this](const QVector<QModelIndex>& changed) {
+                  notifyFileVisualRows(this, changed, 2, 2, { Qt::DisplayRole, Qt::ToolTipRole });
               })
         {
         }
@@ -4474,6 +4555,8 @@ namespace
                     }));
             }
         }
+
+        void setVisualDemand(const QVector<FileVisualDemand>& demand) { m_markers.setDemand(demand); }
 
         int rowCount(const QModelIndex& parent = {}) const override
         {
@@ -4542,7 +4625,7 @@ namespace
                 return entry.isDirectory ? QStringLiteral("-") : m_sizeText(entry.sizeBytes);
             case ManualModelColumn::Type:
             {
-                const QString marker = m_markers.marker(entry.absolutePath, index);
+                const QString marker = m_markers.marker(entry.absolutePath);
                 const QString typeText = ks::i18n::displayText(entry.typeText);
                 return marker.isEmpty() ? typeText :
                     QStringLiteral("%1 / %2").arg(ks::i18n::displayText(marker), typeText);
@@ -4564,7 +4647,208 @@ namespace
         std::function<QString(std::uint64_t)> m_sizeText;
         QIcon m_directoryIcon;
         QIcon m_fileIcon;
-        mutable AsyncReparseMarkerCache m_markers;
+        AsyncReparseMarkerCache m_markers;
+    };
+
+    // 原委托继续拥有绘制、编辑、提示和尺寸语义；观察器只接收 Qt 已选择的可见索引。
+    class FileVisualDemandDelegate final : public QAbstractItemDelegate
+    {
+    public:
+        FileVisualDemandDelegate(QAbstractItemDelegate* original, QObject* parent,
+            std::function<void(const QModelIndex&, const QRect&)> painted)
+            : QAbstractItemDelegate(parent), m_original(original), m_fallback(this),
+              m_painted(std::move(painted))
+        {
+            for (QAbstractItemDelegate* delegate : { original, static_cast<QAbstractItemDelegate*>(&m_fallback) })
+            {
+                if (!delegate)
+                    continue;
+                connect(delegate, &QAbstractItemDelegate::commitData, this, &QAbstractItemDelegate::commitData);
+                connect(delegate, &QAbstractItemDelegate::closeEditor, this, &QAbstractItemDelegate::closeEditor);
+                connect(delegate, &QAbstractItemDelegate::sizeHintChanged, this, &QAbstractItemDelegate::sizeHintChanged);
+            }
+        }
+
+        void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+        {
+            m_painted(index, option.rect);
+            target()->paint(painter, option, index);
+        }
+        QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { return target()->sizeHint(option, index); }
+        QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { return target()->createEditor(parent, option, index); }
+        void destroyEditor(QWidget* editor, const QModelIndex& index) const override
+            { target()->destroyEditor(editor, index); }
+        void setEditorData(QWidget* editor, const QModelIndex& index) const override
+            { target()->setEditorData(editor, index); }
+        void setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const override
+            { target()->setModelData(editor, model, index); }
+        void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            { target()->updateEditorGeometry(editor, option, index); }
+        bool editorEvent(QEvent* event, QAbstractItemModel* model,
+            const QStyleOptionViewItem& option, const QModelIndex& index) override
+            { return target()->editorEvent(event, model, option, index); }
+        bool helpEvent(QHelpEvent* event, QAbstractItemView* view,
+            const QStyleOptionViewItem& option, const QModelIndex& index) override
+            { return target()->helpEvent(event, view, option, index); }
+        QList<int> paintingRoles() const override { return target()->paintingRoles(); }
+        bool eventFilter(QObject* object, QEvent* event) override
+            { return static_cast<QObject*>(target())->eventFilter(object, event); }
+
+    private:
+        QAbstractItemDelegate* target() const { return m_original ? m_original.data() : &m_fallback; }
+        QPointer<QAbstractItemDelegate> m_original;
+        mutable QStyledItemDelegate m_fallback;
+        std::function<void(const QModelIndex&, const QRect&)> m_painted;
+    };
+
+    // 每面板只观察自己的两种视图。复用 Qt 的可见项绘制，不额外扫描模型或强迫 Batched 布局。
+    class FileVisualDemandScheduler final : public QObject
+    {
+    public:
+        FileVisualDemandScheduler(QTreeView* tree, QListView* list,
+            QSortFilterProxyModel* fsProxy, QSortFilterProxyModel* manualProxy, QObject* parent,
+            std::function<void(const QVector<FileVisualDemand>&)> publish)
+            : QObject(parent), m_publish(std::move(publish)), m_timer(this)
+        {
+            m_views[0].view = tree;
+            m_views[1].view = list;
+            m_timer.setSingleShot(true);
+            connect(&m_timer, &QTimer::timeout, this, [this]() { publishDemand(); });
+            for (auto& state : m_views)
+            {
+                auto* view = state.view.data();
+                view->installEventFilter(this);
+                view->viewport()->installEventFilter(this);
+                connect(view->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { invalidate(); });
+                connect(view->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this]() { invalidate(); });
+                ensureDelegate(state);
+            }
+            connect(tree, &QTreeView::expanded, this, [this]() { invalidate(); });
+            connect(tree, &QTreeView::collapsed, this, [this]() { invalidate(); });
+            for (auto* proxy : { fsProxy, manualProxy })
+            {
+                connect(proxy, &QAbstractItemModel::modelReset, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::layoutChanged, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::rowsInserted, this, [this]() { invalidate(); });
+                connect(proxy, &QAbstractItemModel::rowsRemoved, this, [this]() { invalidate(); });
+            }
+            connect(fsProxy, &QAbstractProxyModel::sourceModelChanged, this,
+                [this, fsProxy]() { watchFileSystemSource(fsProxy); invalidate(); });
+            watchFileSystemSource(fsProxy);
+        }
+
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Hide)
+                invalidate(false); // 立即清需求；已开始的阻塞调用允许安全结束。
+            else if (event->type() == QEvent::Show || event->type() == QEvent::Resize
+                || event->type() == QEvent::LayoutRequest || event->type() == QEvent::FontChange)
+                invalidate();
+            else if (event->type() == QEvent::Paint)
+            {
+                for (auto& state : m_views)
+                    if (state.view && watched == state.view->viewport())
+                        ensureDelegate(state);
+            }
+            return false;
+        }
+
+    private:
+        struct ViewState
+        {
+            QPointer<QAbstractItemView> view;
+            QPointer<FileVisualDemandDelegate> delegate;
+            QVector<FileVisualDemand> demand;
+            QSet<QString> paths;
+        };
+
+        void watchFileSystemSource(QSortFilterProxyModel* proxy)
+        {
+            if (m_fsSource)
+                disconnect(m_fsSource, nullptr, this, nullptr);
+            m_fsSource = qobject_cast<QFileSystemModel*>(proxy->sourceModel());
+            if (m_fsSource)
+            {
+                connect(m_fsSource, &QFileSystemModel::directoryLoaded, this, [this]() { invalidate(); });
+                connect(m_fsSource, &QFileSystemModel::fileRenamed, this, [this]() { invalidate(); });
+            }
+        }
+
+        void ensureDelegate(ViewState& state)
+        {
+            if (state.view->itemDelegate() == state.delegate && state.delegate)
+                return;
+            QPointer<FileVisualDemandScheduler> guard(this);
+            QAbstractItemView* const view = state.view;
+            auto* replacement = new FileVisualDemandDelegate(view->itemDelegate(), view,
+                [guard, view](const QModelIndex& index, const QRect& rect) {
+                    if (guard)
+                        guard->observe(view, index, rect);
+                });
+            state.delegate = replacement;
+            view->setItemDelegate(replacement);
+        }
+
+        void invalidate(const bool repaint = true)
+        {
+            bool hadDemand = false;
+            for (auto& state : m_views)
+            {
+                hadDemand = hadDemand || !state.demand.isEmpty();
+                state.demand.clear();
+                state.paths.clear();
+                // 滚动优化可能只重画露出的条带；需求重建必须覆盖当前完整视口。
+                if (repaint && state.view && state.view->isVisible())
+                    state.view->viewport()->update();
+            }
+            if (hadDemand)
+                m_publish({});
+            m_timer.stop();
+        }
+
+        void observe(QAbstractItemView* view, const QModelIndex& viewIndex, const QRect& rect)
+        {
+            if (!view->isVisible() || !rect.intersects(view->viewport()->rect()))
+                return;
+            ViewState& state = m_views[view == m_views[0].view ? 0 : 1];
+            if (state.demand.size() >= FileVisualDemandLimit)
+                return;
+            QModelIndex source = viewIndex.siblingAtColumn(0);
+            while (const auto* proxy = qobject_cast<const QAbstractProxyModel*>(source.model()))
+                source = proxy->mapToSource(source);
+            if (!source.isValid())
+                return;
+            const bool fs = qobject_cast<const QFileSystemModel*>(source.model()) != nullptr;
+            const int pathRole = fs ? QFileSystemModel::FilePathRole : Qt::UserRole;
+            const QString path = source.data(pathRole).toString();
+            if (path.isEmpty() || state.paths.contains(path))
+                return;
+            state.paths.insert(path);
+            state.demand.push_back({ path, QPersistentModelIndex(source), pathRole });
+            if (!m_timer.isActive())
+                m_timer.start(0);
+        }
+
+        void publishDemand()
+        {
+            for (const auto& state : m_views)
+            {
+                if (state.view && state.view->isVisible() && state.view->viewport()->isVisible())
+                {
+                    m_publish(state.demand);
+                    return;
+                }
+            }
+            m_publish({});
+        }
+
+        std::array<ViewState, 2> m_views;
+        QPointer<QFileSystemModel> m_fsSource;
+        std::function<void(const QVector<FileVisualDemand>&)> m_publish;
+        QTimer m_timer;
     };
 
     // buildSuspiciousNameSet 作用：把疑似隐藏项名单折叠大小写后转成集合，
@@ -14357,6 +14641,22 @@ void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText
     panel.fileViewStack->addWidget(panel.fileView);
     panel.fileViewStack->setCurrentWidget(panel.fileView);
     panel.rootLayout->addWidget(panel.fileViewStack, 1);
+
+    new FileVisualDemandScheduler(panel.fileView, panel.compactFileView,
+        panel.proxyModel, panel.manualProxyModel, panel.rootWidget,
+        [&panel](const QVector<FileVisualDemand>& demand) {
+            QVector<FileVisualDemand> fsDemand;
+            QVector<FileVisualDemand> manualDemand;
+            for (const auto& item : demand)
+            {
+                if (item.index.model() == panel.fsModel)
+                    fsDemand.push_back(item);
+                else if (item.index.model() == panel.manualModel)
+                    manualDemand.push_back(item);
+            }
+            static_cast<ReparseAwareFileSystemModel*>(panel.fsModel)->setVisualDemand(fsDemand);
+            static_cast<ManualDirectoryModel*>(panel.manualModel)->setVisualDemand(manualDemand);
+        });
 
     panel.statusBar = new QStatusBar(panel.rootWidget);
     panel.pathStatusLabel = new QLabel(QStringLiteral("路径: -"), panel.statusBar);
