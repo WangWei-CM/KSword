@@ -88,6 +88,18 @@ namespace ks::ui
         QLineEdit* m_findEdit = nullptr;
         QLabel* m_status = nullptr;
         MemoryRowCanvas* m_canvas = nullptr;
+        // Exact bounded input cache. Masks and change roles are part of evidence;
+        // cached rendering is reused only when every display dependency matches.
+        bool m_textCacheValid = false;
+        std::uint64_t m_renderGeneration = 0;
+        WorkbenchByteWindow m_cachedWindow;
+        std::uint64_t m_cachedAddress = 0, m_cachedLength = 0, m_cachedOrigin = 0, m_cachedFetchAddress = 0;
+        std::optional<std::pair<std::uint64_t, std::uint64_t>> m_cachedBounds;
+        Encoding m_cachedEncoding = Encoding::Ansi, m_cachedEffectiveEncoding = Encoding::Ansi;
+        int m_cachedBytesPerRow = 16;
+        bool m_cachedControls = true;
+        QString m_structureInput;
+        bool m_structureDirty = true, m_structureComplete = false;
         QString m_renderedText;
         QString m_flatText;
         std::vector<SearchSpan> m_searchSpans;
