@@ -14625,6 +14625,313 @@ std::size_t FileDock::recordFileOplockAccessPrograms(
     return scanRecordByPid.size();
 }
 
+struct FileDock::NavigationPageDefinition
+{
+    QString id;
+    QString parentId;
+    QString languageKey;
+    QString sourceTitle;
+    QStringList sourceSearchTexts;
+    QWidget* FileDock::* pageMember;
+    void (FileDock::* initialize)();
+};
+
+const std::vector<FileDock::NavigationPageDefinition>& FileDock::navigationPageDefinitions()
+{
+    static const std::vector<NavigationPageDefinition> definitions{
+        { QStringLiteral("file.tab.manager"), QString(), QStringLiteral("file.tab.manager"), QStringLiteral("文件管理"),
+          { QStringLiteral("后退"),
+              QStringLiteral("前进"),
+              QStringLiteral("上级目录"),
+              QStringLiteral("刷新当前目录"),
+              QStringLiteral("输入路径后按回车跳转"),
+              QStringLiteral("快速跳转到任意驱动器根目录"),
+              QStringLiteral("图标视图"),
+              QStringLiteral("列表视图"),
+              QStringLiteral("详情视图"),
+              QStringLiteral("树形视图"),
+              QStringLiteral("切换文件显示模式，默认使用详情视图"),
+              QStringLiteral("系统"),
+              QStringLiteral("隐藏"),
+              QStringLiteral("名称"),
+              QStringLiteral("大小"),
+              QStringLiteral("修改时间"),
+              QStringLiteral("类型"),
+              QStringLiteral("Windows API"),
+              QStringLiteral("手动解析文件系统"),
+              QStringLiteral("R0 驱动解析"),
+              QStringLiteral("作为NTFS解析"),
+              QStringLiteral("作为FAT32解析"),
+              QStringLiteral("作为exFAT解析"),
+              QStringLiteral("作为MFT解析"),
+              QStringLiteral("R0 IRP 解析"),
+              QStringLiteral("切换目录读取方式：Windows API、R3 原始卷手动解析、R0 驱动目录解析，强制按 NTFS/FAT32/exFAT 解析，\n作为MFT解析（仅 NTFS：卷偏移直读 $MFT，禁用一切 WinAPI/FSCTL 回退），\nR0 IRP 解析（内核自建 IRP 把目录查询直发基础文件系统设备，绕过过滤层；\n打开阶段仍走正常路径，只在 CREATE 上做的拦截发现不了）。\n后两种会与常规视图对照，把只有绕过路径可见的条目标为疑似隐藏项。"),
+              QStringLiteral("快速过滤"),
+              QStringLiteral("路径: -"),
+              QStringLiteral("选中: 0"),
+              QStringLiteral("磁盘: -"),
+              QStringLiteral("解析器: Windows API") }, &FileDock::m_fileManagerPage, &FileDock::initializeManagerPage },
+        { QStringLiteral("file.tab.storage_controller"), QString(), QStringLiteral("file.tab.storage_controller"), QStringLiteral("存储控制器"),
+          { QStringLiteral("KSword Controller / 存储控制器"),
+              QStringLiteral("持续风险提示：此页直接驱动专用控制器的 BAR、DMA/队列或 IDE task-file。写入可立即破坏文件系统、分区表和启动数据；控制器重置可使设备离线。仅允许手动绑定的非启动、无挂载卷控制器。expected-hash 条件比较与写后复读不是硬件原子操作，不能消除设备并发写、固件缓存或掉电风险。"),
+              QStringLiteral("资源与一致性"),
+              QStringLiteral("控制器：未查询"),
+              QStringLiteral("ownership=none；coherency=unknown；session=none"),
+              QStringLiteral("刷新状态"),
+              QStringLiteral("取得独占会话"),
+              QStringLiteral("释放会话"),
+              QStringLiteral("受控复位"),
+              QStringLiteral("取得对该存储控制器的独占访问会话，用于底层 BAR/DMA 操作"),
+              QStringLiteral("对存储控制器执行受控复位（可能使设备暂时离线，操作危险）"),
+              QStringLiteral("刷新审计"),
+              QStringLiteral("事务化原始访问"),
+              QStringLiteral("字节偏移"),
+              QStringLiteral("字节长度"),
+              QStringLiteral("读取结果或待写入 HEX，例如：00 11 22 FF"),
+              QStringLiteral("读取并建立条件写快照"),
+              QStringLiteral("按快照写入并复读验证"),
+              QStringLiteral("读取该区间并建立“条件写”比对快照，供后续按快照安全写入"),
+              QStringLiteral("仅当区间内容仍与快照一致时才写入，写完再读回校验，防止误写"),
+              QStringLiteral("回滚最近一次写入"),
+              QStringLiteral("序号"),
+              QStringLiteral("操作"),
+              QStringLiteral("偏移"),
+              QStringLiteral("长度"),
+              QStringLiteral("结果"),
+              QStringLiteral("风险"),
+              QStringLiteral("进程") }, &FileDock::m_storageControllerPage, &FileDock::initializeStorageControllerPage },
+        { QStringLiteral("file.tab.recovery"), QString(), QStringLiteral("file.tab.recovery"), QStringLiteral("文件恢复"),
+          { QStringLiteral("选择要扫描误删文件的 NTFS 卷。"),
+              QStringLiteral("刷新可扫描卷列表"),
+              QStringLiteral("扫描误删"),
+              QStringLiteral("解析 NTFS MFT，扫描删除项"),
+              QStringLiteral("恢复选中"),
+              QStringLiteral("支持 Resident 与完整非驻留数据；非驻留文件必须导出到其它卷，恢复前后都会复核卷位图。"),
+              QStringLiteral("查找结果（文件名/路径/恢复能力）"),
+              QStringLiteral("按输入内容实时筛选扫描结果，匹配行以外的条目会被隐藏。"),
+              QStringLiteral("按正则表达式筛选，例如 \\.docx?$ 只看 doc/docx"),
+              QStringLiteral("卷: "),
+              QStringLiteral("选择 NTFS 卷后开始扫描，可在此列出仍可恢复的误删文件。"),
+              QStringLiteral("开始扫描误删文件"),
+              QStringLiteral("请选择NTFS卷并开始扫描。") }, &FileDock::m_fileRecoveryPage, &FileDock::initializeRecoveryPage },
+        { QStringLiteral("file.tab.irpbuilder"), QString(), QStringLiteral("file.tab.irpbuilder"), QStringLiteral("IRP 构造"),
+          { QStringLiteral("正在加载..."),
+              QStringLiteral("0x%1"),
+              QStringLiteral("完成"),
+              QStringLiteral("请求参数被 R0 拒绝"),
+              QStringLiteral("目标打开失败"),
+              QStringLiteral("目标栈层不可用"),
+              QStringLiteral("内核内存不足"),
+              QStringLiteral("该 major 需要额外确认"),
+              QStringLiteral("缺少写入确认令牌"),
+              QStringLiteral("等待超时，请求已取消"),
+              QStringLiteral("IRP 构造失败"),
+              QStringLiteral("输出缓冲不足"),
+              QStringLiteral("被安全策略拒绝"),
+              QStringLiteral("未知状态(%1)"),
+              QStringLiteral("目标请求"),
+              QStringLiteral("已取消"),
+              QStringLiteral("输出被截断"),
+              QStringLiteral("0x%1  未知"),
+              QStringLiteral("0x%1  %2"),
+              QStringLiteral("无法解析数值: %1"),
+              QStringLiteral("十六进制输入必须是偶数个字符。"),
+              QStringLiteral("十六进制输入含非法字符: %1"),
+              QStringLiteral("(无输出数据)"),
+              QStringLiteral("目标与请求"),
+              QStringLiteral("目标路径，例如 C:\\Windows 或 \\??\\C:\\Windows\\notepad.exe"),
+              QStringLiteral("Win32 路径会自动转换为 \\??\\ 命名空间路径；也可直接填 NT 路径。"),
+              QStringLiteral("自定义（手工参数）"),
+              QStringLiteral("查询文件全部信息"),
+              QStringLiteral("读取文件"),
+              QStringLiteral("写入文件（填写下方十六进制数据）"),
+              QStringLiteral("刷新文件缓冲"),
+              QStringLiteral("创建空文件"),
+              QStringLiteral("创建目录"),
+              QStringLiteral("枚举目录"),
+              QStringLiteral("删除（FileDispositionInformation）"),
+              QStringLiteral("删除（POSIX / FileDispositionInformationEx）"),
+              QStringLiteral("截断为 0 字节"),
+              QStringLiteral("设置基本属性为 NORMAL"),
+              QStringLiteral("查询卷属性"),
+              QStringLiteral("查询安全描述符"),
+              QStringLiteral("选择常用操作后自动填写 Major、访问权、InformationClass 与输入结构。预设只填参数、不自动发送；写操作仍需显式勾选确认。"),
+              QStringLiteral("浏览..."),
+              QStringLiteral("选择要构造的 IRP 主功能码。参数区会按所选 major 自动启停。"),
+              QStringLiteral("IRP_MN_* 次功能码，十进制或 0x 前缀十六进制；不适用时填 0。"),
+              QStringLiteral("设备栈顶（等价 Zw* 路径，作为对照基线）"),
+              QStringLiteral("基础文件系统设备（跳过其上的过滤层）"),
+              QStringLiteral("VPB 挂载文件系统设备"),
+              QStringLiteral("卷设备本身"),
+              QStringLiteral("选择 IRP 投递到设备栈的哪一层。\n选择非栈顶时，连 IRP_MJ_CREATE 都由 R0 自行构造并直发，不经过过滤层。\n注意：手工构造的文件对象缺少 I/O 管理器建立的完整关联，NTFS 在后续\n目录查询等操作上可能回 STATUS_INVALID_PARAMETER，这属于预期现象；\n只想绕过目录查询请改用文件页的“R0 IRP 解析”读取方式。\n目标层不可用时 R0 会回退到栈顶，并在结果里如实标出实际生效的层。"),
+              QStringLiteral("等待完成的毫秒数，上限 60000；超时后 R0 会取消 IRP 并等待其排空。"),
+              QStringLiteral("常用操作:"),
+              QStringLiteral("目标路径:"),
+              QStringLiteral("MajorFunction:"),
+              QStringLiteral("MinorFunction:"),
+              QStringLiteral("目标栈层:"),
+              QStringLiteral("超时(ms):"),
+              QStringLiteral("IO_STACK_LOCATION 参数"),
+              QStringLiteral("CREATE 阶段 ACCESS_MASK；留空时按只读属性访问打开。"),
+              QStringLiteral("CREATE 阶段共享位；留空时按读/写/删除全共享打开。"),
+              QStringLiteral("1 (FILE_OPEN)"),
+              QStringLiteral("CREATE 处置方式：1=FILE_OPEN，2=FILE_CREATE，3=FILE_OPEN_IF 等。"),
+              QStringLiteral("CREATE 选项位；R0 会额外补上同步与备份语义。"),
+              QStringLiteral("CREATE 文件属性；留空按 FILE_ATTRIBUTE_NORMAL。"),
+              QStringLiteral("信息类：QUERY/SET_INFORMATION 用 FILE_INFORMATION_CLASS，\nQUERY/SET_VOLUME_INFORMATION 用 FS_INFORMATION_CLASS，\nDIRECTORY_CONTROL 用目录信息类，POWER 复用为目标电源状态。"),
+              QStringLiteral("DEVICE_CONTROL/FILE_SYSTEM_CONTROL 的控制码，低两位决定缓冲方式。"),
+              QStringLiteral("QUERY/SET_SECURITY 的 SECURITY_INFORMATION 位。"),
+              QStringLiteral("READ/WRITE/LOCK_CONTROL 的起始字节偏移。"),
+              QStringLiteral("READ/WRITE 的 Key，或 LOCK_CONTROL 的锁 Key。"),
+              QStringLiteral("LOCK_CONTROL 的加锁字节数。"),
+              QStringLiteral("期望的输出缓冲长度，上限 256 KiB。"),
+              QStringLiteral("DIRECTORY_CONTROL 的文件名通配符，留空表示不限定。"),
+              QStringLiteral("DesiredAccess:"),
+              QStringLiteral("ShareAccess:"),
+              QStringLiteral("CreateDisposition:"),
+              QStringLiteral("CreateOptions:"),
+              QStringLiteral("FileAttributes:"),
+              QStringLiteral("InformationClass:"),
+              QStringLiteral("ControlCode:"),
+              QStringLiteral("SecurityInformation:"),
+              QStringLiteral("ByteOffset:"),
+              QStringLiteral("Key:"),
+              QStringLiteral("LockLength:"),
+              QStringLiteral("OutputBytes:"),
+              QStringLiteral("FileName 通配符:"),
+              QStringLiteral("标志与输入数据"),
+              QStringLiteral("确认写入语义"),
+              QStringLiteral("写类 major 必须勾选；勾选后客户端才会附带确认令牌，R0 会二次校验。"),
+              QStringLiteral("允许 PnP/电源类请求"),
+              QStringLiteral("IRP_MJ_POWER/PNP/SHUTDOWN/SYSTEM_CONTROL/DEVICE_CHANGE 需要额外勾选。\n这些请求正常由系统按状态机下发，手工构造可能让目标驱动进入非法状态。"),
+              QStringLiteral("只执行 CREATE"),
+              QStringLiteral("只验证打开阶段，不再下发目标 major，用于单独观察 CREATE 是否被拦截。"),
+              QStringLiteral("内联输入数据，十六进制，例如 01 00 00 00；留空表示无输入。"),
+              QStringLiteral("作为 IRP 数据段的输入内容，上限 64 KiB。\n空白、逗号和短横线会被忽略，方便直接粘贴各种转储格式。"),
+              QStringLiteral("构造并发送 IRP"),
+              QStringLiteral("尚未发送。写类与 PnP/电源类请求需要先勾选对应确认项。"),
+              QStringLiteral("项目"),
+              QStringLiteral("值"),
+              QStringLiteral("目标驱动写回的数据将以十六进制转储显示。"),
+              QStringLiteral("选择 IRP 目标文件"),
+              QStringLiteral("已填入查询 FileAllInformation 的安全栈顶预设。"),
+              QStringLiteral("已填入从偏移 0 读取 4096 字节的预设，可修改偏移与长度。"),
+              QStringLiteral("已填入写入预设；请在下方填写十六进制数据，并勾选写入确认。"),
+              QStringLiteral("已填入刷新文件缓冲预设。"),
+              QStringLiteral("已填入 FILE_CREATE 空文件预设；目标必须不存在，并需勾选写入确认。"),
+              QStringLiteral("已填入 FILE_CREATE 目录预设；目标必须不存在，并需勾选写入确认。"),
+              QStringLiteral("已填入 FileIdBothDirectoryInformation 目录枚举预设。"),
+              QStringLiteral("已填入传统 IRP 删除预设；目录目标需另勾 FILE_DIRECTORY_FILE，并需写入确认。"),
+              QStringLiteral("已填入 IRP POSIX 删除预设；支持情况取决于系统与文件系统，并需写入确认。"),
+              QStringLiteral("已填入 FileEndOfFileInformation 截断到 0 字节预设，并需写入确认。"),
+              QStringLiteral("已填入 FileBasicInformation 的 NORMAL 属性模板，并需写入确认。"),
+              QStringLiteral("已填入 FileFsAttributeInformation 卷属性查询预设。"),
+              QStringLiteral("已填入所有者、组与 DACL 安全描述符查询预设。"),
+              QStringLiteral("%1 由 PnP/电源管理器按状态机下发，手工构造可能让目标驱动进入非法状态；需要同时勾选写入确认与 PnP/电源允许项。"),
+              QStringLiteral("%1 属于写语义，会改变磁盘或设备状态；需要勾选写入确认。"),
+              QStringLiteral("%1 为只读语义，可直接发送。"),
+              QStringLiteral("正在发送..."),
+              QStringLiteral("IRP 构造"),
+              QStringLiteral("请先填写目标路径。"),
+              QStringLiteral("%1 会改变磁盘或设备状态，请先勾选“确认写入语义”。"),
+              QStringLiteral("%1 需要同时勾选“允许 PnP/电源类请求”。"),
+              QStringLiteral("即将向文件系统栈手工投递 %1。\n\n这类请求正常只由 PnP/电源管理器按状态机下发，手工构造可能让目标驱动进入非法状态甚至触发系统崩溃。\n\n确认继续？"),
+              QStringLiteral("字段 %1 解析失败：%2"),
+              QStringLiteral("输入数据解析失败：%1"),
+              QStringLiteral("输入数据超出上限 %1 字节。"),
+              QStringLiteral("输出缓冲超出上限 %1 字节。"),
+              QStringLiteral("正在向 R0 提交 %1 ..."),
+              QStringLiteral("当前 KswordARK 驱动不支持自建 IRP 提交，请重新部署本次构建的驱动。"),
+              QStringLiteral("R0 通信失败：Win32=%1；%2"),
+              QStringLiteral("通信结果"),
+              QStringLiteral("失败"),
+              QStringLiteral("Win32 错误"),
+              QStringLiteral("诊断"),
+              QStringLiteral("协议状态"),
+              QStringLiteral("执行阶段"),
+              QStringLiteral("MajorFunction"),
+              QStringLiteral("MinorFunction"),
+              QStringLiteral("请求栈层"),
+              QStringLiteral("实际栈层"),
+              QStringLiteral("栈层提示"),
+              QStringLiteral("目标层不可用，R0 已回退到栈顶，本次未绕过过滤层"),
+              QStringLiteral("CREATE 状态"),
+              QStringLiteral("目标请求状态"),
+              QStringLiteral("CLEANUP 状态"),
+              QStringLiteral("CLOSE 状态"),
+              QStringLiteral("Information"),
+              QStringLiteral("%1 (0x%2)"),
+              QStringLiteral("输出字节数"),
+              QStringLiteral("接收驱动"),
+              QStringLiteral("接收设备"),
+              QStringLiteral("目标 DEVICE_OBJECT"),
+              QStringLiteral("栈顶 DEVICE_OBJECT"),
+              QStringLiteral("基础 FS DEVICE_OBJECT"),
+              QStringLiteral("VPB DEVICE_OBJECT"),
+              QStringLiteral("分发入口"),
+              QStringLiteral("目标 StackSize"),
+              QStringLiteral("目标 DeviceFlags"),
+              QStringLiteral("%1：协议=%2；目标请求=%3；Information=%4；输出 %5 字节") }, &FileDock::m_irpBuilderPage, &FileDock::initializeIrpBuilderPage }
+    };
+    return definitions;
+}
+
+ks::ui::PageNavigationCatalog FileDock::navigationCatalog(const FileDock* const existing)
+{
+    ks::ui::PageNavigationCatalog catalog;
+    const auto& definitions = navigationPageDefinitions();
+    catalog.reserve(static_cast<qsizetype>(definitions.size()));
+    for (std::size_t ordinal = 0; ordinal < definitions.size(); ++ordinal)
+    {
+        const auto& definition = definitions[ordinal];
+        ks::ui::PageNavigationDescriptor page;
+        page.id = definition.id;
+        page.parentId = definition.parentId;
+        page.title = ks::i18n::text(definition.languageKey, definition.sourceTitle);
+        page.current = ordinal == 0;
+        for (const auto& text : definition.sourceSearchTexts)
+            page.searchTexts.append(ks::i18n::sourceText(text));
+        if (existing)
+        {
+            const auto* tabs = existing->m_rootTabWidget;
+            QWidget* const widget = existing->*(definition.pageMember);
+            const int index = tabs && widget ? tabs->indexOf(widget) : -1;
+            page.visible = index >= 0 && tabs->isTabVisible(index);
+            page.enabled = index >= 0 && tabs->isEnabled() && tabs->isTabEnabled(index) && widget->isEnabled();
+            page.current = index >= 0 && tabs->currentWidget() == widget;
+            if (index >= 0) page.title = tabs->tabText(index);
+        }
+        catalog.append(std::move(page));
+    }
+    return catalog;
+}
+
+QWidget* FileDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto catalog = navigationCatalog(this);
+    const auto record = std::find_if(catalog.cbegin(), catalog.cend(),
+        [&id](const auto& page) { return page.id == id; });
+    if (record == catalog.cend() || !record->visible || !record->enabled) return nullptr;
+    const auto& definitions = navigationPageDefinitions();
+    const auto definition = std::find_if(definitions.cbegin(), definitions.cend(),
+        [&id](const auto& page) { return page.id == id; });
+    if (definition == definitions.cend()) return nullptr;
+    const QPointer<FileDock> self(this);
+    const QPointer<QTabWidget> tabs(m_rootTabWidget);
+    const QPointer<QWidget> page(this->*(definition->pageMember));
+    if (!tabs || !page) return nullptr;
+    const int index = tabs->indexOf(page);
+    if (index < 0 || !tabs->isTabVisible(index) || !tabs->isTabEnabled(index)) return nullptr;
+    tabs->setCurrentIndex(index);
+    if (!self || !tabs || !page || tabs->currentWidget() != page) return nullptr;
+    ks::ui::PrepareWidgetThemeBindingsForShow(page);
+    if (!self || !tabs || !page || tabs->currentWidget() != page) return nullptr;
+    const int finalIndex = tabs->indexOf(page);
+    if (finalIndex < 0 || !tabs->isTabVisible(finalIndex) || !tabs->isTabEnabled(finalIndex)
+        || !page->isEnabled()) return nullptr;
+    return page.data();
+}
+
 FileDock::FileDock(QWidget* parent)
     : QWidget(parent)
     , m_uiDispatcher(std::make_shared<ks::ui::AsyncUiDispatcher>(this))
@@ -14818,6 +15125,19 @@ void FileDock::initializeUi()
     ks::ui::StyleSquarePageTabsFrame(m_rootTabWidget);
     m_rootLayout->addWidget(m_rootTabWidget, 1);
 
+    for (const auto& definition : navigationPageDefinitions())
+    {
+        (this->*(definition.initialize))();
+        QWidget* const page = this->*(definition.pageMember);
+        if (!page) continue;
+        m_rootTabWidget->addTab(page, ks::i18n::text(definition.languageKey, definition.sourceTitle));
+        ks::i18n::LanguageManager::instance().bindTab(
+            m_rootTabWidget, page, definition.languageKey, definition.sourceTitle);
+    }
+}
+
+void FileDock::initializeManagerPage()
+{
     m_fileManagerPage = new QWidget(m_rootTabWidget);
     QVBoxLayout* managerLayout = new QVBoxLayout(m_fileManagerPage);
     managerLayout->setContentsMargins(0, 0, 0, 0);
@@ -14837,34 +15157,11 @@ void FileDock::initializeUi()
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 1);
 
-    m_rootTabWidget->addTab(m_fileManagerPage, QStringLiteral("文件管理"));
+}
+
+void FileDock::initializeStorageControllerPage()
+{
     m_storageControllerPage = new ks::misc::StorageControllerResearchDialog(m_rootTabWidget);
-    m_rootTabWidget->addTab(m_storageControllerPage, QStringLiteral("存储控制器"));
-    initializeRecoveryPage();
-    if (m_fileRecoveryPage != nullptr)
-    {
-        m_rootTabWidget->addTab(m_fileRecoveryPage, QStringLiteral("文件恢复"));
-    }
-    initializeIrpBuilderPage();
-    if (m_irpBuilderPage != nullptr)
-    {
-        m_rootTabWidget->addTab(m_irpBuilderPage, QStringLiteral("IRP 构造"));
-    }
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rootTabWidget, m_fileManagerPage, QStringLiteral("file.tab.manager"), QStringLiteral("文件管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rootTabWidget, m_storageControllerPage,
-        QStringLiteral("file.tab.storage_controller"), QStringLiteral("存储控制器"));
-    if (m_fileRecoveryPage != nullptr)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_rootTabWidget, m_fileRecoveryPage, QStringLiteral("file.tab.recovery"), QStringLiteral("文件恢复"));
-    }
-    if (m_irpBuilderPage != nullptr)
-    {
-        ks::i18n::LanguageManager::instance().bindTab(
-            m_rootTabWidget, m_irpBuilderPage, QStringLiteral("file.tab.irpbuilder"), QStringLiteral("IRP 构造"));
-    }
 }
 
 void FileDock::initializePanel(FilePanelWidgets& panel, const QString& titleText)
@@ -21276,4 +21573,10 @@ QString FileDock::formatSizeText(std::uint64_t sizeBytes)
         return QStringLiteral("%1 %2").arg(static_cast<qulonglong>(sizeBytes)).arg(units[unitIndex]);
     }
     return QStringLiteral("%1 %2").arg(QString::number(value, 'f', 2)).arg(units[unitIndex]);
+}
+
+namespace
+{
+    [[maybe_unused]] const bool kFileNavigationRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<FileDock>(QStringLiteral("file"));
 }

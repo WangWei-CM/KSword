@@ -11,6 +11,7 @@
 #include "../Framework.h"
 #include "ManualFileSystemParser.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QStringList>
 #include <QSet>
@@ -84,6 +85,11 @@ public:
     // - 作用：初始化双栏 UI 并设置默认目录。
     // - 参数 parent：Qt 父控件。
     explicit FileDock(QWidget* parent = nullptr);
+
+    // Pure catalog data shares the actual root-page factory definitions. No
+    // business page is instantiated while collecting/searching a cold Dock.
+    static ks::ui::PageNavigationCatalog navigationCatalog(const FileDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
     // 析构函数：
     // - 作用：关闭后台 UI 投递，排空受管理线程，再由 Qt 释放子控件。
@@ -220,6 +226,11 @@ private:
     // - 作用：绑定单个面板的信号槽交互逻辑。
     // - 参数 panel：目标面板。
     void initializeConnections(FilePanelWidgets& panel);
+
+    struct NavigationPageDefinition;
+    static const std::vector<NavigationPageDefinition>& navigationPageDefinitions();
+    void initializeManagerPage();
+    void initializeStorageControllerPage();
 
     // initializeRecoveryPage：
     // - 作用：初始化“文件恢复”竖排 Tab 页面。
