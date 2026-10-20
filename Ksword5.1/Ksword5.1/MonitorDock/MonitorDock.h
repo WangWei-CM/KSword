@@ -70,6 +70,7 @@ class QChartView;
 class QLineSeries;
 class QValueAxis;
 class CodeEditorWidget;
+namespace ks::ui { class CompleteExportOperation; }
 class WinAPIDock;
 class ProcessTraceMonitorWidget;
 class DirectKernelCallMonitorWidget;
@@ -664,6 +665,8 @@ private:
     // - 若缓存为空则提示未集成或无结果；
     // - 返回值：无。
     void exportArkRiskCenterAsJson() const;
+    void startArkRiskCenterExport(bool asCsv);
+    void updateArkRiskExportActions();
     void exportArkRiskCenterAsCsv() const;
     void refreshPerformanceCharts();
     bool sampleCpuUsage(double* cpuUsageOut);
@@ -1132,6 +1135,8 @@ private:
     std::uint64_t m_arkRiskRefreshTicket = 0;        // 风险中心刷新票据。
     std::shared_ptr<const std::vector<ArkRiskCenterEntry>> m_arkRiskCenterEntries = std::make_shared<const std::vector<ArkRiskCenterEntry>>();
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_arkRiskDispatcher;
+    ks::ui::CompleteExportOperation* m_arkRiskExportOperation = nullptr;
+    std::uint64_t m_arkRiskEntriesVersion = 0;
     std::uint64_t m_arkRiskProjectionTicket = 0;
     bool m_arkRiskProjectionRunning = false;
     bool m_arkRiskProjectionScheduled = false;

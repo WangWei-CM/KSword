@@ -1,3 +1,4 @@
+#include "../UI/CompleteExport.h"
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
@@ -685,6 +686,35 @@ namespace
             escaped = QStringLiteral("\"%1\"").arg(escaped);
         }
         return escaped;
+    }
+
+    struct ArkRiskExportSnapshot
+    {
+        std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> entries;
+        bool asCsv = false;
+    };
+
+    template<class Sink>
+    bool formatArkRiskExport(const ArkRiskExportSnapshot& snapshot, Sink& sink)
+    {
+        if (!snapshot.entries) return false;
+        if (!snapshot.asCsv)
+        {
+            QJsonArray rows;
+            for (const auto& entry : *snapshot.entries) rows.append(entry.payload);
+            return sink.writeUtf8(QJsonDocument(rows).toJson(QJsonDocument::Indented))
+                && sink.rowsCompleted(static_cast<std::uint64_t>(snapshot.entries->size()));
+        }
+        if (!sink.writeUtf8(QByteArrayView("riskScore,source,category,title,detail,json\n"))) return false;
+        for (const auto& entry : *snapshot.entries)
+        {
+            const QString jsonText = QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact));
+            const QString line = QStringLiteral("%1,%2,%3,%4,%5,%6\n")
+                .arg(csvEscape(entry.riskScoreText), csvEscape(entry.sourceName), csvEscape(entry.category),
+                    csvEscape(entry.title), csvEscape(entry.detail), csvEscape(jsonText));
+            if (!sink.writeUtf8(line.toUtf8()) || !sink.rowsCompleted()) return false;
+        }
+        return true;
     }
 
     bool matchesFilter(const MonitorDock::ArkRiskCenterEntry& entry, const QString& filter)
@@ -1414,6 +1444,7 @@ void MonitorDock::refreshArkRiskCenterAsync()
                     }
                     auto previousEntries = std::move(guardThis->m_arkRiskCenterEntries);
                     guardThis->m_arkRiskCenterEntries = deferredEntries;
+                    guardThis->m_arkRiskEntriesVersion = ticket;
                     QThreadPool::globalInstance()->start(QRunnable::create([previousEntries = std::move(previousEntries)]() {}));
                     guardThis->rebuildArkRiskCenterTable();
                     guardThis->showArkRiskCenterDetailForCurrentRow();
@@ -1687,69 +1718,79 @@ void MonitorDock::navigateToProcessDetailFromArkRiskRow(const int tableRow)
         messageText);
 }
 
+void MonitorDock::updateArkRiskExportActions()
+{
+    const bool busy = m_arkRiskExportOperation && m_arkRiskExportOperation->isBusy();
+    for (auto* button : { m_arkRiskExportJsonButton, m_arkRiskExportCsvButton })
+        if (button) {
+            button->setEnabled(!busy);
+            button->setToolTip(busy ? ks::i18n::LanguageManager::instance().text(
+                QStringLiteral("monitor.export.in_progress"), QStringLiteral("导出进行中")) : QString());
+        }
+}
+
+void MonitorDock::startArkRiskCenterExport(const bool asCsv)
+{
+    const QPointer<MonitorDock> guard(this);
+    if (m_arkRiskExportOperation) m_arkRiskExportOperation->reconcile();
+    if (!guard) return;
+    if (m_arkRiskExportOperation && m_arkRiskExportOperation->isBusy()) return;
+    if (m_arkRiskCenterEntries->empty()) {
+        QMessageBox::information(this, QStringLiteral("ARK 风险中心"), QStringLiteral("当前没有可导出的风险记录。"));
+        return;
+    }
+    const QString suffix = asCsv ? QStringLiteral("csv") : QStringLiteral("json");
+    const QString defaultPath = QDir::home().filePath(QStringLiteral("ark-risk-center-%1.%2")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss")), suffix));
+    const QString filePath = QFileDialog::getSaveFileName(this,
+        asCsv ? QStringLiteral("导出 ARK 风险 CSV") : QStringLiteral("导出 ARK 风险 JSON"), defaultPath,
+        asCsv ? QStringLiteral("CSV (*.csv)") : QStringLiteral("JSON (*.json)"));
+    if (!guard || filePath.isEmpty() || (m_arkRiskExportOperation && m_arkRiskExportOperation->isBusy())) return;
+    if (!m_arkRiskExportOperation)
+    {
+        m_arkRiskExportOperation = new ks::ui::CompleteExportOperation(this);
+        m_arkRiskExportOperation->setStateChangedCallback([guard]() {
+            if (guard) guard->updateArkRiskExportActions();
+        });
+    }
+    // O(1) publication root retains the complete canonical cache, including rows
+    // outside the current search/high-risk projection. No GUI model traversal.
+    const auto frozen = std::make_shared<const ArkRiskExportSnapshot>(ArkRiskExportSnapshot{m_arkRiskCenterEntries, asCsv});
+    auto input = ks::ui::MakeCompleteExportInput(frozen, QStringLiteral("monitor/ark-risk"),
+        m_arkRiskEntriesVersion, std::optional<std::uint64_t>(frozen->entries->size()),
+        ks::i18n::LanguageManager::instance().sourceTextSnapshot(),
+        [](const ArkRiskExportSnapshot& snapshot, ks::ui::CompleteExportSink& sink,
+            const ks::i18n::SourceTextSnapshot&) { return formatArkRiskExport(snapshot, sink); });
+    input.fileMode = asCsv ? ks::ui::CompleteExportFileMode::NativeText : ks::ui::CompleteExportFileMode::Binary;
+    const int progress = kPro.add(this, "监控", "导出");
+    const auto accepted = m_arkRiskExportOperation->startFile(filePath, std::move(input),
+        [guard, progress](const ks::ui::CompleteExportReceipt& receipt) {
+            const bool unavailable = receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable;
+            kPro.finish(progress, unavailable ? kProgressState::LegacyCompleted
+                    : receipt.succeeded() ? kProgressState::Success : kProgressState::Failure,
+                unavailable ? "导出结果待确认" : receipt.succeeded() ? "导出完成" : "导出失败");
+            if (guard && unavailable) {
+                auto& language = ks::i18n::LanguageManager::instance();
+                QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"),
+                    QStringLiteral("导出结果待确认")),
+                    language.text(QStringLiteral("monitor.export.result_unconfirmed"),
+                        QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath));
+                return;
+            }
+            if (guard && !receipt.succeeded())
+                QMessageBox::warning(guard, QStringLiteral("导出失败"),
+                    receipt.nativeError.isEmpty() ? QStringLiteral("导出失败") : receipt.nativeError);
+        });
+    if (!accepted) kPro.finish(progress, kProgressState::Canceled, "导出已取消");
+    updateArkRiskExportActions();
+}
+
 void MonitorDock::exportArkRiskCenterAsJson() const
 {
-    // 输入：无，读取风险中心缓存。
-    // 处理：用户选择路径后写 JSON 数组；缓存为空时提示。
-    // 返回：无返回值。
-    if (m_arkRiskCenterEntries->empty())
-    {
-        QMessageBox::information(const_cast<MonitorDock*>(this), QStringLiteral("ARK 风险中心"), QStringLiteral("当前没有可导出的风险记录。"));
-        return;
-    }
-    const QString defaultPath = QDir::home().filePath(QStringLiteral("ark-risk-center-%1.json").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
-    const QString filePath = QFileDialog::getSaveFileName(const_cast<MonitorDock*>(this), QStringLiteral("导出 ARK 风险 JSON"), defaultPath, QStringLiteral("JSON (*.json)"));
-    if (filePath.isEmpty())
-    {
-        return;
-    }
-    QJsonArray rows;
-    for (const auto& entry : *m_arkRiskCenterEntries)
-    {
-        rows.append(entry.payload);
-    }
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-    {
-        QMessageBox::warning(const_cast<MonitorDock*>(this), QStringLiteral("导出失败"), file.errorString());
-        return;
-    }
-    file.write(QJsonDocument(rows).toJson(QJsonDocument::Indented));
+    const_cast<MonitorDock*>(this)->startArkRiskCenterExport(false);
 }
 
 void MonitorDock::exportArkRiskCenterAsCsv() const
 {
-    // 输入：无，读取风险中心缓存。
-    // 处理：用户选择路径后写 CSV；缓存为空时提示。
-    // 返回：无返回值。
-    if (m_arkRiskCenterEntries->empty())
-    {
-        QMessageBox::information(const_cast<MonitorDock*>(this), QStringLiteral("ARK 风险中心"), QStringLiteral("当前没有可导出的风险记录。"));
-        return;
-    }
-    const QString defaultPath = QDir::home().filePath(QStringLiteral("ark-risk-center-%1.csv").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
-    const QString filePath = QFileDialog::getSaveFileName(const_cast<MonitorDock*>(this), QStringLiteral("导出 ARK 风险 CSV"), defaultPath, QStringLiteral("CSV (*.csv)"));
-    if (filePath.isEmpty())
-    {
-        return;
-    }
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
-    {
-        QMessageBox::warning(const_cast<MonitorDock*>(this), QStringLiteral("导出失败"), file.errorString());
-        return;
-    }
-    file.write("riskScore,source,category,title,detail,json\n");
-    for (const auto& entry : *m_arkRiskCenterEntries)
-    {
-        const QString jsonText = QString::fromUtf8(QJsonDocument(entry.payload).toJson(QJsonDocument::Compact));
-        const QString line = QStringLiteral("%1,%2,%3,%4,%5,%6\n")
-            .arg(csvEscape(entry.riskScoreText),
-                csvEscape(entry.sourceName),
-                csvEscape(entry.category),
-                csvEscape(entry.title),
-                csvEscape(entry.detail),
-                csvEscape(jsonText));
-        file.write(line.toUtf8());
-    }
+    const_cast<MonitorDock*>(this)->startArkRiskCenterExport(true);
 }

@@ -4,6 +4,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
+#include "../UI/CompleteExport.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include <MonitorDock/EtwArchiveCompression.h>
 #include "../UI/VisibleTableWidget.h"
@@ -4821,6 +4822,11 @@ void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
     }
 
     QWidget* currentPage = m_sideTabWidget->currentWidget();
+    if (currentPage == m_arkRiskCenterPage && m_arkRiskExportOperation) {
+        const QPointer<MonitorDock> guard(this);
+        m_arkRiskExportOperation->reconcile();
+        if (!guard) return;
+    }
     if (currentPage == m_wmiPage && !m_wmiInitialDiscoveryDone)
     {
         m_wmiInitialDiscoveryDone = true;
@@ -4926,6 +4932,7 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
 MonitorDock::~MonitorDock()
 {
     if (m_wmiFilterProjection) m_wmiFilterProjection->close();
+    if (m_arkRiskExportOperation) m_arkRiskExportOperation->close();
     if (m_arkRiskDispatcher) m_arkRiskDispatcher->close();
     ++m_arkRiskProjectionTicket;
     // 析构阶段必须同步等待线程退出，防止对象释放后后台线程仍访问成员。
