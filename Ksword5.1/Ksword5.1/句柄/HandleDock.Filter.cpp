@@ -416,7 +416,7 @@ void HandleDock::appendNextRuleResultBatch(const QString& ruleId)
 
     const std::size_t batchEnd = std::min(
         state->loadedCount + kHandleRulePageSize,
-        state->rowIndices.size());
+        static_cast<std::size_t>(state->rowIndices.size()));
     QVector<qulonglong> sourceRowIndices;
     QVector<QTreeWidgetItem*> newItems;
     sourceRowIndices.reserve(static_cast<qsizetype>(batchEnd - state->loadedCount));
