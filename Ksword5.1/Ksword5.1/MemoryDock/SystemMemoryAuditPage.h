@@ -33,6 +33,8 @@ class CodeEditorWidget;
 class QPushButton;
 class QSpinBox;
 class QTableWidget;
+class AuditTableView;
+class QShowEvent;
 class QTabWidget;
 class QTimer;
 class QTreeWidget;
@@ -45,6 +47,7 @@ class SystemMemoryAuditPage final : public QWidget
 {
 public:
     explicit SystemMemoryAuditPage(QWidget* parent = nullptr);
+    ~SystemMemoryAuditPage() override;
 
     // refreshSnapshot：重新采集整机内存快照并刷新全部审计视图。
     void refreshSnapshot();
@@ -65,8 +68,17 @@ public:
 
 protected:
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
+    static void retireValue(std::function<void()> destroy);
+    template<class T> static std::shared_ptr<T> valueStorage() {
+        return std::shared_ptr<T>(new T, [](T* value) { retireValue([value] { delete value; }); });
+    }
+    struct DeltaIndex {
+        QHash<std::uint64_t, std::uint64_t> process, bigPool;
+        QHash<std::uint32_t, std::uint64_t> pool;
+    };
     struct ProcessRow
     {
         std::uint64_t identity = 0;
@@ -141,7 +153,7 @@ private:
         std::uint64_t privateResidentBytes = 0;
         std::uint64_t sharedResidentReferenceBytes = 0;
         std::uint64_t proportionalResidentBytes = 0;
-        std::vector<UserResidencyRow> rows;
+        std::shared_ptr<std::vector<UserResidencyRow>> rows = valueStorage<std::vector<UserResidencyRow>>();
     };
 
     struct SnapshotError
@@ -155,6 +167,7 @@ private:
         QString sampledAt;
         QStringList errors;
         std::vector<SnapshotError> pendingErrors;
+        std::shared_ptr<DeltaIndex> deltaIndex = valueStorage<DeltaIndex>();
         std::uint64_t pageSize = 4096;
 
         std::uint64_t installedPhysicalBytes = 0;
@@ -200,18 +213,32 @@ private:
         std::uint64_t processPrivateCommitBytes = 0;
         std::uint64_t processPagedPoolQuotaBytes = 0;
         std::uint64_t processNonPagedPoolQuotaBytes = 0;
-        std::vector<ProcessRow> processes;
+        std::shared_ptr<std::vector<ProcessRow>> processes = valueStorage<std::vector<ProcessRow>>();
 
         std::uint64_t poolTagPagedBytes = 0;
         std::uint64_t poolTagNonPagedBytes = 0;
-        std::vector<PoolTagRow> poolTags;
-        std::vector<BigPoolRow> bigPool;
+        std::shared_ptr<std::vector<PoolTagRow>> poolTags = valueStorage<std::vector<PoolTagRow>>();
+        std::shared_ptr<std::vector<BigPoolRow>> bigPool = valueStorage<std::vector<BigPoolRow>>();
 
         std::uint64_t identifiedResidentLowerBoundBytes = 0;
         std::uint64_t unattributedResidentBytes = 0;
         std::uint64_t overAccountedResidentBytes = 0;
     };
 
+    enum class AuditKind { UserResidency, Processes, PoolTags, BigPool };
+    struct ProjectionData;
+    struct ProjectionJob;
+    struct SnapshotJob;
+    struct ResidencyJob;
+    void pollJobs();
+    void invalidateTableProjections();
+    void requestTableProjection(AuditKind kind);
+    void publishTableProjection(const std::shared_ptr<ProjectionData>& data, std::uint64_t version);
+    static QVariant projectionCell(const ProjectionData& data, std::size_t row, int column, int role);
+    static QString projectionRowKey(const ProjectionData& data, std::size_t row);
+    static QString projectionSearch(const ProjectionData& data, std::size_t row);
+    static void buildProjection(const std::shared_ptr<ProjectionJob>& job);
+    static void prepareSnapshotDelta(Snapshot& snapshot, const std::shared_ptr<DeltaIndex>& previous, bool hasPrevious);
     void initializeUi();
     void initializeConnections();
     void retranslateUi();
@@ -271,13 +298,22 @@ private:
     QLabel* m_unattributedLabel = nullptr;
     QTabWidget* m_detailTabs = nullptr;
     QTreeWidget* m_overviewTree = nullptr;
-    QTableWidget* m_userResidencyTable = nullptr;
-    QTableWidget* m_processTable = nullptr;
-    QTableWidget* m_poolTagTable = nullptr;
-    QTableWidget* m_bigPoolTable = nullptr;
+    AuditTableView* m_userResidencyTable = nullptr;
+    AuditTableView* m_processTable = nullptr;
+    AuditTableView* m_poolTagTable = nullptr;
+    AuditTableView* m_bigPoolTable = nullptr;
     ks::ui::StructuredFieldView* m_detailText = nullptr;
     QLabel* m_statusLabel = nullptr;
     QTimer* m_autoRefreshTimer = nullptr;
+    QTimer* m_projectionDebounce = nullptr;
+    std::shared_ptr<SnapshotJob> m_snapshotJob;
+    std::shared_ptr<ResidencyJob> m_residencyJob;
+    std::shared_ptr<ProjectionJob> m_projectionJob;
+    std::array<std::shared_ptr<ProjectionData>, 4> m_readyProjections;
+    QTimer* m_jobsTimer = nullptr;
+    std::array<std::uint64_t, 4> m_projectionVersions{1, 1, 1, 1}, m_publishedVersions{}, m_failedVersions{};
+    std::array<int, 4> m_sortColumns{4, 3, 3, 2};
+    std::array<Qt::SortOrder, 4> m_sortOrders{Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder};
 
     // DDMA 复核入口。本页只读 DDMA 会话，配置仍然只在 DDMA 子页上做。
     QLineEdit* m_ddmaCrossCheckAddressEdit = nullptr;
@@ -299,9 +335,7 @@ private:
     bool m_processTableDirty = true;
     bool m_poolTagTableDirty = true;
     bool m_bigPoolTableDirty = true;
-    QHash<std::uint64_t, std::uint64_t> m_previousProcessPrivateBytes;
-    QHash<std::uint32_t, std::uint64_t> m_previousPoolTagBytes;
-    QHash<std::uint64_t, std::uint64_t> m_previousBigPoolBytes;
+    std::shared_ptr<DeltaIndex> m_previousDelta = valueStorage<DeltaIndex>();
     QHash<QString, std::uint64_t> m_previousSummaryBytes;
     QHash<QString, std::int64_t> m_summaryDeltaBytes;
     QHash<std::uint32_t, TagMetadata> m_poolTagMetadata;
