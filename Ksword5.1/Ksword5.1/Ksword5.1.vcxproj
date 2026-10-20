@@ -531,6 +531,7 @@
     <ClCompile Include="StartupDock\StartupDock.Registry.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Services.cpp" />
     <ClCompile Include="StartupDock\StartupDock.Tasks.cpp" />
+    <ClCompile Include="UI\CodeEditorWidget.State.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.cpp" />
     <ClCompile Include="UI\CodeEditorWidget.Export.cpp" />
     <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.Native.cpp" />

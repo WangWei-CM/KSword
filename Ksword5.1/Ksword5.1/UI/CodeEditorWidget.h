@@ -15,6 +15,9 @@
 #include <QStringConverter>
 #include <QPointer>
 #include <QWidget>
+#include <memory>
+
+struct CodeEditorReadOnlyViewState;
 
 class QComboBox;
 class QLabel;
@@ -103,6 +106,12 @@ public:
     QString copyTextForCurrentView() const;
     void setWordWrapEnabled(bool enabled);
     bool wordWrapEnabled() const;
+
+    // Value-only reading state for bounded inline editor reuse. The caller owns
+    // the canonical text snapshot and installs it before restoring this state.
+    // Editable sessions are rejected; this port never transfers documents/undo.
+    std::shared_ptr<const CodeEditorReadOnlyViewState> captureReadOnlyViewState() const;
+    bool restoreReadOnlyViewState(const std::shared_ptr<const CodeEditorReadOnlyViewState>& state);
 
     // currentEncodingDisplayText：
     // - 返回当前文件编码展示文本（如 "UTF-8 BOM"）；
@@ -395,4 +404,5 @@ private:
     // m_themeRefreshPending：合并排队的样式更新，避免setStyleSheet引发palette事件递归。
     bool m_themeRefreshPending = false;
     bool m_contentNotificationPending = false;
+    quint64 m_readOnlyViewRestoreGeneration = 0;
 };

@@ -1508,6 +1508,9 @@
     <ClCompile Include="..\..\shared\evidence\memory_workbench\MemoryEditJournal.cpp">
       <Filter>Source Files\MemoryWorkbench\Shared</Filter>
     </ClCompile>
+    <ClCompile Include="UI\CodeEditorWidget.State.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\CodeEditorWidget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
