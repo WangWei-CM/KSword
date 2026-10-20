@@ -9,6 +9,8 @@
 // ============================================================
 
 #include "../../Framework.h"
+#include "../../ArkDriverClient/ArkDriverTypes.h"
+#include <functional>
 
 #include <QElapsedTimer>
 #include <QWidget>
@@ -22,6 +24,7 @@ class QRadioButton;
 class QShowEvent;
 class QSpinBox;
 class QTimer;
+namespace ks::ui { class AsyncOperation; }
 
 namespace ks::misc
 {
@@ -30,7 +33,7 @@ namespace ks::misc
     public:
         // 构造函数：创建页面但不主动访问 R0，避免打开“杂项”时弹出驱动提示。
         explicit SystemTimePage(QWidget* parent = nullptr);
-        ~SystemTimePage() override = default;
+        ~SystemTimePage() override;
 
     protected:
         // 页面真正可见时才查询并轮询状态，隐藏后停止周期 IOCTL。
@@ -50,6 +53,17 @@ namespace ks::misc
         void initializeConnections();
         // refreshStatus：通过 ArkDriverClient 获取最新倍率、代次与接管状态。
         void refreshStatus();
+        struct ControlReceipt
+        {
+            ksword::ark::SystemTimeQueryResult before;
+            ksword::ark::SystemTimeControlResult result;
+            ksword::ark::SystemTimeQueryResult after;
+            bool hasAfter = false;
+        };
+        void applyQueryResult(const ksword::ark::SystemTimeQueryResult& result);
+        void showAsyncFailure();
+        void runControl(std::function<ControlReceipt()> operation,
+            std::function<void(const ControlReceipt&)> applyReceipt);
         // applyRequestedMode：执行双重确认后应用当前加速或减速倍率。
         void applyRequestedMode();
         // resetSystemTime：无额外门槛地停止变速，并以连续计数保持 1x。
@@ -129,6 +143,10 @@ namespace ks::misc
         bool m_active = false; // m_active：R0 当前是否已经接管计数器槽。
         bool m_supported = false; // m_supported：当前 R0 是否解析并支持本功能。
         bool m_hypervAvailable = false; // m_hypervAvailable：Microsoft Hv 与共享 QPC 页是否同时可用。
+        ks::ui::AsyncOperation* m_statusOperation = nullptr;
+        ks::ui::AsyncOperation* m_controlOperation = nullptr;
+        bool m_statusPending = false;
+        bool m_controlPending = false;
         bool m_busy = false; // m_busy：同步控制期间阻止重复操作。
     };
 }

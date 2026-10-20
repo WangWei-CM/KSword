@@ -1,4 +1,6 @@
 #include "SystemTimePage.h"
+#include "../../UI/AsyncOperation.h"
+#include <QPointer>
 #include "../../UI/PrimaryPageStyle.h"
 #include "../../UI/ParameterWorkspace.h"
 #include <QFormLayout>
@@ -136,8 +138,32 @@ namespace ks::misc
     SystemTimePage::SystemTimePage(QWidget* parent)
         : QWidget(parent)
     {
+        m_statusOperation = new ks::ui::AsyncOperation(this);
+        m_controlOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_statusOperation->setStateChangedCallback([this]() {
+            if (m_statusPending && !m_statusOperation->isInFlight())
+            {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
+        m_controlOperation->setStateChangedCallback([this]() {
+            if (m_controlPending && !m_controlOperation->isInFlight())
+            {
+                m_controlPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            }
+        });
+    }
+
+    SystemTimePage::~SystemTimePage()
+    {
+        m_statusOperation->close();
+        m_controlOperation->close();
     }
 
     void SystemTimePage::showEvent(QShowEvent* event)
@@ -491,17 +517,37 @@ namespace ks::misc
             [this]() { updateCalibratedTimeDisplay(); });
     }
 
+    void SystemTimePage::showAsyncFailure()
+    {
+        m_operationLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"),
+            QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
+    }
+
     void SystemTimePage::refreshStatus()
     {
-        if (m_busy)
-        {
-            return;
-        }
+        if (m_busy) return;
+        m_statusPending = true;
         setBusy(true);
-        ksword::ark::DriverClient client;
-        const auto result = client.querySystemTime();
-        setBusy(false);
+        m_statusOperation->submit<int, ksword::ark::SystemTimeQueryResult>(0,
+            [](const int&, const ks::ui::AsyncOperationToken& token) {
+                if (token.isCanceled()) return ksword::ark::SystemTimeQueryResult{};
+                return ksword::ark::DriverClient{}.querySystemTime();
+            },
+            [this](const ksword::ark::SystemTimeQueryResult& result, std::uint64_t) {
+                m_statusPending = false;
+                setBusy(false);
+                applyQueryResult(result);
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_statusPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+    }
 
+    void SystemTimePage::applyQueryResult(const ksword::ark::SystemTimeQueryResult& result)
+    {
         if (!result.io.ok)
         {
             m_supported = false;
@@ -545,6 +591,7 @@ namespace ks::misc
 
     void SystemTimePage::applyRequestedMode()
     {
+        if (m_busy) return;
         const unsigned long factor =
             static_cast<unsigned long>(m_factorSpin->value());
         const unsigned long command =
@@ -582,114 +629,160 @@ namespace ks::misc
             return;
         }
 
-        setBusy(true);
-        kLogEvent controlEvent;
-        ksword::ark::DriverClient client;
-        const auto freshStatus = client.querySystemTime();
-        if (!freshStatus.io.ok)
-        {
-            setBusy(false);
-            warn << controlEvent
-                << "[SystemTimePage] 控制前状态查询失败: "
-                << freshStatus.io.message << eol;
-            showOpaqueMessage(
-                this,
-                QMessageBox::Critical,
-                ks::i18n::sourceText(QStringLiteral("系统全局变速")),
-                ks::i18n::sourceText(
-                    QStringLiteral("控制前无法读取 R0 状态，未执行任何修改。")));
-            return;
-        }
+        runControl([command, factor, backend, resolutionMode, modeText, backendText, schemeText]() {
+            ControlReceipt receipt;
+            ksword::ark::DriverClient client;
+            receipt.before = client.querySystemTime();
+            kLogEvent controlEvent;
+            if (!receipt.before.io.ok)
+            {
+                warn << controlEvent << "[SystemTimePage] 控制前状态查询失败: "
+                    << receipt.before.io.message << eol;
+                return receipt;
+            }
+            receipt.result = client.controlSystemTime(command, factor, backend,
+                resolutionMode, receipt.before.response.generation, true);
+            if (!receipt.result.io.ok || receipt.result.response.status != KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
+            {
+                warn << controlEvent << "[SystemTimePage] 系统变速失败: "
+                    << receipt.result.io.message << eol;
+            }
+            else
+            {
+                info << controlEvent << "[SystemTimePage] 系统变速已应用, mode="
+                    << modeText.toStdString() << ", backend=" << backendText.toStdString()
+                    << ", scheme=" << schemeText.toStdString() << ", factor=" << factor << eol;
+            }
+            receipt.after = client.querySystemTime();
+            receipt.hasAfter = true;
+            return receipt;
+        }, [this, modeText, backendText, schemeText, factor](const ControlReceipt& receipt) {
+            const auto& freshStatus = receipt.before;
+            const auto& result = receipt.result;
+            if (!freshStatus.io.ok)
+            {
+                showOpaqueMessage(
+                    this,
+                    QMessageBox::Critical,
+                    ks::i18n::sourceText(QStringLiteral("系统全局变速")),
+                    ks::i18n::sourceText(
+                        QStringLiteral("控制前无法读取 R0 状态，未执行任何修改。")));
+                return;
+            }
 
-        const auto result = client.controlSystemTime(
-            command,
-            factor,
-            backend,
-            resolutionMode,
-            freshStatus.response.generation,
-            true);
-        setBusy(false);
-        if (!result.io.ok ||
-            result.response.status !=
-                KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
-        {
-            warn << controlEvent
-                << "[SystemTimePage] 系统变速失败: "
-                << result.io.message << eol;
-            showOpaqueMessage(
-                this,
-                QMessageBox::Critical,
-                ks::i18n::sourceText(QStringLiteral("系统全局变速")),
-                result.io.ok
-                    ? operationStatusText(
-                        result.response.status,
-                        result.response.lastStatus)
-                    : ks::i18n::sourceText(QStringLiteral("R0 控制失败：%1"))
-                        .arg(QString::fromStdString(
-                            result.io.message)));
-            refreshStatus();
-            return;
-        }
+            if (!result.io.ok ||
+                result.response.status !=
+                    KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
+            {
+                showOpaqueMessage(
+                    this,
+                    QMessageBox::Critical,
+                    ks::i18n::sourceText(QStringLiteral("系统全局变速")),
+                    result.io.ok
+                        ? operationStatusText(
+                            result.response.status,
+                            result.response.lastStatus)
+                        : ks::i18n::sourceText(QStringLiteral("R0 控制失败：%1"))
+                            .arg(QString::fromStdString(
+                                result.io.message)));
+                return;
+            }
 
-        info << controlEvent
-            << "[SystemTimePage] 系统变速已应用, mode="
-            << modeText.toStdString()
-            << ", backend=" << backendText.toStdString()
-            << ", scheme=" << schemeText.toStdString()
-            << ", factor=" << factor << eol;
-        m_operationLabel->setText(
-            ks::i18n::sourceText(QStringLiteral("已应用：%1；%2；%3 %4 倍"))
-                .arg(backendText)
-                .arg(schemeText)
-                .arg(modeText)
-                .arg(factor));
-        refreshStatus();
+            m_operationLabel->setText(
+                ks::i18n::sourceText(QStringLiteral("已应用：%1；%2；%3 %4 倍"))
+                    .arg(backendText)
+                    .arg(schemeText)
+                    .arg(modeText)
+                    .arg(factor));
+        });
     }
 
     void SystemTimePage::resetSystemTime()
     {
+        if (m_busy) return;
+        const auto backend = m_currentBackend;
+        const auto resolution = m_compatRadio->isChecked()
+            ? KSWORD_ARK_SYSTEM_TIME_RESOLUTION_ORIGINAL_COMPAT
+            : KSWORD_ARK_SYSTEM_TIME_RESOLUTION_GUARDED;
+        const auto generation = m_generation;
+        runControl([backend, resolution, generation]() {
+            ControlReceipt receipt;
+            ksword::ark::DriverClient client;
+            receipt.result = client.controlSystemTime(KSWORD_ARK_SYSTEM_TIME_COMMAND_RESET,
+                1UL, backend, resolution, generation, false);
+            kLogEvent resetEvent;
+            if (!receipt.result.io.ok || receipt.result.response.status != KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
+            {
+                warn << resetEvent << "[SystemTimePage] 恢复 1x 失败: "
+                    << receipt.result.io.message << eol;
+            }
+            else
+            {
+                info << resetEvent << "[SystemTimePage] 已停止变速并切换到连续 1x 计时。" << eol;
+            }
+            receipt.after = client.querySystemTime();
+            receipt.hasAfter = true;
+            return receipt;
+        }, [this](const ControlReceipt& receipt) {
+            const auto& result = receipt.result;
+            if (!result.io.ok ||
+                result.response.status !=
+                    KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
+            {
+                showOpaqueMessage(
+                    this,
+                    QMessageBox::Critical,
+                    ks::i18n::sourceText(QStringLiteral("恢复系统计时")),
+                    result.io.ok
+                        ? operationStatusText(
+                            result.response.status,
+                            result.response.lastStatus)
+                        : ks::i18n::sourceText(QStringLiteral("R0 控制失败：%1"))
+                            .arg(QString::fromStdString(
+                                result.io.message)));
+                return;
+            }
+
+            m_operationLabel->setText(ks::i18n::sourceText(
+                QStringLiteral("已停止变速，当前以连续计数保持 1x")));
+            m_acknowledgeCheck->setChecked(false);
+        });
+    }
+
+    void SystemTimePage::runControl(std::function<ControlReceipt()> operation,
+        std::function<void(const ControlReceipt&)> applyReceipt)
+    {
+        if (m_busy) return;
+        m_statusPending = false;
+        m_statusOperation->cancel();
+        m_controlPending = true;
         setBusy(true);
-        kLogEvent resetEvent;
-        ksword::ark::DriverClient client;
-        const auto result = client.controlSystemTime(
-            KSWORD_ARK_SYSTEM_TIME_COMMAND_RESET,
-            1UL,
-            m_currentBackend,
-            m_compatRadio->isChecked()
-                ? KSWORD_ARK_SYSTEM_TIME_RESOLUTION_ORIGINAL_COMPAT
-                : KSWORD_ARK_SYSTEM_TIME_RESOLUTION_GUARDED,
-            m_generation,
-            false);
-        setBusy(false);
-
-        if (!result.io.ok ||
-            result.response.status !=
-                KSWORD_ARK_SYSTEM_TIME_STATUS_OK)
+        using Operation = std::function<ControlReceipt()>;
+        const auto accepted = m_controlOperation->submitTransaction<Operation, ControlReceipt>(std::move(operation),
+            [](const Operation& execute) { return execute(); },
+            [this, applyReceipt = std::move(applyReceipt)](const ControlReceipt& receipt, std::uint64_t) {
+                m_controlPending = false;
+                // Keep status timer and control admission blocked throughout any receipt modal.
+                const QPointer<SystemTimePage> alive(this);
+                applyReceipt(receipt);
+                if (alive)
+                {
+                    if (receipt.hasAfter) alive->applyQueryResult(receipt.after);
+                    alive->setBusy(false);
+                }
+                return true;
+            },
+            [this](std::exception_ptr) {
+                m_controlPending = false;
+                setBusy(false);
+                showAsyncFailure();
+            });
+        if (accepted == 0)
         {
-            warn << resetEvent
-                << "[SystemTimePage] 恢复 1x 失败: "
-                << result.io.message << eol;
-            showOpaqueMessage(
-                this,
-                QMessageBox::Critical,
-                ks::i18n::sourceText(QStringLiteral("恢复系统计时")),
-                result.io.ok
-                    ? operationStatusText(
-                        result.response.status,
-                        result.response.lastStatus)
-                    : ks::i18n::sourceText(QStringLiteral("R0 控制失败：%1"))
-                        .arg(QString::fromStdString(
-                            result.io.message)));
-            refreshStatus();
-            return;
+            m_controlPending = false;
+            setBusy(false);
+            showAsyncFailure();
         }
-
-        info << resetEvent
-            << "[SystemTimePage] 已停止变速并切换到连续 1x 计时。" << eol;
-        m_operationLabel->setText(ks::i18n::sourceText(
-            QStringLiteral("已停止变速，当前以连续计数保持 1x")));
-        m_acknowledgeCheck->setChecked(false);
-        refreshStatus();
     }
 
     void SystemTimePage::synchronizeFromTimeServer()
