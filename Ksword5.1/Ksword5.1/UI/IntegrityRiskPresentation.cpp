@@ -252,22 +252,8 @@ namespace ks::ui::integrity
         return Tier::Notice;
     }
 
-    void applyRowHighlight(
-        QTableWidget* const table,
-        const int row,
-        const Tier tier,
-        const QString& detailText)
+    static QVariant tierRoleData(const Tier tier, const int role)
     {
-        // 输入：表格、行号、分级和 tooltip 文字。
-        // 处理：Danger/Notice 对整行每个单元格设前景色+底色；Clean 清回 QBrush()，
-        //       这样行被复用或表格被重建时不会残留旧颜色，交替行底色也能透出来。
-        //       颜色走绘制路径令牌（QColor），换主题后由调用方重建表格即可刷新。
-        // 返回：无。
-        if (table == nullptr || row < 0 || row >= table->rowCount())
-        {
-            return;
-        }
-
         QBrush foregroundBrush;
         QBrush backgroundBrush;
         switch (tier)
@@ -288,6 +274,37 @@ namespace ks::ui::integrity
         default:
             break;
         }
+
+        return role == Qt::ForegroundRole ? foregroundBrush : backgroundBrush;
+    }
+
+    QVariant riskRoleData(const quint32 riskFlags, const int role)
+    {
+        if (role == Qt::ToolTipRole)
+            return riskFlags == 0U ? QString() : tooltipText(riskFlags);
+        if (role == Qt::ForegroundRole || role == Qt::BackgroundRole)
+            return tierRoleData(tierOf(riskFlags), role);
+        return {};
+    }
+
+    void applyRowHighlight(
+        QTableWidget* const table,
+        const int row,
+        const Tier tier,
+        const QString& detailText)
+    {
+        // 输入：表格、行号、分级和 tooltip 文字。
+        // 处理：Danger/Notice 对整行每个单元格设前景色+底色；Clean 清回 QBrush()，
+        //       这样行被复用或表格被重建时不会残留旧颜色，交替行底色也能透出来。
+        //       颜色走绘制路径令牌（QColor），换主题后由调用方重建表格即可刷新。
+        // 返回：无。
+        if (table == nullptr || row < 0 || row >= table->rowCount())
+        {
+            return;
+        }
+
+        const QBrush foregroundBrush = qvariant_cast<QBrush>(tierRoleData(tier, Qt::ForegroundRole));
+        const QBrush backgroundBrush = qvariant_cast<QBrush>(tierRoleData(tier, Qt::BackgroundRole));
 
         for (int column = 0; column < table->columnCount(); ++column)
         {
