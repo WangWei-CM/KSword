@@ -21103,28 +21103,31 @@ void FileDock::showFileDetailDialog(const QString& filePath, const QString& init
 
 void FileDock::showFileDetailDialog(const QStringList& filePaths, const QString& initialTabKey)
 {
-    QStringList existingPaths;
+    QStringList detailPaths;
     QSet<QString> seenPaths;
     for (const QString& candidatePath : filePaths)
     {
+        // This entry point owns only lexical target identity. Existence/access
+        // are reported by the detail dialog's asynchronous snapshot, never here.
+        const QString trimmedPath = candidatePath.trimmed();
+        if (trimmedPath.isEmpty()) continue;
         const QString normalizedPath = QDir::cleanPath(
-            QDir::toNativeSeparators(candidatePath.trimmed()));
+            QDir::toNativeSeparators(trimmedPath));
         const QString identityKey = normalizedPath.toLower();
-        if (!normalizedPath.isEmpty() && !seenPaths.contains(identityKey) &&
-            QFileInfo::exists(normalizedPath))
+        if (!normalizedPath.isEmpty() && !seenPaths.contains(identityKey))
         {
             seenPaths.insert(identityKey);
-            existingPaths.push_back(normalizedPath);
+            detailPaths.push_back(normalizedPath);
         }
     }
-    if (existingPaths.isEmpty())
+    if (detailPaths.isEmpty())
     {
         kLogEvent event;
         warn << event << "[FileDock] 打开文件详情失败：没有可访问目标" << eol;
         return;
     }
 
-    FileDetailDialog* dialog = new FileDetailDialog(existingPaths, this, initialTabKey);
+    FileDetailDialog* dialog = new FileDetailDialog(detailPaths, this, initialTabKey);
     dialog->setWindowFlag(Qt::WindowStaysOnTopHint, false);
     dialog->show();
     dialog->raise();
@@ -21133,7 +21136,7 @@ void FileDock::showFileDetailDialog(const QStringList& filePaths, const QString&
     kLogEvent event;
     info << event
         << "[FileDock] 打开文件详情窗口, targetCount="
-        << existingPaths.size()
+        << detailPaths.size()
         << eol;
 }
 
