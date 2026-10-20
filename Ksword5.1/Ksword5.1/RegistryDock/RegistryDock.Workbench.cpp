@@ -49,6 +49,7 @@
 #include <QTreeWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace
 {
@@ -402,6 +403,17 @@ void RegistryDock::initializeWorkbenchControls()
 
 bool RegistryDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_valueTable && event->type() == QEvent::Show && m_deferredValueListing)
+    {
+        auto listing = std::move(m_deferredValueListing);
+        const int offset = m_deferredValueOffset;
+        const quint64 generation = m_deferredValueGeneration;
+        const QString selectedName = std::move(m_deferredValueSelection);
+        const QPointer<RegistryDock> guarded(this);
+        QTimer::singleShot(0, this, [guarded, listing = std::move(listing), offset, generation, selectedName]() {
+            if (guarded) guarded->appendValueRows(listing, offset, generation, selectedName);
+        });
+    }
     if (event->type() == QEvent::FocusIn)
     {
         if (watched == m_keyTree) m_valuesActive = false;
@@ -749,6 +761,17 @@ void RegistryDock::appendValueRows(const std::shared_ptr<const RegistryKeyListin
     int offset, quint64 generation, const QString& selectedName)
 {
     if (generation != m_valueLoadGeneration) return;
+    if (!m_valueTable->isVisible())
+    {
+        // Keep the full canonical listing; hidden value pages do not materialize more cells.
+        auto retired = std::exchange(m_deferredValueListing, listing);
+        if (retired && retired != listing)
+            QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        m_deferredValueOffset = offset;
+        m_deferredValueGeneration = generation;
+        m_deferredValueSelection = selectedName;
+        return;
+    }
     const QPointer<RegistryDock> guarded(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-value-batch"),
         {m_valueTable}, [guarded, listing, offset, generation, selectedName]() {

@@ -348,6 +348,10 @@ private:
     int m_editorViewBits = 0;
     bool m_editorUseR0 = false;
     quint64 m_editorGeneration = 0;
+    std::shared_ptr<const RegistryKeyListing> m_deferredValueListing;
+    int m_deferredValueOffset = 0;
+    quint64 m_deferredValueGeneration = 0;
+    QString m_deferredValueSelection;
     quint64 m_valueLoadGeneration = 0;
     int m_viewBits = 0;
     bool m_applyingChanges = false;
