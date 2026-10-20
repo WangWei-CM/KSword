@@ -91,21 +91,29 @@ void ProcessDetailWindow::requestAsyncModuleRefresh(const bool forceRefresh)
                     }
                     catch (...) {} // Allocation failure retains ordinary RAII cleanup.
                 });
+            struct ShellComScope
+            {
+                HRESULT status = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                ~ShellComScope() { if (SUCCEEDED(status)) ::CoUninitialize(); }
+                bool usable() const { return SUCCEEDED(status) || status == RPC_E_CHANGED_MODE; }
+            } shellCom;
+            struct ShellIconOwner
+            {
+                HICON value = nullptr;
+                ~ShellIconOwner() { if (value) ::DestroyIcon(value); }
+            };
             rows->reserve(result->moduleSnapshot.modules.size());
             for (auto& record : result->moduleSnapshot.modules)
             {
                 QImage image;
-                if (!token.isCanceled() && !record.modulePath.empty())
+                if (!token.isCanceled() && shellCom.usable() && !record.modulePath.empty())
                 {
                     const QString path = QString::fromStdString(record.modulePath);
                     SHFILEINFOW shellInfo{};
-                    if (::SHGetFileInfoW(reinterpret_cast<LPCWSTR>(path.utf16()), 0,
-                        &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_SMALLICON) != 0
-                        && shellInfo.hIcon != nullptr)
-                    {
-                        image = QImage::fromHICON(shellInfo.hIcon);
-                        ::DestroyIcon(shellInfo.hIcon);
-                    }
+                    const auto queried = ::SHGetFileInfoW(reinterpret_cast<LPCWSTR>(path.utf16()), 0,
+                        &shellInfo, sizeof(shellInfo), SHGFI_ICON | SHGFI_SMALLICON);
+                    const ShellIconOwner icon{shellInfo.hIcon};
+                    if (queried != 0 && icon.value != nullptr) image = QImage::fromHICON(icon.value);
                 }
                 rows->push_back(ModuleRowValue{std::move(record), std::move(image)});
             }
