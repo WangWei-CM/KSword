@@ -42,6 +42,8 @@ def main() -> int:
                         help="Instrument a build-log source copy to pause an old query across a language change")
     parser.add_argument("--runtime-policy", action="store_true",
                         help="Count actual runtime traversal over QObject-only trees in a test-only source copy")
+    parser.add_argument("--rediscover", action="store_true",
+                        help="Make initialize rediscover fixture packs in a test-only source copy; does not add a production reload API")
     args = parser.parse_args()
     repository = find_repository_root()
     source_dir = (args.source_dir or repository / "Ksword5.1" / "Ksword5.1" / "Internationalization").resolve()
@@ -94,6 +96,17 @@ def main() -> int:
         hook_bytes = hook_bytes.replace(point, b"        ::ksword_i18n_test_runtime_visited(currentObject);" + newline + point, 1)
         compile_source = out_dir / "LanguageManager.policy-hook.cpp"
         compile_source.write_bytes(hook_bytes)
+    if args.rediscover:
+        hook_bytes = compile_source.read_bytes()
+        begin = hook_bytes.index(b"bool ks::i18n::LanguageManager::initialize(")
+        condition = b"if (!hasAnyPack())"
+        point = hook_bytes.index(condition, begin)
+        # initialize currently reuses its discovered registry. Exercise the real
+        # rediscovery body only in this isolated copy, with a runtime condition
+        # that is true in the QCoreApplication fixture.
+        hook_bytes = hook_bytes[:point] + b"if (QCoreApplication::instance() != nullptr)" + hook_bytes[point + len(condition):]
+        compile_source = out_dir / "LanguageManager.rediscover-hook.cpp"
+        compile_source.write_bytes(hook_bytes)
     exe = out_dir / "language_manager_snapshot_tests.exe"
     result = out_dir / "results.json"
     flags = [
@@ -112,6 +125,8 @@ def main() -> int:
         flags.insert(1, "/DKSWORD_I18N_TEST_GENERATION_HOOK")
     if args.runtime_policy:
         flags.insert(1, "/DKSWORD_I18N_TEST_RUNTIME_POLICY")
+    if args.rediscover:
+        flags.insert(1, "/DKSWORD_I18N_TEST_REDISCOVER")
     response_file = out_dir / "compile.rsp"
     response_file.write_text(subprocess.list2cmdline(flags[1:]) + "\n", encoding="utf-8")
     batch = out_dir / "build.cmd"
@@ -129,6 +144,7 @@ def main() -> int:
         "compiled_source_sha256": hashlib.sha256(compile_source.read_bytes()).hexdigest(),
         "test_only_generation_hook": args.generation_race,
         "test_only_runtime_policy_hook": args.runtime_policy,
+        "test_only_rediscovery_hook": args.rediscover,
         "header_sha256": hashlib.sha256((source_dir / "LanguageManager.h").read_bytes()).hexdigest(),
         "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
         "build_returncode": build.returncode,

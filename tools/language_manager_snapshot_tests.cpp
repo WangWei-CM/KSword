@@ -56,7 +56,8 @@ namespace
         }
     }
 
-    bool writePack(const QString& id, const QString& fallback, const QJsonObject& sources)
+    bool writePack(const QString& id, const QString& fallback, const QJsonObject& sources,
+        const QJsonObject& contexts = {})
     {
         const QJsonObject pack{
             {QStringLiteral("schema"), QStringLiteral("ksword-language-pack")},
@@ -69,7 +70,8 @@ namespace
             {QStringLiteral("fallback"), fallback},
             {QStringLiteral("translations"), QJsonObject{
                 {QStringLiteral("fixture.sentinel"), QStringLiteral("sentinel")}}},
-            {QStringLiteral("source_translations"), sources}};
+            {QStringLiteral("source_translations"), sources},
+            {QStringLiteral("context_translations"), contexts}};
         QFile file(QCoreApplication::applicationDirPath() + QStringLiteral("/languages/") + id + QStringLiteral(".json"));
         if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         {
@@ -111,12 +113,17 @@ namespace
             {QStringLiteral("回退重名乙"), QStringLiteral("ambiguous-fallback")},
             {QStringLiteral("回退反查"), QStringLiteral("fallback-retranslated")},
             {QStringLiteral("显示模板：%1"), QStringLiteral("Rendered %1")},
-            {QStringLiteral("identity"), QStringLiteral("identity")}}));
+            {QStringLiteral("identity"), QStringLiteral("identity")}}, {
+            {QStringLiteral("context.a"), QStringLiteral("Context A")},
+            {QStringLiteral("context.b"), QStringLiteral("Context B")},
+            {QStringLiteral("context.empty"), QString()},
+            {QStringLiteral("context.template"), QStringLiteral("Context %1")}}));
         requireTrue(QStringLiteral("write French fixture"), writePack(QStringLiteral("fr-FR"), QStringLiteral("en-US"), {
             {QStringLiteral("直接命中"), QStringLiteral("French-exact")},
             {QStringLiteral("法语独有"), QStringLiteral("French-only")},
             {QStringLiteral("换代词"), QStringLiteral("generation-French")},
-            {QStringLiteral("显示模板：%1"), QStringLiteral("French rendered %1")}}));
+            {QStringLiteral("显示模板：%1"), QStringLiteral("French rendered %1")}}, {
+            {QStringLiteral("context.a"), QStringLiteral("French context A")}}));
         requireTrue(QStringLiteral("write Chinese fixture"), writePack(QStringLiteral("zh-CN"), QString(), {
             {QStringLiteral("直接命中"), QStringLiteral("包内中文")},
             {QStringLiteral("English canonical"), QStringLiteral("中文强制")},
@@ -124,14 +131,21 @@ namespace
             {QStringLiteral("状态：%1"), QStringLiteral("包状态：%1")},
             {QStringLiteral("安全模式"), QStringLiteral("包内安全模式")},
             {QStringLiteral("缺%1"), QStringLiteral("fallback:%1")},
-            {QStringLiteral("回退反查"), QStringLiteral("ambiguous-fallback")}}));
+            {QStringLiteral("回退反查"), QStringLiteral("ambiguous-fallback")}}, {
+            {QStringLiteral("context.a"), QStringLiteral("中文包不覆盖历史源")},
+            {QStringLiteral("context.zh-only"), QStringLiteral("中文包不从fallback覆盖源")}}));
         requireTrue(QStringLiteral("write cycle A fixture"), writePack(QStringLiteral("aa-AA"), QStringLiteral("bb-BB"), {
             {QStringLiteral("甲侧命中"), QStringLiteral("cycle-A")}}));
         requireTrue(QStringLiteral("write cycle B fixture"), writePack(QStringLiteral("bb-BB"), QStringLiteral("aa-AA"), {
-            {QStringLiteral("环链词"), QStringLiteral("cycle-B")}}));
+            {QStringLiteral("环链词"), QStringLiteral("cycle-B")}}, {
+            {QStringLiteral("context.cycle"), QStringLiteral("Cycle context B")}}));
         requireTrue(QStringLiteral("write failed-chain root fixture"), writePack(QStringLiteral("cc-CC"), QStringLiteral("dd-DD"), {}));
         requireTrue(QStringLiteral("write later-failed fallback metadata fixture"), writePack(QStringLiteral("dd-DD"), QStringLiteral("zh-CN"), {
             {QStringLiteral("失败回退"),QStringLiteral("unused-before-corruption")}}));
+        requireTrue(QStringLiteral("write context failed root fixture"), writePack(QStringLiteral("vv-VV"), QStringLiteral("ww-WW"), {}));
+        requireTrue(QStringLiteral("write context failed middle metadata fixture"), writePack(QStringLiteral("ww-WW"), QStringLiteral("xx-XX"), {}));
+        requireTrue(QStringLiteral("write context later fallback fixture"), writePack(QStringLiteral("xx-XX"), QString(), {}, {
+            {QStringLiteral("context.after-failed"), QStringLiteral("must not skip failed pack")}}));
         requireTrue(QStringLiteral("write concurrent reverse root fixture"), writePack(QStringLiteral("tt-TT"), QStringLiteral("uu-UU"), {
             {QStringLiteral("并发反查"),QStringLiteral("Thread-root")}}));
         requireTrue(QStringLiteral("write concurrent reverse fallback fixture"), writePack(QStringLiteral("uu-UU"), QString(), {
@@ -470,6 +484,87 @@ namespace
 #endif
 
 
+    void runFrozenContextCases(ks::i18n::LanguageManager& manager)
+    {
+        QString error;
+        const ks::i18n::SourceTextSnapshot empty;
+        requireEqual(QStringLiteral("default context snapshot passes through"), empty.contextText(QStringLiteral("context.a"), QStringLiteral("同一个源")), QStringLiteral("同一个源"));
+        const QStringList keys{QString(), QStringLiteral("  \n\t"), QStringLiteral("context.a"), QStringLiteral("context.b"),
+            QStringLiteral("context.empty"), QStringLiteral("context.template"), QStringLiteral("context.cycle"),
+            QStringLiteral("context.zh-only"), QStringLiteral("fixture.sentinel"), QStringLiteral(" context.a "), QStringLiteral("missing")};
+        const QStringList languages{QStringLiteral("en-US"), QStringLiteral("fr-FR"), QStringLiteral("zh-CN"), QStringLiteral("aa-AA")};
+        struct Expected { ks::i18n::SourceTextSnapshot value; QStringList texts; };
+        std::vector<Expected> frozen;
+        const QString fallback = QStringLiteral("同一个源：安全模式 %1");
+        for (const auto& language : languages)
+        {
+            requireTrue(QStringLiteral("activate context language ")+language, manager.setLanguage(language,&error));
+            Expected value{manager.sourceTextSnapshot(),{}};
+            for (const auto& key : keys)
+            {
+                value.texts.append(manager.contextText(key,fallback));
+                requireEqual(QStringLiteral("frozen exact context equivalence ")+language+key,value.value.contextText(key,fallback),value.texts.back());
+                requireEqual(QStringLiteral("empty context fallback stays empty ")+language+key,value.value.contextText(key,QString()),QString());
+            }
+            frozen.push_back(std::move(value));
+        }
+        requireEqual(QStringLiteral("same source first context"),frozen[0].value.contextText(QStringLiteral("context.a"),fallback),QStringLiteral("Context A"));
+        requireEqual(QStringLiteral("same source distinct context"),frozen[0].value.contextText(QStringLiteral("context.b"),fallback),QStringLiteral("Context B"));
+        requireEqual(QStringLiteral("context empty translation is authoritative"),frozen[0].value.contextText(QStringLiteral("context.empty"),fallback),QString());
+        requireEqual(QStringLiteral("context does not expand source templates"),frozen[0].value.contextText(QStringLiteral("context.template"),fallback),QStringLiteral("Context %1"));
+        requireEqual(QStringLiteral("context does not consult regular translations"),frozen[0].value.contextText(QStringLiteral("fixture.sentinel"),fallback),fallback);
+        requireEqual(QStringLiteral("context does not use source fallback translation"),frozen[0].value.contextText(QStringLiteral("missing"),QStringLiteral("安全模式")),QStringLiteral("安全模式"));
+        requireEqual(QStringLiteral("context uses exact untrimmed key"),frozen[0].value.contextText(QStringLiteral(" context.a "),fallback),fallback);
+        requireEqual(QStringLiteral("French current context wins"),frozen[1].value.contextText(QStringLiteral("context.a"),fallback),QStringLiteral("French context A"));
+        requireEqual(QStringLiteral("French falls back to English context"),frozen[1].value.contextText(QStringLiteral("context.b"),fallback),QStringLiteral("Context B"));
+        requireEqual(QStringLiteral("context historical Chinese fallback stays source"),frozen[1].value.contextText(QStringLiteral("context.zh-only"),fallback),fallback);
+        requireEqual(QStringLiteral("Chinese ignores context dictionary"),frozen[2].value.contextText(QStringLiteral("context.a"),fallback),fallback);
+        requireEqual(QStringLiteral("context cycle finds second pack"),frozen[3].value.contextText(QStringLiteral("context.cycle"),fallback),QStringLiteral("Cycle context B"));
+
+        std::atomic<int> mismatches{0};
+        std::vector<std::thread> readers;
+        for (const auto& expected : frozen)
+            readers.emplace_back([expected,keys,fallback,&mismatches]() {
+                for (int repeat=0;repeat!=1000;++repeat)
+                    for (qsizetype index=0;index!=keys.size();++index)
+                        if (expected.value.contextText(keys[index],fallback)!=expected.texts[index]) ++mismatches;
+            });
+        for (int pass=0;pass!=32;++pass)
+            requireTrue(QStringLiteral("switch while frozen context workers %1").arg(pass),manager.setLanguage(languages[pass%languages.size()],&error));
+        for (auto& reader:readers) reader.join();
+        checks+=static_cast<int>(frozen.size())*1000*static_cast<int>(keys.size());
+        requireTrue(QStringLiteral("frozen context workers retain all exact dictionaries"),mismatches.load()==0);
+
+        QFile broken(QCoreApplication::applicationDirPath()+QStringLiteral("/languages/ww-WW.json"));
+        requireTrue(QStringLiteral("open context failed middle fixture"),broken.open(QIODevice::WriteOnly|QIODevice::Truncate));
+        requireTrue(QStringLiteral("write context failed middle fixture"),broken.write("invalid context fixture")>0); broken.close();
+        requireTrue(QStringLiteral("activate context failed middle root"),manager.setLanguage(QStringLiteral("vv-VV"),&error));
+        const auto failed=manager.sourceTextSnapshot();
+        requireEqual(QStringLiteral("live context stops at failed pack"),manager.contextText(QStringLiteral("context.after-failed"),fallback),fallback);
+        requireEqual(QStringLiteral("frozen context stops despite retained later metadata"),failed.contextText(QStringLiteral("context.after-failed"),fallback),fallback);
+
+        // Rewrite only the generated fixture's context value, rediscover packs,
+        // then prove an old value still uses its retained immutable dictionary.
+        QFile english(QCoreApplication::applicationDirPath()+QStringLiteral("/languages/en-US.json"));
+        requireTrue(QStringLiteral("open generated context pack for reload"),english.open(QIODevice::ReadOnly));
+        auto pack=QJsonDocument::fromJson(english.readAll()).object(); english.close();
+        auto contexts=pack.value(QStringLiteral("context_translations")).toObject();
+        contexts.insert(QStringLiteral("context.a"),QStringLiteral("Reloaded context A"));
+        pack.insert(QStringLiteral("context_translations"),contexts);
+        requireTrue(QStringLiteral("open generated context reload output"),english.open(QIODevice::WriteOnly|QIODevice::Truncate));
+        const auto bytes=QJsonDocument(pack).toJson();
+        requireTrue(QStringLiteral("write generated context reload output"),english.write(bytes)==bytes.size()); english.close();
+        requireTrue(QStringLiteral("reload context dictionaries"),manager.initialize(QStringLiteral("en-US"),&error));
+#ifdef KSWORD_I18N_TEST_REDISCOVER
+        requireEqual(QStringLiteral("new snapshot sees reloaded exact context"),manager.sourceTextSnapshot().contextText(QStringLiteral("context.a"),fallback),QStringLiteral("Reloaded context A"));
+#else
+        requireEqual(QStringLiteral("initialize reuses registered context pack without rediscovery"),manager.sourceTextSnapshot().contextText(QStringLiteral("context.a"),fallback),QStringLiteral("Context A"));
+#endif
+        requireEqual(QStringLiteral("old context snapshot survives dictionary reload"),frozen[0].value.contextText(QStringLiteral("context.a"),fallback),QStringLiteral("Context A"));
+        setupPacks();
+        requireTrue(QStringLiteral("restore normal generated packs after context reload"),manager.initialize(QStringLiteral("en-US"),&error));
+    }
+
     void runFrozenDisplayCases(ks::i18n::LanguageManager& manager)
     {
         QString error;
@@ -628,6 +723,7 @@ int main(int argc, char** argv)
         requireEqual(QStringLiteral("no packs frozen normal fallback"), noPackSnapshot.sourceText(QStringLiteral("没有语言包")), QStringLiteral("没有语言包"));
         requireEqual(QStringLiteral("no packs frozen packed fallback"), noPackSnapshot.packedSourceText(QStringLiteral("没有语言包")), QStringLiteral("没有语言包"));
         requireEqual(QStringLiteral("no packs frozen display fallback"),noPackSnapshot.displayText(QStringLiteral("没有语言包")),QStringLiteral("没有语言包"));
+        requireEqual(QStringLiteral("no packs frozen context fallback"),noPackSnapshot.contextText(QStringLiteral("context.a"),QStringLiteral("没有语言包")),QStringLiteral("没有语言包"));
         return writeReport(output);
     }
     setupPacks();
@@ -642,6 +738,7 @@ int main(int argc, char** argv)
     requireTrue(QStringLiteral("initialize English"), manager.initialize(QStringLiteral("en-US"), &error));
     runSourceCases(manager);
     runSnapshotCases(manager);
+    runFrozenContextCases(manager);
     runFrozenDisplayCases(manager);
 #ifdef KSWORD_I18N_TEST_RUNTIME_POLICY
     runRuntimePolicyCases(manager);

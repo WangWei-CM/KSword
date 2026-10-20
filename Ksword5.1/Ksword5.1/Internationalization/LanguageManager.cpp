@@ -1502,6 +1502,51 @@ namespace
         return canonical.isEmpty() ? value : translate(canonical);
     }
 
+    template<class AcquirePack>
+    QString resolveContextTextValue(const QString& languageId, const QString& contextKey,
+        const QString& sourceText, QStringList* visitedLanguageIds, const AcquirePack& acquire)
+    {
+        if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty())
+        {
+            return sourceText;
+        }
+
+        const QString normalizedLanguageId = languageId.trimmed().toLower();
+        if (visitedLanguageIds->contains(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+        visitedLanguageIds->append(normalizedLanguageId);
+
+        // Keep the historical Chinese fallback authoritative even when a third
+        // language reaches zh-CN through its fallback chain.
+        if (isHistoricalChineseLanguage(normalizedLanguageId))
+        {
+            return sourceText;
+        }
+
+        const auto pack = acquire(normalizedLanguageId);
+        if (!pack.found || !pack.data)
+        {
+            return sourceText;
+        }
+
+        if (const StringEntry* entry = pack.data->find(pack.data->contextTranslations, contextKey))
+        {
+            return pack.data->valueOf(*entry).toString();
+        }
+        if (!pack.fallbackLanguageId.isEmpty())
+        {
+            return resolveContextTextValue(
+                pack.fallbackLanguageId,
+                contextKey,
+                sourceText,
+                visitedLanguageIds, acquire);
+        }
+        return sourceText;
+    }
+
+
 }
 
 // State 说明：
@@ -1597,6 +1642,15 @@ QString ks::i18n::SourceTextSnapshot::sourceText(const QString& sourceText) cons
 QString ks::i18n::SourceTextSnapshot::packedSourceText(const QString& sourceText) const
 {
     return m_data ? m_data->translate(sourceText, false) : sourceText;
+}
+
+QString ks::i18n::SourceTextSnapshot::contextText(const QString& contextKey, const QString& sourceText) const
+{
+    if (!m_data || contextKey.trimmed().isEmpty() || sourceText.isEmpty()
+        || isHistoricalChineseLanguage(m_data->languageId)) return sourceText;
+    QStringList visitedLanguageIds;
+    return resolveContextTextValue(m_data->languageId, contextKey, sourceText, &visitedLanguageIds,
+        [this](const QString& id) { return m_data->acquirePack(id); });
 }
 
 QString ks::i18n::SourceTextSnapshot::displayText(const QString& renderedOrSourceText) const
@@ -2312,44 +2366,8 @@ QString ks::i18n::LanguageManager::resolveContextText(
     const QString& sourceText,
     QStringList* visitedLanguageIds) const
 {
-    if (visitedLanguageIds == nullptr || languageId.trimmed().isEmpty())
-    {
-        return sourceText;
-    }
-
-    const QString normalizedLanguageId = languageId.trimmed().toLower();
-    if (visitedLanguageIds->contains(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-    visitedLanguageIds->append(normalizedLanguageId);
-
-    // Keep the historical Chinese fallback authoritative even when a third
-    // language reaches zh-CN through its fallback chain.
-    if (isHistoricalChineseLanguage(normalizedLanguageId))
-    {
-        return sourceText;
-    }
-
-    const PackRef pack = acquirePack(normalizedLanguageId);
-    if (!pack.found || !pack.data)
-    {
-        return sourceText;
-    }
-
-    if (const StringEntry* entry = pack.data->find(pack.data->contextTranslations, contextKey))
-    {
-        return pack.data->valueOf(*entry).toString();
-    }
-    if (!pack.fallbackLanguageId.isEmpty())
-    {
-        return resolveContextText(
-            pack.fallbackLanguageId,
-            contextKey,
-            sourceText,
-            visitedLanguageIds);
-    }
-    return sourceText;
+    return resolveContextTextValue(languageId, contextKey, sourceText, visitedLanguageIds,
+        [this](const QString& id) { return acquirePack(id); });
 }
 
 QString ks::i18n::LanguageManager::resolveSourceText(
