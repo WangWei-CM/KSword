@@ -143,6 +143,10 @@ namespace ks::ui
         // currentStep：当前停在哪一步。
         Step currentStep() const noexcept { return m_currentStep; }
 
+    protected:
+        void showEvent(QShowEvent* event) override;
+        void changeEvent(QEvent* event) override;
+
     private:
         // -------------------------------------------------------------
         // 后台任务的快照结构。
@@ -582,6 +586,9 @@ namespace ks::ui
 
         // m_eventCursor：B 段读事件用的消费游标（HvmEventEntry::sequence 单调递增）。
         unsigned long long m_eventCursor = 0;
+        VerifyResidentSnapshot m_residentSnapshot;
+        bool m_residentProjectionDirty = false;
+        void presentResidentEvidence();
 
         // m_rehearsalPage：排练入口自己分配的一页。
         // VirtualAlloc 出来的，天然 4 KiB 对齐；分配后要写一字节并 VirtualLock，

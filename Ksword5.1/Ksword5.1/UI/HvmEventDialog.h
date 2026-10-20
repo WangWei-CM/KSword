@@ -10,6 +10,8 @@
 // 否则用户看到的事件流会静默缺口。
 
 #include <QDialog>
+#include "HvmControl.h"
+#include <deque>
 
 class QCheckBox;
 class QLabel;
@@ -24,6 +26,10 @@ class HvmEventDialog final : public QDialog
 public:
     explicit HvmEventDialog(QWidget* parent = nullptr);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
+
 private:
     // buildUi：构造控件树与信号连接。
     void buildUi();
@@ -31,6 +37,11 @@ private:
     void poll();
     // trimRows：把表格裁剪到上限，避免长时间观察吃满内存。
     void trimRows();
+    void presentEvents();
+    std::deque<ksword::hvm::HvmEventEntry> m_events;
+    std::deque<quint64> m_presented;
+    QString m_latestStatus;
+    bool m_projectionDirty = false;
 
     QTableWidget* m_eventTable = nullptr;
     QCheckBox* m_followCheck = nullptr;

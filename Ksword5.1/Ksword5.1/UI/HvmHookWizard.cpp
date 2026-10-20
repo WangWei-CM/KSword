@@ -30,6 +30,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTimer>
@@ -138,6 +139,18 @@ namespace ks::ui
         // Stop admitting work; accepted workers own value reservations until
         // their final page access and view publication, even if UI delivery drops.
         releaseRehearsalPage();
+    }
+
+    void HvmHookWizard::showEvent(QShowEvent* event)
+    {
+        QDialog::showEvent(event);
+        presentResidentEvidence();
+    }
+
+    void HvmHookWizard::changeEvent(QEvent* event)
+    {
+        QDialog::changeEvent(event);
+        if (event->type() == QEvent::WindowStateChange) presentResidentEvidence();
     }
 
     void HvmHookWizard::openWizard(QWidget* const parent)
@@ -307,6 +320,7 @@ namespace ks::ui
 
         updateNavigationState();
         // 「进入这一步要做什么」只有这一个分派点。
+        presentResidentEvidence();
         enterStep(step);
     }
 
