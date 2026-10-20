@@ -5,7 +5,12 @@
 // 覆盖的那一份。
 #include "../../../shared/driver/KswordArkDdmaPlan.h"
 
+#include "../../../shared/evidence/SerialTransactionQueue.h"
+
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <utility>
 #include <limits>
 #include <vector>
 
@@ -258,18 +263,23 @@ namespace ksword::memory_backend
 
     namespace
     {
-        // 进程级 DDMA 会话。写入只发生在 UI 线程（DDMA 子页），读取也全部在 UI
-        // 线程，唯一的例外是内存搜索的后台 worker——但它在启动前就把会话按值
-        // 复制走了（见 MemoryDock.SearchFlow.cpp），不会读这里的活对象。
+        // The UI owns the legacy reference. Background callers capture a value
+        // while holding sessionStateMutex, never the UI-owned live object.
         DdmaSession& mutableCurrentDdmaSession()
         {
             static DdmaSession session;
             return session;
         }
 
-        std::uint64_t& mutableDdmaSessionGeneration()
+        std::mutex& sessionStateMutex()
         {
-            static std::uint64_t generation = 0ULL;
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        std::atomic<std::uint64_t>& mutableDdmaSessionGeneration()
+        {
+            static std::atomic<std::uint64_t> generation{ 0ULL };
             return generation;
         }
     }
@@ -281,13 +291,38 @@ namespace ksword::memory_backend
 
     void setCurrentDdmaSession(const DdmaSession& session)
     {
+        std::lock_guard<std::mutex> stateLock(sessionStateMutex());
         mutableCurrentDdmaSession() = session;
         ++mutableDdmaSessionGeneration();
     }
 
     std::uint64_t ddmaSessionGeneration()
     {
-        return mutableDdmaSessionGeneration();
+        return mutableDdmaSessionGeneration().load();
+    }
+
+    DdmaSessionSnapshot captureDdmaSession()
+    {
+        std::lock_guard<std::mutex> stateLock(sessionStateMutex());
+        return { mutableCurrentDdmaSession(), mutableDdmaSessionGeneration().load() };
+    }
+
+    std::recursive_mutex& ddmaTransactionMutex()
+    {
+        static std::recursive_mutex mutex;
+        return mutex;
+    }
+
+    bool submitDdmaTransaction(std::function<void()> transaction)
+    {
+        // Construct the gate first so it outlives queue shutdown and draining.
+        auto* const gate = &ddmaTransactionMutex();
+        (void)captureDdmaSession(); // Session state must also outlive queue draining.
+        static ksword::evidence::SerialTransactionQueue queue(32);
+        return queue.trySubmit([gate, transaction = std::move(transaction)]() {
+            std::lock_guard<std::recursive_mutex> transactionLock(*gate);
+            transaction();
+        });
     }
 
     std::uint32_t ddmaTransferBytes()
@@ -698,6 +733,11 @@ namespace ksword::memory_backend
         const std::uint64_t lengthBytes,
         const bool requireHvmDirectWindow)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (lengthBytes == 0ULL)
         {
@@ -818,6 +858,11 @@ namespace ksword::memory_backend
         const QByteArray& bytes,
         const bool forceApproved)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (bytes.isEmpty())
         {
@@ -946,6 +991,11 @@ namespace ksword::memory_backend
         const std::uint64_t lengthBytes,
         const bool requireHvmDirectWindow)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (lengthBytes == 0ULL)
         {
@@ -1105,6 +1155,11 @@ namespace ksword::memory_backend
         const QByteArray& bytes,
         const bool forceApproved)
     {
+        std::unique_lock<std::recursive_mutex> transactionLock(ddmaTransactionMutex(), std::defer_lock);
+        if (backend == MemoryAccessBackend::Ddma)
+        {
+            transactionLock.lock();
+        }
         AccessOutcome outcome;
         if (bytes.isEmpty())
         {

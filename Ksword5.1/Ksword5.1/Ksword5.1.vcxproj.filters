@@ -67,6 +67,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="PrivilegeDock\PrivilegeAccessPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>

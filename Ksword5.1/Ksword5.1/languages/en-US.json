@@ -6950,6 +6950,11 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "DDMA transaction failed unexpectedly.": "DDMA transaction failed unexpectedly.",
+    "DDMA transaction queue is full; wait for the current operation and retry.": "DDMA transaction queue is full; wait for the current operation and retry.",
+    "DDMA scratch sectors could not be restored; further DDMA operations are unsafe.": "DDMA scratch sectors could not be restored; further DDMA operations are unsafe.",
+    "DDMA transaction returned incomplete data.": "DDMA transaction returned incomplete data.",
+    "DDMA session changed; read a new snapshot before retrying.": "DDMA session changed; read a new snapshot before retrying.",
     "KernelServiceAuditEvidence.h": "KernelServiceAuditEvidence.h",
     "KernelServiceAuditUi.h": "KernelServiceAuditUi.h",
     "概览列组": "Overview columns",

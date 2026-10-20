@@ -29,6 +29,8 @@
 #include <QEvent>
 #include <QFile>
 #include <QFrame>
+#include <QFutureWatcher>
+#include <QPromise>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QIcon>
@@ -53,6 +55,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <exception>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1304,7 +1307,7 @@ void SystemMemoryAuditPage::refreshDdmaCrossCheckState()
     QString reason;
     const bool usable =
         ksword::memory_backend::isDdmaUsable(m_ddmaSessionProvider(), &reason);
-    m_ddmaCrossCheckButton->setEnabled(usable);
+    m_ddmaCrossCheckButton->setEnabled(usable && !m_ddmaCrossCheckBusy);
     m_ddmaCrossCheckButton->setToolTip(usable
         ? localized("Read the same physical page through both backends and compare byte by byte.")
         : reason);
@@ -1312,7 +1315,7 @@ void SystemMemoryAuditPage::refreshDdmaCrossCheckState()
 
 void SystemMemoryAuditPage::runDdmaCrossCheck()
 {
-    if (m_ddmaCrossCheckResultLabel == nullptr || m_ddmaCrossCheckAddressEdit == nullptr)
+    if (m_ddmaCrossCheckBusy || m_ddmaCrossCheckResultLabel == nullptr || m_ddmaCrossCheckAddressEdit == nullptr)
     {
         return;
     }
@@ -1348,67 +1351,125 @@ void SystemMemoryAuditPage::runDdmaCrossCheck()
     const std::uint64_t transferBytes =
         static_cast<std::uint64_t>(ksword::memory_backend::ddmaTransferBytes());
     const std::uint64_t pageBase = physicalAddress & ~(transferBytes - 1ULL);
-    const ksword::memory_backend::DdmaSession& session = m_ddmaSessionProvider();
-
-    const ksword::memory_backend::AccessOutcome standardOutcome =
-        ksword::memory_backend::readPhysical(
-            ksword::memory_backend::MemoryAccessBackend::StandardDriver,
-            session,
-            pageBase,
-            transferBytes);
-    const ksword::memory_backend::AccessOutcome ddmaOutcome =
-        ksword::memory_backend::readPhysical(
-            ksword::memory_backend::MemoryAccessBackend::Ddma,
-            session,
-            pageBase,
-            transferBytes);
-
-    // 任何一侧读失败都不能下"一致/不一致"的结论，只能说没法比。
-    if (!standardOutcome.ok || !ddmaOutcome.ok)
+    const auto session = m_ddmaSessionProvider();
+    const auto generation = ksword::memory_backend::ddmaSessionGeneration();
+    const auto ticket = ++m_ddmaCrossCheckTicket;
+    struct CrossCheckResult
     {
-        const QString detail = !standardOutcome.ok
-            ? standardOutcome.failureText
-            : ddmaOutcome.failureText;
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("%1 %2").arg(localized("Cannot compare:")).arg(detail));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-        return;
-    }
-
-    const qsizetype compareLength =
-        std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
-    qsizetype diffCount = 0;
-    for (qsizetype index = 0; index < compareLength; ++index)
-    {
-        if (standardOutcome.data[index] != ddmaOutcome.data[index])
+        ksword::memory_backend::AccessOutcome standard;
+        ksword::memory_backend::AccessOutcome ddma;
+    };
+    auto promise = std::make_shared<QPromise<CrossCheckResult>>();
+    auto* const watcher = new QFutureWatcher<CrossCheckResult>(this);
+    watcher->setFuture(promise->future());
+    m_ddmaCrossCheckBusy = true;
+    refreshDdmaCrossCheckState();
+    m_ddmaCrossCheckResultLabel->clear();
+    connect(watcher, &QFutureWatcher<CrossCheckResult>::finished, this,
+        [this, watcher, ticket, generation, pageBase, transferBytes]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (ticket != m_ddmaCrossCheckTicket)
         {
-            ++diffCount;
+            return;
         }
+        m_ddmaCrossCheckBusy = false;
+        refreshDdmaCrossCheckState();
+        // A result belongs to the frozen disk/scratch session, never a new one.
+        if (generation != ksword::memory_backend::ddmaSessionGeneration())
+        {
+            return;
+        }
+        const auto& standardOutcome = result.standard;
+        const auto& ddmaOutcome = result.ddma;
+
+        // 任何一侧读失败都不能下"一致/不一致"的结论，只能说没法比。
+        if (!standardOutcome.ok || !ddmaOutcome.ok || standardOutcome.partial || ddmaOutcome.partial
+            || standardOutcome.data.size() != static_cast<qsizetype>(transferBytes)
+            || ddmaOutcome.data.size() != static_cast<qsizetype>(transferBytes) || ddmaOutcome.scratchDirty)
+        {
+            const QString detail = ddmaOutcome.scratchDirty
+                ? QStringLiteral("DDMA scratch sectors could not be restored; further DDMA operations are unsafe.")
+                : ((!standardOutcome.ok || standardOutcome.partial || standardOutcome.data.size() != static_cast<qsizetype>(transferBytes))
+                    ? standardOutcome.failureText : ddmaOutcome.failureText);
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("%1 %2").arg(localized("Cannot compare:")).arg(detail.isEmpty()
+                ? localized("DDMA transaction returned incomplete data.") : detail));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+            return;
+        }
+
+        const qsizetype compareLength =
+            std::min<qsizetype>(standardOutcome.data.size(), ddmaOutcome.data.size());
+        qsizetype diffCount = 0;
+        for (qsizetype index = 0; index < compareLength; ++index)
+        {
+            if (standardOutcome.data[index] != ddmaOutcome.data[index])
+            {
+                ++diffCount;
+            }
+        }
+
+        if (diffCount == 0)
+        {
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("0x%1: %2")
+                    .arg(pageBase, 0, 16)
+                    .arg(localized("both backends returned identical bytes; no redirection observed.")));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
+        }
+        else
+        {
+            m_ddmaCrossCheckResultLabel->setText(
+                QStringLiteral("0x%1: %2/%3 %4")
+                    .arg(pageBase, 0, 16)
+                    .arg(diffCount)
+                    .arg(compareLength)
+                    .arg(localized(
+                        "bytes differ. The standard channel is subject to SLAT; DDMA is not. "
+                        "This usually means the page is redirected or hidden by a hypervisor.")));
+            m_ddmaCrossCheckResultLabel->setStyleSheet(
+                QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
+        }
+    });
+    promise->start();
+    if (!ksword::memory_backend::submitDdmaTransaction(
+        [promise, session, generation, pageBase, transferBytes]() {
+        CrossCheckResult result;
+        // A queued request may become obsolete before it starts. Once started,
+        // the complete standard/DDMA pair runs to completion (including restore).
+        if (generation == ksword::memory_backend::ddmaSessionGeneration())
+        {
+            try
+            {
+                result.standard = ksword::memory_backend::readPhysical(
+                    ksword::memory_backend::MemoryAccessBackend::StandardDriver,
+                    session, pageBase, transferBytes);
+                result.ddma = ksword::memory_backend::readPhysical(
+                    ksword::memory_backend::MemoryAccessBackend::Ddma,
+                    session, pageBase, transferBytes);
+            }
+            catch (const std::exception& error)
+            {
+                result.standard.failureText = QString::fromUtf8(error.what());
+            }
+            catch (...)
+            {
+                result.standard.failureText = QStringLiteral("DDMA transaction failed unexpectedly.");
+            }
+        }
+        promise->addResult(std::move(result));
+        promise->finish();
+    }))
+    {
+        CrossCheckResult rejected;
+        rejected.standard.failureText = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
+        promise->addResult(std::move(rejected));
+        promise->finish();
     }
 
-    if (diffCount == 0)
-    {
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("0x%1: %2")
-                .arg(pageBase, 0, 16)
-                .arg(localized("both backends returned identical bytes; no redirection observed.")));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
-    }
-    else
-    {
-        m_ddmaCrossCheckResultLabel->setText(
-            QStringLiteral("0x%1: %2/%3 %4")
-                .arg(pageBase, 0, 16)
-                .arg(diffCount)
-                .arg(compareLength)
-                .arg(localized(
-                    "bytes differ. The standard channel is subject to SLAT; DDMA is not. "
-                    "This usually means the page is redirected or hidden by a hypervisor.")));
-        m_ddmaCrossCheckResultLabel->setStyleSheet(
-            QStringLiteral("color:%1;").arg(KswordTheme::WarningHex()));
-    }
 }
 
 void SystemMemoryAuditPage::retranslateUi()

@@ -74,7 +74,7 @@ namespace ksword::memwb_ports
     //       条）；
     //     虚拟范围 + StandardDriver 写（非内核地址）、Hvm、Ddma -> 经
     //       ksword::memory_backend::readVirtual/writeVirtual。
-    // - Ddma 通道读写共用同一把进程级互斥闸（静态存储，函数内持锁范围最小且
+    // - Ddma 通道读写共用 MemoryAccessBackend 的进程级事务闸（函数内持锁范围最小且
     //   不嵌套），因为门面本身对磁盘控制器传输通道没有互斥（设计文档第 3 节
     //   不变式 2）。
     // - 线程安全：无成员状态，会话由每次调用的参数传入；可被读线程与 UI 线程

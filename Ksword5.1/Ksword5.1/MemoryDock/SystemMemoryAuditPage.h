@@ -285,6 +285,9 @@ private:
     QLabel* m_ddmaCrossCheckResultLabel = nullptr;
     std::function<const ksword::memory_backend::DdmaSession&()> m_ddmaSessionProvider;
 
+    bool m_ddmaCrossCheckBusy = false;
+    std::uint64_t m_ddmaCrossCheckTicket = 0;
+
     Snapshot m_snapshot;
     UserResidencyScan m_userResidencyScan;
     bool m_hasSnapshot = false;

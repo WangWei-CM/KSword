@@ -838,6 +838,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\shared\evidence\SerialTransactionQueue.h" />
     <ClInclude Include="include\ads\ads_version.h" />
     <ClInclude Include="Framework.h" />
     <ClInclude Include="Ksword.h" />

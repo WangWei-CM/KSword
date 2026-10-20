@@ -21,20 +21,8 @@
 
 namespace
 {
-    // DdmaChannelMutex：
-    // - 作用：串行化全部经由 Ddma 通道（磁盘控制器传输）发起的读写请求。
-    // - 为什么要有它：MemoryAccessBackend 的门面本身对该通道没有互斥——旧
-    //   代码在 UI 线程同步执行，天然不会并发；真实端口可能同时被读线程
-    //   （MemoryPageReader）与 UI 线程（写事务提交）调用，没有这把闸两路
-    //   请求会同时抢同一块暂存扇区，读到/写到互相污染的中间状态。
-    // - 静态存储，进程内唯一一份；每次使用只在本函数作用域内持锁，不嵌套
-    //   持有（见下面 ReadViaFacade/WriteViaFacade，持锁范围只包住门面调用
-    //   本身）。
-    std::mutex& DdmaChannelMutex()
-    {
-        static std::mutex mutex;
-        return mutex;
-    }
+    // DDMA serialization belongs to MemoryAccessBackend so legacy and workbench
+    // callers share the same transaction owner. No second port-local lock.
 
     // VectorToQByteArray：std::vector<uint8_t> -> QByteArray 的转换只在本文件
     // 做（WorkbenchIoPort 是 Qt-free 逻辑层与 Qt 门面之间唯一的边界）。
@@ -230,8 +218,8 @@ namespace ksword::memwb_ports
         const ksword::memory_backend::MemoryAccessBackend backend =
             MapChannelToBackend(session.channel);
         const bool isDdmaChannel = session.channel == ksword::memwb::Channel::Ddma;
-        const ksword::memory_backend::DdmaSession& ddmaSession =
-            ksword::memory_backend::currentDdmaSession();
+        const auto sessionSnapshot = ksword::memory_backend::captureDdmaSession();
+        const auto& ddmaSession = sessionSnapshot.session;
 
         if (isDdmaChannel)
         {
@@ -262,8 +250,16 @@ namespace ksword::memwb_ports
         ksword::memory_backend::AccessOutcome outcome;
         if (isDdmaChannel)
         {
-            std::lock_guard<std::mutex> guard(DdmaChannelMutex());
-            outcome = invoke();
+            std::lock_guard<std::recursive_mutex> guard(ksword::memory_backend::ddmaTransactionMutex());
+            if (sessionSnapshot.generation != session.ddmaGeneration
+                || sessionSnapshot.generation != ksword::memory_backend::ddmaSessionGeneration())
+            {
+                outcome.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            }
+            else
+            {
+                outcome = invoke();
+            }
         }
         else
         {
@@ -320,8 +316,8 @@ namespace ksword::memwb_ports
         const ksword::memory_backend::MemoryAccessBackend backend =
             MapChannelToBackend(session.channel);
         const bool isDdmaChannel = session.channel == ksword::memwb::Channel::Ddma;
-        const ksword::memory_backend::DdmaSession& ddmaSession =
-            ksword::memory_backend::currentDdmaSession();
+        const auto sessionSnapshot = ksword::memory_backend::captureDdmaSession();
+        const auto& ddmaSession = sessionSnapshot.session;
 
         if (isDdmaChannel)
         {
@@ -349,8 +345,16 @@ namespace ksword::memwb_ports
         ksword::memory_backend::AccessOutcome outcome;
         if (isDdmaChannel)
         {
-            std::lock_guard<std::mutex> guard(DdmaChannelMutex());
-            outcome = invoke();
+            std::lock_guard<std::recursive_mutex> guard(ksword::memory_backend::ddmaTransactionMutex());
+            if (sessionSnapshot.generation != session.ddmaGeneration
+                || sessionSnapshot.generation != ksword::memory_backend::ddmaSessionGeneration())
+            {
+                outcome.failureText = QStringLiteral("DDMA session changed; read a new snapshot before retrying.");
+            }
+            else
+            {
+                outcome = invoke();
+            }
         }
         else
         {
