@@ -33,7 +33,9 @@ typedef enum _KSW_RXPF_IOCTL_OPERATION
     KswRxpfIoctlRunSelfTest,
     KswRxpfIoctlSetHookPoint,
     /* Phase G：读 Record->Backup 的子段，供 R3 wizard 在 Unregister(SKIP) 后恢复原字节用 */
-    KswRxpfIoctlQueryBackup
+    KswRxpfIoctlQueryBackup,
+    /* 原子提交：Register→Change→Write→Unregister 压缩到单次 IOCTL */
+    KswRxpfIoctlAtomicCommit
 } KSW_RXPF_IOCTL_OPERATION;
 
 typedef union _KSW_RXPF_REQUEST_SNAPSHOT
@@ -46,6 +48,7 @@ typedef union _KSW_RXPF_REQUEST_SNAPSHOT
     KSWORD_ARK_RXPF_DRAIN_EVENTS_REQUEST DrainEvents;
     KSWORD_ARK_RXPF_SET_HOOK_POINT_REQUEST SetHookPoint;
     KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST QueryBackup;
+    KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST AtomicCommit;
 } KSW_RXPF_REQUEST_SNAPSHOT;
 
 static BOOLEAN
@@ -60,7 +63,8 @@ KswRxpfIoctlIsMutation(
         Operation == KswRxpfIoctlSetEmulation ||
         Operation == KswRxpfIoctlUnregisterPage ||
         Operation == KswRxpfIoctlRunSelfTest ||
-        Operation == KswRxpfIoctlSetHookPoint;
+        Operation == KswRxpfIoctlSetHookPoint ||
+        Operation == KswRxpfIoctlAtomicCommit;
 }
 
 static NTSTATUS
@@ -114,6 +118,12 @@ KswRxpfIoctlEvaluateSafety(
             L"Set or clear an RXPF hook point redirect on a managed page";
         safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
             L"Set or clear an RXPF hook point redirect on a managed page") - 1U);
+        break;
+    case KswRxpfIoctlAtomicCommit:
+        safetyContext.TargetText =
+            L"Atomic RXPF register+write+restore on an external image page";
+        safetyContext.TargetTextChars = (USHORT)(RTL_NUMBER_OF(
+            L"Atomic RXPF register+write+restore on an external image page") - 1U);
         break;
     default:
         safetyContext.TargetText =
@@ -265,6 +275,12 @@ KswRxpfIoctlDispatchFixed(
             &snapshot.QueryBackup,
             (KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE*)outputBuffer);
         break;
+    case KswRxpfIoctlAtomicCommit:
+        /* 原子提交：Register→Change→Write→Unregister 在单个 handler 内完成 */
+        status = KswRxpfRuntimeAtomicCommit(
+            &snapshot.AtomicCommit,
+            (KSWORD_ARK_RXPF_PAGE_RESPONSE*)outputBuffer);
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -381,6 +397,13 @@ KSW_RXPF_DEFINE_IOCTL_HANDLER(
     KswRxpfIoctlQueryBackup,
     KSWORD_ARK_RXPF_QUERY_BACKUP_REQUEST,
     KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE,
+    KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
+
+KSW_RXPF_DEFINE_IOCTL_HANDLER(
+    KswordARKRxpfIoctlAtomicCommit,
+    KswRxpfIoctlAtomicCommit,
+    KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST,
+    KSWORD_ARK_RXPF_PAGE_RESPONSE,
     KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED)
 
 #undef KSW_RXPF_DEFINE_IOCTL_HANDLER

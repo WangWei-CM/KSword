@@ -279,6 +279,15 @@ namespace ks::misc::rxpf
     BackupInfo queryBackup(std::uint64_t recordId,
         unsigned long offset, unsigned long length);
 
+    // atomicCommit：原子提交——单次 IOCTL 完成 Register+Change(mode=2)+Write+
+    // Unregister(SKIP_BACKUP_RESTORE)，把 NX 窗口压缩到驱动函数内部（纳秒级）。
+    // 仅支持 EXTERNAL_IMAGE 目标。返回完整 PageInfo（包含 mode=1 恢复后的状态）。
+    // - targetAddress：目标页面虚拟地址。
+    // - offset：页内偏移（0 ~ PAGE_SIZE-1）。
+    // - bytes：要写入的字节数组（最多 64 字节）。
+    PageInfo atomicCommit(std::uint64_t targetAddress,
+        unsigned long offset, const QByteArray& bytes);
+
     // setHookPoint：设置或清除已注册页面上的钩点。
     // - recordId：注册时返回的记录 ID。
     // - hookAddress：页内拦截地址（清除时传 0）。

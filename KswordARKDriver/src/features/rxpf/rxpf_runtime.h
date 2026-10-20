@@ -91,6 +91,16 @@ KswRxpfRuntimeQueryBackup(
     _Out_ KSWORD_ARK_RXPF_QUERY_BACKUP_RESPONSE* Response
     );
 
+/*
+ * 原子提交：单次 IOCTL 内完成 Register→Change(mode=2)→Write→Unregister(SKIP)，
+ * 把 NX 窗口压缩到驱动函数内以避免高频 fetch 页的时序蓝屏。
+ */
+NTSTATUS
+KswRxpfRuntimeAtomicCommit(
+    _In_ const KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_PAGE_RESPONSE* Response
+    );
+
 ULONGLONG
 KswRxpfInvokeTestPage(
     _In_ PVOID PageAddress

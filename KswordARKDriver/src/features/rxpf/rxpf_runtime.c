@@ -1002,3 +1002,132 @@ KswRxpfRuntimeQueryBackup(
     KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
     return status;
 }
+
+/*
+ * 原子提交：Register→Change(mode=2)→Write→Unregister(SKIP_BACKUP_RESTORE)
+ * 全部在单次 IOCTL handler 内完成，把 NX 窗口压到一个函数调用内部（纳秒级），
+ * 避免 GUI 分步点击在高频 fetch 页上触发 BugCheck 0xFC。
+ *
+ * 仅支持 EXTERNAL_IMAGE 目标。不分配备份（CAPTURE_BACKUP 不需要），
+ * 不启用模拟（无需 IDT 安装/恢复/handler 等待）。
+ * 失败时自动清理 record，恢复原始页面保护。
+ */
+NTSTATUS
+KswRxpfRuntimeAtomicCommit(
+    _In_ const KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST* Request,
+    _Out_ KSWORD_ARK_RXPF_PAGE_RESPONSE* Response
+    )
+{
+    KSW_RXPF_PAGE_RECORD source;
+    PKSW_RXPF_PAGE_RECORD record = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    BOOLEAN inserted = FALSE;
+
+    /* 基本参数校验 */
+    if (Request == NULL || Response == NULL || Request->reserved != 0UL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(Response, sizeof(*Response));
+    status = KswRxpfValidateHeader(
+        &Request->header,
+        sizeof(*Request),
+        KSWORD_ARK_RXPF_FLAG_UI_CONFIRMED);
+    if (!NT_SUCCESS(status) || !KswRxpfRuntimeReady()) {
+        return NT_SUCCESS(status) ? STATUS_DELETE_PENDING : status;
+    }
+
+    /* 只接受 EXTERNAL_IMAGE 目标——原子提交的唯一使用场景 */
+    if (Request->targetKind != KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* 写入参数 bounds check：长度非零、不超 MAX_WRITE_BYTES、不越页 */
+    if (Request->length == 0UL ||
+        Request->length > KSWORD_ARK_RXPF_MAX_WRITE_BYTES ||
+        (ULONGLONG)Request->offset + Request->length > PAGE_SIZE ||
+        (ULONGLONG)Request->offset + Request->length < Request->offset) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* ── 阶段 1：创建 record（无 CAPTURE_BACKUP，原子流程不需要备份）── */
+    status = KswRxpfImageProtectionCreateRecord(
+        Request->targetKind,
+        Request->targetAddress,
+        0UL,        /* flags：不含 CAPTURE_BACKUP */
+        &source);
+    if (!NT_SUCCESS(status)) {
+        KswRxpfSetLastStatus(status);
+        return status;
+    }
+
+    /* ── 阶段 2：插入页表 ── */
+    KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+    status = KswRxpfPageTableInsertLocked(
+        &g_KswRxpfRuntime.PageTable,
+        &source,
+        &record);
+    if (!NT_SUCCESS(status)) {
+        KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
+        KswRxpfImageProtectionReleaseRecord(&source);
+        KswRxpfSetLastStatus(status);
+        return status;
+    }
+    inserted = TRUE;
+
+    /* ── 阶段 3：Change(mode=2) — NX 窗口从此开始 ── */
+    status = KswRxpfImageProtectionChangeToRwNx(record);
+    record->LastStatus = status;
+    if (!NT_SUCCESS(status)) {
+        goto Cleanup;
+    }
+
+    /* ── 阶段 4：Write payload — 窗口仍开着 ── */
+    record->LastFailureReason = 0x00FFU;    /* 诊断标记：即将 Write */
+    status = KswRxpfImageProtectionWrite(
+        record,
+        Request->offset,
+        Request->bytes,
+        Request->length);
+    if (!NT_SUCCESS(status)) {
+        record->LastStatus = status;
+        goto Cleanup;
+    }
+
+    /* ── 阶段 5：标记 SKIP_BACKUP_RESTORE → Unregister → mode=1 恢复 RX ── */
+    /* payload 写入成功，标记跳过备份恢复使 payload 在 ReleaseRecord 后保留 */
+    record->SkipBackupRestoreOnRelease = TRUE;
+
+Cleanup:
+    /* 无论成功/失败都要清理 record：BeginRemove → Release → ClearRemoved */
+
+    /* emulation 从未启用——无需 IDT 恢复、无需 handler 等待 */
+    KswRxpfPageTableBeginRemoveLocked(
+        &g_KswRxpfRuntime.PageTable,
+        record);
+    KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
+
+    /* 不需要 IDT restore：原子流程不启用模拟 */
+    /* 不需要 WaitForHandlers：无活跃 handler */
+
+    /* 重新获取锁，释放 record（包含 mode=1 RestoreExecutableProtection） */
+    KswRxpfPageTableAcquireExclusive(&g_KswRxpfRuntime.PageTable);
+
+    /* 失败路径：不跳过备份恢复（虽然没有备份，ReleaseRecord 会原样恢复 PTE） */
+    if (!NT_SUCCESS(status)) {
+        record->SkipBackupRestoreOnRelease = FALSE;
+    }
+
+    KswRxpfImageProtectionReleaseRecord(record);
+    /* ── NX 窗口在 ReleaseRecord 中 mode=1 调用后关闭 ── */
+
+    /* 在 ClearRemovedLocked 销毁槽之前捕获最终状态 */
+    Response->lastStatus = record->LastStatus;
+    KswRxpfFillPageResponse(record, Response);
+    KswRxpfPageTableClearRemovedLocked(
+        &g_KswRxpfRuntime.PageTable,
+        record);
+    InterlockedIncrement(&g_KswRxpfRuntime.Generation);
+    KswRxpfPageTableReleaseExclusive(&g_KswRxpfRuntime.PageTable);
+    KswRxpfSetLastStatus(NT_SUCCESS(status) ? Response->lastStatus : status);
+    return status;
+}

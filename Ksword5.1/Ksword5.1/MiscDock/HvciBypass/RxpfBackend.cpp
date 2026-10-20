@@ -591,6 +591,57 @@ namespace ks::misc::rxpf
     }
 
     // ================================================================
+    // atomicCommit：原子提交——Register+Change(mode=2)+Write+Unregister(SKIP)
+    // 在单次 IOCTL 内完成，把 NX 窗口压到驱动函数内部。
+    // 仅支持 EXTERNAL_IMAGE 目标。
+    // ================================================================
+    PageInfo atomicCommit(
+        const std::uint64_t targetAddress,
+        const unsigned long offset,
+        const QByteArray& bytes)
+    {
+        PageInfo result;
+
+        // request：原子提交请求体。
+        KSWORD_ARK_RXPF_ATOMIC_COMMIT_REQUEST request{};
+        request.header = buildRequestHeader();
+        request.header.size = sizeof(request);
+        // targetKind：固定 EXTERNAL_IMAGE（原子提交唯一场景）。
+        request.targetKind = KSWORD_ARK_RXPF_TARGET_EXTERNAL_IMAGE;
+        request.reserved = 0UL;
+        request.targetAddress = targetAddress;
+        request.offset = offset;
+
+        // length：实际写入长度，截断到协议上限 64 字节。
+        const unsigned long length = static_cast<unsigned long>(
+            std::min<int>(bytes.size(), KSWORD_ARK_RXPF_MAX_WRITE_BYTES));
+        request.length = length;
+
+        // 拷贝写入数据到请求体。
+        std::memcpy(request.bytes, bytes.constData(), length);
+
+        // response：复用 PAGE_RESPONSE（记录在 ReleaseRecord 后的最终状态）。
+        KSWORD_ARK_RXPF_PAGE_RESPONSE response{};
+
+        // client：通过 ArkDriverClient 发送 IOCTL。
+        const ksword::ark::DriverClient client;
+        const auto io = client.deviceIoControl(
+            IOCTL_KSWORD_ARK_RXPF_ATOMIC_COMMIT,
+            &request,
+            static_cast<unsigned long>(sizeof(request)),
+            &response,
+            static_cast<unsigned long>(sizeof(response)));
+
+        if (!io.ok)
+        {
+            result.ioErrorText = makeIoErrorText(io);
+            return result;
+        }
+
+        return fillPageInfo(response);
+    }
+
+    // ================================================================
     // setHookPoint：设置或清除已注册页面上的执行钩点。
     // - confirmed：调用方必须在用户明确确认后传 true；
     //   R0 端在 confirmed=false 时拒绝该变更操作。
