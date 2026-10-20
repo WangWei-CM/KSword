@@ -11,6 +11,7 @@
 #include "../../Framework.h"
 
 #include <QMap>
+#include <functional>
 #include <QWidget>
 
 #include <vector>
@@ -31,6 +32,7 @@ class QTableWidget;
 class QTabWidget;
 class QToolButton;
 class QVBoxLayout;
+namespace ks::ui { class AsyncOperation; }
 
 class BootEditorTab final : public QWidget
 {
@@ -42,7 +44,7 @@ public:
     // - 参数 parent：Qt 父控件。
     // - 返回：无（构造函数）。
     explicit BootEditorTab(QWidget* parent = nullptr);
-    ~BootEditorTab() override = default;
+    ~BootEditorTab() override;
 
 protected:
     // showEvent：
@@ -121,14 +123,22 @@ private:
         const QStringList& argumentList,
         int timeoutMs,
         const QString& commandDescription);
-    bool runBcdAndExpectSuccess(
-        const QStringList& argumentList,
-        const QString& operationText,
-        bool showSuccessToast);
-    bool applyBootMenuPolicyByIdentifier(
-        const QString& identifierText,
-        const QString& policyValueText,
-        const QString& operationText);
+    enum class BcdErrorStyle { Generic, Copy, Custom };
+    struct BcdPlannedCommand { QStringList args; QString operation; bool missingOkay = false; };
+    struct BcdCommandPlan
+    {
+        std::vector<BcdPlannedCommand> commands;
+        QString successTitle;
+        QString successText;
+        BcdErrorStyle errorStyle = BcdErrorStyle::Generic;
+        bool refreshAfter = true;
+        bool copyAndAppend = false;
+    };
+    void queueBcdPlan(BcdCommandPlan plan);
+    void queueBcdCommand(const QStringList& args, const QString& operation, bool refreshAfter = true);
+    void queueBootMenuPolicy(const QString& identifier, const QString& policy, const QString& operation);
+    void setBcdCommandBusy(bool busy);
+    void applyBcdEnumResult(const BcdCommandResult& result);
 
     // ===================== 解析函数 =====================
     static QString normalizeElementKey(const QString& rawKeyText);
@@ -200,5 +210,7 @@ private:
     QString m_defaultIdentifierText;        // m_defaultIdentifierText：当前默认启动项标识符缓存。
 
     // ===================== 首轮加载状态 =====================
+    ks::ui::AsyncOperation* m_commandOperation = nullptr;
+    bool m_commandPending = false;
     bool m_firstShowHandled = false;        // m_firstShowHandled：是否已在首次可见时排队过首轮 BCD 枚举。
 };

@@ -1,4 +1,6 @@
 #include "BootEditorTab.h"
+#include "../../UI/AsyncOperation.h"
+#include "../../Internationalization/LanguageManager.h"
 #include "../../UI/TableContextMenu.h"
 #include "../../UI/PageControlStyle.h"
 #include "../../UI/PrimaryPageStyle.h"
@@ -127,6 +129,14 @@ BootEditorTab::BootEditorTab(QWidget* parent)
     // - 状态栏保持 initializeUi 写入的“尚未加载”，语义与真实状态一致。
     initializeUi();
     initializeConnections();
+    m_commandOperation = new ks::ui::AsyncOperation(this);
+    m_commandOperation->setStateChangedCallback([this]() {
+        if (m_commandPending && !m_commandOperation->isInFlight())
+        {
+            setBcdCommandBusy(false);
+            m_statusLabel->setText(ks::i18n::text(QStringLiteral("misc.async.receipt_missing"), QStringLiteral("后台任务未返回有效回执，请刷新状态。")));
+        }
+    });
 }
 
 // showEvent：
@@ -627,8 +637,14 @@ void BootEditorTab::initializeConnections()
         });
 }
 
+BootEditorTab::~BootEditorTab()
+{
+    m_commandOperation->close();
+}
+
 void BootEditorTab::refreshBcdEntries()
 {
+    if (m_commandPending) return;
     const BcdCommandResult enumResult = runBcdEdit(
         QStringList{ QStringLiteral("/enum"), QStringLiteral("all"), QStringLiteral("/v") },
         kDefaultCommandTimeoutMs,
@@ -639,6 +655,11 @@ void BootEditorTab::refreshBcdEntries()
     }
     appendCommandLog(QStringLiteral("bcdedit /enum all /v"), enumResult);
 
+    applyBcdEnumResult(enumResult);
+}
+
+void BootEditorTab::applyBcdEnumResult(const BcdCommandResult& enumResult)
+{
     if (!enumResult.startSucceeded || enumResult.timeout || enumResult.exitCode != 0)
     {
         // 刷新失败时必须清空缓存：

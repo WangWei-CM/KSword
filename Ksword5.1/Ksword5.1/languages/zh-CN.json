@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "misc.async.receipt_missing": "后台任务未返回有效回执，请刷新状态。",
     "shared.fields.loading": "正在准备字段...",
     "main.shutdown.wait.title": "等待后台操作完成",
     "main.shutdown.wait.status": "正在完成后台操作（%1）",

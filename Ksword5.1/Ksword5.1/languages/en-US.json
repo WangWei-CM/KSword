@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "misc.async.receipt_missing": "The background task returned no valid receipt. Refresh the system status.",
     "shared.fields.loading": "Preparing fields...",
     "main.shutdown.wait.title": "Waiting for background operations",
     "main.shutdown.wait.status": "Finishing background operations (%1)",
