@@ -37034,6 +37034,8 @@
     "UserInitLogonServer": "UserInitLogonServer",
     "用户登录脚本服务器": "User logon script server",
     "SupportDLL": "SupportDLL",
+    "状态：后台查询失败，请刷新后重试。": "Status: background query failed. Refresh to retry.",
+    "状态：正在查询所选 MajorFunction 事务...": "Status: querying the selected MajorFunction transaction...",
     "BluetoothRadioSupport": "BluetoothRadioSupport",
     "蓝牙无线电支持 DLL": "Bluetooth radio support DLL",
     "ServerCoreShellLauncher": "ServerCoreShellLauncher",
