@@ -4,6 +4,7 @@
 #include <QAbstractItemModel>
 #include <QSortFilterProxyModel>
 #include <QStringList>
+#include <QBitArray>
 #include <memory>
 #include <functional>
 
@@ -44,6 +45,24 @@ namespace ks::ui
             QVector<ChangedRange> changes;
             bool reset = false;
         };
+        struct FilterState
+        {
+            Snapshot source;
+            QString query;
+            QString scopePath;
+            bool diagnosticsOnly = false;
+            QBitArray accepted;
+            QVector<int> matchesBelow;
+            QVector<int> childRows;
+            QStringList expansionPaths;
+            int rootMatches = 0;
+            int rootRows = 0;
+        };
+        using FilterSnapshot = std::shared_ptr<const FilterState>;
+        static FilterSnapshot prepareFilter(Snapshot source, const QString& query, const QString& scopePath,
+            bool diagnosticsOnly, const std::function<bool()>& cancelled = {});
+        static QString preferredScopePath(const Snapshot& source);
+        static bool containsPath(const Snapshot& source, const QString& path);
         static PreparedDocument prepareDocument(const FieldDocument& document, const Translator& translate,
             Snapshot previous = {}, const std::function<bool()>& cancelled = {});
         Snapshot snapshot() const { return m_state; }
@@ -75,13 +94,25 @@ namespace ks::ui
     {
     public:
         explicit ComplexReportFilter(QObject* parent = nullptr);
+        void setSourceModel(QAbstractItemModel* model) override;
+        void setPreparedSearchEnabled(bool enabled);
+        void stagePrepared(ComplexReportModel::FilterSnapshot prepared);
+        void applyPrepared(ComplexReportModel::FilterSnapshot prepared);
+        int matchCount(const QModelIndex& proxyRoot = {}) const;
+        QStringList expansionPaths() const;
         void setQuery(const QString& query);
         void setDiagnosticsOnly(bool enabled);
         void setScopePath(const QString& path);
     protected:
         bool filterAcceptsRow(int row, const QModelIndex& parent) const override;
     private:
-        QStringList m_terms; // 空白分隔的搜索词，全部命中才接受该行。
+        void rebuildPrepared();
+        const ComplexReportModel::FilterState* activePrepared() const;
+        ComplexReportModel::FilterSnapshot m_prepared;
+        ComplexReportModel::FilterSnapshot m_staged;
+        QVector<QMetaObject::Connection> m_sourceConnections;
+        QString m_query;
+        bool m_preparedSearch = false;
         bool m_diagnosticsOnly = false; // 诊断入口排除目录分区，不改变原模型。
         QString m_scopePath; // 范围过滤独立于视图根，空匹配不能退回其它分区。
     };

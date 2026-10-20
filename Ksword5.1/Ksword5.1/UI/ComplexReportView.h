@@ -1,5 +1,5 @@
 #pragma once
-#include "./StructuredFieldView.h"
+#include "./ComplexReportModel.h"
 #include <QPointer>
 #include <QSet>
 #include <QHash>
@@ -40,6 +40,9 @@ namespace ks::ui
         void showEvent(QShowEvent* event) override;
     private:
         void prepareDocument();
+        void scheduleSearch(bool debounce);
+        void prepareSearch();
+        void continueSearchExpansion(quint64 ticket);
         void updateNavigation(bool firstDocument);
         void updateTypes(bool selectFirst);
         void applyNavigation();
@@ -79,7 +82,14 @@ namespace ks::ui
         int m_beforeSearchScroll = 0; // 搜索前的阅读位置。
         FieldDocument m_requestedDocument; // Latest complete canonical input; no background QObject access.
         std::shared_ptr<std::atomic<quint64>> m_prepareGeneration = std::make_shared<std::atomic<quint64>>(0);
+        std::shared_ptr<const ComplexReportModel::PreparedDocument> m_candidate;
         std::shared_ptr<std::atomic<quint64>> m_filterGeneration = std::make_shared<std::atomic<quint64>>(0);
+        QSet<QString> m_expandedPaths;
+        QStringList m_searchExpansion;
+        qsizetype m_expansionOffset = 0;
+        quint64 m_expansionGeneration = 0;
+        bool m_restoreAfterSearch = false;
+        bool m_searchPending = false;
         bool m_preparing = false;
         bool m_projectionDirty = false;
         bool m_initialized = false; // 首份目录到达时选择默认范围和类型。

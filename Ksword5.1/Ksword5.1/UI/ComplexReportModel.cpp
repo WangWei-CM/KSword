@@ -19,6 +19,8 @@ namespace ks::ui
         {
             int parent = -1; // 父节点的 preorder 索引，根节点使用 -1。
             int row = 0; // 在父节点实际可见子项中的位置。
+            int root = -1; // Precomputed scope identity, never walk QModelIndex parents per row.
+            int end = 0; // Exclusive preorder subtree bound.
             int depth = 0; // 绘制层级，根分区为零。
             ReportNodeKind kind = ReportNodeKind::Field; // 原分区/字段或合成的长值详情。
             QVector<int> children; // 子节点的稳定 preorder 索引。
@@ -26,7 +28,7 @@ namespace ks::ui
             QString path; // 不依赖本地化和显示名裁短的节点身份。
             QString name; // 本地化后的短显示名。
             QString value; // 完整值，不截断复制、搜索或行内详情。
-            QString search; // 原名、完整值和祖先上下文。
+            QString search; // Local canonical/display context; ancestors are shared through parent IDs.
             QString summary; // 生产者指定的摘要短标题或原分区名。
             QString offset; // 来自规范 Offset/RVA 属性的独立偏移列。
             QString type; // 来自规范 Type 属性的独立类型列。
@@ -41,8 +43,12 @@ namespace ks::ui
         explicit State(const FieldDocument& source, Translator translator, std::function<bool()> cancellation = {})
             : translate(std::move(translator)), cancelled(std::move(cancellation)), snapshot(source)
         {
-            const QString context = localized(snapshot.title, true) + QLatin1Char('\n') + snapshot.title;
-            appendNodes(snapshot.nodes, -1, {}, QString(), context, QString());
+            noteLabel = localized(QStringLiteral("说明"), true);
+            countPattern = localized(QStringLiteral("%1 个字段"), true);
+            for (const QString& header : {QStringLiteral("字段"), QStringLiteral("偏移"), QStringLiteral("类型 / 值")})
+                headers.append(localized(header, true));
+            titleSearch = localized(snapshot.title, true) + QLatin1Char('\n') + snapshot.title;
+            appendNodes(snapshot.nodes, -1, {}, QString(), QString());
         }
 
         // 输入规范节点和翻译策略，返回完整本地化文本；业务数据不会经 HTML 或报告文本解析。
@@ -100,7 +106,7 @@ namespace ks::ui
 
         // 按原文档次序建立 preorder；同名同类兄弟使用序号消歧，不以翻译后的文字作身份。
         void appendNodes(const QVector<FieldNode>& nodes, int parentIndex, const QVector<int>& sourcePrefix,
-            const QString& parentPath, const QString& context, const QString& parentName)
+            const QString& parentPath, const QString& parentName)
         {
             QHash<QString, int> occurrences; // 当前兄弟层的同名节点计数。
             for (int row = 0; row < nodes.size(); ++row)
@@ -112,6 +118,7 @@ namespace ks::ui
                 occurrences.insert(key, occurrence + 1);
                 Entry entry;
                 entry.parent = parentIndex;
+                entry.root = parentIndex < 0 ? static_cast<int>(entries.size()) : entries.at(parentIndex).root;
                 entry.row = row;
                 entry.depth = parentIndex < 0 ? 0 : entries.at(parentIndex).depth + 1;
                 entry.kind = node.kind == FieldNode::Kind::Section
@@ -132,12 +139,12 @@ namespace ks::ui
                         entry.value = properties; // 属性变化由同结构值比较通知父组，不改节点身份或状态。
                     }
                 }
-                entry.search = context + QLatin1Char('\n') + node.name + QLatin1Char('\n')
+                entry.search = node.name + QLatin1Char('\n')
                     + localized(node.name, node.translateName) + QLatin1Char('\n') + node.value
                     + QLatin1Char('\n') + entry.value;
                 entry.summary = node.summaryLabel.isEmpty()
                     ? localized(node.name, node.translateName) : localized(node.summaryLabel, true);
-                entry.search += QLatin1Char('\n') + entry.summary; // 显示的短标题同样可搜索，后代继承完整上下文。
+                entry.search += QLatin1Char('\n') + entry.summary; // Short labels participate in the same ancestor search context.
                 entry.purpose = node.reportRole;
                 entry.reportedCount = node.reportedCount;
                 entry.preferredScope = node.preferredScope;
@@ -169,25 +176,26 @@ namespace ks::ui
                 // 递归可能让 QVector 重分配，因此不跨递归保留任何 Entry 引用。
                 const QVector<int> childSourcePrefix = entries.at(entryIndex).sourcePath;
                 const QString childPath = entries.at(entryIndex).path;
-                const QString childContext = entries.at(entryIndex).search;
-                appendNodes(node.children, entryIndex, childSourcePrefix, childPath, childContext, node.name);
+                appendNodes(node.children, entryIndex, childSourcePrefix, childPath, node.name);
                 if (needsValueDetail(node))
                 {
                     Entry detail;
                     detail.parent = entryIndex;
+                    detail.root = entries.at(entryIndex).root;
                     detail.row = static_cast<int>(entries.at(entryIndex).children.size());
                     detail.depth = entries.at(entryIndex).depth + 1;
                     detail.kind = ReportNodeKind::ValueDetail;
                     detail.sourcePath = childSourcePrefix;
                     detail.path = childPath + QStringLiteral("/value-detail");
                     detail.value = entries.at(entryIndex).value;
-                    detail.search = childContext;
+                    detail.end = static_cast<int>(entries.size()) + 1;
                     detail.status = node.status;
                     const int detailIndex = static_cast<int>(entries.size());
                     entries.append(std::move(detail));
                     entries[entryIndex].children.append(detailIndex);
                     paths.insert(entries.at(detailIndex).path, detailIndex);
                 }
+                entries[entryIndex].end = static_cast<int>(entries.size());
             }
         }
 
@@ -238,6 +246,18 @@ namespace ks::ui
             return result;
         }
 
+        QString fullSearch(int item) const
+        {
+            QStringList context;
+            for (; item >= 0; item = entries.at(item).parent) context.prepend(entries.at(item).search);
+            context.prepend(titleSearch);
+            return context.join(QLatin1Char('\n'));
+        }
+
+        QString noteLabel;
+        QString countPattern;
+        QStringList headers;
+        QString titleSearch; // Shared document context, not copied into every descendant string.
         Translator translate; // Frozen value callback; production workers never consult LanguageManager.
         std::function<bool()> cancelled;
         FieldDocument snapshot; // 复制、导出与所有角色共用的完整规范文档快照。
@@ -274,11 +294,18 @@ namespace ks::ui
         if (!result.reset)
         {
             QHash<int, QVector<int>> changedRows;
+            QBitArray contextChanged(next->entries.size());
+            const bool titleChanged = result.base->titleSearch != next->titleSearch;
             for (int item = 0; item < next->entries.size(); ++item)
             {
                 if ((item & 255) == 0 && cancelled && cancelled()) return result;
                 const State::Entry& entry = next->entries.at(item);
-                if (!State::sameDisplay(result.base->entries.at(item), entry))
+                const State::Entry& previousEntry = result.base->entries.at(item);
+                const bool inheritedChange = titleChanged || (entry.parent >= 0 && contextChanged.testBit(entry.parent));
+                contextChanged.setBit(item, inheritedChange || previousEntry.search != entry.search);
+                const bool labelChanged = (entry.kind == ReportNodeKind::Note && result.base->noteLabel != next->noteLabel)
+                    || (entry.reportedCount >= 0 && result.base->countPattern != next->countPattern);
+                if (inheritedChange || labelChanged || !State::sameDisplay(previousEntry, entry))
                     changedRows[entry.parent].append(entry.row);
             }
             for (auto iterator = changedRows.constBegin(); iterator != changedRows.constEnd(); ++iterator)
@@ -315,6 +342,7 @@ namespace ks::ui
     bool ComplexReportModel::applyPrepared(const PreparedDocument& prepared)
     {
         if (!prepared.next || prepared.base != m_state) return false;
+        const bool headersChanged = m_state->headers != prepared.next->headers;
         const QPointer<ComplexReportModel> alive(this);
         if (prepared.reset) beginResetModel();
         if (!alive) return false;
@@ -328,6 +356,7 @@ namespace ks::ui
             emit dataChanged(index(range.first, 0, parentIndex), index(range.last, 2, parentIndex));
             if (!alive || m_state != prepared.next) return false;
         }
+        if (headersChanged) emit headerDataChanged(Qt::Horizontal, 0, 2);
         return prepared.reset;
     }
 
@@ -342,7 +371,6 @@ namespace ks::ui
     void ComplexReportModel::relocalize()
     {
         setDocument(m_state->snapshot);
-        emit headerDataChanged(Qt::Horizontal, 0, 2);
     }
 
     QModelIndex ComplexReportModel::index(int row, int column, const QModelIndex& parent) const
@@ -413,13 +441,13 @@ namespace ks::ui
         case Qt::DisplayRole:
             if (index.column() == 0)
             {
-                if (entry.kind == ReportNodeKind::Note) return ks::i18n::sourceText(QStringLiteral("说明"));
+                if (entry.kind == ReportNodeKind::Note) return m_state->noteLabel;
                 return entry.kind == ReportNodeKind::Section && !entry.summary.isEmpty() ? entry.summary : entry.name;
             }
             if (index.column() == 1) return entry.offset;
             if (!entry.type.isEmpty()) return entry.type;
             if (entry.reportedCount >= 0)
-                return ks::i18n::sourceText(QStringLiteral("%1 个字段")).arg(entry.reportedCount);
+                return m_state->countPattern.arg(entry.reportedCount);
             return entry.value;
         case ReportNameRole: return entry.name;
         case Qt::ToolTipRole:
@@ -432,7 +460,7 @@ namespace ks::ui
         case ReportCountRole: return entry.count;
         case ReportInitiallyExpandedRole: return entry.expanded;
         case ReportStatusRole: return static_cast<int>(entry.status);
-        case ReportSearchRole: return entry.search;
+        case ReportSearchRole: return m_state->fullSearch(static_cast<int>(index.internalId() - 1));
         case ReportSummaryRole: return entry.summary;
         case ReportPurposeRole: return static_cast<int>(entry.purpose);
         case ReportReportedCountRole: return entry.reportedCount;
@@ -445,8 +473,7 @@ namespace ks::ui
     QVariant ComplexReportModel::headerData(int section, Qt::Orientation orientation, int role) const
     {
         if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
-        const QStringList headers{QStringLiteral("字段"), QStringLiteral("偏移"), QStringLiteral("类型 / 值")};
-        return section >= 0 && section < headers.size() ? ks::i18n::sourceText(headers.at(section)) : QVariant();
+        return section >= 0 && section < m_state->headers.size() ? m_state->headers.at(section) : QVariant();
     }
 
     Qt::ItemFlags ComplexReportModel::flags(const QModelIndex& index) const
@@ -524,50 +551,210 @@ namespace ks::ui
         return m_state->snapshot;
     }
 
+    bool ComplexReportModel::containsPath(const Snapshot& source, const QString& path)
+    {
+        return source && source->paths.contains(path);
+    }
+
+    QString ComplexReportModel::preferredScopePath(const Snapshot& source)
+    {
+        QString first;
+        if (source) for (int item : source->roots)
+        {
+            const State::Entry& entry = source->entries.at(item);
+            if (entry.purpose != FieldNode::ReportRole::Catalog) continue;
+            if (entry.preferredScope) return entry.path;
+            if (first.isEmpty()) first = entry.path;
+        }
+        return first;
+    }
+
+    ComplexReportModel::FilterSnapshot ComplexReportModel::prepareFilter(Snapshot source,
+        const QString& query, const QString& scopePath, bool diagnosticsOnly, const std::function<bool()>& cancelled)
+    {
+        if (!source || (cancelled && cancelled())) return {};
+        auto result = std::make_unique<FilterState>();
+        result->source = std::move(source);
+        result->query = query.trimmed();
+        result->diagnosticsOnly = diagnosticsOnly;
+        const State& state = *result->source;
+        const int size = static_cast<int>(state.entries.size());
+        const int scope = state.paths.value(scopePath, -1);
+        const bool missingScope = !scopePath.isEmpty() && scope < 0;
+        result->scopePath = scopePath;
+        result->accepted.resize(size);
+        result->matchesBelow.fill(0, size);
+        result->childRows.fill(0, size);
+        QBitArray matched(size, true);
+        const QStringList terms = result->query.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        // AND terms can match different ancestors. Each term propagates one bit in preorder;
+        // no descendant stores or scans a copied full ancestor document.
+        for (const QString& term : terms)
+        {
+            QBitArray inherited(size);
+            const bool title = state.titleSearch.contains(term, Qt::CaseInsensitive);
+            for (int item = 0; item < size; ++item)
+            {
+                if ((item & 255) == 0 && cancelled && cancelled()) return {};
+                const State::Entry& entry = state.entries.at(item);
+                const bool hit = title || (entry.parent >= 0 && inherited.testBit(entry.parent))
+                    || entry.search.contains(term, Qt::CaseInsensitive);
+                inherited.setBit(item, hit);
+                if (!hit) matched.clearBit(item);
+            }
+        }
+        QBitArray eligible(size);
+        for (int item = 0; item < size; ++item)
+        {
+            if ((item & 255) == 0 && cancelled && cancelled()) return {};
+            const State::Entry& entry = state.entries.at(item);
+            const bool inScope = scope < 0 || (item >= scope && item < state.entries.at(scope).end)
+                || (scope >= item && scope < entry.end);
+            const bool allowed = !missingScope && inScope && entry.purpose != FieldNode::ReportRole::Metadata
+                && entry.kind != ReportNodeKind::ValueDetail
+                && (!diagnosticsOnly || state.entries.at(entry.root).purpose != FieldNode::ReportRole::Catalog);
+            eligible.setBit(item, allowed);
+            result->accepted.setBit(item, allowed && matched.testBit(item));
+        }
+        // Close accepted ancestors once on the worker; Qt recursive proxy filtering stays disabled.
+        for (int item = size - 1; item >= 0; --item)
+        {
+            if ((item & 255) == 0 && cancelled && cancelled()) return {};
+            const State::Entry& entry = state.entries.at(item);
+            if (result->accepted.testBit(item) && entry.parent >= 0 && eligible.testBit(entry.parent))
+                result->accepted.setBit(entry.parent);
+        }
+        for (int item = size - 1; item >= 0; --item)
+        {
+            if ((item & 255) == 0 && cancelled && cancelled()) return {};
+            if (!result->accepted.testBit(item)) continue;
+            const State::Entry& entry = state.entries.at(item);
+            const int count = entry.purpose == FieldNode::ReportRole::Record || result->childRows.at(item) == 0
+                ? 1 : result->matchesBelow.at(item);
+            if (entry.parent < 0)
+            {
+                ++result->rootRows;
+                result->rootMatches += count;
+            }
+            else
+            {
+                ++result->childRows[entry.parent];
+                result->matchesBelow[entry.parent] += count;
+            }
+        }
+        for (int item = 0; item < size; ++item)
+        {
+            const State::Entry& entry = state.entries.at(item);
+            if (result->accepted.testBit(item) && (entry.purpose == FieldNode::ReportRole::Collection
+                || entry.kind == ReportNodeKind::Section)) result->expansionPaths.append(entry.path);
+        }
+        return FilterSnapshot(result.release(), [](const FilterState* retired)
+        { QThreadPool::globalInstance()->start([retired]() { delete retired; }); });
+    }
+
     ComplexReportFilter::ComplexReportFilter(QObject* parent) : QSortFilterProxyModel(parent)
     {
-        setRecursiveFilteringEnabled(true);
-        setAutoAcceptChildRows(false); // 搜索不自动展开/接受整片属性正文。
+        setRecursiveFilteringEnabled(false); // Prepared bitmap already includes the exact ancestor closure.
+        setAutoAcceptChildRows(false);
+    }
+
+    void ComplexReportFilter::setSourceModel(QAbstractItemModel* model)
+    {
+        for (const auto& connection : m_sourceConnections) disconnect(connection);
+        m_sourceConnections.clear();
+        m_prepared.reset();
+        m_staged.reset();
+        QSortFilterProxyModel::setSourceModel(model);
+        if (model)
+        {
+            const auto refresh = [this]() { if (!m_preparedSearch) rebuildPrepared(); };
+            m_sourceConnections.append(connect(model, &QAbstractItemModel::modelReset, this, refresh));
+            m_sourceConnections.append(connect(model, &QAbstractItemModel::dataChanged, this, refresh));
+        }
+        if (!m_preparedSearch) rebuildPrepared();
+    }
+
+    void ComplexReportFilter::setPreparedSearchEnabled(bool enabled)
+    {
+        m_preparedSearch = enabled;
+        setDynamicSortFilter(!enabled);
+        if (!enabled) rebuildPrepared();
+    }
+
+    void ComplexReportFilter::stagePrepared(ComplexReportModel::FilterSnapshot prepared)
+    {
+        m_staged = std::move(prepared);
+    }
+
+    void ComplexReportFilter::applyPrepared(ComplexReportModel::FilterSnapshot prepared)
+    {
+        const auto* model = dynamic_cast<const ComplexReportModel*>(sourceModel());
+        if (!prepared || !model || prepared->source != model->snapshot()) return;
+        m_query = prepared->query;
+        m_scopePath = prepared->scopePath;
+        m_diagnosticsOnly = prepared->diagnosticsOnly;
+        m_prepared = std::move(prepared);
+        m_staged.reset();
+        invalidateFilter();
+    }
+
+    const ComplexReportModel::FilterState* ComplexReportFilter::activePrepared() const
+    {
+        const auto* model = dynamic_cast<const ComplexReportModel*>(sourceModel());
+        if (!model) return nullptr;
+        const auto current = model->snapshot();
+        if (m_staged && m_staged->source == current) return m_staged.get();
+        return m_prepared && m_prepared->source == current ? m_prepared.get() : nullptr;
+    }
+
+    void ComplexReportFilter::rebuildPrepared()
+    {
+        if (const auto* model = dynamic_cast<const ComplexReportModel*>(sourceModel()))
+            applyPrepared(ComplexReportModel::prepareFilter(model->snapshot(), m_query, m_scopePath, m_diagnosticsOnly));
     }
 
     void ComplexReportFilter::setQuery(const QString& query)
     {
-        const QStringList terms = query.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-        if (terms == m_terms) return;
-        m_terms = terms;
-        invalidateFilter();
+        if (m_query == query.trimmed()) return;
+        m_query = query.trimmed();
+        if (!m_preparedSearch) rebuildPrepared();
     }
 
     void ComplexReportFilter::setDiagnosticsOnly(bool enabled)
     {
         if (m_diagnosticsOnly == enabled) return;
         m_diagnosticsOnly = enabled;
-        invalidateFilter();
-    }
-
-    bool ComplexReportFilter::filterAcceptsRow(int row, const QModelIndex& parent) const
-    {
-        const QModelIndex index = sourceModel()->index(row, 0, parent);
-        QModelIndex root = index;
-        while (root.parent().isValid()) root = root.parent();
-        if (!m_scopePath.isEmpty() && root.data(ReportPathRole).toString() != m_scopePath) return false;
-        const auto purpose = static_cast<FieldNode::ReportRole>(index.data(ReportPurposeRole).toInt());
-        if (purpose == FieldNode::ReportRole::Metadata
-            || static_cast<ReportNodeKind>(index.data(ReportKindRole).toInt()) == ReportNodeKind::ValueDetail) return false;
-        if (m_diagnosticsOnly)
-        {
-            if (static_cast<FieldNode::ReportRole>(root.data(ReportPurposeRole).toInt()) == FieldNode::ReportRole::Catalog) return false;
-        }
-        const QString text = index.data(ReportSearchRole).toString();
-        for (const QString& term : m_terms)
-            if (!text.contains(term, Qt::CaseInsensitive)) return false;
-        return true;
+        if (!m_preparedSearch) rebuildPrepared();
     }
 
     void ComplexReportFilter::setScopePath(const QString& path)
     {
         if (m_scopePath == path) return;
         m_scopePath = path;
-        invalidateFilter();
+        if (!m_preparedSearch) rebuildPrepared();
+    }
+
+    bool ComplexReportFilter::filterAcceptsRow(int row, const QModelIndex& parent) const
+    {
+        const auto* prepared = activePrepared();
+        if (!prepared) return false;
+        const QModelIndex index = sourceModel()->index(row, 0, parent);
+        const int item = static_cast<int>(index.internalId()) - 1;
+        return item >= 0 && item < prepared->accepted.size() && prepared->accepted.testBit(item);
+    }
+
+    int ComplexReportFilter::matchCount(const QModelIndex& proxyRoot) const
+    {
+        const auto* prepared = activePrepared();
+        if (!prepared) return 0;
+        if (!proxyRoot.isValid()) return prepared->rootMatches;
+        const int item = static_cast<int>(mapToSource(proxyRoot).internalId()) - 1;
+        return item >= 0 && item < prepared->matchesBelow.size() ? prepared->matchesBelow.at(item) : 0;
+    }
+
+    QStringList ComplexReportFilter::expansionPaths() const
+    {
+        const auto* prepared = activePrepared();
+        return prepared ? prepared->expansionPaths : QStringList();
     }
 }
