@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -35,6 +36,22 @@ namespace ks::file
         constexpr std::uint32_t kMaxExportNames = 4096;
         constexpr std::uint64_t kMaxPeFileBytes = 512ULL * 1024ULL * 1024ULL;
 
+        struct PeAnalysisCancelled {};
+        thread_local const PeAnalysisOptions* activeOptions = nullptr;
+        thread_local unsigned cancellationProbeCount = 0;
+        struct ScopedPeAnalysisOptions
+        {
+            const PeAnalysisOptions* previous;
+            explicit ScopedPeAnalysisOptions(const PeAnalysisOptions& options) : previous(activeOptions) { activeOptions = &options; }
+            ~ScopedPeAnalysisOptions() { activeOptions = previous; }
+        };
+        void CheckPeAnalysisCancelled(bool force = false)
+        {
+            if (activeOptions && activeOptions->cancelled &&
+                (force || ((++cancellationProbeCount) % 256U) == 1U) && activeOptions->cancelled())
+                throw PeAnalysisCancelled{};
+        }
+
         // Collect semantic fields at the point where structures are decoded.
         // No report text is read back or split to manufacture the property tree.
         class ReportCollector
@@ -43,14 +60,17 @@ namespace ks::file
             explicit ReportCollector(PeAnalysisResult& result) : result_(result) {}
             void Section(std::wstring name)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Section, std::move(name), {}, 0 });
             }
             void Field(std::wstring name, std::wstring value, std::uint32_t depth = 0)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Field, std::move(name), std::move(value), depth });
             }
             void Note(std::wstring value, std::uint32_t depth = 0)
             {
+                CheckPeAnalysisCancelled();
                 result_.entries.push_back({ PeReportEntry::Kind::Note, {}, std::move(value), depth });
             }
         private:
@@ -139,6 +159,7 @@ namespace ks::file
             std::wstring output;
             for (const std::wstring& itemText : itemList)
             {
+                CheckPeAnalysisCancelled();
                 if (!output.empty())
                 {
                     output += L" | ";
@@ -228,6 +249,7 @@ namespace ks::file
             const std::size_t cappedEndOffset = std::min(fileBytes.size(), beginOffset + kMaxPeStringBytes);
             while (endOffset < cappedEndOffset && fileBytes[endOffset] != 0)
             {
+                CheckPeAnalysisCancelled();
                 ++endOffset;
             }
             return ks::str::Utf8ToUtf16(std::string(
@@ -243,6 +265,7 @@ namespace ks::file
             int length = 0;
             while (length < IMAGE_SIZEOF_SHORT_NAME && nameBytes[length] != '\0')
             {
+                CheckPeAnalysisCancelled();
                 ++length;
             }
             return std::string(nameBytes, nameBytes + length);
@@ -259,6 +282,7 @@ namespace ks::file
         {
             for (const IMAGE_SECTION_HEADER& sectionHeader : sectionList)
             {
+                CheckPeAnalysisCancelled();
                 const std::uint32_t sectionRva = sectionHeader.VirtualAddress;
                 if (rvaValue < sectionRva)
                 {
@@ -301,11 +325,13 @@ namespace ks::file
             std::array<std::uint32_t, 256> countList{};
             for (std::uint32_t index = 0; index < readableSize; ++index)
             {
+                if ((index % 65536U) == 0U) CheckPeAnalysisCancelled(true);
                 ++countList[fileBytes[static_cast<std::size_t>(rawOffsetValue) + index]];
             }
             double entropyValue = 0.0;
             for (std::uint32_t countValue : countList)
             {
+                CheckPeAnalysisCancelled();
                 if (countValue == 0) { continue; }
                 const double probability = static_cast<double>(countValue) / static_cast<double>(readableSize);
                 entropyValue -= probability * std::log2(probability);
@@ -333,17 +359,17 @@ namespace ks::file
                 return false;
             }
 
+            const auto close = [](void* handle) { ::CloseHandle(handle); };
+            const std::unique_ptr<void, decltype(close)> handleOwner(fileHandle, close);
             LARGE_INTEGER fileSize{};
             if (::GetFileSizeEx(fileHandle, &fileSize) == FALSE || fileSize.QuadPart < 0)
             {
                 const DWORD errorCode = ::GetLastError();
-                ::CloseHandle(fileHandle);
                 errorTextOut = L"GetFileSizeEx failed, error=" + std::to_wstring(errorCode);
                 return false;
             }
             if (static_cast<std::uint64_t>(fileSize.QuadPart) > kMaxPeFileBytes)
             {
-                ::CloseHandle(fileHandle);
                 errorTextOut = L"file is too large for interactive PE analysis";
                 return false;
             }
@@ -352,13 +378,13 @@ namespace ks::file
             std::size_t totalRead = 0;
             while (totalRead < fileBytesOut.size())
             {
+                CheckPeAnalysisCancelled(true);
                 const DWORD chunkSize = static_cast<DWORD>(std::min<std::size_t>(fileBytesOut.size() - totalRead, 1024U * 1024U));
                 DWORD bytesRead = 0;
                 if (::ReadFile(fileHandle, fileBytesOut.data() + totalRead, chunkSize, &bytesRead, nullptr) == FALSE)
                 {
                     const DWORD errorCode = ::GetLastError();
-                    ::CloseHandle(fileHandle);
-                    errorTextOut = L"ReadFile failed, error=" + std::to_wstring(errorCode);
+                        errorTextOut = L"ReadFile failed, error=" + std::to_wstring(errorCode);
                     return false;
                 }
                 if (bytesRead == 0)
@@ -367,7 +393,6 @@ namespace ks::file
                 }
                 totalRead += bytesRead;
             }
-            ::CloseHandle(fileHandle);
             fileBytesOut.resize(totalRead);
             return true;
         }
@@ -382,6 +407,7 @@ namespace ks::file
 
             for (int directoryIndex = 0; directoryIndex < IMAGE_NUMBEROF_DIRECTORY_ENTRIES; ++directoryIndex)
             {
+                CheckPeAnalysisCancelled();
                 const IMAGE_DATA_DIRECTORY& directoryEntry = directoryList[static_cast<std::size_t>(directoryIndex)];
                 report.Field(L"[" + std::to_wstring(directoryIndex) + L"] " + DataDirectoryName(directoryIndex), L"");
                 report.Field(L"RVA", Hex(directoryEntry.VirtualAddress), 1);
@@ -403,6 +429,7 @@ namespace ks::file
             }
             for (const auto& module : modules)
             {
+                CheckPeAnalysisCancelled();
                 report.Field(L"模块", ks::str::Utf8ToUtf16(module.dllName));
                 if (module.descriptorValid)
                 {
@@ -413,6 +440,7 @@ namespace ks::file
                     report.Note(ks::str::Utf8ToUtf16(module.diagnosticText), 1);
                 for (std::size_t index = 0; index < module.imports.size(); ++index)
                 {
+                    CheckPeAnalysisCancelled();
                     const auto& function = module.imports[index];
                     report.Field(L"#" + std::to_wstring(index),
                         function.importByOrdinal ? L"" : ks::str::Utf8ToUtf16(function.functionName), 1);
@@ -460,6 +488,7 @@ namespace ks::file
 
             for (std::uint32_t moduleIndex = 0; moduleIndex < kMaxImportDescriptors; ++moduleIndex)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_IMPORT_DESCRIPTOR descriptor{};
                 const std::uint64_t currentOffset =
                     static_cast<std::uint64_t>(descriptorOffset) +
@@ -516,6 +545,7 @@ namespace ks::file
                     : static_cast<std::uint32_t>(sizeof(std::uint32_t));
                 for (std::uint32_t importIndex = 0; importIndex < kMaxImportPerModule; ++importIndex)
                 {
+                    CheckPeAnalysisCancelled();
                     PeImportFunctionSummary function{};
                     function.dllName = module.dllName;
                     function.thunkRva = displayThunkRva + (importIndex * thunkWidth);
@@ -666,6 +696,7 @@ namespace ks::file
                 kMaxExportNames);
             for (std::uint32_t nameIndex = 0; nameIndex < displayCount; ++nameIndex)
             {
+                CheckPeAnalysisCancelled();
                 std::uint32_t nameRva = 0;
                 std::uint16_t ordinalIndex = 0;
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(nameArrayOffset) + nameIndex * sizeof(nameRva), nameRva) ||
@@ -768,6 +799,7 @@ namespace ks::file
             const std::uint32_t displayCount = std::min<std::uint32_t>(entryCount, 64U);
             for (std::uint32_t index = 0; index < displayCount; ++index)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_RESOURCE_DIRECTORY_ENTRY entry{};
                 const std::uint64_t entryOffset = static_cast<std::uint64_t>(resourceBaseOffset) +
                     sizeof(IMAGE_RESOURCE_DIRECTORY) + static_cast<std::uint64_t>(index) * sizeof(entry);
@@ -814,6 +846,7 @@ namespace ks::file
             while (consumedBytes <= relocDirectory.Size
                 && sizeof(IMAGE_BASE_RELOCATION) <= relocDirectory.Size - consumedBytes)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_BASE_RELOCATION block{};
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(relocOffset) + consumedBytes, block))
                 {
@@ -870,6 +903,7 @@ namespace ks::file
 
             for (std::uint32_t index = 0; index < std::min<std::uint32_t>(entryCount, 32U); ++index)
             {
+                CheckPeAnalysisCancelled();
                 IMAGE_DEBUG_DIRECTORY entry{};
                 if (!ReadPodAtOffset(fileBytes, static_cast<std::uint64_t>(debugOffset) + index * sizeof(entry), entry))
                 {
@@ -961,6 +995,7 @@ namespace ks::file
             }
             for (std::uint32_t index = 0; index < 64U; ++index)
             {
+                CheckPeAnalysisCancelled();
                 if (isPe64)
                 {
                     std::uint64_t callbackVa = 0;
@@ -1006,7 +1041,7 @@ namespace ks::file
         }
     }
 
-    PeAnalysisResult AnalyzePeBytes(
+    static PeAnalysisResult AnalyzePeBytesImpl(
         const std::vector<std::uint8_t>& fileBytes)
     {
         PeAnalysisResult result{};
@@ -1124,6 +1159,7 @@ namespace ks::file
                         directoryCapacity));
             for (std::uint32_t index = 0; index < count; ++index)
             {
+                CheckPeAnalysisCancelled();
                 dataDirectoryList[static_cast<std::size_t>(index)] = optionalHeader.DataDirectory[index];
             }
         }
@@ -1170,6 +1206,7 @@ namespace ks::file
                         directoryCapacity));
             for (std::uint32_t index = 0; index < count; ++index)
             {
+                CheckPeAnalysisCancelled();
                 dataDirectoryList[static_cast<std::size_t>(index)] = optionalHeader.DataDirectory[index];
             }
         }
@@ -1212,6 +1249,7 @@ namespace ks::file
         sectionList.reserve(fileHeader.NumberOfSections);
         for (std::uint16_t sectionIndex = 0; sectionIndex < fileHeader.NumberOfSections; ++sectionIndex)
         {
+            CheckPeAnalysisCancelled();
             IMAGE_SECTION_HEADER sectionHeader{};
             const std::uint64_t currentOffset = sectionTableOffset +
                 static_cast<std::uint64_t>(sectionIndex) * sizeof(IMAGE_SECTION_HEADER);
@@ -1246,7 +1284,8 @@ namespace ks::file
             summary.rawOffset = sectionHeader.PointerToRawData;
             summary.rawSize = sectionHeader.SizeOfRawData;
             summary.characteristics = sectionHeader.Characteristics;
-            summary.entropy = CalculateSectionEntropy(fileBytes, sectionHeader.PointerToRawData, sectionHeader.SizeOfRawData);
+            summary.entropy = activeOptions && activeOptions->importsOnly ? 0.0 :
+                CalculateSectionEntropy(fileBytes, sectionHeader.PointerToRawData, sectionHeader.SizeOfRawData);
             result.sections.push_back(summary);
         }
 
@@ -1267,12 +1306,17 @@ namespace ks::file
                 result.entryPointFileOffset)
             && result.entryPointFileOffset
                 < static_cast<std::uint64_t>(fileBytes.size());
+        if (activeOptions && activeOptions->decodedImports)
+            result.importModules = *activeOptions->decodedImports;
+        else
         result.importModules = CollectImportTable(
             fileBytes,
             isPe64,
             sizeOfHeadersValue,
             sectionList,
             dataDirectoryList[IMAGE_DIRECTORY_ENTRY_IMPORT]);
+
+        if (activeOptions && activeOptions->importsOnly) return result;
 
         ReportCollector report(result);
         report.Section(L"PE头");
@@ -1310,6 +1354,7 @@ namespace ks::file
 
         for (std::size_t sectionIndex = 0; sectionIndex < sectionList.size(); ++sectionIndex)
         {
+            CheckPeAnalysisCancelled();
             const IMAGE_SECTION_HEADER& sectionHeader = sectionList[sectionIndex];
             const PeSectionSummary& summary = result.sections[sectionIndex];
             report.Field(L"[" + std::to_wstring(sectionIndex) + L"]", ks::str::Utf8ToUtf16(summary.name));
@@ -1342,8 +1387,27 @@ namespace ks::file
         return result;
     }
 
+    PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes)
+    {
+        return AnalyzePeBytes(fileBytes, PeAnalysisOptions{});
+    }
+    PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes, const PeAnalysisOptions& options)
+    {
+        const ScopedPeAnalysisOptions scope(options);
+        try { CheckPeAnalysisCancelled(true); return AnalyzePeBytesImpl(fileBytes); }
+        catch (const PeAnalysisCancelled&) { PeAnalysisResult result; result.error = PeAnalysisError::Cancelled; return result; }
+    }
+
     PeAnalysisResult AnalyzePeFile(const std::wstring& filePath)
     {
+        return AnalyzePeFile(filePath, PeAnalysisOptions{});
+    }
+    PeAnalysisResult AnalyzePeFile(const std::wstring& filePath, const PeAnalysisOptions& options)
+    {
+        const ScopedPeAnalysisOptions scope(options);
+        try
+        {
+        CheckPeAnalysisCancelled(true);
         std::vector<std::uint8_t> fileBytes;
         std::wstring readErrorText;
         if (!ReadWholeFile(filePath, fileBytes, readErrorText))
@@ -1352,7 +1416,9 @@ namespace ks::file
             SetAnalysisError(result, L"PE解析失败：" + readErrorText, PeAnalysisError::ReadFailure);
             return result;
         }
-        return AnalyzePeBytes(fileBytes);
+        return AnalyzePeBytes(fileBytes, options);
+        }
+        catch (const PeAnalysisCancelled&) { PeAnalysisResult result; result.error = PeAnalysisError::Cancelled; return result; }
     }
 
     std::wstring ExportPeAnalysisText(const PeAnalysisResult& analysis)
@@ -1360,6 +1426,7 @@ namespace ks::file
         std::wostringstream output;
         for (const PeReportEntry& entry : analysis.entries)
         {
+            CheckPeAnalysisCancelled();
             if (entry.kind == PeReportEntry::Kind::Section)
                 output << L"\n[" << entry.name << L"]\n";
             else

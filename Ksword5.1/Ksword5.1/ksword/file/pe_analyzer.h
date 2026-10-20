@@ -10,6 +10,7 @@
 // ============================================================
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -72,7 +73,7 @@ namespace ks::file
     // PeAnalysisResult 作用：
     // - 聚合原生字段、节表与导入摘要，支持按需从字段模型导出文本；
     // - success=false 时 errorText 与 Note 保存可读失败原因。
-    enum class PeAnalysisError { None, NotPe, InvalidLayout, ReadFailure };
+    enum class PeAnalysisError { None, NotPe, InvalidLayout, ReadFailure, Cancelled };
 
     struct PeAnalysisResult
     {
@@ -91,12 +92,23 @@ namespace ks::file
         PeAnalysisError error = PeAnalysisError::None;
     };
 
+    struct PeAnalysisOptions
+    {
+        bool importsOnly = false; // Still validates the complete header/section/RVA layout.
+        std::function<bool()> cancelled;
+        // Reuse only imports decoded from these exact immutable bytes.
+        const std::vector<PeImportModuleSummary>* decodedImports = nullptr;
+    };
+
     // AnalyzePeFile 作用：读取文件并解析 PE 结构，返回结构化结果。
     PeAnalysisResult AnalyzePeFile(const std::wstring& filePath);
 
     // AnalyzePeBytes 作用：直接解析来自原始磁盘、内存快照或其它证据源的 PE 字节。
     PeAnalysisResult AnalyzePeBytes(
         const std::vector<std::uint8_t>& fileBytes);
+
+    PeAnalysisResult AnalyzePeBytes(const std::vector<std::uint8_t>& fileBytes, const PeAnalysisOptions& options);
+    PeAnalysisResult AnalyzePeFile(const std::wstring& filePath, const PeAnalysisOptions& options);
 
     // Serialize the already-decoded entries only when an export is requested.
     std::wstring ExportPeAnalysisText(const PeAnalysisResult& analysis);
