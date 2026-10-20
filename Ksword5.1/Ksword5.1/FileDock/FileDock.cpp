@@ -10,6 +10,7 @@
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/AsyncCleanupRegistry.h"
+#include "../UI/ResultTableHost.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/UI_All.h"
 #include "FilePropertyPeAnalyzer.h"
@@ -84,6 +85,7 @@
 #include <QInputDialog>
 #include <QImage>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
@@ -198,6 +200,18 @@
 #define LABEL_SECURITY_INFORMATION 0x00000010L
 #endif
 
+// Recovery snapshots contain values only. The table and its row projection stay on the GUI thread.
+struct FileRecoverySnapshot
+{
+    std::vector<ks::file::NtfsDeletedFileEntry> entries;
+    QString volumeRoot;
+    std::uint64_t revision = 0;
+    int residentReady = 0;
+    int nonResidentReady = 0;
+    int safelyRecoverable = 0;
+    int highIntegrity = 0;
+};
+
 namespace
 {
     // isDeletedFileSafelyRecoverable 作用：
@@ -233,6 +247,173 @@ namespace
             return QStringLiteral("仅元数据");
         }
     }
+
+    struct RecoveryProjection
+    {
+        std::vector<int> rows;
+        std::vector<int> sourceToView;
+    };
+
+    QString recoverySizeText(std::uint64_t sizeBytes)
+    {
+        static const std::array<const char*, 5> units{ "B", "KB", "MB", "GB", "TB" };
+        double value = static_cast<double>(sizeBytes);
+        std::size_t unit = 0;
+        while (value >= 1024.0 && unit + 1 < units.size()) { value /= 1024.0; ++unit; }
+        return unit == 0
+            ? QStringLiteral("%1 %2").arg(static_cast<qulonglong>(sizeBytes)).arg(units[unit])
+            : QStringLiteral("%1 %2").arg(QString::number(value, 'f', 2)).arg(units[unit]);
+    }
+
+    QString recoveryCellText(const ks::file::NtfsDeletedFileEntry& entry, int column)
+    {
+        switch (column)
+        {
+        case 0: return entry.fileName;
+        case 1: return entry.pathHint;
+        case 2: return recoverySizeText(entry.sizeBytes);
+        case 3: return entry.modifiedTime.isValid()
+            ? entry.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-");
+        case 4: return QStringLiteral("%1 / seq %2")
+            .arg(static_cast<qulonglong>(entry.fileReference)).arg(entry.sequenceNumber);
+        case 5: return entry.estimatedIntegrityPercent >= 0
+            ? QStringLiteral("%1%").arg(entry.estimatedIntegrityPercent) : QStringLiteral("未知");
+        case 6: return deletedFileRecoveryCapabilityText(entry)
+            + (entry.hasOriginalName ? QString() : QStringLiteral(" / 缺名"));
+        default: return {};
+        }
+    }
+
+    struct RecoveryProjectionRequest
+    {
+        std::shared_ptr<const FileRecoverySnapshot> snapshot;
+        QString query;
+        bool regex = false;
+        int sortColumn = -1;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+    };
+
+    struct RecoveryProjectionResult
+    {
+        RecoveryProjectionRequest request;
+        std::shared_ptr<const RecoveryProjection> projection;
+    };
+
+    RecoveryProjectionResult buildRecoveryProjection(const RecoveryProjectionRequest& request,
+        const ks::ui::AsyncOperationToken& token)
+    {
+        RecoveryProjectionResult result{ request, {} };
+        auto projection = std::make_shared<RecoveryProjection>();
+        const auto& entries = request.snapshot->entries;
+        projection->rows.reserve(entries.size());
+        QRegularExpression expression(request.query, QRegularExpression::CaseInsensitiveOption);
+        for (std::size_t row = 0; row < entries.size(); ++row)
+        {
+            if ((row & 127U) == 0 && token.isCanceled()) return result;
+            const auto& entry = entries[row];
+            bool matched = request.query.isEmpty();
+            if (!matched)
+            {
+                const QStringList fields{ entry.fileName, entry.pathHint,
+                    deletedFileRecoveryCapabilityText(entry) };
+                for (const QString& text : fields)
+                {
+                    if (request.regex ? expression.match(text).hasMatch()
+                        : text.contains(request.query, Qt::CaseInsensitive))
+                    { matched = true; break; }
+                }
+            }
+            if (matched) projection->rows.push_back(static_cast<int>(row));
+        }
+        if (request.sortColumn >= 0 && request.sortColumn < 7)
+        {
+            // Precompute display sort keys once; never format cells in a GUI comparator.
+            std::vector<QString> keys(entries.size());
+            for (int row : projection->rows)
+            {
+                if (token.isCanceled()) return result;
+                keys[static_cast<std::size_t>(row)] = recoveryCellText(entries[static_cast<std::size_t>(row)], request.sortColumn);
+            }
+            std::stable_sort(projection->rows.begin(), projection->rows.end(),
+                [&keys, order = request.sortOrder](int left, int right)
+                {
+                    const int compared = QString::localeAwareCompare(keys[static_cast<std::size_t>(left)], keys[static_cast<std::size_t>(right)]);
+                    return order == Qt::AscendingOrder ? compared < 0 : compared > 0;
+                });
+        }
+        if (token.isCanceled()) return result;
+        projection->sourceToView.assign(entries.size(), -1);
+        for (std::size_t row = 0; row < projection->rows.size(); ++row)
+            projection->sourceToView[static_cast<std::size_t>(projection->rows[row])] = static_cast<int>(row);
+        result.projection = std::move(projection);
+        return result;
+    }
+
+    void retireRecoverySnapshot(std::shared_ptr<const FileRecoverySnapshot> snapshot)
+    {
+        if (snapshot) QThreadPool::globalInstance()->start(QRunnable::create(
+            [snapshot = std::move(snapshot)]() mutable { snapshot.reset(); }));
+    }
+
+    class DeletedRecoveryModel final : public QAbstractTableModel
+    {
+    public:
+        explicit DeletedRecoveryModel(QObject* parent) : QAbstractTableModel(parent) {}
+        ~DeletedRecoveryModel() override { retireRecoverySnapshot(std::move(m_snapshot)); }
+        std::function<void(int, Qt::SortOrder)> sortRequested;
+        const std::shared_ptr<const FileRecoverySnapshot>& snapshot() const { return m_snapshot; }
+        int sourceRow(int row) const
+        { return m_projection && row >= 0 && row < rowCount() ? m_projection->rows[static_cast<std::size_t>(row)] : -1; }
+        int viewRow(int source) const
+        { return m_projection && source >= 0 && source < static_cast<int>(m_projection->sourceToView.size())
+            ? m_projection->sourceToView[static_cast<std::size_t>(source)] : -1; }
+        const ks::file::NtfsDeletedFileEntry* entry(int row) const
+        {
+            const int source = sourceRow(row);
+            return source >= 0 ? &m_snapshot->entries[static_cast<std::size_t>(source)] : nullptr;
+        }
+        void publish(std::shared_ptr<const FileRecoverySnapshot> snapshot,
+            std::shared_ptr<const RecoveryProjection> projection)
+        {
+            const QPointer<DeletedRecoveryModel> lifetime(this);
+            beginResetModel();
+            if (!lifetime) return;
+            auto retired = std::move(m_snapshot);
+            m_snapshot = std::move(snapshot);
+            m_projection = std::move(projection);
+            const bool changedSnapshot = retired != m_snapshot;
+            endResetModel();
+            if (changedSnapshot) retireRecoverySnapshot(std::move(retired));
+        }
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() || !m_projection ? 0 : static_cast<int>(m_projection->rows.size()); }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 7; }
+        QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override
+        {
+            static const QStringList headers{ QStringLiteral("文件名"), QStringLiteral("路径提示"),
+                QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("记录号"),
+                QStringLiteral("完整度"), QStringLiteral("恢复能力") };
+            if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headers.size())
+                return ks::i18n::displayText(headers[section]);
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override
+        {
+            if (!index.isValid() || index.model() != this || index.column() < 0 || index.column() >= 7) return {};
+            const auto* value = entry(index.row());
+            if (!value) return {};
+            if (role == Qt::ToolTipRole && index.column() == 0 && !value->hasOriginalName)
+                return ks::i18n::displayText(QStringLiteral("该条目原始文件名已丢失，当前名称为系统生成的占位名。"));
+            if (role != Qt::DisplayRole) return {};
+            const QString text = recoveryCellText(*value, index.column());
+            return index.column() >= 5 ? ks::i18n::displayText(text) : text;
+        }
+        void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override
+        { if (sortRequested) sortRequested(column, order); }
+    private:
+        std::shared_ptr<const FileRecoverySnapshot> m_snapshot;
+        std::shared_ptr<const RecoveryProjection> m_projection;
+    };
 
     // localVolumeRootForPath 作用：
     // - 从本地绝对路径提取“C:\”形式卷根；
@@ -13707,6 +13888,9 @@ FileDock::~FileDock()
     if (m_fileMenuOperation) m_fileMenuOperation->close();
     if (m_shortNameOperation) m_shortNameOperation->close();
     if (m_fileMutationOperation != nullptr) m_fileMutationOperation->close();
+    if (m_recoveryScanOperation) m_recoveryScanOperation->close();
+    if (m_recoveryProjectionOperation) m_recoveryProjectionOperation->close();
+    retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
     if (m_fileAnalysisOperation != nullptr) m_fileAnalysisOperation->close();
     m_uiDispatcher->close();
     // 析构阶段先释放持有型 Oplock，再停止解锁器后台线程。
@@ -13749,10 +13933,52 @@ void FileDock::changeEvent(QEvent* event)
         };
     refreshPanelView(m_leftPanel);
     refreshPanelView(m_rightPanel);
+    if (m_recoveryTable)
+    {
+        m_recoveryTable->viewport()->update();
+        m_recoveryTable->horizontalHeader()->viewport()->update();
+    }
 }
 
 bool FileDock::eventFilter(QObject* watched, QEvent* event)
 {
+    // A projection keeps filtered-out selections by source identity. Normal replacement
+    // selection still clears those latent rows, just as QTableWidget did before filtering.
+    if (m_recoveryTable && m_recoveryModel && event && !m_recoveryProjectionCommit)
+    {
+        auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+        if (watched == m_recoveryTable->viewport() && event->type() == QEvent::MouseButtonPress)
+        {
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            const auto clicked = m_recoveryTable->indexAt(mouse->position().toPoint());
+            if (!(mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                && (mouse->button() == Qt::LeftButton || (mouse->button() == Qt::RightButton
+                    && clicked.isValid() && !m_recoveryTable->selectionModel()->isSelected(clicked))))
+            {
+                for (auto it = m_recoverySelectedSourceRows.begin(); it != m_recoverySelectedSourceRows.end();)
+                    if (model->viewRow(*it) < 0) it = m_recoverySelectedSourceRows.erase(it); else ++it;
+            }
+        }
+        if (watched == m_recoveryTable && event->type() == QEvent::KeyPress)
+        {
+            const auto* key = static_cast<QKeyEvent*>(event);
+            if (key->matches(QKeySequence::SelectAll) && model->snapshot())
+            {
+                m_recoverySelectedSourceRows.clear();
+                for (int source = 0; source < static_cast<int>(model->snapshot()->entries.size()); ++source)
+                    m_recoverySelectedSourceRows.insert(source);
+            }
+            else if (!(key->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                && (key->key() == Qt::Key_Escape || key->key() == Qt::Key_Up || key->key() == Qt::Key_Down
+                    || key->key() == Qt::Key_Home || key->key() == Qt::Key_End
+                    || key->key() == Qt::Key_PageUp || key->key() == Qt::Key_PageDown))
+            {
+                for (auto it = m_recoverySelectedSourceRows.begin(); it != m_recoverySelectedSourceRows.end();)
+                    if (model->viewRow(*it) < 0) it = m_recoverySelectedSourceRows.erase(it); else ++it;
+            }
+        }
+    }
+
     // 读取方式下拉框吞掉滚轮：它的每一次切换都会触发一轮目录重解析，
     // 纯 MFT / R0 IRP 这两种还是全卷级别的重活。鼠标从列表滚到工具条上时
     // 一次滚动就能连着切好几档，等于连续排队几轮全盘扫描。
@@ -16071,18 +16297,51 @@ void FileDock::initializeRecoveryPage()
     ks::ui::NormalizeToolbarRow(toolLayout);
     recoveryLayout->addWidget(toolWidget, 0);
 
-    m_recoveryTable = new ks::ui::VisibleTableWidget(m_fileRecoveryPage);
-    // 恢复候选属于一次扫描结果，保留导出即可，避免通用快照栏挤占清单。
-    ks::ui::SetTableActionBarMode(m_recoveryTable, ks::ui::TableActionBarMode::Compact);
-    m_recoveryTable->setColumnCount(7);
-    m_recoveryTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("文件名"),
-        QStringLiteral("路径提示"),
-        QStringLiteral("大小"),
-        QStringLiteral("修改时间"),
-        QStringLiteral("记录号"),
-        QStringLiteral("完整度"),
-        QStringLiteral("恢复能力")
+    m_recoveryScanOperation = new ks::ui::AsyncOperation(this);
+    m_recoveryProjectionOperation = new ks::ui::AsyncOperation(this);
+    m_recoveryTable = new ks::ui::TableActionTableView(m_fileRecoveryPage);
+    auto* recoveryModel = new DeletedRecoveryModel(m_recoveryTable);
+    m_recoveryModel = recoveryModel;
+    ks::ui::ResultTableCapabilities capabilities;
+    capabilities.actionBar = ks::ui::TableActionBarMode::Compact;
+    ks::ui::ResultTableHost::ensure(m_recoveryTable)->bindModel(recoveryModel, {
+        {0, QStringLiteral("file-name")}, {1, QStringLiteral("path-hint")},
+        {2, QStringLiteral("size")}, {3, QStringLiteral("modified")},
+        {4, QStringLiteral("record-sequence")}, {5, QStringLiteral("integrity")},
+        {6, QStringLiteral("recovery-capability")} }, capabilities);
+    recoveryModel->sortRequested = [this](int column, Qt::SortOrder order)
+    {
+        m_recoverySortColumn = column;
+        m_recoverySortOrder = order;
+        applyRecoveryFilter();
+    };
+    m_recoveryTable->horizontalHeader()->setSectionsClickable(true);
+    connect(m_recoveryTable->horizontalHeader(), &QHeaderView::sectionClicked, this, [this, recoveryModel](int column)
+    {
+        const Qt::SortOrder order = m_recoverySortColumn == column && m_recoverySortOrder == Qt::AscendingOrder
+            ? Qt::DescendingOrder : Qt::AscendingOrder;
+        m_recoveryTable->horizontalHeader()->setSortIndicator(column, order);
+        m_recoveryTable->horizontalHeader()->setSortIndicatorShown(true);
+        recoveryModel->sort(column, order);
+    });
+    m_recoveryTable->viewport()->installEventFilter(this);
+    m_recoveryTable->installEventFilter(this);
+    connect(m_recoveryTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+        [this, recoveryModel](const QItemSelection& selected, const QItemSelection& deselected)
+        {
+            if (m_recoveryProjectionCommit) return;
+            for (const auto& range : deselected) for (int row = range.top(); row <= range.bottom(); ++row)
+                m_recoverySelectedSourceRows.remove(recoveryModel->sourceRow(row));
+            for (const auto& range : selected) for (int row = range.top(); row <= range.bottom(); ++row)
+            {
+                const int source = recoveryModel->sourceRow(row);
+                if (source >= 0) m_recoverySelectedSourceRows.insert(source);
+            }
+        });
+    connect(m_recoveryTable->selectionModel(), &QItemSelectionModel::currentChanged, this,
+        [this, recoveryModel](const QModelIndex& current, const QModelIndex&)
+        {
+            if (!m_recoveryProjectionCommit) m_recoveryCurrentSourceRow = recoveryModel->sourceRow(current.row());
         });
     m_recoveryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_recoveryTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -16158,90 +16417,113 @@ void FileDock::initializeRecoveryPage()
 
 void FileDock::applyRecoveryFilter()
 {
-    // applyRecoveryFilter：
-    // - 输入：查找框文本与正则开关；
-    // - 处理：逐行比对已缓存的删除项字段，用 setRowHidden 就地隐藏不匹配行；
-    // - 返回：无。只影响可见性，不改动 m_deletedRecoveryItems 与行号映射，
-    //   因此右键属性、恢复选中拿到的行号依然直接对应缓存下标。
-    if (m_recoveryTable == nullptr || m_recoveryFilterEdit == nullptr)
+    if (m_recoveryTable == nullptr || m_recoveryFilterEdit == nullptr || m_recoveryModel == nullptr) return;
+    auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+    if (m_recoveryScanInProgress && !m_recoveryPendingSnapshot) return;
+    auto snapshot = m_recoveryPendingSnapshot ? m_recoveryPendingSnapshot : model->snapshot();
+    if (!snapshot) return;
+    QString query = m_recoveryFilterEdit->text().trimmed();
+    bool regex = m_recoveryFilterRegexButton != nullptr && m_recoveryFilterRegexButton->isChecked();
+    const bool invalid = !query.isEmpty() && regex
+        && !QRegularExpression(query, QRegularExpression::CaseInsensitiveOption).isValid();
+    if (invalid)
     {
-        return;
+        m_recoveryProjectionOperation->cancel();
+        m_recoveryFilterEdit->setToolTip(QStringLiteral("正则表达式无效，已暂不筛选。"));
+        if (!m_recoveryPendingSnapshot) return;
+        // A newly completed scan uses the last committed predicate while the editor is invalid.
+        query = m_recoveryAppliedFilterText;
+        regex = m_recoveryAppliedFilterRegex;
     }
-
-    const QString queryText = m_recoveryFilterEdit->text().trimmed();
-    const bool useRegex =
-        m_recoveryFilterRegexButton != nullptr && m_recoveryFilterRegexButton->isChecked();
-
-    QRegularExpression regexValue;
-    bool regexUsable = false;
-    if (!queryText.isEmpty() && useRegex)
-    {
-        regexValue = QRegularExpression(
-            queryText,
-            QRegularExpression::CaseInsensitiveOption);
-        regexUsable = regexValue.isValid();
-        // 正则写到一半必然是非法的，这里不把整张表清空，保持上一次的可见状态。
-        if (!regexUsable)
-        {
-            m_recoveryFilterEdit->setToolTip(QStringLiteral("正则表达式无效，已暂不筛选。"));
-            return;
-        }
-    }
-    m_recoveryFilterEdit->setToolTip(QStringLiteral(
+    else m_recoveryFilterEdit->setToolTip(QStringLiteral(
         "按输入内容实时筛选扫描结果，匹配行以外的条目会被隐藏。"));
 
-    const int rowCount = m_recoveryTable->rowCount();
-    int visibleCount = 0;
-    // 上万行逐行改可见性会触发大量重排，先关掉刷新再统一恢复。
-    m_recoveryTable->setUpdatesEnabled(false);
-    for (int row = 0; row < rowCount; ++row)
-    {
-        bool matched = queryText.isEmpty();
-        if (!matched && row < static_cast<int>(m_deletedRecoveryItems.size()))
+    const RecoveryProjectionRequest request{ snapshot, query, regex,
+        m_recoverySortColumn, m_recoverySortOrder };
+    m_recoveryProjectionOperation->submit<RecoveryProjectionRequest, RecoveryProjectionResult>(request,
+        [](const RecoveryProjectionRequest& value, const ks::ui::AsyncOperationToken& token)
+        { return buildRecoveryProjection(value, token); },
+        [this](const RecoveryProjectionResult& result, std::uint64_t ticket)
         {
-            const ks::file::NtfsDeletedFileEntry& itemValue =
-                m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-            // 只比对用户真正会搜的三个字段，避免大小/时间数字造成误命中。
-            const QStringList searchFields{
-                itemValue.fileName,
-                itemValue.pathHint,
-                deletedFileRecoveryCapabilityText(itemValue) };
-            for (const QString& fieldText : searchFields)
+            // Only shared values survive apply; AsyncOperation does not retain this result reference.
+            const auto commit = [this, result, ticket]()
             {
-                if (useRegex)
+                if (!m_recoveryProjectionOperation->isCurrent(ticket))
+                { m_recoveryProjectionOperation->completeDeferred(ticket); return; }
+                auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+                const auto expected = m_recoveryPendingSnapshot ? m_recoveryPendingSnapshot : model->snapshot();
+                if (!result.projection || expected != result.request.snapshot)
+                { m_recoveryProjectionOperation->completeDeferred(ticket); return; }
+                const bool newSnapshot = model->snapshot() != result.request.snapshot;
+                if (newSnapshot)
                 {
-                    if (regexUsable && regexValue.match(fieldText).hasMatch())
-                    {
-                        matched = true;
-                        break;
-                    }
+                    m_recoverySelectedSourceRows.clear();
+                    m_recoveryCurrentSourceRow = -1;
                 }
-                else if (fieldText.contains(queryText, Qt::CaseInsensitive))
+                const QPointer<FileDock> lifetime(this);
+                m_recoveryProjectionCommit = true;
+                model->publish(result.request.snapshot, result.projection);
+                if (!lifetime) return;
+                // Preserve selected source identities even while a filter removes them from the view.
+                std::vector<int> selectedViewRows;
+                selectedViewRows.reserve(static_cast<std::size_t>(m_recoverySelectedSourceRows.size()));
+                for (int source : m_recoverySelectedSourceRows)
                 {
-                    matched = true;
-                    break;
+                    const int row = model->viewRow(source);
+                    if (row >= 0) selectedViewRows.push_back(row);
                 }
-            }
-        }
-
-        m_recoveryTable->setRowHidden(row, !matched);
-        if (matched)
+                std::sort(selectedViewRows.begin(), selectedViewRows.end());
+                QItemSelection selection;
+                for (std::size_t first = 0; first < selectedViewRows.size();)
+                {
+                    std::size_t last = first;
+                    while (last + 1 < selectedViewRows.size() && selectedViewRows[last + 1] == selectedViewRows[last] + 1) ++last;
+                    selection.select(model->index(selectedViewRows[first], 0), model->index(selectedViewRows[last], 6));
+                    first = last + 1;
+                }
+                m_recoveryTable->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                const int current = model->viewRow(m_recoveryCurrentSourceRow);
+                if (current >= 0) m_recoveryTable->selectionModel()->setCurrentIndex(model->index(current, 0), QItemSelectionModel::NoUpdate);
+                m_recoveryProjectionCommit = false;
+                m_recoveryAppliedFilterText = result.request.query;
+                m_recoveryAppliedFilterRegex = result.request.regex;
+                if (newSnapshot)
+                {
+                    const auto& value = *result.request.snapshot;
+                    m_recoveryBaseStatusText = QStringLiteral(
+                        "扫描完成：%1 项（可安全恢复 %2 项：Resident %3，完整非驻留 %4；完整度≥80%% %5 项）")
+                        .arg(value.entries.size()).arg(value.safelyRecoverable).arg(value.residentReady)
+                        .arg(value.nonResidentReady).arg(value.highIntegrity);
+                    m_recoveryPendingSnapshot.reset();
+                    m_recoveryScanInProgress = false;
+                    m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                    m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                    m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                    updateRecoveryViewState(!value.entries.empty(), QStringLiteral(
+                        "本次扫描未发现仍可恢复的删除项，可更换卷后重新扫描。"));
+                }
+                m_recoveryStatusLabel->setText(result.request.query.isEmpty() ? m_recoveryBaseStatusText
+                    : QStringLiteral("%1｜筛选出 %2 / %3 项").arg(m_recoveryBaseStatusText)
+                        .arg(model->rowCount()).arg(result.request.snapshot->entries.size()));
+                m_recoveryProjectionOperation->completeDeferred(ticket);
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+                QStringLiteral("file-recovery-projection"), { m_recoveryTable }, commit)) return false;
+            commit();
+            return true;
+        },
+        [this](std::exception_ptr)
         {
-            ++visibleCount;
-        }
-    }
-    m_recoveryTable->setUpdatesEnabled(true);
-
-    if (m_recoveryStatusLabel != nullptr && !m_deletedRecoveryItems.empty())
-    {
-        m_recoveryStatusLabel->setText(
-            queryText.isEmpty()
-            ? m_recoveryBaseStatusText
-            : QStringLiteral("%1｜筛选出 %2 / %3 项")
-                .arg(m_recoveryBaseStatusText)
-                .arg(visibleCount)
-                .arg(rowCount));
-    }
+            if (m_recoveryPendingSnapshot)
+            {
+                retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
+                m_recoveryScanInProgress = false;
+                m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryStatusLabel->setText(QStringLiteral("扫描失败"));
+            }
+        });
 }
 
 void FileDock::updateRecoveryViewState(const bool hasResults, const QString& emptyHintText)
@@ -16273,7 +16555,7 @@ void FileDock::installRecoveryTableMenu()
     }
 
     m_recoveryTable->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_recoveryTable, &QTableWidget::customContextMenuRequested, this,
+    connect(m_recoveryTable, &QTableView::customContextMenuRequested, this,
         [this](const QPoint& localPosition)
     {
         if (m_recoveryTable == nullptr)
@@ -16289,13 +16571,29 @@ void FileDock::installRecoveryTableMenu()
 
         const int currentRow = clickedIndex.isValid()
             ? clickedIndex.row()
-            : m_recoveryTable->currentRow();
-        const bool hasRow = currentRow >= 0
-            && currentRow < static_cast<int>(m_deletedRecoveryItems.size());
-        const bool hasSelection =
-            !m_recoveryTable->selectionModel()->selectedRows().isEmpty();
+            : m_recoveryTable->currentIndex().row();
+        const auto* model = static_cast<DeletedRecoveryModel*>(m_recoveryModel);
+        const auto snapshot = model->snapshot();
+        const auto* entry = model->entry(currentRow);
+        const bool hasRow = entry != nullptr;
+        const ks::file::NtfsDeletedFileEntry currentItem = hasRow ? *entry : ks::file::NtfsDeletedFileEntry{};
+        std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
+        if (snapshot)
+        {
+            auto selected = m_recoverySelectedSourceRows.values();
+            std::sort(selected.begin(), selected.end());
+            selectedItems.reserve(static_cast<std::size_t>(selected.size()));
+            for (int source : selected) if (source >= 0 && source < static_cast<int>(snapshot->entries.size()))
+                selectedItems.push_back(snapshot->entries[static_cast<std::size_t>(source)]);
+        }
+        const bool hasSelection = !selectedItems.empty();
+        QStringList fields;
+        if (hasRow) for (int column = 0; column < model->columnCount(); ++column)
+            fields.push_back(model->data(model->index(currentRow, column), Qt::DisplayRole).toString());
+        const QString copyText = fields.join(QLatin1Char('\t'));
 
-        QMenu menu(m_recoveryTable);
+        const QPointer<FileDock> guardThis(this);
+        QMenu menu;
         menu.setStyleSheet(buildContextMenuStyle());
 
         QAction* propertyAction = menu.addAction(
@@ -16306,7 +16604,7 @@ void FileDock::installRecoveryTableMenu()
         QAction* recoverAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/log_export.svg")),
             QStringLiteral("恢复选中"));
-        recoverAction->setEnabled(hasSelection && !m_recoveryRecoverInProgress);
+        recoverAction->setEnabled(hasSelection && !m_recoveryRecoverInProgress && !m_recoveryScanInProgress);
 
         menu.addSeparator();
         QAction* copyRowAction = menu.addAction(
@@ -16318,18 +16616,18 @@ void FileDock::installRecoveryTableMenu()
 
         QAction* selectedAction =
             menu.exec(m_recoveryTable->viewport()->mapToGlobal(localPosition));
-        if (selectedAction == nullptr)
+        if (!guardThis || selectedAction == nullptr)
         {
             return;
         }
         if (selectedAction == propertyAction)
         {
-            showDeletedFilePropertiesDialog(currentRow);
+            showDeletedFilePropertiesDialog(currentItem);
             return;
         }
         if (selectedAction == recoverAction)
         {
-            recoverSelectedDeletedFiles();
+            if (snapshot) recoverDeletedFileEntriesAsync(snapshot->volumeRoot, std::move(selectedItems));
             return;
         }
         if (selectedAction != copyRowAction)
@@ -16337,43 +16635,26 @@ void FileDock::installRecoveryTableMenu()
             return;
         }
 
-        QClipboard* clipboardObject = QApplication::clipboard();
-        if (clipboardObject == nullptr
-            || currentRow < 0
-            || currentRow >= m_recoveryTable->rowCount())
-        {
-            return;
-        }
-        QStringList fields;
-        fields.reserve(m_recoveryTable->columnCount());
-        for (int columnIndex = 0; columnIndex < m_recoveryTable->columnCount(); ++columnIndex)
-        {
-            const QTableWidgetItem* item = m_recoveryTable->item(currentRow, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
-        }
-        clipboardObject->setText(fields.join(QLatin1Char('\t')));
+        if (hasRow) if (QClipboard* clipboardObject = QApplication::clipboard())
+            clipboardObject->setText(copyText);
     });
 }
 
-void FileDock::showDeletedFilePropertiesDialog(const int rowIndex)
+void FileDock::showDeletedFilePropertiesDialog(const ks::file::NtfsDeletedFileEntry& entry)
 {
-    if (rowIndex < 0 || rowIndex >= static_cast<int>(m_deletedRecoveryItems.size()))
-    {
-        return;
-    }
-    const ks::file::NtfsDeletedFileEntry& itemValue =
-        m_deletedRecoveryItems[static_cast<std::size_t>(rowIndex)];
+    const ks::file::NtfsDeletedFileEntry itemValue = entry;
 
-    QDialog dialog(this);
-    dialog.setObjectName(QStringLiteral("DeletedFilePropertyDialog"));
-    dialog.setStyleSheet(buildOpaqueStandaloneDialogStyle(dialog.objectName()));
-    dialog.setWindowTitle(QStringLiteral("删除项属性"));
-    dialog.resize(620, 460);
+    QDialog* dialog = new QDialog(this);
+    const QPointer<QDialog> guardedDialog(dialog);
+    dialog->setObjectName(QStringLiteral("DeletedFilePropertyDialog"));
+    dialog->setStyleSheet(buildOpaqueStandaloneDialogStyle(dialog->objectName()));
+    dialog->setWindowTitle(QStringLiteral("删除项属性"));
+    dialog->resize(620, 460);
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(&dialog);
+    QVBoxLayout* rootLayout = new QVBoxLayout(dialog);
 
     // 属性用只读表格展示：字段多且需要整段复制，比 QFormLayout 更实用。
-    QTableWidget* propertyTable = new ks::ui::VisibleTableWidget(&dialog);
+    QTableWidget* propertyTable = new ks::ui::VisibleTableWidget(dialog);
     // 单个删除项的属性对话框沿用右键复制，不显示快照操作栏。
     ks::ui::SetTableActionBarMode(propertyTable, ks::ui::TableActionBarMode::None);
     propertyTable->setColumnCount(2);
@@ -16430,18 +16711,19 @@ void FileDock::showDeletedFilePropertiesDialog(const int rowIndex)
 
     QLabel* noteLabel = new QLabel(
         QStringLiteral("以上为扫描时刻的 MFT 快照；恢复前会按记录号和序列号重新校验，不依赖此处的旧数据。"),
-        &dialog);
+        dialog);
     noteLabel->setWordWrap(true);
     noteLabel->setContentsMargins(8, 6, 8, 6);
     rootLayout->addWidget(noteLabel, 0);
 
-    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
     buttonBox->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
-    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttonBox, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     rootLayout->addWidget(buttonBox, 0);
 
-    ks::ui::ApplyDetailDialogChrome(&dialog);
-    dialog.exec();
+    ks::ui::ApplyDetailDialogChrome(dialog);
+    dialog->exec();
+    if (guardedDialog) guardedDialog->deleteLater();
 }
 
 void FileDock::refreshRecoveryVolumeList()
@@ -16597,250 +16879,98 @@ void FileDock::scanDeletedFilesForRecovery()
 
 void FileDock::scanDeletedFilesForRecoveryAsync()
 {
-    if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr)
-    {
-        return;
-    }
-    if (m_recoveryScanInProgress)
-    {
-        return;
-    }
+    if (m_recoveryVolumeCombo == nullptr || m_recoveryTable == nullptr || m_recoveryStatusLabel == nullptr) return;
+    if (m_recoveryScanInProgress || m_recoveryRecoverInProgress || m_recoveryScanOperation->isInFlight()) return;
     if (m_recoveryVolumeCombo->currentIndex() < 0)
     {
         QMessageBox::warning(this, QStringLiteral("文件恢复"), QStringLiteral("请先选择 NTFS 卷。"));
         return;
     }
-
-    const QString rootPath = m_recoveryVolumeCombo->currentData().toString();
-    m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(rootPath));
-    m_recoveryScanInProgress = true;
-    if (m_recoveryScanButton != nullptr)
-    {
-        m_recoveryScanButton->setEnabled(false);
-        if (m_recoveryEmptyScanButton != nullptr) { m_recoveryEmptyScanButton->setEnabled(false); }
-    }
-    if (m_recoveryExportButton != nullptr)
-    {
-        m_recoveryExportButton->setEnabled(false);
-    }
-
-    {
-        kLogEvent event;
-        info << event
-            << "[FileDock] 开始扫描误删文件, volume="
-            << QDir::toNativeSeparators(rootPath).toStdString()
-            << eol;
-    }
-
+    struct Request { QString volume; std::uint64_t revision; int progressPid; };
+    struct Result { std::shared_ptr<const FileRecoverySnapshot> snapshot; QString error; bool ok = false; };
+    const QString volume = m_recoveryVolumeCombo->currentData().toString();
     const int progressPid = kPro.add(this, "文件恢复", "扫描误删");
+    const Request request{ volume, ++m_recoverySnapshotRevision, progressPid };
+    m_recoveryProjectionOperation->cancel();
+    m_recoveryStatusLabel->setText(QStringLiteral("正在扫描：%1").arg(volume));
+    m_recoveryScanInProgress = true;
+    m_recoveryScanButton->setEnabled(false);
+    m_recoveryEmptyScanButton->setEnabled(false);
+    m_recoveryExportButton->setEnabled(false);
     kPro.set(progressPid, "准备扫描卷", 0, 5.0f);
-
-    QPointer<FileDock> safeThis(this);
-    const auto dispatcher = m_uiDispatcher;
-    std::thread([safeThis, dispatcher, rootPath, progressPid]() {
-        QString errorText;
-        std::vector<ks::file::NtfsDeletedFileEntry> deletedItems;
-
-        kPro.set(progressPid, "准备读取 NTFS 元数据", 0, 3.0f);
-        const bool scanOk = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(
-            rootPath,
-            deletedItems,
-            errorText,
-            [progressPid](const int percentValue, const QString& stageText) {
-                const int boundedPercent = std::clamp(percentValue, 0, 100);
-                kPro.set(progressPid, stageText.toStdString(), 0, static_cast<float>(boundedPercent));
-            });
-        if (!scanOk)
+    m_recoveryScanOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token)
         {
-            kPro.set(progressPid, "扫描失败，整理错误信息", 0, 82.0f);
-        }
-
-        dispatcher->post(
-            [safeThis,
-             rootPath,
-             progressPid,
-             scanOk,
-             deletedItems = std::move(deletedItems),
-             errorText]() mutable {
-                if (safeThis.isNull())
+            Result result;
+            auto snapshot = std::make_shared<FileRecoverySnapshot>();
+            snapshot->volumeRoot = value.volume;
+            snapshot->revision = value.revision;
+            result.ok = ks::file::ManualFileSystemParser::enumerateNtfsDeletedFiles(value.volume,
+                snapshot->entries, result.error,
+                [progressPid = value.progressPid, token](int percent, const QString& stage)
                 {
-                    kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-                    return;
-                }
-
-                const auto deletedItemsSnapshot =
-                    std::make_shared<std::vector<ks::file::NtfsDeletedFileEntry>>(
-                        std::move(deletedItems));
-                const auto commitSnapshot =
-                    [safeThis,
-                     rootPath,
-                     progressPid,
-                     scanOk,
-                     deletedItemsSnapshot,
-                     errorText]()
-                {
-                    if (safeThis.isNull())
-                    {
-                        kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-                        return;
-                    }
-
-                    safeThis->m_recoveryScanInProgress = false;
-                    if (safeThis->m_recoveryScanButton != nullptr)
-                    {
-                        safeThis->m_recoveryScanButton->setEnabled(true);
-                        if (safeThis->m_recoveryEmptyScanButton != nullptr) { safeThis->m_recoveryEmptyScanButton->setEnabled(true); }
-                    }
-                    if (safeThis->m_recoveryExportButton != nullptr)
-                    {
-                        safeThis->m_recoveryExportButton->setEnabled(true);
-                    }
-
-                    if (!scanOk)
-                    {
-                        safeThis->m_recoveryStatusLabel->setText(
-                            QStringLiteral("扫描失败：%1").arg(errorText));
-                        kLogEvent event;
-                        err << event
-                            << "[FileDock] 扫描误删失败, volume="
-                            << QDir::toNativeSeparators(rootPath).toStdString()
-                            << ", error="
-                            << errorText.toStdString()
-                            << eol;
-                        safeThis->updateRecoveryViewState(
-                            false,
-                            QStringLiteral("扫描未能完成，可更换卷或确认程序以管理员权限运行后重试。"));
-                        QMessageBox::warning(safeThis.data(), QStringLiteral("扫描失败"), errorText);
-                        kPro.set(progressPid, "扫描失败", 0, 100.0f);
-                        return;
-                    }
-
-                    safeThis->m_deletedRecoveryItems = std::move(*deletedItemsSnapshot);
-                    safeThis->m_recoveryTable->setUpdatesEnabled(false);
-                    safeThis->m_recoveryTable->setSortingEnabled(false);
-                    safeThis->m_recoveryTable->clearContents();
-                    safeThis->m_recoveryTable->setRowCount(
-                        static_cast<int>(safeThis->m_deletedRecoveryItems.size()));
-                    for (int row = 0;
-                         row < static_cast<int>(safeThis->m_deletedRecoveryItems.size());
-                         ++row)
-                    {
-                        const ks::file::NtfsDeletedFileEntry& itemValue =
-                            safeThis->m_deletedRecoveryItems[static_cast<std::size_t>(row)];
-                        // 完整度文本：优先显示估计百分比，无法评估时明确标记为未知。
-                        const QString integrityText =
-                            (itemValue.estimatedIntegrityPercent >= 0)
-                            ? QStringLiteral("%1%").arg(itemValue.estimatedIntegrityPercent)
-                            : QStringLiteral("未知");
-
-                        // 恢复能力文本：明确区分驻留、完整非驻留、已复用与不支持布局。
-                        QString recoverabilityText =
-                            deletedFileRecoveryCapabilityText(itemValue);
-                        if (!itemValue.hasOriginalName)
-                        {
-                            recoverabilityText += QStringLiteral(" / 缺名");
-                        }
-
-                        QTableWidgetItem* nameItem = new QTableWidgetItem(itemValue.fileName);
-                        if (!itemValue.hasOriginalName)
-                        {
-                            nameItem->setToolTip(
-                                QStringLiteral("该条目原始文件名已丢失，当前名称为系统生成的占位名。"));
-                        }
-                        safeThis->m_recoveryTable->setItem(row, 0, nameItem);
-                        safeThis->m_recoveryTable->setItem(
-                            row, 1, new QTableWidgetItem(itemValue.pathHint));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 2, new QTableWidgetItem(formatSizeText(itemValue.sizeBytes)));
-                        safeThis->m_recoveryTable->setItem(row, 3, new QTableWidgetItem(
-                            itemValue.modifiedTime.isValid()
-                            ? itemValue.modifiedTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-                            : QStringLiteral("-")));
-                        safeThis->m_recoveryTable->setItem(
-                            row,
-                            4,
-                            new QTableWidgetItem(
-                                QStringLiteral("%1 / seq %2")
-                                    .arg(static_cast<qulonglong>(itemValue.fileReference))
-                                    .arg(itemValue.sequenceNumber)));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 5, new QTableWidgetItem(integrityText));
-                        safeThis->m_recoveryTable->setItem(
-                            row, 6, new QTableWidgetItem(recoverabilityText));
-                    }
-                    safeThis->m_recoveryTable->setUpdatesEnabled(true);
-
-                    const int residentReadyCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.recoveryCapability ==
-                                ks::file::NtfsRecoveryCapability::Resident;
-                        }));
-                    const int nonResidentReadyCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.recoveryCapability ==
-                                ks::file::NtfsRecoveryCapability::NonResidentIntact;
-                        }));
-                    const int safelyRecoverableCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return isDeletedFileSafelyRecoverable(item);
-                        }));
-                    const int highIntegrityCount = static_cast<int>(std::count_if(
-                        safeThis->m_deletedRecoveryItems.begin(),
-                        safeThis->m_deletedRecoveryItems.end(),
-                        [](const ks::file::NtfsDeletedFileEntry& item) {
-                            return item.estimatedIntegrityPercent >= 80;
-                        }));
-
-                    // 基准文案单独留存：筛选时要在它后面追加“筛选出 N / M 项”，
-                    // 清空查找框后还要能原样还原。
-                    safeThis->m_recoveryBaseStatusText =
-                        QStringLiteral(
-                            "扫描完成：%1 项（可安全恢复 %2 项：Resident %3，完整非驻留 %4；完整度≥80%% %5 项）")
-                        .arg(safeThis->m_deletedRecoveryItems.size())
-                        .arg(safelyRecoverableCount)
-                        .arg(residentReadyCount)
-                        .arg(nonResidentReadyCount)
-                        .arg(highIntegrityCount);
-                    safeThis->m_recoveryStatusLabel->setText(safeThis->m_recoveryBaseStatusText);
-
-                    safeThis->updateRecoveryViewState(
-                        !safeThis->m_deletedRecoveryItems.empty(),
-                        QStringLiteral("本次扫描未发现仍可恢复的删除项，可更换卷后重新扫描。"));
-
-                    // 重新扫描后沿用当前查找条件，省去用户再输一次。
-                    safeThis->applyRecoveryFilter();
-
-                    kLogEvent event;
-                    info << event
-                        << "[FileDock] 扫描误删完成, volume="
-                        << QDir::toNativeSeparators(rootPath).toStdString()
-                        << ", total="
-                        << safeThis->m_deletedRecoveryItems.size()
-                        << eol;
-                    kPro.set(progressPid, "扫描完成", 0, 100.0f);
-                };
-
-                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                    safeThis.data(),
-                    QStringLiteral("file-recovery-scan-snapshot"),
-                    { safeThis->m_recoveryTable },
-                    commitSnapshot))
-                {
-                    return;
-                }
-                commitSnapshot();
-            },
-            [progressPid]()
+                    if (!token.isCanceled()) kPro.set(progressPid, stage.toStdString(), 0,
+                        static_cast<float>(std::clamp(percent, 0, 100)));
+                });
+            if (!result.ok || token.isCanceled()) return result;
+            for (const auto& entry : snapshot->entries)
             {
+                if (token.isCanceled()) return result;
+                snapshot->residentReady += entry.recoveryCapability == ks::file::NtfsRecoveryCapability::Resident;
+                snapshot->nonResidentReady += entry.recoveryCapability == ks::file::NtfsRecoveryCapability::NonResidentIntact;
+                snapshot->safelyRecoverable += isDeletedFileSafelyRecoverable(entry);
+                snapshot->highIntegrity += entry.estimatedIntegrityPercent >= 80;
+            }
+            result.snapshot = std::move(snapshot);
+            return result;
+        },
+        [this, request](const Result& result, std::uint64_t)
+        {
+            if (!result.ok || !result.snapshot)
+            {
+                m_recoveryScanInProgress = false;
+                m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+                m_recoveryStatusLabel->setText(QStringLiteral("扫描失败：%1").arg(result.error));
+                updateRecoveryViewState(false, QStringLiteral(
+                    "扫描未能完成，可更换卷或确认程序以管理员权限运行后重试。"));
+                kLogEvent event;
+                err << event << "[FileDock] 扫描误删失败, volume=" << request.volume.toStdString()
+                    << ", error=" << result.error.toStdString() << eol;
+                kPro.set(request.progressPid, "扫描失败", 0, 100.0f);
+                QMessageBox::warning(this, QStringLiteral("扫描失败"), result.error);
+                return true;
+            }
+            // Publication, including the current filter, is a separate pure-value worker.
+            // Keep the old model intact until that complete projection passes the menu barrier.
+            retireRecoverySnapshot(std::move(m_recoveryPendingSnapshot));
+            m_recoveryPendingSnapshot = result.snapshot;
+            // The previous table's one-shot header sort was reset by a fresh scan.
+            m_recoverySortColumn = -1;
+            m_recoverySortOrder = Qt::AscendingOrder;
+            m_recoveryTable->horizontalHeader()->setSortIndicatorShown(false);
+            applyRecoveryFilter();
+            kLogEvent event;
+            info << event << "[FileDock] 扫描误删完成, volume=" << request.volume.toStdString()
+                << ", total=" << result.snapshot->entries.size() << eol;
+            kPro.set(request.progressPid, "扫描完成", 0, 100.0f);
+            return true;
+        },
+        [this, progressPid](std::exception_ptr)
+        {
+            m_recoveryScanInProgress = false;
+            m_recoveryScanButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryEmptyScanButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryExportButton->setEnabled(!m_recoveryRecoverInProgress);
+            m_recoveryStatusLabel->setText(QStringLiteral("扫描失败"));
+            kPro.set(progressPid, "扫描失败", 0, 100.0f);
+        },
+        [progressPid](ks::ui::AsyncOperationOutcome outcome)
+        {
+            if (outcome != ks::ui::AsyncOperationOutcome::Applied && outcome != ks::ui::AsyncOperationOutcome::Failed)
                 kPro.set(progressPid, "界面已关闭", 0, 100.0f);
-            });
-    }).detach();
+        });
 }
 
 void FileDock::recoverSelectedDeletedFiles()
@@ -16851,47 +16981,33 @@ void FileDock::recoverSelectedDeletedFiles()
 
 void FileDock::recoverSelectedDeletedFilesAsync()
 {
-    if (m_recoveryTable == nullptr || m_recoveryVolumeCombo == nullptr)
-    {
-        return;
-    }
-    if (m_recoveryRecoverInProgress)
-    {
-        return;
-    }
-    const QModelIndexList selectedRows = m_recoveryTable->selectionModel()->selectedRows();
-    if (selectedRows.empty())
+    if (m_recoveryTable == nullptr || m_recoveryRecoverInProgress) return;
+    const auto snapshot = static_cast<DeletedRecoveryModel*>(m_recoveryModel)->snapshot();
+    if (!snapshot) return;
+    auto selected = m_recoverySelectedSourceRows.values();
+    std::sort(selected.begin(), selected.end());
+    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
+    selectedItems.reserve(static_cast<std::size_t>(selected.size()));
+    for (int source : selected) if (source >= 0 && source < static_cast<int>(snapshot->entries.size()))
+        selectedItems.push_back(snapshot->entries[static_cast<std::size_t>(source)]);
+    recoverDeletedFileEntriesAsync(snapshot->volumeRoot, std::move(selectedItems));
+}
+
+void FileDock::recoverDeletedFileEntriesAsync(const QString& sourceVolume,
+    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems)
+{
+    if (m_recoveryRecoverInProgress || m_recoveryScanInProgress) return;
+    if (selectedItems.empty())
     {
         QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("请先在列表中选择要恢复的条目。"));
         return;
     }
-
-    const QString exportDir = QFileDialog::getExistingDirectory(
-        this,
-        QStringLiteral("选择恢复输出目录"),
-        QDir::homePath());
-    if (exportDir.isEmpty())
-    {
-        return;
-    }
-
-    const QString volumeRoot = m_recoveryVolumeCombo->currentData().toString();
-    std::vector<ks::file::NtfsDeletedFileEntry> selectedItems;
-    selectedItems.reserve(static_cast<std::size_t>(selectedRows.size()));
-    for (const QModelIndex& rowIndex : selectedRows)
-    {
-        const int rowValue = rowIndex.row();
-        if (rowValue < 0 || rowValue >= static_cast<int>(m_deletedRecoveryItems.size()))
-        {
-            continue;
-        }
-        selectedItems.push_back(m_deletedRecoveryItems[static_cast<std::size_t>(rowValue)]);
-    }
-    if (selectedItems.empty())
-    {
-        QMessageBox::information(this, QStringLiteral("文件恢复"), QStringLiteral("未读取到有效恢复条目。"));
-        return;
-    }
+    const QString volumeRoot = sourceVolume;
+    const QPointer<FileDock> guardThis(this);
+    const QString exportDir = QFileDialog::getExistingDirectory(this,
+        QStringLiteral("选择恢复输出目录"), QDir::homePath());
+    if (!guardThis || exportDir.isEmpty()) return;
+    if (m_recoveryRecoverInProgress || m_recoveryScanInProgress) return;
     const bool hasSafelyRecoverableItem = std::any_of(
         selectedItems.begin(),
         selectedItems.end(),

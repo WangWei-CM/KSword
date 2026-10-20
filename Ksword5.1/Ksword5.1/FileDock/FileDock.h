@@ -13,6 +13,7 @@
 #include "../UI/AsyncUiDispatcher.h"
 
 #include <QStringList>
+#include <QSet>
 #include <QWidget>
 
 #include <cstdint>     // std::uint64_t：文件大小统计。
@@ -45,6 +46,8 @@ class QSplitter;
 class QStatusBar;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
+struct FileRecoverySnapshot;
 class QToolButton;
 class QTreeView;
 class QVBoxLayout;
@@ -576,6 +579,8 @@ private:
     // recoverSelectedDeletedFilesAsync：
     // - 作用：异步恢复选中删除项，避免恢复过程阻塞 UI。
     void recoverSelectedDeletedFilesAsync();
+    void recoverDeletedFileEntriesAsync(const QString& sourceVolume,
+        std::vector<ks::file::NtfsDeletedFileEntry> selectedItems);
 
     // installRecoveryTableMenu：
     // - 作用：为删除项表格安装右键菜单（复制行 / 文件属性 / 恢复选中）。
@@ -583,12 +588,12 @@ private:
 
     // showDeletedFilePropertiesDialog：
     // - 作用：展示单条删除项的完整取证属性（记录号、序列号、恢复能力等）。
-    // - 入参 rowIndex：表格行号，越界时不弹窗。
-    void showDeletedFilePropertiesDialog(int rowIndex);
+    // - 入参 entry：菜单打开前冻结的完整删除项值。
+    void showDeletedFilePropertiesDialog(const ks::file::NtfsDeletedFileEntry& entry);
 
     // applyRecoveryFilter：
     // - 作用：按查找框内容筛选删除项表格，支持子串与正则两种模式；
-    // - 说明：只改行可见性，不动缓存顺序，右键与恢复入口的行号映射保持有效。
+    // - 说明：后台生成纯值源行投影；动作始终绑定不可变快照记录。
     void applyRecoveryFilter();
 
     // updateRecoveryViewState：
@@ -648,7 +653,7 @@ private:
     QPushButton* m_recoveryRefreshButton = nullptr; // 刷新卷按钮。
     QPushButton* m_recoveryScanButton = nullptr;    // 扫描按钮。
     QPushButton* m_recoveryExportButton = nullptr;  // 恢复导出按钮。
-    QTableWidget* m_recoveryTable = nullptr;        // 删除项结果表格。
+    QTableView* m_recoveryTable = nullptr;        // 删除项结果表格。
     QLabel* m_recoveryStatusLabel = nullptr;        // 扫描状态标签。
     QLineEdit* m_recoveryFilterEdit = nullptr;      // 结果查找输入框。
     QToolButton* m_recoveryFilterRegexButton = nullptr; // 查找的正则开关。
@@ -657,7 +662,18 @@ private:
     QWidget* m_recoveryEmptyPage = nullptr;         // 空状态引导页容器。
     QPushButton* m_recoveryEmptyScanButton = nullptr; // 引导页中央扫描按钮。
     QLabel* m_recoveryEmptyHintLabel = nullptr;     // 引导页说明文字。
-    std::vector<ks::file::NtfsDeletedFileEntry> m_deletedRecoveryItems; // 删除项缓存（含 resident 数据）。
+    QAbstractTableModel* m_recoveryModel = nullptr; // 不可变完整候选和纯值行投影。
+    std::shared_ptr<const FileRecoverySnapshot> m_recoveryPendingSnapshot;
+    ks::ui::AsyncOperation* m_recoveryScanOperation = nullptr;
+    ks::ui::AsyncOperation* m_recoveryProjectionOperation = nullptr;
+    std::uint64_t m_recoverySnapshotRevision = 0;
+    QSet<int> m_recoverySelectedSourceRows; // 包括临时筛选隐藏的已选记录。
+    int m_recoveryCurrentSourceRow = -1;
+    bool m_recoveryProjectionCommit = false;
+    int m_recoverySortColumn = -1;
+    Qt::SortOrder m_recoverySortOrder = Qt::AscendingOrder;
+    QString m_recoveryAppliedFilterText;
+    bool m_recoveryAppliedFilterRegex = false;
     bool m_recoveryScanInProgress = false;          // 误删扫描后台任务运行状态。
     bool m_recoveryRecoverInProgress = false;       // 误删恢复后台任务运行状态。
 
