@@ -487,8 +487,9 @@ namespace ks::ui
             }
 
             // 新键先追加到末尾，随后通过一次 layout 变更放到最终位置。
-            oldKeySet.clear();
-            oldKeySet.insert(oldKeys.cbegin(), oldKeys.cend());
+            // For each unique new key, membership in the original old set equals
+            // membership in the retained set: every removed key is absent from newKeys.
+            // Reuse that set; inserted keys need not be tracked because newKeys is unique.
             std::vector<std::size_t> insertedNewRowIndexes;
             for (std::size_t newRow = 0; newRow < newKeys.size(); ++newRow)
             {
@@ -497,7 +498,6 @@ namespace ks::ui
                     continue;
                 }
                 insertedNewRowIndexes.push_back(newRow);
-                oldKeySet.insert(newKeys[newRow]);
             }
             if (!insertedNewRowIndexes.empty())
             {
