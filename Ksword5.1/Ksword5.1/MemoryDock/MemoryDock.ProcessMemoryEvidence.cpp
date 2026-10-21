@@ -292,10 +292,10 @@ namespace
 
                 for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
                 {
-                    const QTableWidgetItem* headerItem = table->horizontalHeaderItem(columnIndex);
-                    const QString headerText = headerItem != nullptr
-                        ? headerItem->text()
-                        : QString::number(columnIndex);
+                    const QVariant headerValue = table->model() != nullptr
+                        ? table->model()->headerData(columnIndex, Qt::Horizontal, Qt::DisplayRole) : QVariant();
+                    const QString headerText = headerValue.isValid()
+                        ? headerValue.toString() : QString::number(columnIndex);
                     QAction* columnAction = columnMenu.addAction(headerText);
                     columnAction->setCheckable(true);
                     columnAction->setChecked(!table->isColumnHidden(columnIndex));
