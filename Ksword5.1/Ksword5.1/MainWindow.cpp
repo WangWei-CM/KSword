@@ -4627,7 +4627,7 @@ namespace
     }
 
     // MainWindowBackgroundWidget 作用：
-    // - 作为主窗口根容器的唯一背景绘制者；
+    // - 绘制主窗口根容器或浮动 Dock 的底层背景；
     // - 每次绘制都按当前真实 rect 执行“居中、等比覆盖”，避免启动阶段预测窗口尺寸。
     // kTranslucentTintAlpha 作用：
     // - 穿透模式无背景图时主题着色层的默认不透明度（0~255）；
@@ -4784,81 +4784,15 @@ namespace
         int m_tintAlpha = kTranslucentTintAlpha; // m_tintAlpha：自绘着色层不透明度，由外观设置下发。
     };
 
-    // buildBackgroundBrush 作用：
-    // - 按“纯色底 + 可选背景图 + 透明度”组合一张画刷贴图；
-    // - 仅供仍使用独立调色板的浮动 Dock 容器绘制。
-    // 调用方式：MainWindow::applyFloatingDockContainerAppearance 调用。
-    // 入参 windowSize：目标窗口尺寸；
-    // 入参 baseColor：主题基底色（深色黑、浅色白）；
-    // 入参 sourceImage：已在线程池解码并由 UI 线程转换的缓存图片；可为空。
-    // 入参 imageOpacityPercent：背景图透明度（0~100）。
-    // 返回：可直接设置到 QPalette::Window 的画刷。
-    QBrush buildBackgroundBrush(
-        const QSize& windowSize,
-        const QColor& baseColor,
-        const QPixmap* sourceImage,
-        const int imageOpacityPercent)
+    // 浮动窗只借用主窗口现有的背景绘制宿主，不改变 ADS 的布局/父子身份。
+    // 只查直接子级；业务页面不参与背景宿主查找。
+    constexpr auto kFloatingBackgroundObjectName = "ksFloatingDockBackground";
+
+    MainWindowBackgroundWidget* floatingDockBackgroundWidget(
+        ads::CFloatingDockContainer* floatingWidget)
     {
-        const QSize safeSize = windowSize.isValid() ? windowSize : QSize(1, 1);
-        const int normalizedOpacityPercent = normalizeOpacityPercent(imageOpacityPercent);
-        // effectiveSourceImage 用途：透明度为零时跳过合成，同时不访问任何文件路径。
-        const QPixmap* effectiveSourceImage = normalizedOpacityPercent > 0 ? sourceImage : nullptr;
-        if (effectiveSourceImage == nullptr || effectiveSourceImage->isNull())
-        {
-            // 纯色不依赖窗口尺寸，不分配/填充整窗像素，也不因 Resize 换纹理键触发 PaletteChange。
-            return QBrush(baseColor);
-        }
-        const quint64 sourceImageCacheKey =
-            effectiveSourceImage == nullptr ? 0 : effectiveSourceImage->cacheKey();
-
-        // 主窗口 resize 期间通常会连续收到相同尺寸或相邻布局事件。
-        // 缓存最近一次合成图，避免重复分配整窗像素缓冲并再次进行平滑缩放。
-        static QSize cachedSize;
-        static QColor cachedBaseColor;
-        static int cachedOpacityPercent = -1;
-        static quint64 cachedSourceImageCacheKey = 0;
-        static QPixmap cachedComposedPixmap;
-        const bool cacheHit =
-            cachedSize == safeSize
-            && cachedBaseColor == baseColor
-            && cachedOpacityPercent == normalizedOpacityPercent
-            && cachedSourceImageCacheKey == sourceImageCacheKey
-            && !cachedComposedPixmap.isNull();
-        if (cacheHit)
-        {
-            return QBrush(cachedComposedPixmap);
-        }
-
-        QPixmap composedPixmap(safeSize);
-        composedPixmap.fill(baseColor);
-        if (effectiveSourceImage != nullptr)
-        {
-            QPainter painter(&composedPixmap);
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            painter.setOpacity(static_cast<double>(normalizedOpacityPercent) / 100.0);
-
-            // scaledImageSize 作用：按“覆盖整个窗口”策略计算缩放尺寸。
-            QSizeF scaledImageSize = effectiveSourceImage->size();
-            scaledImageSize.scale(safeSize, Qt::KeepAspectRatioByExpanding);
-
-            const QRectF targetRect(
-                (static_cast<double>(safeSize.width()) - scaledImageSize.width()) / 2.0,
-                (static_cast<double>(safeSize.height()) - scaledImageSize.height()) / 2.0,
-                scaledImageSize.width(),
-                scaledImageSize.height());
-
-            painter.drawPixmap(
-                targetRect,
-                *effectiveSourceImage,
-                QRectF(QPointF(0, 0), effectiveSourceImage->size()));
-        }
-
-        cachedSize = safeSize;
-        cachedBaseColor = baseColor;
-        cachedOpacityPercent = normalizedOpacityPercent;
-        cachedSourceImageCacheKey = sourceImageCacheKey;
-        cachedComposedPixmap = composedPixmap;
-        return QBrush(composedPixmap);
+        return static_cast<MainWindowBackgroundWidget*>(floatingWidget->findChild<QWidget*>(
+            QString::fromLatin1(kFloatingBackgroundObjectName), Qt::FindDirectChildrenOnly));
     }
 
     // buildGlobalTooltipStyleBlock 作用：
@@ -5369,9 +5303,7 @@ MainWindow::MainWindow(
     setCentralWidget(m_mainRootContainer);
     initResizeBorderOverlays();
 
-    // 浮动窗口创建后立即挂接事件过滤器：
-    // - 让脱离主窗口的 Dock 容器也能同步背景图与纯色底；
-    // - 后续 resize/show 时统一走 MainWindow 的外观同步逻辑。
+    // 浮动窗口创建时同步外观；Show 补齐主题/导航身份，Resize 只更新背景宿主几何。
     connect(
         m_pDockManager,
         &ads::CDockManager::floatingWidgetCreated,
@@ -5384,6 +5316,15 @@ MainWindow::MainWindow(
             }
             floatingWidget->installEventFilter(this);
             applyFloatingDockContainerAppearance(floatingWidget);
+            if (ads::CDockContainerWidget* container = floatingWidget->dockContainer(); container != nullptr)
+            {
+                // 新分区迁入现有浮动窗不一定再次触发 Show；只在结构变化时补齐导航身份。
+                connect(container, &ads::CDockContainerWidget::dockAreasAdded,
+                    floatingWidget, [floatingWidget]()
+                    {
+                        refreshAdsDockTabVisualIdentities(floatingWidget);
+                    });
+            }
         });
 
     // 显式要求“最后一个窗口关闭后退出应用”。
@@ -6323,9 +6264,20 @@ bool MainWindow::eventFilter(QObject* watchedObject, QEvent* event)
         qobject_cast<ads::CFloatingDockContainer*>(watchedObject);
     if (floatingWidget != nullptr && event != nullptr)
     {
-        if (event->type() == QEvent::Show || event->type() == QEvent::Resize)
+        if (event->type() == QEvent::Show)
         {
             applyFloatingDockContainerAppearance(floatingWidget);
+        }
+        else if (event->type() == QEvent::Resize || event->type() == QEvent::DevicePixelRatioChange)
+        {
+            // 尺寸和 DPR 只影响绘制目标，不影响主题配方、palette 或 ADS 导航身份。
+            if (MainWindowBackgroundWidget* background = floatingDockBackgroundWidget(floatingWidget);
+                background != nullptr && !background->isHidden())
+            {
+                background->setGeometry(floatingWidget->rect());
+                // cover 的中心随尺寸变化，必须重画整个背景，而非仅新增的边缘。
+                background->update();
+            }
         }
     }
 
@@ -13462,7 +13414,7 @@ const QPixmap* MainWindow::cachedBackgroundImage(const QString& rawImagePath) co
         return nullptr;
     }
     // 模糊副本只在“玻璃模糊半径”>0 且已由 refreshBackgroundImageBlurCache 生成时替换原图；
-    // 主窗口根容器与浮动 Dock 画刷都走这里，因此两者永远取到同一张底图。
+    // 主窗口根容器与浮动 Dock 背景宿主都走这里，因此两者永远取到同一张底图。
     return m_backgroundImageBlurredPixmap.isNull()
         ? &m_backgroundImagePixmap
         : &m_backgroundImageBlurredPixmap;
@@ -13621,36 +13573,29 @@ void MainWindow::rebuildWindowBackgroundBrush(const bool includeBackgroundImage)
     }
 }
 
-void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const
+void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget)
 {
     if (floatingWidget == nullptr)
     {
         return;
     }
 
-    const bool darkModeEnabled = isDarkModeEffective(m_currentAppearanceSettings);
     const QColor baseColor = KswordTheme::MainBackgroundColor();
+    // 浮动窗沿用独立不透明顶层的既有策略；主窗口的穿透开关不改变浮动窗原生属性。
     const bool enableDockContentTransparency =
         isCachedBackgroundImageReady(m_currentAppearanceSettings.backgroundImagePath);
-    // sourceImage 用途：浮动容器复用线程池解码结果，不执行路径探测或文件加载。
-    const QPixmap* sourceImage =
-        cachedBackgroundImage(m_currentAppearanceSettings.backgroundImagePath);
-
-    // floatingSize 用途：浮动容器当前尺寸；无效时至少给 1x1，避免画刷构造失败。
-    floatingWidget->setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
-    const QSize floatingSize = floatingWidget->size().isValid() ? floatingWidget->size() : QSize(1, 1);
-    const QBrush backgroundBrush = buildBackgroundBrush(
-        floatingSize,
-        baseColor,
-        sourceImage,
+    const int imageOpacityPercent = normalizeOpacityPercent(
         m_currentAppearanceSettings.backgroundOpacityPercent);
+    const QPixmap* sourceImage = imageOpacityPercent > 0
+        ? cachedBackgroundImage(m_currentAppearanceSettings.backgroundImagePath)
+        : nullptr;
+    const bool paintBackgroundImage = sourceImage != nullptr && !sourceImage->isNull();
 
+    floatingWidget->setProperty("ksword_main_surface_hierarchy", !enableDockContentTransparency);
     QPalette floatingPalette = floatingWidget->palette();
+    // palette 只保留稳定纯色；不再分配随每个新尺寸变化的整窗纹理。
     floatingPalette.setColor(QPalette::Window, baseColor);
-    floatingPalette.setBrush(QPalette::Window, backgroundBrush);
-    floatingPalette.setColor(
-        QPalette::WindowText,
-        KswordTheme::MainBackgroundTextColor());
+    floatingPalette.setColor(QPalette::WindowText, KswordTheme::MainBackgroundTextColor());
     if (floatingWidget->palette() != floatingPalette)
     {
         floatingWidget->setPalette(floatingPalette);
@@ -13658,34 +13603,69 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
     floatingWidget->setAutoFillBackground(true);
     floatingWidget->setAttribute(Qt::WA_StyledBackground, false);
 
-    // 浮动窗口是独立顶层窗口，不继承 MainWindow 的局部样式表；
-    // 这里显式复用同一套外观样式，确保 Tab/TitleBar/内容区规则一致。
-    const QString appearanceStyleSheet =
-        QSS_MainWindow_TabWidget
-        + QSS_MainWindow_dockStyle
-        + buildAppearanceOverlayStyleSheet(
-            m_currentAppearanceSettings,
-            darkModeEnabled,
-            enableDockContentTransparency);
-    // 尺寸/背景图刷新仍需换画刷，但配色规则没有变化时不重抛整棵浮动页的 StyleChange。
-    if (floatingWidget->styleSheet() != appearanceStyleSheet)
+    // 配方只依赖实际深浅模式/强调色/主背景及透明内容策略，所有浮动窗共享结果。
+    // 全局种子代次也会因保存相同配置递增，故比较真实输入，图片/opacity 更新不重建 QSS。
+    const bool darkModeEnabled = KswordTheme::IsDarkModeEnabled();
+    const QColor accentColor = KswordTheme::PrimaryAccentColor();
+    if (m_floatingDockAppearanceDarkMode != darkModeEnabled
+        || m_floatingDockAppearanceAccentColor != accentColor
+        || m_floatingDockAppearanceBaseColor != baseColor
+        || m_floatingDockAppearanceTransparency != enableDockContentTransparency
+        || m_floatingDockAppearanceStyleSheet.isEmpty())
     {
-        floatingWidget->setStyleSheet(appearanceStyleSheet);
+        m_floatingDockAppearanceStyleSheet =
+            QSS_MainWindow_TabWidget
+            + QSS_MainWindow_dockStyle
+            + buildAppearanceOverlayStyleSheet(
+                m_currentAppearanceSettings,
+                darkModeEnabled,
+                enableDockContentTransparency);
+        m_floatingDockAppearanceDarkMode = darkModeEnabled;
+        m_floatingDockAppearanceAccentColor = accentColor;
+        m_floatingDockAppearanceBaseColor = baseColor;
+        m_floatingDockAppearanceTransparency = enableDockContentTransparency;
     }
-    // 仍校验真实导航结构，已改为 ADS 登记表遍历，惰性新 Dock 不会因样式相同而漏接入。
+    if (floatingWidget->styleSheet() != m_floatingDockAppearanceStyleSheet)
+    {
+        floatingWidget->setStyleSheet(m_floatingDockAppearanceStyleSheet);
+    }
+    // 仅创建/Show/主题刷新检查导航；Resize 不再进入此路径。
     refreshAdsDockTabVisualIdentities(floatingWidget);
+
+    MainWindowBackgroundWidget* background = floatingDockBackgroundWidget(floatingWidget);
+    if (paintBackgroundImage)
+    {
+        if (background == nullptr)
+        {
+            background = new MainWindowBackgroundWidget(floatingWidget);
+            background->setObjectName(QString::fromLatin1(kFloatingBackgroundObjectName));
+            background->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            background->setFocusPolicy(Qt::NoFocus);
+            // 作为布局外的最底层兄弟，保留 ADS 容器、标题栏和业务页的既有身份。
+            background->lower();
+        }
+        background->setBackground(baseColor, sourceImage, imageOpacityPercent);
+        background->setGeometry(floatingWidget->rect());
+        background->show();
+    }
+    else if (background != nullptr)
+    {
+        // 图片关闭/opacity 0 立即释放旧像素引用，回到原来的纯色自动填充快速路径。
+        background->setBackground(baseColor, nullptr, 0);
+        background->hide();
+    }
 
     ads::CDockContainerWidget* dockContainer = floatingWidget->dockContainer();
     if (dockContainer != nullptr)
     {
         QPalette dockContainerPalette = dockContainer->palette();
         dockContainerPalette.setColor(QPalette::Window, baseColor);
-        dockContainerPalette.setBrush(QPalette::Window, backgroundBrush);
         if (dockContainer->palette() != dockContainerPalette)
         {
             dockContainer->setPalette(dockContainerPalette);
         }
-        dockContainer->setAutoFillBackground(true);
+        // 有图时让底层背景宿主一次绘制完整 cover；无图保持既有纯色填充。
+        dockContainer->setAutoFillBackground(!paintBackgroundImage);
         dockContainer->setAttribute(Qt::WA_StyledBackground, false);
     }
 }

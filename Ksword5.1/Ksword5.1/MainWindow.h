@@ -25,6 +25,7 @@
 #include <QStringList>
 #include <QByteArray>
 #include <QPixmap>
+#include <QColor>
 #include <QToolButton>
 
 #include <functional>
@@ -386,7 +387,7 @@ private:
 
     // refreshBackgroundImageBlurCache 作用：
     // - 按“玻璃模糊半径”设置重建背景图的模糊副本，半径为 0 时清空副本；
-    // - 主窗口根容器与浮动 Dock 画刷都通过 cachedBackgroundImage 取图，
+    // - 主窗口根容器与浮动 Dock 背景宿主都通过 cachedBackgroundImage 取图，
     //   在这里统一生成既保证两者观感一致，又避免每次重绘都重新模糊；
     // - 系统亚克力的模糊半径由 DWM 内部固定（ACCENT_POLICY 无半径字段），
     //   因此可调半径只能作用于这一层自绘模糊。
@@ -693,9 +694,14 @@ private:
     const QPixmap* cachedBackgroundImage(const QString& rawImagePath) const;
 
     // applyFloatingDockContainerAppearance 作用：
-    // - 把当前主题色、背景图与样式同步到指定浮动 Dock 容器；
-    // - 解决“拖出后浮动窗口背景变成纯黑未填充”的问题。
-    void applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget) const;
+    // - 创建/显示/外观设置变化时同步浮动 Dock；Resize 只调整背景宿主几何。
+    // - 配方按主题种子/透明内容策略缓存；图片复用主窗口背景宿主直接绘制原图。
+    void applyFloatingDockContainerAppearance(ads::CFloatingDockContainer* floatingWidget);
+    QString m_floatingDockAppearanceStyleSheet;
+    QColor m_floatingDockAppearanceAccentColor;
+    QColor m_floatingDockAppearanceBaseColor;
+    bool m_floatingDockAppearanceDarkMode = false;
+    bool m_floatingDockAppearanceTransparency = false;
 
     // buildAppearanceOverlayStyleSheet 作用：
     // - 生成深色/浅色覆盖样式字符串，叠加在基础 QSS 之后。
