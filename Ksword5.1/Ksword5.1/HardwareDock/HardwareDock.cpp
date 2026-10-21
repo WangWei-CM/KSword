@@ -4692,6 +4692,8 @@ void HardwareDock::resizeEvent(QResizeEvent* resizeEventPointer)
 bool HardwareDock::eventFilter(QObject* watchedObject, QEvent* eventObject)
 {
     QWidget* const eventWidget = qobject_cast<QWidget*>(watchedObject);
+    if (eventWidget == this && eventObject != nullptr && eventObject->type() == QEvent::LanguageChange)
+        QTimer::singleShot(0, this, [this]() { refreshArchivedNavigationTexts(); });
     // 全局 palette 传播尚在遍历子树时只排队，主题完成后统一刷新性能图和浮窗快照。
     if (eventObject != nullptr
         && (eventObject->type() == QEvent::ApplicationPaletteChange
@@ -5233,7 +5235,7 @@ ks::ui::PageNavigationCatalog HardwareDock::navigationCatalog(const HardwareDock
     };
     // Read only cached provider values/registered identities. Catalog collection never enumerates hardware.
     for (const auto& device : existing->m_diskUtilDevices)
-        appendDevice(diskNavigationId(device.instanceNameText), device.displayNameText, {device.instanceNameText});
+        appendDevice(diskNavigationId(device.instanceNameText), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {device.instanceNameText});
     for (std::size_t index = 0; index < existing->m_lastPerformanceSample.diskSamples.size(); ++index)
     {
         const auto& sample = existing->m_lastPerformanceSample.diskSamples[index];
@@ -5242,7 +5244,7 @@ ks::ui::PageNavigationCatalog HardwareDock::navigationCatalog(const HardwareDock
     bool virtualNetwork = existing->m_virtualNetworkPage != nullptr;
     for (const auto& device : existing->m_networkUtilDevices)
     {
-        if (device.physical) appendDevice(networkNavigationId(device.interfaceKey), device.displayNameText, {});
+        if (device.physical) appendDevice(networkNavigationId(device.interfaceKey), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {});
         else virtualNetwork = true;
     }
     for (std::size_t index = 0; index < existing->m_lastPerformanceSample.networkSamples.size(); ++index)
@@ -5254,7 +5256,7 @@ ks::ui::PageNavigationCatalog HardwareDock::navigationCatalog(const HardwareDock
     if (virtualNetwork) appendDevice(QStringLiteral("hardware.utilization.virtual_network"),
         ks::i18n::contextText(QStringLiteral("hardware.utilization.card.virtual_network"), QStringLiteral("虚拟网络")), {});
     for (const auto& device : existing->m_gpuUtilDevices)
-        appendDevice(gpuNavigationId(device.adapterKey), device.displayNameText, {});
+        appendDevice(gpuNavigationId(device.adapterKey), device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText), {});
     for (std::size_t index = 0; index < existing->m_lastGpuSamples.size(); ++index)
     {
         const auto& sample = existing->m_lastGpuSamples[index];
@@ -5460,6 +5462,7 @@ void HardwareDock::ensureCurrentHardwarePageInitialized()
 void HardwareDock::restoreUtilizationHistory()
 {
     if (m_presentationHistory.empty()) return;
+    materializeArchivedDeviceNavigation();
     m_restoringUtilizationHistory = true;
     // Re-project the same retained frames; do not collect, emit, increment identity or archive again.
     for (const auto& frame : m_presentationHistory)
@@ -5470,6 +5473,7 @@ void HardwareDock::restoreUtilizationHistory()
         applyPerformanceSample(frame.sample);
     }
     m_restoringUtilizationHistory = false;
+    retireInactiveDeviceViews();
 }
 
 void HardwareDock::initializeUi()
@@ -5622,7 +5626,7 @@ void HardwareDock::initializeUtilizationTab()
         QStringLiteral(
             "QListWidget{border:none;background:transparent;}"
             "QListWidget::item{border:none;padding:0px;margin:0px;}"
-            "QListWidget::item:selected{background:transparent;}"));
+            "QListWidget::item:selected{background:palette(highlight);color:palette(highlighted-text);border-radius:5px;}"));
     appendTransparentBackgroundStyle(m_utilizationSidebarList);
     m_utilizationBodySplitter->addWidget(m_utilizationSidebarList);
 
@@ -5722,20 +5726,9 @@ void HardwareDock::initializeUtilizationSidebarCards()
     }
 }
 
-PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
-    QWidget* detailPage,
-    const QString& titleText,
-    const QColor& accentColor,
-    const UtilizationDeviceKind kind,
-    const int deviceIndex)
+PerformanceNavCard* HardwareDock::makeUtilizationSidebarCard(QListWidgetItem* itemPointer,
+    const QString& titleText, const QColor& accentColor)
 {
-    if (m_utilizationSidebarList == nullptr)
-    {
-        return nullptr;
-    }
-
-    // itemPointer 用途：承载 PerformanceNavCard 的 QListWidget 行。
-    QListWidgetItem* itemPointer = new QListWidgetItem();
     // cardPointer 用途：实际绘制任务管理器风格缩略卡片。
     PerformanceNavCard* cardPointer = new PerformanceNavCard(m_utilizationSidebarList);
     if (m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar)
@@ -5755,9 +5748,27 @@ PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
     // 只把高度交给 QListWidget 管理；宽度始终由 viewport/分割器决定，不能把
     // 卡片推荐宽度写进 item，否则拖动 splitter 时 QListView 会反向拉回 splitter。
     itemPointer->setSizeHint(QSize(0, cardPointer->sizeHint().height()));
-    m_utilizationSidebarList->addItem(itemPointer);
     m_utilizationSidebarList->setItemWidget(itemPointer, cardPointer);
 
+    return cardPointer;
+}
+
+PerformanceNavCard* HardwareDock::addUtilizationSidebarCard(
+    QWidget* detailPage,
+    const QString& titleText,
+    const QColor& accentColor,
+    const UtilizationDeviceKind kind,
+    const int deviceIndex)
+{
+    if (m_utilizationSidebarList == nullptr)
+    {
+        return nullptr;
+    }
+
+    // itemPointer 用途：承载 PerformanceNavCard 的 QListWidget 行。
+    QListWidgetItem* itemPointer = new QListWidgetItem();
+    m_utilizationSidebarList->addItem(itemPointer);
+    PerformanceNavCard* cardPointer = makeUtilizationSidebarCard(itemPointer, titleText, accentColor);
     // navEntry 用途：记录 QListWidget 行号与 QStackedWidget 页面之间的稳定映射。
     UtilizationNavEntry navEntry;
     navEntry.navCard = cardPointer;
@@ -5790,6 +5801,7 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
     int targetPageIndex = std::clamp(boundedRowIndex, 0, pageCount - 1);
     if (boundedRowIndex >= 0 && boundedRowIndex < entryCount)
     {
+        openArchivedDevice(m_utilizationNavEntries[static_cast<std::size_t>(boundedRowIndex)]);
         QWidget* targetPageWidget = m_utilizationNavEntries[static_cast<std::size_t>(boundedRowIndex)].detailPage;
         if (targetPageWidget != nullptr)
         {
@@ -5816,6 +5828,7 @@ void HardwareDock::syncUtilizationSidebarSelection(const int selectedRowIndex)
     }
 
     // 选项切换后立即重算大图高度，避免首帧出现滚动条。
+    retireInactiveDeviceViews();
     scheduleUtilizationLayoutRefresh();
 }
 
@@ -7268,8 +7281,9 @@ void HardwareDock::adjustUtilizationChartHeights()
     applyMaxHeightIfChanged(m_memoryUtilSecondaryDetailLabel, std::max(1, m_memoryUtilSecondaryDetailLabel != nullptr ? m_memoryUtilSecondaryDetailLabel->sizeHint().height() : 1));
     applyMaxHeightIfChanged(m_diskUtilDetailLabel, std::max(1, m_diskUtilDetailLabel != nullptr ? m_diskUtilDetailLabel->sizeHint().height() : 1));
     applyMaxHeightIfChanged(m_networkUtilDetailLabel, std::max(1, m_networkUtilDetailLabel != nullptr ? m_networkUtilDetailLabel->sizeHint().height() : 1));
-    for (DiskUtilizationDevice& device : m_diskUtilDevices)
+    for (const int deviceIndex : m_presentedDiskDevices)
     {
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
         adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120,
             m_utilizationFloatingMode == UtilizationFloatingMode::Detail && m_utilizationFloatingPage == device.pageWidget);
         if (device.detailLabel != nullptr)
@@ -7277,8 +7291,9 @@ void HardwareDock::adjustUtilizationChartHeights()
             applyMaxHeightIfChanged(device.detailLabel, std::max(1, device.detailLabel->sizeHint().height()));
         }
     }
-    for (NetworkUtilizationDevice& device : m_networkUtilDevices)
+    for (const int deviceIndex : m_presentedNetworkDevices)
     {
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
         if (device.physical)
         {
             adjustMainChartHeight(device.pageWidget, device.chartView, 0.40, 24, 120,
@@ -7364,8 +7379,9 @@ void HardwareDock::adjustUtilizationChartHeights()
             applyMaxHeightIfChanged(m_gpuUtilDetailLabel, std::max(1, m_gpuUtilDetailLabel->sizeHint().height()));
         }
     }
-    for (GpuUtilizationDevice& device : m_gpuUtilDevices)
+    for (const int deviceIndex : m_presentedGpuDevices)
     {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
         if (device.pageWidget == nullptr)
         {
             continue;
@@ -8553,6 +8569,366 @@ void HardwareDock::scheduleUtilizationLayoutRefresh()
     });
 }
 
+PerformanceNavCard* HardwareDock::restoreDeviceNavigation(DeviceSeriesArchive& archive, QWidget* page,
+    const QString& title, const QColor& accent, const UtilizationDeviceKind kind, const int deviceIndex)
+{
+    if (archive.offlineButton) archive.offlineButton->deleteLater();
+    archive.offlineButton = nullptr;
+    if (archive.navRow < 0)
+    {
+        archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        return addUtilizationSidebarCard(page, title, accent, kind, deviceIndex);
+    }
+    auto* item = m_utilizationSidebarList->item(archive.navRow);
+    if (item == nullptr) return nullptr;
+    auto& entry = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)];
+    entry.detailPage = page;
+    if (entry.navCard != nullptr) return entry.navCard;
+    item->setText(QString());
+    item->setToolTip(QString());
+    entry.navCard = makeUtilizationSidebarCard(item, archive.active ? title : archivedDeviceTitle(title), accent);
+    return entry.navCard;
+}
+
+void HardwareDock::archiveDeviceNavigation(DeviceSeriesArchive& archive, const QString& title,
+    const UtilizationDeviceKind kind, const int deviceIndex)
+{
+    if (m_utilizationSidebarList == nullptr) return;
+    const QString offlineTitle = archivedDeviceTitle(title);
+    if (archive.navRow < 0)
+    {
+        archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        m_utilizationSidebarList->addItem(new QListWidgetItem());
+        UtilizationNavEntry entry;
+        entry.kind = kind;
+        entry.deviceIndex = deviceIndex;
+        m_utilizationNavEntries.push_back(entry);
+    }
+    auto* item = m_utilizationSidebarList->item(archive.navRow);
+    if (item == nullptr) return;
+    auto& entry = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)];
+    const QPointer<PerformanceNavCard> card = entry.navCard;
+    entry.navCard = nullptr;
+    entry.detailPage = nullptr;
+    if (card) m_utilizationSidebarList->removeItemWidget(item);
+    if (card) card->deleteLater();
+    item->setText(offlineTitle);
+    item->setToolTip(offlineTitle);
+    item->setSizeHint(QSize(-1, -1)); // Restore native compact row height, keeping keyboard selection.
+}
+
+void HardwareDock::materializeArchivedDeviceNavigation()
+{
+    if (!m_utilizationDetailsInitialized) return;
+    bool virtualLayoutChanged = false;
+    for (int index = 0; index < static_cast<int>(m_diskUtilDevices.size()); ++index)
+    {
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Disk, index);
+    }
+    for (int index = 0; index < static_cast<int>(m_networkUtilDevices.size()); ++index)
+    {
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.pageWidget == nullptr && device.physical && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Network, index);
+        else if (!device.archive.active && !device.physical && !device.archive.offlineButton)
+        {
+            retireNetworkDeviceView(index);
+            virtualLayoutChanged = true;
+        }
+    }
+    for (int index = 0; index < static_cast<int>(m_gpuUtilDevices.size()); ++index)
+    {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+        if (!device.archive.active && device.archive.navRow < 0)
+            archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Gpu, index);
+    }
+    if (virtualLayoutChanged) relayoutVirtualNetworkTiles();
+}
+
+void HardwareDock::openArchivedDevice(const UtilizationNavEntry& entry)
+{
+    m_openingArchivedDevice = true;
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    switch (entry.kind)
+    {
+    case UtilizationDeviceKind::Disk:
+        if (entry.deviceIndex >= 0 && index < m_diskUtilDevices.size())
+            ensureDiskUtilizationDevice(m_diskUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    case UtilizationDeviceKind::Network:
+        if (entry.deviceIndex >= 0 && index < m_networkUtilDevices.size())
+            ensureNetworkUtilizationDevice(m_networkUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    case UtilizationDeviceKind::Gpu:
+        if (entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size())
+            ensureGpuUtilizationDevice(m_gpuUtilDevices[index].lastSample, entry.deviceIndex);
+        break;
+    default: break;
+    }
+    m_openingArchivedDevice = false;
+}
+
+QString HardwareDock::archivedDeviceTitle(const QString& title)
+{
+    return ks::i18n::contextText(QStringLiteral("hardware.utilization.device.offline_title"),
+        QStringLiteral("%1（离线，保留历史）")).arg(title);
+}
+
+void HardwareDock::restoreArchivedNavSamples(const DeviceSeriesArchive& archive, PerformanceNavCard* card,
+    const QString& primaryRole, const QString& secondaryRole, double* upperBound)
+{
+    if (card == nullptr) return;
+    const auto primary = archive.histories.value(primaryRole);
+    const auto secondary = archive.histories.value(secondaryRole);
+    double peak = 0.0;
+    for (const auto& history : {primary, secondary})
+        if (history) for (const auto& sample : history->samples())
+            if (sample.valid) peak = std::max(peak, sample.value);
+    const double scale = upperBound != nullptr ? std::max(1.0, peak * 1.08) : 100.0;
+    if (upperBound != nullptr) *upperBound = scale;
+    const auto values = [scale](const std::shared_ptr<ks::ui::MetricHistory>& history)
+    {
+        QVector<double> result;
+        if (history) for (const auto& sample : history->samples())
+            result.push_back(sample.valid ? std::clamp(sample.value / scale * 100.0, 0.0, 100.0) : 0.0);
+        return result;
+    };
+    card->setSampleSeries(values(primary), values(secondary));
+}
+
+void HardwareDock::projectArchivedDevice(const UtilizationNavEntry& entry)
+{
+    const int savedId = m_sampleCounter;
+    const qint64 savedTime = m_metricSampleTimeMs;
+    const bool savedDisk = m_metricDiskValid, savedNetwork = m_metricNetworkValid, savedGpu = m_metricGpuValid;
+    m_projectingDeviceArchive = true;
+    const auto project = [this](const DeviceSeriesArchive& archive)
+    {
+        m_sampleCounter = archive.lastSampleId;
+        m_metricSampleTimeMs = archive.lastSampleTimeMs;
+    };
+    const auto markProjected = [](DeviceSeriesArchive& archive)
+    {
+        if (!archive.histories.isEmpty() && !archive.histories.cbegin().value()->samples().empty())
+            archive.lastProjectedHistoryId = archive.histories.cbegin().value()->samples().back().id;
+    };
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    if (entry.kind == UtilizationDeviceKind::Disk && entry.deviceIndex >= 0 && index < m_diskUtilDevices.size())
+    {
+        auto& device = m_diskUtilDevices[index]; project(device.archive);
+        m_metricDiskValid = device.archive.available;
+        updateDiskUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("read"), QStringLiteral("write"), &device.navAutoScaleBytesPerSec);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    else if (entry.kind == UtilizationDeviceKind::Network && entry.deviceIndex >= 0 && index < m_networkUtilDevices.size())
+    {
+        auto& device = m_networkUtilDevices[index]; project(device.archive);
+        m_metricNetworkValid = device.archive.available;
+        updateNetworkUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("rx"), QStringLiteral("tx"), &device.navAutoScaleBytesPerSec);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    else if (entry.kind == UtilizationDeviceKind::Gpu && entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size())
+    {
+        auto& device = m_gpuUtilDevices[index]; project(device.archive);
+        m_metricGpuValid = device.archive.available;
+        updateGpuUtilizationDevice(device, device.lastSample);
+        restoreArchivedNavSamples(device.archive, device.navCard, QStringLiteral("overall"), QString(), nullptr);
+        if (device.navCard && !device.archive.available) device.navCard->setSubtitleText(QStringLiteral("N/A"));
+        markProjected(device.archive);
+    }
+    m_projectingDeviceArchive = false;
+    m_sampleCounter = savedId; m_metricSampleTimeMs = savedTime;
+    m_metricDiskValid = savedDisk; m_metricNetworkValid = savedNetwork; m_metricGpuValid = savedGpu;
+}
+
+void HardwareDock::refreshArchivedNavigationTexts()
+{
+    const auto refresh = [this](const DeviceSeriesArchive& archive, const QString& title)
+    {
+        if (archive.active) return;
+        const QString text = archivedDeviceTitle(title);
+        if (archive.navRow >= 0 && m_utilizationSidebarList != nullptr)
+        {
+            auto* item = m_utilizationSidebarList->item(archive.navRow);
+            if (item != nullptr && m_utilizationSidebarList->itemWidget(item) == nullptr)
+            { item->setText(text); item->setToolTip(text); }
+            if (archive.navRow < static_cast<int>(m_utilizationNavEntries.size()))
+                if (auto* card = m_utilizationNavEntries[static_cast<std::size_t>(archive.navRow)].navCard) card->setTitleText(text);
+        }
+        if (archive.offlineButton) { archive.offlineButton->setText(text); archive.offlineButton->setToolTip(text); }
+    };
+    for (const auto& device : m_diskUtilDevices) refresh(device.archive, device.displayNameText);
+    for (const auto& device : m_networkUtilDevices) refresh(device.archive, device.displayNameText);
+    for (const auto& device : m_gpuUtilDevices) refresh(device.archive, device.displayNameText);
+}
+
+void HardwareDock::retireInactiveDeviceViews()
+{
+    bool virtualLayoutChanged = false;
+    const int selected = m_utilizationSidebarList != nullptr ? m_utilizationSidebarList->currentRow() : -1;
+    const auto protectedView = [this, selected](const DeviceSeriesArchive& archive, QWidget* page)
+    {
+        return archive.active || (archive.navRow >= 0 && archive.navRow == selected)
+            || (page != nullptr && m_utilizationDetailStack != nullptr && page == m_utilizationDetailStack->currentWidget())
+            || (page != nullptr && page == m_utilizationFloatingPage.data());
+    };
+    const auto needsMissingProjection = [](const DeviceSeriesArchive& archive)
+    {
+        return !archive.available && !archive.histories.isEmpty()
+            && !archive.histories.cbegin().value()->samples().empty()
+            && archive.lastProjectedHistoryId != archive.histories.cbegin().value()->samples().back().id;
+    };
+    for (const int index : QSet<int>(m_presentedDiskDevices))
+    {
+        auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+        if (!protectedView(device.archive, device.pageWidget)) retireDiskDeviceView(index);
+        else
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Disk, index});
+        }
+    }
+    for (const int index : QSet<int>(m_presentedNetworkDevices))
+    {
+        auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+        if (protectedView(device.archive, device.pageWidget))
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Network, index});
+            continue;
+        }
+        if (!device.physical && device.archive.explicitlyViewed
+            && m_utilizationDetailStack != nullptr && m_utilizationDetailStack->currentWidget() == m_virtualNetworkPage
+            && device.pageWidget != nullptr && m_virtualNetworkScrollArea != nullptr)
+        {
+            const auto* viewport = m_virtualNetworkScrollArea->viewport();
+            const QRect rect(device.pageWidget->mapTo(viewport, QPoint()), device.pageWidget->size());
+            if (rect.intersects(viewport->rect())) continue; // Only a visible explicitly opened archive tile stays materialized.
+        }
+        retireNetworkDeviceView(index);
+        virtualLayoutChanged = virtualLayoutChanged || !device.physical;
+    }
+    for (const int index : QSet<int>(m_presentedGpuDevices))
+    {
+        auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+        if (!protectedView(device.archive, device.pageWidget)) retireGpuDeviceView(index);
+        else
+        {
+            if (device.navCard) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
+            if (needsMissingProjection(device.archive)) projectArchivedDevice({nullptr, device.pageWidget, UtilizationDeviceKind::Gpu, index});
+        }
+    }
+    if (virtualLayoutChanged) relayoutVirtualNetworkTiles();
+}
+
+void HardwareDock::retireDiskDeviceView(const int index)
+{
+    auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Disk, index);
+    m_presentedDiskDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.summaryLabel = nullptr;
+    device.chartView = nullptr;
+    device.readLineSeries = nullptr;
+    device.readBaselineSeries = nullptr;
+    device.readAreaSeries = nullptr;
+    device.writeLineSeries = nullptr;
+    device.writeBaselineSeries = nullptr;
+    device.writeAreaSeries = nullptr;
+    device.axisX = nullptr;
+    device.axisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+}
+
+void HardwareDock::retireNetworkDeviceView(const int index)
+{
+    auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    if (device.physical)
+        archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Network, index);
+    m_presentedNetworkDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    if (page && m_virtualNetworkGrid != nullptr) m_virtualNetworkGrid->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.summaryLabel = nullptr;
+    device.chartView = nullptr;
+    device.rxLineSeries = nullptr;
+    device.rxBaselineSeries = nullptr;
+    device.rxAreaSeries = nullptr;
+    device.txLineSeries = nullptr;
+    device.txBaselineSeries = nullptr;
+    device.txAreaSeries = nullptr;
+    device.axisX = nullptr;
+    device.axisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+    if (!device.physical && !device.archive.offlineButton)
+    {
+        ensureVirtualNetworkPage();
+        if (m_virtualNetworkGridHost != nullptr)
+        {
+            auto* button = new QPushButton(archivedDeviceTitle(device.displayNameText), m_virtualNetworkGridHost);
+            button->setToolTip(button->text());
+            button->setMinimumWidth(0);
+            button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+            device.archive.offlineButton = button;
+            connect(button, &QPushButton::clicked, this, [this, index]()
+            {
+                auto& archived = m_networkUtilDevices[static_cast<std::size_t>(index)];
+                archived.archive.explicitlyViewed = true;
+                m_openingArchivedDevice = true;
+                ensureNetworkUtilizationDevice(archived.lastSample, index);
+                m_openingArchivedDevice = false;
+                relayoutVirtualNetworkTiles();
+            });
+        }
+    }
+}
+
+void HardwareDock::retireGpuDeviceView(const int index)
+{
+    auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+    const QPointer<QWidget> page = device.pageWidget;
+    archiveDeviceNavigation(device.archive, device.displayNameText, UtilizationDeviceKind::Gpu, index);
+    m_presentedGpuDevices.remove(index);
+    if (page && m_utilizationDetailStack != nullptr) m_utilizationDetailStack->removeWidget(page);
+    device.pageWidget = nullptr;
+    device.adapterTitleLabel = nullptr;
+    device.summaryLabel = nullptr;
+    device.engineHostWidget = nullptr;
+    device.engineGridLayout = nullptr;
+    device.dedicatedMemoryChartView = nullptr;
+    device.dedicatedMemoryLineSeries = nullptr;
+    device.dedicatedMemoryBaselineSeries = nullptr;
+    device.dedicatedMemoryAreaSeries = nullptr;
+    device.dedicatedMemoryAxisX = nullptr;
+    device.dedicatedMemoryAxisY = nullptr;
+    device.sharedMemoryChartView = nullptr;
+    device.sharedMemoryLineSeries = nullptr;
+    device.sharedMemoryBaselineSeries = nullptr;
+    device.sharedMemoryAreaSeries = nullptr;
+    device.sharedMemoryAxisX = nullptr;
+    device.sharedMemoryAxisY = nullptr;
+    device.detailLabel = nullptr;
+    device.navCard = nullptr;
+    device.engineCharts.clear();
+    if (page) page->deleteLater();
+    ++m_utilizationMirrorStructureRevision;
+}
+
 void HardwareDock::appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
     const double value, const bool valid, const int sampleId, const qint64 sampleTimeMs, const int capacity)
 {
@@ -8707,18 +9083,29 @@ int HardwareDock::ensureDiskUtilizationDevice(const DiskRateSample& sample, cons
     }
     auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
     // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
-    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
     {
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
         createDiskUtilizationDevicePage(&device);
-        device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
-        device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+        device.displayNameText = sourceTitle;
+        m_presentedDiskDevices.insert(deviceIndex);
+        device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
             UtilizationDeviceKind::Disk, deviceIndex);
         if (device.navCard != nullptr) device.navCard->setSeriesColors(
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Disk;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
         scheduleUtilizationLayoutRefresh();
     }
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
@@ -8743,14 +9130,20 @@ int HardwareDock::ensureNetworkUtilizationDevice(const NetworkRateSample& sample
     }
     auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
     // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
-    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
     {
         if (!device.physical) ensureVirtualNetworkPage();
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
         createNetworkUtilizationDevicePage(&device);
+        device.displayNameText = sourceTitle;
+        m_presentedNetworkDevices.insert(deviceIndex);
         if (device.physical)
         {
-            device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
-            device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+                device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
                 UtilizationDeviceKind::Network, deviceIndex);
             if (device.navCard != nullptr) device.navCard->setSeriesColors(
@@ -8758,8 +9151,13 @@ int HardwareDock::ensureNetworkUtilizationDevice(const NetworkRateSample& sample
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
         }
         else relayoutVirtualNetworkTiles();
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Network;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
         scheduleUtilizationLayoutRefresh();
     }
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
@@ -8802,6 +9200,10 @@ void HardwareDock::ensureVirtualNetworkPage()
     m_virtualNetworkGrid->setVerticalSpacing(10);
     m_virtualNetworkGrid->setAlignment(Qt::AlignTop);
     m_virtualNetworkScrollArea->setWidget(m_virtualNetworkGridHost);
+    connect(m_virtualNetworkScrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]()
+    {
+        QTimer::singleShot(0, this, [this]() { retireInactiveDeviceViews(); });
+    });
     m_utilizationDetailStack->addWidget(m_virtualNetworkPage);
     m_networkNavCard = addUtilizationSidebarCard(m_virtualNetworkPage,
         titleLabel->text(), KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
@@ -8827,20 +9229,23 @@ void HardwareDock::relayoutVirtualNetworkTiles()
     tiles.reserve(m_networkUtilDevices.size());
     for (NetworkUtilizationDevice& device : m_networkUtilDevices)
     {
-        if (!device.physical && device.pageWidget != nullptr)
+        if (!device.physical)
         {
-            tiles.push_back(device.pageWidget);
+            if (device.pageWidget != nullptr) tiles.push_back(device.pageWidget);
+            else if (device.archive.offlineButton) tiles.push_back(device.archive.offlineButton);
         }
     }
-    if (m_virtualNetworkColumnCount == columns
-        && m_virtualNetworkTileCount == static_cast<int>(tiles.size()))
+    bool sameTiles = m_virtualNetworkLaidOutTiles.size() == static_cast<qsizetype>(tiles.size());
+    for (std::size_t index = 0; sameTiles && index < tiles.size(); ++index)
+        sameTiles = m_virtualNetworkLaidOutTiles[static_cast<qsizetype>(index)] == tiles[index];
+    if (m_virtualNetworkColumnCount == columns && sameTiles)
     {
         return;
     }
-    for (QWidget* const tile : tiles)
-    {
-        m_virtualNetworkGrid->removeWidget(tile);
-    }
+    while (auto* item = m_virtualNetworkGrid->takeAt(0)) delete item;
+    m_virtualNetworkLaidOutTiles.clear();
+    for (QWidget* tile : tiles) m_virtualNetworkLaidOutTiles.push_back(tile);
+    ++m_utilizationMirrorStructureRevision;
     for (int index = 0; index < static_cast<int>(tiles.size()); ++index)
     {
         m_virtualNetworkGrid->addWidget(tiles[static_cast<std::size_t>(index)],
@@ -8875,15 +9280,26 @@ int HardwareDock::ensureGpuUtilizationDevice(const GpuUsageSample& sample, const
     }
     auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
     // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
-    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr
+        && (device.archive.active || m_openingArchivedDevice))
     {
+        if (device.archive.offlineButton) device.archive.offlineButton->deleteLater();
+        device.archive.offlineButton = nullptr;
+        const QString sourceTitle = device.displayNameText;
+        if (!device.archive.active) device.displayNameText = archivedDeviceTitle(sourceTitle);
         createGpuUtilizationDevicePage(&device);
-        device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
-        device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+        device.displayNameText = sourceTitle;
+        m_presentedGpuDevices.insert(deviceIndex);
+        device.navCard = restoreDeviceNavigation(device.archive, device.pageWidget, device.displayNameText,
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
             UtilizationDeviceKind::Gpu, deviceIndex);
+        UtilizationNavEntry archivedEntry;
+        archivedEntry.kind = UtilizationDeviceKind::Gpu;
+        archivedEntry.deviceIndex = deviceIndex;
+        projectArchivedDevice(archivedEntry);
         scheduleUtilizationLayoutRefresh();
     }
+    if (!m_recordingDeviceHistory && device.navCard != nullptr) device.navCard->setTitleText(device.archive.active ? device.displayNameText : archivedDeviceTitle(device.displayNameText));
     return deviceIndex;
 }
 
@@ -9677,6 +10093,7 @@ void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
         updateAdditionalDiskUtilizationDevices(diskSampleList);
         updateAdditionalNetworkUtilizationDevices(networkSampleList);
         updateAdditionalGpuUtilizationDevices(gpuSampleList);
+        if (!m_restoringUtilizationHistory) retireInactiveDeviceViews();
         updateTaskManagerDetailLabels(
             coreUsageList,
             powerInfoList,
@@ -10881,7 +11298,7 @@ void HardwareDock::updateDiskUtilizationDevice(
         device.axisY,
         0.0);
 
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         rebuildDualRateNavCard(
             device.navCard,
@@ -10955,7 +11372,7 @@ void HardwareDock::updateNetworkUtilizationDevice(
         device.axisY,
         0.0);
 
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         rebuildDualRateNavCard(
             device.navCard,
@@ -11139,7 +11556,7 @@ void HardwareDock::updateGpuUtilizationDevice(
             .arg(sharedCapacityGiB, 0, 'f', 2)
             .arg(sample.adapterIndex));
     }
-    if (device.navCard != nullptr)
+    if (device.navCard != nullptr && !m_projectingDeviceArchive)
     {
         device.navCard->setSubtitleText(
             ks::i18n::contextText(

@@ -54,6 +54,8 @@ class QGridLayout;
 class QHBoxLayout;
 class QLabel;
 class QLineSeries;
+class QListWidgetItem;
+class QPushButton;
 class QListWidget;
 class QResizeEvent;
 class QScrollArea;
@@ -298,6 +300,9 @@ private:
     {
         bool active = true;
         bool available = false;
+        bool explicitlyViewed = false;
+        std::uint64_t lastProjectedHistoryId = 0;
+        QPointer<QPushButton> offlineButton;
         int navRow = -1;
         int lastSampleId = 0;
         qint64 lastSampleTimeMs = 0;
@@ -525,6 +530,29 @@ private:
     bool m_restoringUtilizationHistory = false;
     std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreHistory;
     std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreBaselineHistory;
+    PerformanceNavCard* makeUtilizationSidebarCard(QListWidgetItem* item,
+        const QString& title, const QColor& accent);
+    PerformanceNavCard* restoreDeviceNavigation(DeviceSeriesArchive& archive, QWidget* page,
+        const QString& title, const QColor& accent, UtilizationDeviceKind kind, int deviceIndex);
+    void archiveDeviceNavigation(DeviceSeriesArchive& archive, const QString& title,
+        UtilizationDeviceKind kind, int deviceIndex);
+    void retireInactiveDeviceViews();
+    void retireDiskDeviceView(int index);
+    void retireNetworkDeviceView(int index);
+    void retireGpuDeviceView(int index);
+    void materializeArchivedDeviceNavigation();
+    void openArchivedDevice(const UtilizationNavEntry& entry);
+    void projectArchivedDevice(const UtilizationNavEntry& entry);
+    void refreshArchivedNavigationTexts();
+    static QString archivedDeviceTitle(const QString& title);
+    void restoreArchivedNavSamples(const DeviceSeriesArchive& archive, PerformanceNavCard* card,
+        const QString& primaryRole, const QString& secondaryRole, double* upperBound);
+    QSet<int> m_presentedDiskDevices;
+    QSet<int> m_presentedNetworkDevices;
+    QSet<int> m_presentedGpuDevices;
+    bool m_openingArchivedDevice = false;
+    bool m_projectingDeviceArchive = false;
+    QVector<QPointer<QWidget>> m_virtualNetworkLaidOutTiles;
     static void appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
         double value, bool valid, int sampleId, qint64 sampleTimeMs, int capacity);
     static void appendDeviceGap(DeviceSeriesArchive& archive, int sampleId, qint64 sampleTimeMs);

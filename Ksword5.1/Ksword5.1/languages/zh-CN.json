@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "hardware.utilization.device.offline_title": "%1（离线，保留历史）",
     "minidump.status.report_failed": "报告视图生成失败：%1；重新打开报告页可重试。",
     "handle.filter.preparing": "● 正在准备句柄筛选结果...",
     "● 正在准备句柄筛选结果...": "● 正在准备句柄筛选结果...",
@@ -7051,6 +7052,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "%1（离线，保留历史）": "%1（离线，保留历史）",
     "正在检查 MCP 脚本路径…": "正在检查 MCP 脚本路径…",
     "rehearsal view capacity": "rehearsal view capacity",
     "@kernel.knowledge.tab.title": "@kernel.knowledge.tab.title",

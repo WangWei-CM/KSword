@@ -109,12 +109,14 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
     }
     refreshChart(m_diskUtilChartView, Role::Read, Role::Write);
     refreshChart(m_networkUtilChartView, Role::Read, Role::Write);
-    for (const DiskUtilizationDevice& device : m_diskUtilDevices)
+    for (const int deviceIndex : m_presentedDiskDevices)
     {
+        const auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
         refreshChart(device.chartView, Role::Read, Role::Write);
     }
-    for (const NetworkUtilizationDevice& device : m_networkUtilDevices)
+    for (const int deviceIndex : m_presentedNetworkDevices)
     {
+        const auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
         refreshChart(device.chartView, Role::Read, Role::Write);
     }
     for (const GpuEngineChartEntry& entry : m_gpuEngineCharts)
@@ -124,8 +126,9 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
     }
     refreshChart(m_gpuDedicatedMemoryChartView, Role::DedicatedMemory, Role::DedicatedMemory);
     refreshChart(m_gpuSharedMemoryChartView, Role::SharedMemory, Role::SharedMemory);
-    for (const GpuUtilizationDevice& device : m_gpuUtilDevices)
+    for (const int deviceIndex : m_presentedGpuDevices)
     {
+        const auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
         for (const GpuEngineChartEntry& entry : device.engineCharts)
         {
             const Role role = engineRole(entry.engineKeyText);
