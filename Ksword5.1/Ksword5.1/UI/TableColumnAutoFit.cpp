@@ -23,6 +23,7 @@
 #include <QTimer>
 #include <QTreeView>
 #include <QVariant>
+#include <QVector>
 #include <QWidget>
 
 namespace
@@ -130,6 +131,7 @@ namespace
 
         void invalidate()
         {
+            ++m_revision;
             content.clear();
             headers.clear();
             if (!m_view.isNull()) scheduleColumnFit(m_view.data());
@@ -147,6 +149,13 @@ namespace
                 for (auto it = m_widgetMetrics.cbegin(); it != m_widgetMetrics.cend(); ++it)
                     it.key()->removeEventFilter(this);
                 m_widgetMetrics.clear();
+                invalidate();
+            }
+            if (m_header != header)
+            {
+                if (!m_header.isNull()) m_header->removeEventFilter(this);
+                m_header = header;
+                header->installEventFilter(this);
                 invalidate();
             }
             auto* model = view->model();
@@ -181,14 +190,22 @@ namespace
                 }
             }
             if (m_root != view->rootIndex() || m_font != view->font()
-                || m_headerFont != header->font() || m_style != view->style()
+                || m_header != header || m_headerFont != header->font()
+                || m_headerStyle != header->style() || m_style != view->style()
+                || m_headerDpiX != header->logicalDpiX() || m_headerDpiY != header->logicalDpiY()
+                || m_headerDpr != header->devicePixelRatioF()
                 || m_iconSize != view->iconSize() || m_dpiX != view->logicalDpiX()
                 || m_dpiY != view->logicalDpiY() || m_dpr != view->devicePixelRatioF()
                 || m_indentation != indentation)
             {
                 m_root = view->rootIndex();
                 m_font = view->font();
+                m_header = header;
                 m_headerFont = header->font();
+                m_headerStyle = header->style();
+                m_headerDpiX = header->logicalDpiX();
+                m_headerDpiY = header->logicalDpiY();
+                m_headerDpr = header->devicePixelRatioF();
                 m_style = view->style();
                 m_iconSize = view->iconSize();
                 m_dpiX = view->logicalDpiX();
@@ -215,8 +232,35 @@ namespace
             if (m_sortSection != sortSection)
             {
                 m_sortSection = sortSection;
+                ++m_revision;
                 headers.clear();
             }
+        }
+
+        bool fitInputsMatch(QHeaderView* header, const int availableWidth) const
+        {
+            return m_fitHeader == header && m_fitWidth == availableWidth
+                && m_fitRevision == m_revision && m_fitSections == sectionInputs(header)
+                && m_fitStretch == header->property(AutoFitStretchSectionsProperty).toList();
+        }
+
+        quint64 revision() const { return m_revision; }
+
+        void rememberFitInputs(QHeaderView* header, const int availableWidth, const quint64 measuredRevision)
+        {
+            // A synchronous model/style/widget invalidation during fit cannot
+            // certify the older measurement as the new generation.
+            if (measuredRevision != m_revision)
+            {
+                m_fitWidth = -1;
+                if (!m_view.isNull()) scheduleColumnFit(m_view.data());
+                return;
+            }
+            m_fitHeader = header;
+            m_fitWidth = availableWidth;
+            m_fitRevision = m_revision;
+            m_fitSections = sectionInputs(header);
+            m_fitStretch = header->property(AutoFitStretchSectionsProperty).toList();
         }
 
         void observeCellWidget(QWidget* widget)
@@ -239,7 +283,7 @@ namespace
         {
             if (event != nullptr && (event->type() == QEvent::ChildAdded
                 || event->type() == QEvent::ChildRemoved || event->type() == QEvent::StyleChange
-                || event->type() == QEvent::FontChange
+                || event->type() == QEvent::FontChange || event->type() == QEvent::DevicePixelRatioChange
                 || (m_widgetMetrics.contains(watched) && event->type() == QEvent::LayoutRequest)))
             {
                 invalidate();
@@ -248,6 +292,36 @@ namespace
         }
 
     private:
+        static QVector<int> sectionInputs(QHeaderView* header)
+        {
+            // Geometry/column policy only: never read text, model cells or size hints.
+            QVector<int> inputs{header->count(), header->minimumSectionSize(), header->maximumSectionSize(),
+                header->defaultSectionSize(), header->stretchLastSection() ? 1 : 0,
+                header->isSortIndicatorShown() ? 1 : 0, header->sortIndicatorSection(),
+                static_cast<int>(header->sortIndicatorOrder())};
+            inputs.reserve(inputs.size() + header->count() * 4);
+            for (int visual = 0; visual < header->count(); ++visual)
+            {
+                const int logical = header->logicalIndex(visual);
+                inputs.push_back(logical);
+                inputs.push_back(logical >= 0 && header->isSectionHidden(logical) ? 1 : 0);
+                inputs.push_back(logical >= 0 ? header->sectionSize(logical) : 0);
+                inputs.push_back(logical >= 0 ? static_cast<int>(header->sectionResizeMode(logical)) : -1);
+            }
+            return inputs;
+        }
+
+        quint64 m_revision = 0;
+        quint64 m_fitRevision = 0;
+        QPointer<QHeaderView> m_header;
+        const void* m_headerStyle = nullptr;
+        int m_headerDpiX = 0;
+        int m_headerDpiY = 0;
+        qreal m_headerDpr = 0;
+        QPointer<QHeaderView> m_fitHeader;
+        int m_fitWidth = -1;
+        QVector<int> m_fitSections;
+        QVariantList m_fitStretch;
         QPointer<QAbstractItemView> m_view;
         QPointer<QWidget> m_viewport;
         QPointer<QAbstractItemModel> m_model;
@@ -1076,7 +1150,10 @@ namespace
             return false;
         }
 
-        widthCacheForView(view)->synchronize(header);
+        auto* cache = widthCacheForView(view);
+        cache->synchronize(header);
+        if (cache->fitInputsMatch(header, availableWidth)) return true;
+        const quint64 measuredRevision = cache->revision();
         const int visibleSectionCount = countVisibleSections(header);
         if (visibleSectionCount <= 0)
         {
@@ -1117,6 +1194,7 @@ namespace
         // 当前列宽已经吻合时不能再次刷新几何，否则会形成 singleShot(0) 的空闲重排循环。
         if (!geometryRefreshRequired)
         {
+            cache->rememberFitInputs(header, availableWidth, measuredRevision);
             return true;
         }
 
@@ -1135,8 +1213,15 @@ namespace
             }
         }
 
+        const QPointer<QAbstractItemView> viewGuard(view);
+        const QPointer<QHeaderView> headerGuard(header);
+        const QPointer<ColumnWidthCache> cacheGuard(cache);
         refreshViewGeometryAfterFit(view, header);
+        if (!viewGuard || !headerGuard || !cacheGuard) return true;
         view->setProperty(AutoFitApplyingProperty, false);
+        // Capture the actual final Interactive modes/widths/stretch policy, not
+        // the pre-fit values that this operation deliberately replaced.
+        cache->rememberFitInputs(header, availableWidth, measuredRevision);
         return true;
     }
 
@@ -1216,6 +1301,11 @@ namespace
                 {
                     scheduleColumnFit(guardedView.data());
                 }
+            });
+
+        QObject::connect(header, &QHeaderView::sectionMoved, header,
+            [guardedView](int, int, int) {
+                if (!guardedView.isNull()) scheduleColumnFit(guardedView.data());
             });
 
         // geometriesChanged 覆盖隐藏列、显示列、表头布局刷新等无 sectionResized 的情况。
