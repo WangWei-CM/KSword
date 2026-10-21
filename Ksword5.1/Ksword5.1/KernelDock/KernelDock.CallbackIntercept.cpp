@@ -737,7 +737,7 @@ namespace
             copyRowAction->setEnabled(current.isValid());
             bool processIdOk = false;
             const quint32 processId = current.isValid() && processIdColumn >= 0
-                ? current.siblingAtColumn(processIdColumn).data().toString().trimmed().toUInt(&processIdOk, 10) : 0U;
+                ? QModelIndex(current).siblingAtColumn(processIdColumn).data().toString().trimmed().toUInt(&processIdOk, 10) : 0U;
             QAction* openProcessAction = nullptr;
             if (processIdColumn >= 0)
             {
@@ -752,7 +752,7 @@ namespace
             if (clipboard == nullptr) return;
             QStringList fields;
             for (int column = 0; column < guard->model()->columnCount(); ++column)
-                fields.push_back(current.siblingAtColumn(column).data().toString());
+                fields.push_back(QModelIndex(current).siblingAtColumn(column).data().toString());
             clipboard->setText(fields.join(QLatin1Char('\t')));
         });
     }
