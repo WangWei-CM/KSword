@@ -493,3 +493,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 网络值接纳后续已简化：用worker预备的连续值阶段替代持久范围树，先按稳定身份把待删行转到尾部，再一次尾删/尾插，最后按原target映射恢复顺序；正常路径最多两次layout、一批remove、一批insert和一个覆盖全部真实变化的dataChanged矩形，不能对5000个离散删除在GUI发5000组通知。公开模型和persistent身份保持，重复/无效键才用原reset回退；所有Row复制及阶段/旧值退役在后台。QtCore10000行/5000离散删除仍0次GUI Row复制，通知收敛到1次删除、2次layout；必要persistent remap仍在GUI，不宣称恒定时延。此前范围树段落为已替代历史。
 
 - 抓包展示Row后续只持字段、sequence/PID/地址和指向规范Record的weak_ptr；不能让隐藏旧表继续强持已被6000+320规范缓存裁掉的原始字节。后台输入仍强持一次完整源，保证准备期间安全；接受后的展示/导出只需完整表字段，详情/重放仍按规范序号查缓存，保持原清理语义。弱源过期时重建当前字段，元数据只按sequence查当前规范记录；未知域名另存布尔状态，不能用已本地化占位文字推断查询状态。15项受控所有权检查证明旧展示字段保留时字节所有者可释放，不代表实机退役时延/峰值测量。
+
+- 诊断探针的writer关闭请求不等于尾部日志已落盘。默认宏0不启动writer也不等待；显式启用时在app.exec返回后、Qt销毁前进行默认100ms有界等待（调用上限1000ms），不改退出码。writer排空全部已接纳记录并明确统计overflow丢失，QFile flush与Windows FlushFileBuffers均成功后才原子发布带session/实际路径/字节数的completed回执；单独writer_drain_end标记不能作为成功依据。超时、无法写入/flush/发布回执或进程异常退出都不得宣称完成；这不是物理呈现或整条输入因果链证据。

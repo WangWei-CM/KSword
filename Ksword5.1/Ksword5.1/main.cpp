@@ -2033,6 +2033,7 @@ int main(int argc, char* argv[])
         });
 
     const int exitCode = app.exec();
+    (void)ks::ui::FinishPerfTrace(); // Diagnostic-only bounded writer receipt, after GUI dispatch ends.
     startupTraceRaw(std::string("QApplication::exec returned, exitCode=") + std::to_string(exitCode));
     {
         kLogEvent exitLoopEvent;

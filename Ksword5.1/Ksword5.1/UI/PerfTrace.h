@@ -39,6 +39,11 @@ namespace ks::ui
     // GUI 宿主初始化诊断；Dock 标记直接维护观察缓存，不注册 UI 查询回调。
     void InitializePerfTrace();
 
+    // Called after exec() returns, while Qt still exists. Diagnostic builds wait
+    // at most maxWaitMs for the writer's successful flush/receipt; false means
+    // no completion proof. Does not change the application's exit result.
+    bool FinishPerfTrace(int maxWaitMs = 100) noexcept;
+
     // Wrap only the real GUI notify call. CPU cycles remain cycles; thread time
     // is the OS's 100ns counter, not a conversion of wall time or clock cycles.
     // Self values subtract nested notify bodies; diagnostic overhead is reported
@@ -96,6 +101,7 @@ namespace ks::ui
     inline qint64 PerfTraceNowNs() { return 0; }
     inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}
     inline void InitializePerfTrace() {}
+    inline bool FinishPerfTrace(int = 100) noexcept { return false; }
 
     class PerfNotifyScope final
     {

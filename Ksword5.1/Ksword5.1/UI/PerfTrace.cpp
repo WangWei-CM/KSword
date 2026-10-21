@@ -9,15 +9,19 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QMetaObject>
 #include <QObject>
 #include <QThread>
 #include <QTimer>
 #include <QUuid>
 #include <atomic>
+#include <algorithm>
 #include <condition_variable>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -30,6 +34,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <io.h>
 
 namespace
 {
@@ -97,8 +102,12 @@ namespace
     {
         std::mutex mutex;
         std::condition_variable ready;
+        std::condition_variable finishedReady;
         std::deque<TraceRecord> records;
         bool closed = false;
+        bool finished = false;
+        bool completionReceipt = false;
+        quint64 accepted = 0;
         quint64 dropped = 0;
         QString path;
         QString fallbackPath;
@@ -109,8 +118,9 @@ namespace
     };
 
     // The existing trace gets one value-owned writer, not a second UI service.
-    // It owns QFile/JSON/hash work, including shutdown drain. GUI never waits for disk.
-    void writeTrace(const std::shared_ptr<TraceWriterState>& state)
+    // It owns QFile/JSON/hash work. Normal dispatch never waits for disk; only
+    // diagnostic shutdown can make a bounded wait after the event loop returns.
+    bool writeTrace(const std::shared_ptr<TraceWriterState>& state)
     {
         QFile file(state->path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
@@ -121,7 +131,7 @@ namespace
         const auto writeRecord = [&file](const QJsonObject& record)
         {
             if (!file.isOpen())
-                return;
+                return false;
             const QByteArray line = QJsonDocument(record).toJson(QJsonDocument::Compact) + '\n';
             qint64 offset = 0;
             while (offset < line.size())
@@ -130,10 +140,18 @@ namespace
                 if (written <= 0)
                 {
                     file.close();
-                    return;
+                    return false;
                 }
                 offset += written;
             }
+            return true;
+        };
+
+        const auto flushToOs = [](QFileDevice& output)
+        {
+            if (!output.flush()) return false;
+            const auto handle = ::_get_osfhandle(output.handle());
+            return handle != -1 && ::FlushFileBuffers(reinterpret_cast<HANDLE>(handle)) != FALSE;
         };
 
         QJsonObject session;
@@ -154,13 +172,16 @@ namespace
             if (hash.addData(&executable))
                 session.insert(QStringLiteral("exe_sha256"), QString::fromLatin1(hash.result().toHex()));
         }
-        writeRecord(session);
+        if (!writeRecord(session)) return false;
+
+        quint64 writtenRecords = 0, droppedRecords = 0;
 
         for (;;)
         {
             std::deque<TraceRecord> records;
             quint64 dropped = 0;
             bool closed = false;
+            quint64 accepted = 0;
             {
                 std::unique_lock<std::mutex> lock(state->mutex);
                 state->ready.wait(lock, [&state]()
@@ -170,6 +191,7 @@ namespace
                 records.swap(state->records);
                 dropped = std::exchange(state->dropped, 0);
                 closed = state->closed;
+                accepted = state->accepted;
             }
             if (dropped != 0)
             {
@@ -177,7 +199,8 @@ namespace
                 loss.insert(QStringLiteral("event"), QStringLiteral("dropped"));
                 loss.insert(QStringLiteral("session_id"), state->sessionId);
                 loss.insert(QStringLiteral("count"), QString::number(dropped));
-                writeRecord(loss);
+                if (!writeRecord(loss)) return false;
+                droppedRecords += dropped;
             }
             for (const TraceRecord& value : records)
             {
@@ -229,12 +252,36 @@ namespace
                     record.insert(QStringLiteral("probe_until_enqueue_ns"), static_cast<double>(value.probeUntilEnqueueNs));
                     record.insert(QStringLiteral("physical_present_measured"), false);
                 }
-                writeRecord(record);
+                if (!writeRecord(record)) return false;
+                ++writtenRecords;
             }
-            if (file.isOpen())
-                file.flush();
             if (closed)
-                return;
+            {
+                if (writtenRecords != accepted) return false;
+                QJsonObject end;
+                end.insert(QStringLiteral("event"), QStringLiteral("writer_drain_end"));
+                end.insert(QStringLiteral("session_id"), state->sessionId);
+                end.insert(QStringLiteral("written_records"), QString::number(writtenRecords));
+                end.insert(QStringLiteral("dropped_records"), QString::number(droppedRecords));
+                // This marker alone is not a flush acknowledgement. The separate
+                // receipt is published only after the complete trace flush succeeds.
+                if (!writeRecord(end) || !flushToOs(file)) return false;
+                QJsonObject receipt = end;
+                receipt.insert(QStringLiteral("event"), QStringLiteral("writer_flush_receipt"));
+                receipt.insert(QStringLiteral("trace_path"), QFileInfo(file).absoluteFilePath());
+                receipt.insert(QStringLiteral("trace_bytes"), QString::number(file.size()));
+                receipt.insert(QStringLiteral("accepted_records"), QString::number(accepted));
+                receipt.insert(QStringLiteral("flush"), QStringLiteral("QFile_flush_and_FlushFileBuffers"));
+                receipt.insert(QStringLiteral("physical_present_measured"), false);
+                QSaveFile completion(file.fileName() + QStringLiteral(".completed-")
+                    + state->sessionId + QStringLiteral(".json"));
+                completion.setDirectWriteFallback(false);
+                const QByteArray bytes = QJsonDocument(receipt).toJson(QJsonDocument::Compact) + '\n';
+                return completion.open(QIODevice::WriteOnly)
+                    && completion.write(bytes) == bytes.size()
+                    && flushToOs(completion) && completion.commit();
+            }
+            if (!file.flush()) return false;
         }
     }
 }
@@ -296,6 +343,15 @@ namespace ks::ui
             enqueue(std::move(record));
         }
 
+        bool finishWriter(int maxWaitMs)
+        {
+            closeWriter();
+            std::unique_lock<std::mutex> lock(m_writer->mutex);
+            return m_writer->finishedReady.wait_for(lock,
+                std::chrono::milliseconds(std::clamp(maxWaitMs, 0, 1000)),
+                [this]() { return m_writer->finished; }) && m_writer->completionReceipt;
+        }
+
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
@@ -324,17 +380,22 @@ namespace ks::ui
             {
                 std::thread([state = m_writer]()
                 {
-                    try { writeTrace(state); }
-                    catch (...)
+                    bool receipt = false;
+                    try { receipt = writeTrace(state); }
+                    catch (...) {}
                     {
                         std::lock_guard<std::mutex> lock(state->mutex);
                         state->closed = true;
+                        state->finished = true;
+                        state->completionReceipt = receipt;
                     }
+                    state->finishedReady.notify_all();
                 }).detach();
             }
             catch (...)
             {
                 m_writer->closed = true; // Diagnostics must not fail a product operation.
+                m_writer->finished = true;
             }
             m_heartbeat.setParent(this);
             if (QCoreApplication* application = QCoreApplication::instance())
@@ -417,6 +478,7 @@ namespace ks::ui
                 else
                 {
                     m_writer->records.push_back(std::move(record));
+                    ++m_writer->accepted;
                     auto& queued = m_writer->records.back();
                     if (queued.eventType >= 0)
                         queued.probeUntilEnqueueNs = queued.probeSetupNs
@@ -480,6 +542,12 @@ namespace ks::ui
     {
         (void)PerfTrace::instance();
         notifyTraceReady.store(true, std::memory_order_relaxed);
+    }
+
+    bool FinishPerfTrace(int maxWaitMs) noexcept
+    {
+        try { return PerfTrace::instance().finishWriter(maxWaitMs); }
+        catch (...) { return false; }
     }
 
     PerfNotifyScope::PerfNotifyScope(QObject* receiver, const int eventType) noexcept
