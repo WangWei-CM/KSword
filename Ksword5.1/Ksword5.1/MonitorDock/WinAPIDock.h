@@ -56,6 +56,7 @@ class QPoint;
 
 class WinAPIDock final : public QWidget
 {
+    friend class MonitorDock; // Read already-built result tabs for the cold navigation value catalog.
 public:
     // 构造函数：
     // - 作用：初始化 WinAPI 监控页 UI、连接和后台刷新定时器；

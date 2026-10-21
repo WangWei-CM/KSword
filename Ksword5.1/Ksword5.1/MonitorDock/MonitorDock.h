@@ -12,6 +12,7 @@
 #include "ProcessTraceTimelineWidget.h"
 #include "WmiEventArchive.h"
 #include "EtwArchiveMetadata.h"
+#include "../UI/PageNavigationCatalog.h"
 #include "../UI/AsyncUiDispatcher.h"
 #include "../Framework.h"
 
@@ -101,6 +102,8 @@ public:
     // - 作用：把监控页内部子页切到指定 tab；
     // - 调用：MainWindow 需要把启动默认页或跳转目标定位到“WinAPI / WMI / ETW / 进程定向”时调用。
     void activateMonitorTab(const QString& tabKey);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MonitorDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 protected:
     // event：
@@ -678,6 +681,7 @@ private:
         QValueAxis* axisY,
         double value);
 
+    QWidget* monitorNavigationPage(const QString& key) const;
     // ========================= WMI 功能 ==========================
     void refreshWmiProvidersAsync();
     void refreshWmiEventClassesAsync();

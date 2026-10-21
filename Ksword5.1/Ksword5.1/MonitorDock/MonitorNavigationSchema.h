@@ -1,0 +1,54 @@
+#pragma once
+#include <array>
+#include <QString>
+#include <QTabWidget>
+#include <QIcon>
+#include <QVariant>
+#include "../Internationalization/LanguageManager.h"
+
+namespace ks::monitor
+{
+    struct MonitorNavigationSpec
+    {
+        const char* id; const char* parent; const wchar_t* title;
+        const char* translationKey; const char* icon; const char* search;
+        bool defaultCurrent;
+    };
+    inline constexpr std::array<MonitorNavigationSpec, 9> MonitorNavigationSpecs{{
+        {"process-trace", "", L"进程定向", "monitor.tab.process_trace", ":/Icon/process_main.svg", "process|trace", true},
+        {"kernel-callback", "", L"内核回调", "monitor.tab.kernel_callback", ":/Icon/process_threads.svg", "kernelcallback|callback", false},
+        {"direct-kernel-call", "", L"直接内核调用", "monitor.tab.direct_kernel_call", ":/Icon/process_threads.svg", "directkernelcall|syscall", false},
+        {"winapi", "", L"WinAPI", "monitor.tab.winapi", ":/Icon/process_details.svg", "api", false},
+        {"winapi-events", "winapi", L"API 事件", "", "", "events|api", true},
+        {"winapi-coverage", "winapi", L"API 覆盖", "", "", "coverage|hooks", false},
+        {"wmi", "", L"WMI", "monitor.tab.wmi", "", "subscription|provider", false},
+        {"etw", "", L"ETW监控", "monitor.tab.etw", "", "event|trace|provider", false},
+        {"ark-risk", "", L"ARK 风险中心", "monitor.tab.ark_risk_center", ":/Icon/process_critical.svg", "risk|ark-risk-center", false}
+    }};
+    inline const MonitorNavigationSpec* FindMonitorNavigationSpec(const QString& id)
+    {
+        for (const auto& spec : MonitorNavigationSpecs)
+            if (id == QString::fromLatin1(spec.id)) return &spec;
+        return nullptr;
+    }
+    inline QString MonitorNavigationTitle(const MonitorNavigationSpec& spec)
+    {
+        const QString title = QString::fromWCharArray(spec.title);
+        return *spec.translationKey
+            ? ks::i18n::LanguageManager::instance().text(QString::fromLatin1(spec.translationKey), title)
+            : ks::i18n::sourceText(title);
+    }
+    inline int AddMonitorNavigationTab(QTabWidget* tabs, QWidget* page, const QString& id)
+    {
+        const auto* spec = FindMonitorNavigationSpec(id);
+        if (!tabs || !page || !spec) return -1;
+        page->setProperty("ksword_monitor_navigation_id", id);
+        const int index = *spec->icon
+            ? tabs->addTab(page, QIcon(QString::fromLatin1(spec->icon)), MonitorNavigationTitle(*spec))
+            : tabs->addTab(page, MonitorNavigationTitle(*spec));
+        if (*spec->translationKey)
+            ks::i18n::LanguageManager::instance().bindTab(tabs, page,
+                QString::fromLatin1(spec->translationKey), QString::fromWCharArray(spec->title));
+        return index;
+    }
+}

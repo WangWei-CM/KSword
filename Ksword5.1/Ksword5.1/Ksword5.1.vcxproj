@@ -851,6 +851,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="MonitorDock\MonitorNavigationSchema.h" />
     <ClInclude Include="WindowDock\WindowImmutableTableSupport.h" />
     <ClInclude Include="MonitorDock\EtwArchiveMetadata.h" />
     <ClInclude Include="RegistryDock\OfflineHiveSession.h" />

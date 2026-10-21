@@ -1,3 +1,4 @@
+#include "MonitorNavigationSchema.h"
 #include "WinAPIDock.h"
 #include "../UI/CodeTextEdit.h"
 #include "../UI/ThemeItemForeground.h"
@@ -544,7 +545,7 @@ void WinAPIDock::initializeUi()
     }
     m_resultTabs = new QTabWidget(this);
     ks::ui::StyleJoinedResultTabs(m_resultTabs, m_filterPanel);
-    m_resultTabs->addTab(m_eventTable, QStringLiteral("API 事件"));
+    ks::monitor::AddMonitorNavigationTab(m_resultTabs, m_eventTable, QStringLiteral("winapi-events"));
     QWidget* coveragePanel = new QWidget(m_resultTabs);
     auto* coverageLayout = new QVBoxLayout(coveragePanel);
     auto* coverageFilterLayout = new QHBoxLayout();
@@ -577,7 +578,7 @@ void WinAPIDock::initializeUi()
     m_coverageTable->setColumnWidth(4, 120);
     m_coverageTable->setColumnWidth(5, 140);
     coverageLayout->addWidget(m_coverageTable, 1);
-    m_resultTabs->addTab(coveragePanel, QStringLiteral("API 覆盖"));
+    ks::monitor::AddMonitorNavigationTab(m_resultTabs, coveragePanel, QStringLiteral("winapi-coverage"));
     eventResultsLayout->addWidget(m_resultTabs, 1);
     workspace->finish();
 

@@ -5,6 +5,7 @@
 #include "../UI/TableContextMenu.h"
 #include "MonitorDock.h"
 #include "../UI/CompleteExport.h"
+#include "MonitorNavigationSchema.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include <MonitorDock/EtwArchiveCompression.h>
 #include "../UI/VisibleTableWidget.h"
@@ -4850,6 +4851,90 @@ void MonitorDock::triggerDeferredDiscoveryForCurrentTab()
     }
 }
 
+QWidget* MonitorDock::monitorNavigationPage(const QString& key) const
+{
+    if (key == QStringLiteral("process-trace")) return m_processTraceWidget;
+    if (key == QStringLiteral("kernel-callback")) return m_kernelCallbackHostPage;
+    if (key == QStringLiteral("direct-kernel-call")) return m_directKernelCallHostPage;
+    if (key == QStringLiteral("winapi")) return m_winApiPage;
+    if (key == QStringLiteral("wmi")) return m_wmiPage;
+    if (key == QStringLiteral("etw")) return m_etwPage;
+    if (key == QStringLiteral("ark-risk")) return m_arkRiskCenterPage;
+    return nullptr;
+}
+
+ks::ui::PageNavigationCatalog MonitorDock::navigationCatalog(const MonitorDock* existing)
+{
+    ks::ui::PageNavigationCatalog result;
+    result.reserve(static_cast<qsizetype>(ks::monitor::MonitorNavigationSpecs.size()));
+    for (const auto& spec : ks::monitor::MonitorNavigationSpecs)
+    {
+        ks::ui::PageNavigationDescriptor page;
+        page.id = QString::fromLatin1(spec.id);
+        page.parentId = QString::fromLatin1(spec.parent);
+        page.title = ks::monitor::MonitorNavigationTitle(spec);
+        page.searchTexts = QString::fromLatin1(spec.search).split(QChar('|'));
+        page.searchTexts.append(page.id);
+        page.current = spec.defaultCurrent;
+        QTabWidget* tabs = nullptr;
+        QWidget* target = nullptr;
+        if (existing)
+        {
+            if (page.parentId.isEmpty()) {
+                tabs = existing->m_sideTabWidget;
+                target = existing->monitorNavigationPage(page.id);
+            }
+            else if (existing->m_winApiWidget && existing->m_winApiWidget->m_resultTabs) {
+                tabs = existing->m_winApiWidget->m_resultTabs;
+                for (int index = 0; index < tabs->count(); ++index)
+                    if (tabs->widget(index)->property("ksword_monitor_navigation_id").toString() == page.id)
+                    { target = tabs->widget(index); break; }
+            }
+        }
+        if (tabs) {
+            const int index = target ? tabs->indexOf(target) : -1;
+            if (index >= 0) {
+                page.title = tabs->tabText(index);
+                page.visible = tabs->isTabVisible(index);
+                page.enabled = tabs->isTabEnabled(index) && target->isEnabled();
+                page.current = tabs->currentWidget() == target;
+            }
+            else { page.visible = false; page.enabled = false; page.current = false; }
+        }
+        result.append(std::move(page));
+    }
+    return result;
+}
+
+QWidget* MonitorDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto* spec = ks::monitor::FindMonitorNavigationSpec(id);
+    if (!spec || !m_sideTabWidget) return nullptr;
+    const auto catalog = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QStringLiteral("监控"));
+    if (!catalog) return nullptr;
+    bool available = false;
+    for (const auto& page : *catalog)
+        if (page.page.id == id) { available = page.page.visible && page.page.enabled; break; }
+    if (!available) return nullptr;
+    const QString rootId = *spec->parent ? QString::fromLatin1(spec->parent) : id;
+    activateMonitorTab(rootId); // Existing user navigation owns the actual lazy factory and discovery.
+    if (!*spec->parent) return monitorNavigationPage(rootId);
+    if (!m_winApiWidget || !m_winApiWidget->m_resultTabs) return nullptr;
+    auto* tabs = m_winApiWidget->m_resultTabs;
+    for (int index = 0; index < tabs->count(); ++index)
+        if (tabs->widget(index)->property("ksword_monitor_navigation_id").toString() == id) {
+            if (!tabs->isTabVisible(index) || !tabs->isTabEnabled(index) || !tabs->widget(index)->isEnabled()) return nullptr;
+            tabs->setCurrentIndex(index);
+            return tabs->widget(index);
+        }
+    return nullptr;
+}
+
+namespace {
+    [[maybe_unused]] const bool monitorCatalogRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<MonitorDock>(QStringLiteral("monitor"));
+}
+
 void MonitorDock::activateMonitorTab(const QString& tabKey)
 {
     if (m_sideTabWidget == nullptr)
@@ -4980,12 +5065,7 @@ void MonitorDock::initializeUi()
     m_rootLayout->addWidget(m_sideTabWidget, 1);
 
     m_processTraceWidget = new ProcessTraceMonitorWidget(m_sideTabWidget);
-    m_sideTabWidget->addTab(
-        m_processTraceWidget,
-        QIcon(QStringLiteral(":/Icon/process_main.svg")),
-        QStringLiteral("进程定向"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_processTraceWidget, QStringLiteral("monitor.tab.process_trace"), QStringLiteral("进程定向"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_processTraceWidget, QStringLiteral("process-trace"));
 
     m_kernelCallbackHostPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* kernelCallbackHostLayout = new QVBoxLayout(m_kernelCallbackHostPage);
@@ -4997,15 +5077,7 @@ void MonitorDock::initializeUi()
             QStringLiteral("内核回调监控待加载"),
             QStringLiteral("切换到本页后再连接驱动并创建回调事件界面。")),
         1);
-    m_sideTabWidget->addTab(
-        m_kernelCallbackHostPage,
-        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("内核回调"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_kernelCallbackHostPage,
-        QStringLiteral("monitor.tab.kernel_callback"),
-        QStringLiteral("内核回调"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_kernelCallbackHostPage, QStringLiteral("kernel-callback"));
 
     m_directKernelCallHostPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* directKernelCallHostLayout = new QVBoxLayout(m_directKernelCallHostPage);
@@ -5017,26 +5089,13 @@ void MonitorDock::initializeUi()
             QStringLiteral("直接内核调用待加载"),
             QStringLiteral("切换到本页后再解析 syscall 映射并创建 ETW 采集界面。")),
         1);
-    m_sideTabWidget->addTab(
-        m_directKernelCallHostPage,
-        QIcon(QStringLiteral(":/Icon/process_threads.svg")),
-        QStringLiteral("直接内核调用"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_directKernelCallHostPage,
-        QStringLiteral("monitor.tab.direct_kernel_call"),
-        QStringLiteral("直接内核调用"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_directKernelCallHostPage, QStringLiteral("direct-kernel-call"));
 
     m_winApiPage = new QWidget(m_sideTabWidget);
     QVBoxLayout* winApiPageLayout = new QVBoxLayout(m_winApiPage);
     winApiPageLayout->setContentsMargins(0, 0, 0, 0);
     winApiPageLayout->setSpacing(0);
-    m_sideTabWidget->addTab(
-        m_winApiPage,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("WinAPI"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_winApiPage, QStringLiteral("monitor.tab.winapi"), QStringLiteral("WinAPI"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_winApiPage, QStringLiteral("winapi"));
 
     initializeWmiTab();
     initializeEtwTab();
@@ -5902,9 +5961,7 @@ void MonitorDock::initializeWmiTab()
     m_wmiLayout->setStretch(0, 0);
     m_wmiLayout->setStretch(1, 0);
     m_wmiLayout->setStretch(2, 1);
-    m_sideTabWidget->addTab(m_wmiPage, QStringLiteral("WMI"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_wmiPage, QStringLiteral("monitor.tab.wmi"), QStringLiteral("WMI"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_wmiPage, QStringLiteral("wmi"));
 }
 
 void MonitorDock::updateWmiSubscribePanelCompactLayout()
@@ -6368,9 +6425,7 @@ void MonitorDock::initializeEtwTab()
     updateEtwCaptureActionState();
     updateEtwCollapseHeight();
 
-    m_sideTabWidget->addTab(m_etwPage, QStringLiteral("ETW监控"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget, m_etwPage, QStringLiteral("monitor.tab.etw"), QStringLiteral("ETW监控"));
+    ks::monitor::AddMonitorNavigationTab(m_sideTabWidget, m_etwPage, QStringLiteral("etw"));
 }
 
 MonitorDock::EtwSimpleFilterUiState& MonitorDock::etwSimpleFilterUi(const EtwFilterStage stage)
