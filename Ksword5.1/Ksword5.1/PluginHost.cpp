@@ -12,6 +12,7 @@
 #include "UI/SecondaryPageLayout.h"
 #include "UI/AsyncCleanupRegistry.h"
 #include "UI/AsyncOperation.h"
+#include "UI/CompleteExport.h"
 #include "UI/TableInteractionSupport.h"
 #include "UI/TableHeaderSortingSupport.h"
 #include "UI/RetainedCleanupJob.h"
@@ -24,7 +25,7 @@
 
 #include <QAbstractItemView>
 #include <QAbstractTableModel>
-#include <QSortFilterProxyModel>
+#include <QIdentityProxyModel>
 #include <QTableView>
 #include <QThreadPool>
 #include <QStringDecoder>
@@ -65,6 +66,7 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -1503,6 +1505,24 @@ namespace
         return text;
     }
 
+    constexpr int kPluginResultBlockRows = 256;
+    struct PluginResultValues
+    {
+        QVector<QVector<PluginResultRow>> blocks;
+        QVector<int> publicationEnds;
+        int count = 0;
+        const PluginResultCell& cell(int row, int column) const
+        { return blocks.at(row / kPluginResultBlockRows).at(row % kPluginResultBlockRows).at(column); }
+    };
+    struct PluginResultOrder
+    {
+        QVector<int> rows, inverse;
+        int column = -1;
+        Qt::SortOrder direction = Qt::AscendingOrder;
+        bool changed = false;
+    };
+    using PluginResultOrderValue = std::shared_ptr<const PluginResultOrder>;
+
     class PluginResultModel final : public QAbstractTableModel
     {
     public:
@@ -1510,7 +1530,7 @@ namespace
             : QAbstractTableModel(parent), m_fields(std::move(fields)) {}
         ~PluginResultModel() override
         {
-            auto retired = std::move(m_rows);
+            auto retired = std::move(m_blocks);
             if (!retired.isEmpty()) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
         }
         int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_published; }
@@ -1520,17 +1540,62 @@ namespace
             ? QVariant(m_fields.at(section).label) : QVariant(); }
         QVariant data(const QModelIndex& index, int role) const override
         {
-            if (!index.isValid() || index.row() >= m_published || index.column() >= m_fields.size()) return {};
-            const auto& cell = m_rows.at(index.row()).at(index.column());
+            if (!index.isValid() || index.row() < 0 || index.row() >= m_published ||
+                index.column() < 0 || index.column() >= m_fields.size()) return {};
+            const int row = canonicalRow(index.row());
+            const auto& cell = m_blocks.at(row / kPluginResultBlockRows).at(row % kPluginResultBlockRows).at(index.column());
             if (role == Qt::DisplayRole || (role == Qt::ToolTipRole && cell.tooltip)) return cell.text;
             if (role == Qt::ForegroundRole && !cell.tone.isEmpty()) return QBrush(visualizationToneColor(cell.tone));
             if (role == Qt::TextAlignmentRole && cell.numeric) return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
             return {};
         }
-        int storedCount() const { return static_cast<int>(m_rows.size()); }
-        const QString& sortText(int row, int column) const { return m_rows.at(row).at(column).text; }
+        int storedCount() const { return m_stored; }
         bool hasUnpublishedRows() const { return m_published < storedCount(); }
-        void append(const PluginResultRow& row) { m_rows.push_back(row); }
+        void append(const PluginResultRow& row)
+        {
+            // A worker freezes only the implicitly shared block directory. The
+            // next append detaches at most 40 block headers and one 256-row tail,
+            // never the complete row/cell array on the GUI thread.
+            if (m_stored % kPluginResultBlockRows == 0) m_blocks.push_back(QVector<PluginResultRow>{});
+            m_blocks.last().push_back(row);
+            ++m_stored;
+        }
+        std::shared_ptr<const PluginResultValues> values() const
+        {
+            auto value = std::make_shared<PluginResultValues>();
+            value->blocks = m_blocks;
+            value->publicationEnds = m_publicationEnds;
+            value->count = m_published;
+            return ks::ui::RetainCompleteExportSnapshot<PluginResultValues>(value);
+        }
+        PluginResultOrderValue order() const { return m_order; }
+        void applyOrder(PluginResultOrderValue next)
+        {
+            if (!next->changed) { m_order = std::move(next); return; }
+            const QPointer<PluginResultModel> alive(this);
+            emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+            if (!alive) return;
+            // Capture after aboutTo: proxy, selection and shared row filters may
+            // create persistent source identities while receiving that signal.
+            try {
+                const auto before = persistentIndexList();
+                QModelIndexList after;
+                after.reserve(before.size());
+                for (const auto& index : before) {
+                    const int canonical = canonicalRow(index.row());
+                    // A notification receiver may publish a new tail reentrantly.
+                    // That tail retains canonical identity until the new sort.
+                    after.push_back(this->index(canonical < next->inverse.size()
+                        ? next->inverse.at(canonical) : canonical, index.column()));
+                }
+                m_order = std::move(next); // Both old and new complete values retire off GUI.
+                changePersistentIndexList(before, after);
+            } catch (...) {
+                if (alive) emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+                throw;
+            }
+            emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+        }
         void publish()
         {
             // A hidden run may have accumulated all 10000 rows. Keep each
@@ -1539,33 +1604,209 @@ namespace
             if (count == m_published) return;
             beginInsertRows({}, m_published, count - 1);
             m_published = count;
+            m_publicationEnds.push_back(count);
             endInsertRows();
         }
     private:
         QVector<VisualizationField> m_fields;
-        QVector<PluginResultRow> m_rows;
-        int m_published = 0;
+        int canonicalRow(int row) const
+        { return m_order && row < m_order->rows.size() ? m_order->rows.at(row) : row; }
+        QVector<QVector<PluginResultRow>> m_blocks;
+        QVector<int> m_publicationEnds;
+        PluginResultOrderValue m_order;
+        int m_stored = 0, m_published = 0;
     };
 
-    class PluginResultProxyModel final : public QSortFilterProxyModel
+    class PluginResultProxyModel final : public QIdentityProxyModel
     {
     public:
-        PluginResultProxyModel(PluginResultModel* source, QObject* parent)
-            : QSortFilterProxyModel(parent) { setSourceModel(source); }
-    protected:
-        bool lessThan(const QModelIndex& left, const QModelIndex& right) const override
+        PluginResultProxyModel(PluginResultModel* source, QTableView* table)
+            : QIdentityProxyModel(table), m_source(source), m_table(table), m_operation(this)
         {
-            if (sortRole() != Qt::DisplayRole || isSortLocaleAware())
-                return QSortFilterProxyModel::lessThan(left, right);
-            // Every DisplayRole cell in this model is already a QString prepared
-            // by the protocol worker. Compare those values directly, keeping
-            // Qt's string/case ordering without two QVariant copies per comparison.
-            const auto* source = static_cast<const PluginResultModel*>(sourceModel());
-            if (!source || left.model() != source || right.model() != source)
-                return QSortFilterProxyModel::lessThan(left, right);
-            return QString::compare(source->sortText(left.row(), left.column()),
-                source->sortText(right.row(), right.column()), sortCaseSensitivity()) < 0;
+            setSourceModel(source);
+            // The existing proxy remains an identity projection. Reordering its
+            // source with real layout/persistent-index notifications preserves
+            // both models, selections/current and shared filter identities,
+            // without a QSortFilterProxyModel GUI mapping/sort pass. The shared
+            // table search/filter layers already track persistent row identities.
+            connect(source, &QAbstractItemModel::rowsInserted, this, [this]() {
+                if (!m_requested) return;
+                m_preparing = true;
+                ++m_revision;
+                m_operation.cancel();
+                const QPointer<PluginResultProxyModel> alive(this);
+                if (presentationChanged) presentationChanged();
+                if (alive) scheduleSort();
+            });
         }
+        ~PluginResultProxyModel() override { close(); }
+        void close() { m_closed = true; m_operation.close(); }
+        bool isPreparingSort() const { return m_preparing; }
+        std::function<void()> presentationChanged;
+        std::function<void()> preparationFailed;
+        void sort(int column, Qt::SortOrder direction = Qt::AscendingOrder) override
+        {
+            if (m_closed || !m_source || column < -1 || column >= m_source->columnCount()) return;
+            m_column = column;
+            m_direction = direction;
+            m_requested = true;
+            m_explicitSort = true;
+            m_preparing = true;
+            ++m_revision;
+            m_operation.cancel();
+            const QPointer<PluginResultProxyModel> alive(this);
+            if (presentationChanged) presentationChanged();
+            if (alive) scheduleSort();
+        }
+    private:
+        void scheduleSort()
+        {
+            if (m_closed || m_scheduled) return;
+            m_scheduled = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_scheduled = false;
+                if (m_closed || !m_source || m_source->hasUnpublishedRows() || m_applying) return;
+                const QPointer<PluginResultProxyModel> alive(this);
+                const auto revision = m_revision;
+                try { prepareSort(); }
+                catch (...) { if (alive) failSort(revision); }
+            });
+        }
+        void prepareSort()
+        {
+            struct Request
+            {
+                std::shared_ptr<const PluginResultValues> values;
+                PluginResultOrderValue previous;
+                int column;
+                Qt::SortOrder direction;
+                bool fullSort;
+            };
+            const auto revision = m_revision;
+            const QPointer<PluginResultProxyModel> alive(this);
+            Request request{m_source->values(), m_source->order(), m_column, m_direction, m_explicitSort};
+            const auto ticket = m_operation.submit<Request, PluginResultOrderValue>(std::move(request),
+                [](const Request& request, const ks::ui::AsyncOperationToken& token) -> PluginResultOrderValue {
+                    auto result = std::make_shared<PluginResultOrder>();
+                    result->column = request.column;
+                    result->direction = request.direction;
+                    result->rows.reserve(request.values->count);
+                    // Equal QStrings retain the actual preceding display order,
+                    // including across column/direction changes and appended rows.
+                    for (int row = 0; row < request.values->count; ++row) {
+                        if ((row & 127) == 0 && token.isCanceled()) return {};
+                        result->rows.push_back(request.previous && row < request.previous->rows.size()
+                            ? request.previous->rows.at(row) : row);
+                    }
+                    {
+                        struct SortCanceled {};
+                        unsigned comparisons = 0;
+                        try {
+                            const auto less = [&](int left, int right) {
+                                if ((++comparisons & 127) == 0 && token.isCanceled()) throw SortCanceled{};
+                                if (request.column < 0) return request.direction == Qt::AscendingOrder ? left < right : left > right;
+                                const auto& a = request.values->cell(left, request.column).text;
+                                const auto& b = request.values->cell(right, request.column).text;
+                                // Preserve the original proxy's DisplayRole,
+                                // case-sensitive, non-locale QString ordering.
+                                const int compare = QString::compare(a, b, Qt::CaseSensitive);
+                                return request.direction == Qt::AscendingOrder ? compare < 0 : compare > 0;
+                            };
+                            if (request.fullSort) {
+                                std::stable_sort(result->rows.begin(), result->rows.end(), less);
+                            } else {
+                                // The original proxy has dynamicSortFilter=false:
+                                // each newly published batch is sorted on its own,
+                                // then appended. Never silently re-sort old rows.
+                                int first = request.previous ? static_cast<int>(request.previous->rows.size()) : 0;
+                                for (int end : request.values->publicationEnds) {
+                                    if (end <= first) continue;
+                                    std::stable_sort(result->rows.begin() + first, result->rows.begin() + end, less);
+                                    first = end;
+                                }
+                            }
+                        } catch (const SortCanceled&) { return {}; }
+                    }
+                    if (token.isCanceled()) return {};
+                    result->inverse.resize(result->rows.size());
+                    for (int row = 0; row < result->rows.size(); ++row) {
+                        if ((row & 127) == 0 && token.isCanceled()) return {};
+                        result->inverse[result->rows.at(row)] = row;
+                        const int previous = request.previous && row < request.previous->rows.size()
+                            ? request.previous->rows.at(row) : row;
+                        result->changed = result->changed || previous != result->rows.at(row);
+                    }
+                    return ks::ui::RetainCompleteExportSnapshot<PluginResultOrder>(result);
+                }, [this, revision](const PluginResultOrderValue& result, std::uint64_t ticket) {
+                    return acceptSort(result, revision, ticket);
+                }, [this, revision](std::exception_ptr) { failSort(revision); });
+            if (alive && !ticket) alive->failSort(revision);
+        }
+        void failSort(quint64 revision)
+        {
+            if (m_closed || revision != m_revision) return;
+            m_preparing = false;
+            m_applying = false;
+            m_explicitSort = false;
+            const QPointer<PluginResultProxyModel> alive(this);
+            const auto previous = m_source ? m_source->order() : PluginResultOrderValue{};
+            m_column = previous ? previous->column : -1;
+            m_direction = previous ? previous->direction : Qt::AscendingOrder;
+            // Keep the complete preceding order usable; a header click can
+            // retry. Do not claim that a failed sort was applied.
+            if (m_table && m_table->horizontalHeader()) {
+                const QPointer<QHeaderView> header(m_table->horizontalHeader());
+                QSignalBlocker blocker(header);
+                header->setSortIndicator(previous ? previous->column : -1,
+                    previous ? previous->direction : Qt::AscendingOrder);
+                if (!header) blocker.dismiss();
+            }
+            if (!alive) return;
+            if (presentationChanged) presentationChanged();
+            if (alive && preparationFailed) preparationFailed();
+        }
+        bool acceptSort(const PluginResultOrderValue& result, quint64 revision, std::uint64_t ticket)
+        {
+            if (m_closed || !result || revision != m_revision || !m_source) return true;
+            if (m_source->rowCount() != result->rows.size() || m_source->hasUnpublishedRows()) {
+                scheduleSort();
+                return true;
+            }
+            const QPointer<PluginResultProxyModel> alive(this);
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this, QStringLiteral("plugin-result-sort"), {m_table},
+                [alive, result, revision, ticket]() {
+                    if (!alive || !alive->m_operation.isCurrent(ticket)) return;
+                    bool committed = true;
+                    try { committed = alive->acceptSort(result, revision, ticket); }
+                    catch (...) { if (alive) alive->failSort(revision); }
+                    if (alive && committed) alive->m_operation.completeDeferred(ticket);
+                })) return false;
+            if (!alive || revision != m_revision) return true;
+            m_applying = true;
+            try { m_source->applyOrder(result); }
+            catch (...) {
+                if (alive) {
+                    m_applying = false;
+                    if (revision != m_revision) scheduleSort();
+                }
+                throw;
+            }
+            if (!alive) return true;
+            m_applying = false;
+            if (revision != m_revision) { scheduleSort(); return true; }
+            m_preparing = false;
+            m_explicitSort = false;
+            if (presentationChanged) presentationChanged();
+            return true;
+        }
+        QPointer<PluginResultModel> m_source;
+        QPointer<QTableView> m_table;
+        ks::ui::AsyncOperation m_operation;
+        quint64 m_revision = 0;
+        int m_column = -1;
+        Qt::SortOrder m_direction = Qt::AscendingOrder;
+        bool m_requested = false, m_preparing = false, m_scheduled = false, m_applying = false, m_closed = false;
+        bool m_explicitSort = false;
     };
 
     class PluginRunDialog final : public QDialog
@@ -1671,9 +1912,17 @@ namespace
             {
                 m_resultTable = new ks::ui::TableActionTableView(m_tabs);
                 m_resultModel = new PluginResultModel(descriptor.visualization.columns, m_resultTable);
-                auto* proxy = new PluginResultProxyModel(m_resultModel, m_resultTable);
-                proxy->setDynamicSortFilter(false);
-                m_resultTable->setModel(proxy);
+                m_resultProxy = new PluginResultProxyModel(m_resultModel, m_resultTable);
+                m_resultProxy->presentationChanged = [this]() {
+                    const QPointer<PluginRunDialog> alive(this);
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty,
+                        m_resultModel->hasUnpublishedRows() || m_resultProxy->isPreparingSort());
+                    if (alive) schedulePresentation();
+                };
+                m_resultProxy->preparationFailed = [this]() {
+                    appendDiagnostic(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+                };
+                m_resultTable->setModel(m_resultProxy);
                 // 一次插件扫描结果保留复制/导出，避免通用快照栏挤占插件内容。
                 ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::Compact);
                 m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1783,6 +2032,7 @@ namespace
 
         ~PluginRunDialog() override
         {
+            if (m_resultProxy) m_resultProxy->close();
             m_parseOperation->close();
             retirePluginProcess(m_process, m_processStop);
         }
@@ -1884,7 +2134,7 @@ namespace
                 if (!m_resultModel->hasUnpublishedRows()) {
                     if (m_finished && !m_sortingActivated) { m_sortingActivated = true; m_resultTable->setSortingEnabled(true); }
                     if (!guard) return;
-                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, m_resultProxy->isPreparingSort());
                     if (!guard) return;
                     ks::ui::SetTableHeaderClickSortingEnabled(m_resultTable, true);
                 }
@@ -2086,6 +2336,7 @@ namespace
         QTabWidget* m_tabs = nullptr;
         QTableView* m_resultTable = nullptr;
         PluginResultModel* m_resultModel = nullptr;
+        PluginResultProxyModel* m_resultProxy = nullptr;
         std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
         std::shared_ptr<PluginOutputState> m_parserState;
         QTimer* m_outputTimer = nullptr;
