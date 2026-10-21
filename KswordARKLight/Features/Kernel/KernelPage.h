@@ -6,6 +6,7 @@
 #include "KernelDynamicProjection.h"
 #include "KernelProjectionValues.h"
 #include "../../Core/Win32Lean.h"
+#include <CommCtrl.h>
 #include "../../Ui/AsyncTask.h"
 
 #include <cstdint>
