@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <type_traits>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -221,6 +223,27 @@ inline std::shared_ptr<BackgroundWorkLease> TryAcceptBackgroundWork() {
 inline std::size_t PendingBackgroundWork() { return BackgroundWorkRegistry::global().pending(); }
 inline std::shared_ptr<BackgroundCleanup> RunBackgroundRetirement(std::function<bool()> operation) {
     return BackgroundWorkRegistry::global().retire(std::move(operation));
+}
+
+// Reserve cleanup before transferring a value. A failed worker launch remains
+// in the existing retry registry; no UI wait or synchronous fallback occurs.
+// The short handoff barrier prevents a fast worker from releasing its copy
+// before the submitting thread has dropped the original last owner.
+template<class Value>
+bool RetireBackgroundValue(Value& value,BackgroundWorkRegistry& registry=BackgroundWorkRegistry::global()) {
+    static_assert(std::is_nothrow_move_assignable_v<Value>);
+    struct Ticket {std::mutex mutex;std::condition_variable ready;bool submitted=false;Value value{};};
+    std::shared_ptr<Ticket> ticket;
+    try {
+        ticket=std::make_shared<Ticket>();
+        registry.retire([ticket] {
+            {std::unique_lock lock(ticket->mutex);ticket->ready.wait(lock,[&]{return ticket->submitted;});}
+            ticket->value=Value{};return true;
+        });
+    } catch(...) {return false;}
+    ticket->value=std::move(value);
+    {std::lock_guard lock(ticket->mutex);ticket->submitted=true;}
+    ticket->ready.notify_one();return true;
 }
 
 } // namespace Ksword::Ui

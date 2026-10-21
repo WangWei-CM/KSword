@@ -1496,20 +1496,12 @@ std::wstring KernelTreeNodeKey(const KernelObjectNamespaceTreeNodeState& state) 
 // The worker waits until the UI has dropped this last graph owner. A failed
 // thread launch stays queued in the visible shutdown registry and is retried.
 bool RetireKernelTreeValues(std::shared_ptr<KernelValueProjection>& value) {
-    if(!value)return true;
-    struct Ticket {std::mutex mutex;std::condition_variable ready;bool submitted=false;std::shared_ptr<KernelValueProjection> value;};
-    std::shared_ptr<Ticket> ticket;
-    try {
-        ticket=std::make_shared<Ticket>();ticket->value=value;
-        Ksword::Ui::RunBackgroundRetirement([ticket] {
-            {std::unique_lock lock(ticket->mutex);ticket->ready.wait(lock,[&]{return ticket->submitted;});}
-            ticket->value.reset();return true;
-        });
-    } catch(...) {return false;}
-    value.reset();
-    {std::lock_guard lock(ticket->mutex);ticket->submitted=true;}
-    ticket->ready.notify_one();return true;
+    return !value || Ksword::Ui::RetireBackgroundValue(value);
 }
+struct KernelProjectionReleaseGuard {
+    std::shared_ptr<KernelValueProjection>& value;
+    ~KernelProjectionReleaseGuard(){RetireKernelTreeValues(value);}
+};
 } // namespace
 
 #include "KernelProjectionValues.inl"
@@ -1541,7 +1533,16 @@ bool KernelUsesValueProjection(const KernelFeatureId featureId) {
 }
 
 KernelPage::KernelPage() = default;
-KernelPage::~KernelPage() = default;
+KernelPage::~KernelPage() {
+    RetireCurrentKernelValues();
+    if(deferredProjection_)RetireKernelTreeValues(deferredProjection_);
+    if(choiceProjectionCommit_)Ksword::Ui::RetireBackgroundValue(choiceProjectionCommit_);
+    if(!featureViewCache_.empty())Ksword::Ui::RetireBackgroundValue(featureViewCache_);
+    if(!pendingProjectionSources_.empty())Ksword::Ui::RetireBackgroundValue(pendingProjectionSources_);
+    if(!objectNamespaceTrees_.empty())Ksword::Ui::RetireBackgroundValue(objectNamespaceTrees_);
+    if(objectNamespaceProjection_)RetireKernelTreeValues(objectNamespaceProjection_);
+    for(auto& commit:treeProjectionCommits_)if(commit)Ksword::Ui::RetireBackgroundValue(commit);
+}
 
 void KernelPage::SetInitialFeature(const KernelFeatureId featureId) noexcept {
     // Store the requested feature until WM_CREATE constructs primary and
@@ -2533,7 +2534,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
             callbackEventReceiver_->Shutdown();
         }
         if (cachedProjectionTask_) cachedProjectionTask_->cancel();
-        deferredProjection_.reset();
+        if(deferredProjection_)RetireKernelTreeValues(deferredProjection_);
         if (sortTask_) sortTask_->cancel();
         if (queryTask_) {
             queryTask_->cancel();
@@ -4395,6 +4396,21 @@ void KernelPage::RefreshSelectedFeature() {
         });
 }
 
+bool KernelPage::RetireCurrentKernelValues() {
+    if(currentRows_.empty() && currentRawRows_->empty() && !currentProjectionSource_ && !currentRawSummary_)return true;
+    struct Values {
+        Ksword::Ui::ImmutableTextRows rows;
+        std::shared_ptr<const KernelRows> raw;
+        std::shared_ptr<const KernelProjectionSource> source;
+        std::shared_ptr<const KernelRawSummaryIndex> summary;
+    };
+    Values retired{std::move(currentRows_),std::exchange(currentRawRows_,EmptyKernelRawRows()),
+        std::move(currentProjectionSource_),std::move(currentRawSummary_)};
+    if(Ksword::Ui::RetireBackgroundValue(retired))return true;
+    currentRows_=std::move(retired.rows);currentRawRows_=std::move(retired.raw);
+    currentProjectionSource_=std::move(retired.source);currentRawSummary_=std::move(retired.summary);return false;
+}
+
 void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
     // SaveCurrentFeatureViewCache stores the currently rendered page under the
     // last active feature id rather than CurrentDescriptor(). Inputs select
@@ -4407,6 +4423,12 @@ void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
     }
     const KernelFeatureId cacheFeatureId = activeFeatureId_;
     KernelFeatureViewCache& cache = featureViewCache_[cacheFeatureId];
+    if(cache.projectionSource && !Ksword::Ui::RetireBackgroundValue(cache.projectionSource))return;
+    if(cache.rawSummary && !Ksword::Ui::RetireBackgroundValue(cache.rawSummary))return;
+    if(transferDataToCache) {
+        if(!cache.rows.empty() && !Ksword::Ui::RetireBackgroundValue(cache.rows))return;
+        if(cache.rawRows && !Ksword::Ui::RetireBackgroundValue(cache.rawRows))return;
+    }
     cache.projectionSource=currentProjectionSource_;cache.rawSummary=currentRawSummary_;
     cache.projectionWidths=currentProjectionWidths_;
     if (transferDataToCache) {
@@ -4456,16 +4478,9 @@ void KernelPage::InvalidateCurrentFeatureViewCache() {
     if (found == featureViewCache_.end()) {
         return;
     }
-    found->second.hasData = false;
-    found->second.columns.clear();
-    found->second.rows.clear();
-    found->second.rowIndents.clear();
-    found->second.rawColumns.clear();
-    found->second.rawRows.reset();
-    found->second.projectionSource.reset();found->second.rawSummary.reset();
-    found->second.collapsedObjectPaths.clear();
-    found->second.propertyRows.clear();
-    found->second.summaryRows.clear();
+    auto retired=std::move(found->second);
+    if(!Ksword::Ui::RetireBackgroundValue(retired)){found->second=std::move(retired);return;}
+    found->second.hasData=false;
 }
 
 bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
@@ -4482,6 +4497,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     }
 
     KernelFeatureViewCache& cache = found->second;
+    if(!RetireCurrentKernelValues())return false;
     currentProjectionSource_=cache.projectionSource;currentRawSummary_=cache.rawSummary;
     currentProjectionWidths_=cache.projectionWidths;
     currentColumns_ = std::move(cache.columns);
@@ -4547,6 +4563,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
 }
 
 void KernelPage::ResetVisibleResultRows() {
+    if(!currentRows_.empty() && !Ksword::Ui::RetireBackgroundValue(currentRows_))return;
     currentRows_.clear();
     currentRowIndents_.clear();
     SyncResultListVirtualRows();
@@ -5359,6 +5376,7 @@ void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
     ::SetWindowTextW(backendText_, L"");
     ::SetWindowTextW(statusText_, L"状态：等待刷新。");
 
+    if(!RetireCurrentKernelValues())return;
     currentProjectionSource_.reset();currentRawSummary_.reset();
     currentProjectionWidths_.clear();
     currentColumns_.clear();
@@ -5441,7 +5459,9 @@ void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamic
             auto source=std::make_shared<KernelProjectionSource>();
             source->featureId=descriptor->id;source->serial=++projectionSourceSerial_;
             source->columns=std::move(prepared->columns);source->rows=std::move(prepared->rawRows);
-            pendingProjectionSources_[descriptor->id]=std::move(source);
+            auto& pending=pendingProjectionSources_[descriptor->id];
+            if(pending && !Ksword::Ui::RetireBackgroundValue(pending))return;
+            pending=std::move(source);
             RequestCachedValueProjection(descriptor->id);
             return;
         }
@@ -5449,6 +5469,7 @@ void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamic
     std::vector<std::wstring> orderedColumns;
     if (!prepared) AddDynamicResultColumns(result, orderedColumns);
     bool statusHandledBySpecializedRenderer = false;
+    if(!RetireCurrentKernelValues())return;
     currentColumns_ = orderedColumns;
     currentRows_.clear();
     currentRawColumns_.clear();
@@ -5725,6 +5746,7 @@ void KernelPage::RebuildResultListFromCache() {
         visibleRows.push_back(row);
         visibleIndents.push_back(sourceIndex < sourceIndents.size() ? sourceIndents[sourceIndex] : 0);
     }
+    if(!currentRows_.empty() && !Ksword::Ui::RetireBackgroundValue(currentRows_))return;
     currentRows_ = std::move(visibleRows);
     currentRowIndents_ = std::move(visibleIndents);
     SyncResultListVirtualRows();
@@ -5748,6 +5770,7 @@ std::shared_ptr<const KernelProjectionSource> KernelPage::CachedProjectionSource
     source->columns=!currentRawColumns_.empty()?currentRawColumns_:currentColumns_;
     source->rows=currentRawRows_;
     if(source->rows->empty()) source->fallbackDisplay=currentRows_;
+    if(currentProjectionSource_ && !Ksword::Ui::RetireBackgroundValue(currentProjectionSource_))return currentProjectionSource_;
     currentProjectionSource_=source;
     return source;
 }
@@ -5792,7 +5815,7 @@ void KernelPage::RequestCachedValueProjection(const KernelFeatureId featureId) {
         text.resize(static_cast<std::size_t>(length));input->selectedChoices[index]=std::move(text);
     }
     const auto requestId=++cachedProjectionRequestId_;
-    deferredProjection_.reset();
+    if(deferredProjection_)RetireKernelTreeValues(deferredProjection_);
     ::SetWindowTextW(statusText_,(L"状态：正在后台筛选 "+descriptor->title+L"…").c_str());
     cachedProjectionTask_->request(
         [input,requestId]{return KernelValueProjectionBuilder(input).build(requestId);},
@@ -5803,6 +5826,7 @@ void KernelPage::RequestCachedValueProjection(const KernelFeatureId featureId) {
 }
 
 void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjection> projection) {
+    KernelProjectionReleaseGuard release{projection};
     const auto* descriptor=CurrentDescriptor();
     if(!projection || !projection->input || !descriptor) return;
     const auto source=projection->input->source;
@@ -5818,7 +5842,7 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     const auto acceptedChoice=completingChoiceProjection_==projection.get() && choiceProjectionCommit_ &&
         choiceProjectionCommit_->projection==projection && choiceProjectionCommit_->windows==acceptedChoiceWindows;
     if(!acceptedTree && !acceptedChoice && !KernelProjectionMatches(descriptor->id,cachedProjectionRequestId_,expected,*projection)) return;
-    if(!::IsWindowVisible(hwnd_)) {deferredProjection_=std::move(projection);return;}
+    if(!::IsWindowVisible(hwnd_)) {if(deferredProjection_ && !RetireKernelTreeValues(deferredProjection_))return;deferredProjection_=std::move(projection);return;}
     if(std::any_of(projection->choices.begin(),projection->choices.end(),[](const auto& choice){return choice.changed;})) {
         BeginChoiceProjection(std::move(projection));return;
     }
@@ -5826,10 +5850,9 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
 
     const int oldSelected=ListView_GetNextItem(resultList_,-1,LVNI_SELECTED);
     const int oldTop=ListView_GetTopIndex(resultList_);
-    const auto oldRows=currentRows_.snapshot();
     const auto restore=[&](const int old)->int {
-        if(old<0 || static_cast<std::size_t>(old)>=oldRows->size()) return -1;
-        const auto& value=*(*oldRows)[static_cast<std::size_t>(old)];
+        if(old<0 || static_cast<std::size_t>(old)>=currentRows_.size()) return -1;
+        const auto& value=currentRows_[static_cast<std::size_t>(old)];
         return KernelFindProjectedRow(value,*projection);
     };
     int selected=restore(oldSelected);int top=restore(oldTop);
@@ -5837,6 +5860,7 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     if(top<0 && !projection->rows.empty()) top=(std::min)((std::max)(0,oldTop),static_cast<int>(projection->rows.size())-1);
     const bool schemaChanged=currentColumns_!=projection->columns || currentProjectionWidths_!=projection->widths;
     const bool newSource=currentProjectionSource_!=source;
+    if(!RetireCurrentKernelValues())return;
     currentProjectionSource_=source;currentRawSummary_=projection->rawSummary;currentRawColumns_=source->columns;currentRawRows_=source->rows;
     currentColumns_=std::move(projection->columns);currentRows_=std::move(projection->rows);
     currentRowIndents_=std::move(projection->indents);currentProjectionWidths_=std::move(projection->widths);
@@ -5870,11 +5894,13 @@ void KernelPage::ResumeChoiceProjection() {
 }
 
 void KernelPage::BeginChoiceProjection(std::shared_ptr<KernelValueProjection> projection) {
+    KernelProjectionReleaseGuard release{projection};
     const std::array<HWND,4> windows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
     if(choiceProjectionCommit_) {
         for(std::size_t index=0;index<windows.size();++index)
             if(windows[index] && choiceProjectionCommit_->projection->choices[index].changed)::EnableWindow(windows[index],TRUE);
     }
+    if(choiceProjectionCommit_ && !Ksword::Ui::RetireBackgroundValue(choiceProjectionCommit_))return;
     auto commit=std::make_shared<ChoiceProjectionCommit>();commit->projection=std::move(projection);commit->windows=windows;
     choiceProjectionCommit_=std::move(commit);
     for(std::size_t index=0;index<windows.size();++index)
@@ -5927,7 +5953,8 @@ void KernelPage::PumpChoiceProjection() {
     }
     ::KillTimer(hwnd_,kTimerChoiceProjection);
     completingChoiceProjection_=projection.get();ApplyCachedValueProjection(projection);completingChoiceProjection_=nullptr;
-    if(choiceProjectionCommit_==commit)choiceProjectionCommit_.reset();
+    if(choiceProjectionCommit_==commit)Ksword::Ui::RetireBackgroundValue(choiceProjectionCommit_);
+    RetireKernelTreeValues(projection);Ksword::Ui::RetireBackgroundValue(commit);
 }
 
 void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId) {
@@ -5945,6 +5972,7 @@ void KernelPage::SelectObjectNamespaceTree(const KernelFeatureId featureId) {
         auto& parked = objectNamespaceTrees_[objectNamespaceTreeFeatureId_];
         parked.hwnd = objectNamespaceTree_;
         parked.initialized = hasObjectNamespaceTreeFeatureId_;
+        if(parked.projection && !RetireKernelTreeValues(parked.projection))return;
         parked.projection=std::move(objectNamespaceProjection_);
         ::ShowWindow(objectNamespaceTree_, SW_HIDE);
     }
@@ -5973,9 +6001,11 @@ void KernelPage::SelectObjectNamespaceTree(const KernelFeatureId featureId) {
 
 
 void KernelPage::BeginObjectTreeProjection(std::shared_ptr<KernelValueProjection> projection) {
+    KernelProjectionReleaseGuard release{projection};
     const auto index=projection->input->source->featureId==KernelFeatureId::ObjectDirectoryRecursive?1U:0U;
     auto& commit=treeProjectionCommits_[index];
     if(!commit)commit=std::make_shared<ObjectTreeProjectionCommit>();
+    if(commit->replacement && !RetireKernelTreeValues(commit->replacement))return;
     commit->host=objectNamespaceTree_;commit->replacement=std::move(projection);
     ::EnableWindow(objectNamespaceTree_,FALSE);
     ::SetTimer(hwnd_,kTimerObjectTreeProjection,16,nullptr);
@@ -6032,9 +6062,10 @@ void KernelPage::PumpObjectTreeProjection() {
     if(commit->next<projection->treeNodes.size())return;
     const auto selected=projection->treeSelected;
     const auto top=projection->treeTop;
-    slot.reset();::EnableWindow(objectNamespaceTree_,TRUE);::KillTimer(hwnd_,kTimerObjectTreeProjection);
+    Ksword::Ui::RetireBackgroundValue(slot);::EnableWindow(objectNamespaceTree_,TRUE);::KillTimer(hwnd_,kTimerObjectTreeProjection);
     if(selected>0 && selected<=projection->nativeTreeHandles.size())TreeView_SelectItem(objectNamespaceTree_,reinterpret_cast<HTREEITEM>(projection->nativeTreeHandles[selected-1]));
     if(top>0 && top<=projection->nativeTreeHandles.size())TreeView_SelectSetFirstVisible(objectNamespaceTree_,reinterpret_cast<HTREEITEM>(projection->nativeTreeHandles[top-1]));
+    RetireKernelTreeValues(projection);Ksword::Ui::RetireBackgroundValue(commit);
 }
 
 void KernelPage::RebuildObjectNamespaceTreeFromCurrentRows() {
@@ -6222,6 +6253,7 @@ void KernelPage::RebuildNtQueryLegacyListFromCache() {
     }
 
     currentColumns_ = std::move(displayColumns);
+    if(!currentRows_.empty() && !Ksword::Ui::RetireBackgroundValue(currentRows_))return;
     currentRows_ = std::move(displayRows);
     currentRowIndents_.clear();
     ClearResultTable();
@@ -6435,6 +6467,7 @@ void KernelPage::RequestResultSort(const int columnIndex, const bool ascending) 
                 for (const auto old : result->order) indents.push_back(currentRowIndents_[old]);
                 currentRowIndents_ = std::move(indents);
             }
+            if(!currentRows_.empty() && !Ksword::Ui::RetireBackgroundValue(currentRows_))return;
             currentRows_ = std::move(result->rows);
             pendingSorts_.erase(result->featureId);
             Ksword::Ui::ScopedListViewRedrawLock resultListLock(resultList_);

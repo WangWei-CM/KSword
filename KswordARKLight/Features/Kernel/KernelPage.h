@@ -129,6 +129,7 @@ private:
     bool SelectFeatureById(KernelFeatureId featureId);
     void ParkCurrentFeatureViewCache();
     void SaveCurrentFeatureViewCache(bool transferDataToCache);
+    bool RetireCurrentKernelValues();
     void InvalidateCurrentFeatureViewCache();
     bool RestoreFeatureViewCache(KernelFeatureId featureId);
     void ResetVisibleResultRows();

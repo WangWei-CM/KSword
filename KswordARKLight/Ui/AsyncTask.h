@@ -68,7 +68,7 @@ public:
         const auto lease = TryAcceptBackgroundWork();
         if (!lease) return;
         work = [lease, operation = std::move(work)]() mutable { return operation(); };
-        Work startWork;
+        Work startWork,replacedWork;
         std::uint64_t generation = 0;
         bool startNow = false;
         {
@@ -77,20 +77,21 @@ public:
                 return;
             }
 
+            replacedWork=std::move(state->work);
             state->work = std::move(work);
             state->deliver = std::move(deliver);
             generation = ++state->latestGeneration;
             if (state->running) {
                 state->pending = true;
-                return;
+            } else {
+                state->running = true;
+                state->runningGeneration = generation;
+                startWork = state->work;
+                startNow = true;
             }
-
-            state->running = true;
-            state->runningGeneration = generation;
-            startWork = state->work;
-            startNow = true;
         }
 
+        if(replacedWork)RetireBackgroundValue(replacedWork);
         if (startNow) {
             startWorker(state, std::move(startWork), generation);
         }
@@ -138,6 +139,7 @@ public:
         if (deliverCurrent && deliver) {
             deliver(completion->generation, std::move(completion->result), completion->error);
         }
+        if(completion)RetireBackgroundValue(completion);
         if (startNext) {
             startWorker(state, std::move(nextWork), nextGeneration);
         }
@@ -145,19 +147,17 @@ public:
     }
 
     void cancel() noexcept {
-        const std::shared_ptr<State> state = state_;
-        if (!state) {
-            return;
+        const std::shared_ptr<State> state=state_;if(!state)return;
+        Work releasedWork;std::unique_ptr<Completion> releasedCompletion;
+        {
+            std::scoped_lock lock(state->mutex);
+            state->alive.store(false,std::memory_order_release);state->owner=nullptr;state->pending=false;
+            releasedWork=std::move(state->work);state->deliver={};releasedCompletion=std::move(state->completion);
         }
-        std::scoped_lock lock(state->mutex);
-        state->alive.store(false, std::memory_order_release);
-        state->owner = nullptr;
-        state->pending = false;
-        state->work = {};
-        state->deliver = {};
-        // A queued message may be discarded when its window is destroyed.
-        // The task, rather than the message queue, owns the completed result.
-        state->completion.reset();
+        // Work and completions contain values only; never destroy a complete
+        // row/source graph under the task mutex or on a cancel/close callback.
+        if(releasedWork)RetireBackgroundValue(releasedWork);
+        if(releasedCompletion)RetireBackgroundValue(releasedCompletion);
     }
 
     bool running() const noexcept {
@@ -229,7 +229,7 @@ private:
                 releasedWork = std::move(state->work);
             }
         }
-        releasedWork = {};
+        if(releasedWork)RetireBackgroundValue(releasedWork);
         {
             std::scoped_lock lock(state->mutex);
             if (state->alive.load(std::memory_order_acquire) && state->owner) {
