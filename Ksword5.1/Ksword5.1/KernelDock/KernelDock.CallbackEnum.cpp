@@ -8,6 +8,7 @@
 #include "../UI/AsyncOperation.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/UiCommitCoordinator.h"
 
 #include <memory>
 #include "../UI/VisibleTableWidget.h"
@@ -2432,6 +2433,7 @@ void KernelDock::refreshCallbackEnumAsync()
             }
 
             guardThis->m_minifilterCallbackSourceDirty = true;
+            ++guardThis->m_callbackEnumSourceRevision;
             guardThis->m_callbackEnumRows = std::move(resultRows);
             guardThis->rebuildCallbackEnumTable(true, [=]() {
                 if (!guardThis) return;
@@ -2722,15 +2724,17 @@ void KernelDock::prepareMinifilterCallbackTree()
         // Show and currentChanged may both prepare the same visible branch.
         if (!m_minifilterCallbackSourceDirty
             && previousPass->property("keyword").toString() == filterKeyword
-            && previousPass->property("language").toString() == language) return;
+            && previousPass->property("language").toString() == language)
+        { previousPass->start(0); return; }
         previousPass->stop();
         previousPass->setObjectName(QString());
         previousPass->deleteLater();
     }
     const QPointer<KernelDock> owner(this);
-    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
-        QStringLiteral("kernel_minifilter_projection"), {m_callbackEnumTable, m_minifilterCallbackTree},
-        [owner]() { if (owner) owner->prepareMinifilterCallbackTree(); })) return;
+    if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
+        coordinator && coordinator->deferPresentationIfBlocked(this,
+            QStringLiteral("kernel_minifilter_projection"), {m_callbackEnumTable, m_minifilterCallbackTree},
+            [owner]() { if (owner) owner->prepareMinifilterCallbackTree(); })) return;
 
     const auto searchFields = [](const KernelCallbackEnumEntry& entry) {
         return QStringList{entry.classText, entry.registrationTypeText, entry.sourceText, entry.sourceTrustText,
@@ -2744,17 +2748,56 @@ void KernelDock::prepareMinifilterCallbackTree()
             return field.contains(filterKeyword, Qt::CaseInsensitive);
         });
     };
-    const bool sourceChanged = m_minifilterCallbackSourceDirty;
-    const bool updatesEnabled = m_minifilterCallbackTree->updatesEnabled();
-    m_minifilterCallbackTree->setUpdatesEnabled(false);
-    if (sourceChanged)
+    constexpr auto sourcePassName = "ksword_minifilter_source_pass";
+    constexpr auto sourcePendingProperty = "ksword_minifilter_source_pending";
+    const auto sourceRevision = m_callbackEnumSourceRevision;
+    if (m_minifilterCallbackSourceDirty)
     {
-        m_minifilterCallbackTree->clear();
-        QHash<qulonglong, QTreeWidgetItem*> filterParents;
-        std::vector<std::unique_ptr<QTreeWidgetItem>> parentOwners;
-        for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
+        if (auto* previous = m_minifilterCallbackTree->findChild<QTimer*>(
+            QLatin1String(sourcePassName), Qt::FindDirectChildrenOnly))
         {
-            const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
+            if (previous->property("source_revision").toULongLong() == sourceRevision
+                && previous->property("language").toString() == language)
+            {
+                previous->start(0); // Show resumes the same detached build.
+                return;
+            }
+            previous->stop();
+            previous->setObjectName(QString());
+            previous->deleteLater();
+        }
+        struct SourcePass
+        {
+            std::size_t sourceIndex = 0;
+            int phase = 0; // parents, children, atomic attach, expansion
+            qsizetype expandIndex = 0;
+            QHash<qulonglong, QTreeWidgetItem*> filterParents;
+            std::vector<std::unique_ptr<QTreeWidgetItem>> parentOwners;
+            QList<QTreeWidgetItem*> roots;
+        };
+        const auto pass = std::make_shared<SourcePass>();
+        const QPointer<QTreeWidget> tree(m_minifilterCallbackTree);
+        auto* timer = new QTimer(tree);
+        timer->setObjectName(QLatin1String(sourcePassName));
+        timer->setProperty("source_revision", static_cast<qulonglong>(sourceRevision));
+        timer->setProperty("language", language);
+        timer->setSingleShot(true);
+        const QPointer<QTimer> timerGuard(timer);
+        if (!tree->property(sourcePendingProperty).toBool())
+        {
+            tree->setProperty("source_updates_enabled", tree->updatesEnabled());
+            if (!owner || !tree || !timerGuard) return;
+            tree->setProperty("source_force_disabled", tree->testAttribute(Qt::WA_ForceDisabled));
+            if (!owner || !tree || !timerGuard) return;
+            tree->setProperty(sourcePendingProperty, true);
+            if (!owner || !tree || !timerGuard) return;
+            tree->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+        }
+        if (!owner || !tree || !timerGuard) return;
+        tree->setEnabled(false);
+        if (!owner || !tree || !timerGuard) return;
+        const auto fillParent = [owner, pass, searchFields](const std::size_t sourceIndex) {
+            const KernelCallbackEnumEntry& entry = owner->m_callbackEnumRows[sourceIndex];
             const bool isFilterParent =
                 entry.callbackClass == KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER
                 && entry.source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_FLTMGR_ENUMERATION
@@ -2762,7 +2805,7 @@ void KernelDock::prepareMinifilterCallbackTree()
                 && entry.registrationAddress != 0U;
             if (!isFilterParent)
             {
-                continue;
+                return;
             }
 
             // Fill a detached tree so text/role/brush updates do not each
@@ -2778,24 +2821,23 @@ void KernelDock::prepareMinifilterCallbackTree()
             parentItem->setData(0, Qt::UserRole, static_cast<qulonglong>(sourceIndex));
             parentItem->setData(0, KernelSearchFieldsRole, searchFields(entry));
             parentItem->setToolTip(0, entry.detailText);
-            filterParents.insert(static_cast<qulonglong>(entry.registrationAddress), parentItem);
-            parentOwners.push_back(std::move(parentOwner));
-        }
+            pass->filterParents.insert(static_cast<qulonglong>(entry.registrationAddress), parentItem);
+            pass->parentOwners.push_back(std::move(parentOwner));
 
-        for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
-        {
-            const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
+        };
+        const auto fillChild = [owner, pass, searchFields](const std::size_t sourceIndex) {
+            const KernelCallbackEnumEntry& entry = owner->m_callbackEnumRows[sourceIndex];
             if (entry.callbackClass != KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER
                 || entry.contextAddress == 0U)
             {
-                continue;
+                return;
             }
 
             QTreeWidgetItem* parentItem =
-                filterParents.value(static_cast<qulonglong>(entry.contextAddress), nullptr);
+                pass->filterParents.value(static_cast<qulonglong>(entry.contextAddress), nullptr);
             if (parentItem == nullptr)
             {
-                continue;
+                return;
             }
 
             QString modulePath = callbackEnumNormalizeModulePath(entry.modulePathText);
@@ -2856,22 +2898,79 @@ void KernelDock::prepareMinifilterCallbackTree()
                 parentItem->setText(6, entry.fileVersionText);
                 parentItem->setText(7, entry.fileDescriptionText);
             }
-        }
-
-        QList<QTreeWidgetItem*> roots;
-        roots.reserve(static_cast<qsizetype>(parentOwners.size()));
-        for (const auto& owner : parentOwners) roots.push_back(owner.get());
-        m_minifilterCallbackTree->addTopLevelItems(roots);
-        for (auto& owner : parentOwners)
-        {
-            auto* item = owner.release(); // ownership transferred to the tree
-            item->setExpanded(true);
-        }
+        };
+        connect(timer, &QTimer::timeout, timer,
+            [owner, tree, timerGuard, pass, language, sourceRevision, fillParent, fillChild]() {
+            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            if (!tree->isVisible()) return; // No hidden-page wake loop; Show resumes.
+            if (owner->m_callbackEnumSourceRevision != sourceRevision
+                || ks::i18n::LanguageManager::instance().currentLanguageId() != language)
+            {
+                timerGuard->setObjectName(QString());
+                timerGuard->deleteLater();
+                owner->prepareMinifilterCallbackTree();
+                return;
+            }
+            if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
+                coordinator && coordinator->deferPresentationIfBlocked(owner.data(),
+                    QStringLiteral("kernel_minifilter_source_batch"),
+                    {owner->m_callbackEnumTable, tree.data()}, [timerGuard]() {
+                        if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start(0);
+                    })) return;
+            QElapsedTimer budget;
+            budget.start();
+            int processed = 0;
+            while (pass->phase < 2 && processed < 64 && budget.elapsed() < 4)
+            {
+                if (pass->sourceIndex == owner->m_callbackEnumRows.size())
+                {
+                    pass->sourceIndex = 0;
+                    ++pass->phase;
+                    continue;
+                }
+                if (pass->phase == 0) fillParent(pass->sourceIndex++);
+                else fillChild(pass->sourceIndex++);
+                ++processed;
+            }
+            if (pass->phase < 2) { timerGuard->start(0); return; }
+            if (pass->phase == 2)
+            {
+                // Keep the old painted frame until the first complete filter.
+                // Qt's clear/adoption remain indivisible model operations.
+                tree->setUpdatesEnabled(false);
+                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+                tree->clear();
+                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+                if (owner->m_callbackEnumSourceRevision != sourceRevision)
+                { timerGuard->start(0); return; }
+                pass->roots.reserve(static_cast<qsizetype>(pass->parentOwners.size()));
+                for (auto& root : pass->parentOwners) pass->roots.push_back(root.release());
+                pass->parentOwners.clear();
+                tree->addTopLevelItems(pass->roots);
+                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+                pass->filterParents.clear();
+                pass->phase = 3;
+                timerGuard->start(0);
+                return;
+            }
+            while (pass->expandIndex < pass->roots.size() && processed < 64 && budget.elapsed() < 4)
+            {
+                pass->roots.at(pass->expandIndex++)->setExpanded(true);
+                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+                if (owner->m_callbackEnumSourceRevision != sourceRevision)
+                { timerGuard->start(0); return; }
+                ++processed;
+            }
+            if (pass->expandIndex < pass->roots.size()) { timerGuard->start(0); return; }
+            timerGuard->setObjectName(QString());
+            timerGuard->deleteLater();
+            owner->m_minifilterCallbackSourceDirty = false;
+            owner->m_minifilterCallbackFilterDirty = true;
+            owner->prepareMinifilterCallbackTree();
+        });
+        timer->start(0);
+        return;
     }
-
-    m_minifilterCallbackSourceDirty = false;
-    m_minifilterCallbackFilterDirty = true;
-    m_minifilterCallbackTree->setUpdatesEnabled(updatesEnabled);
 
     // Keep the original items/source identities. Only this visible tree's
     // search-cache and visibility work yields between bounded GUI slices.
@@ -2894,7 +2993,7 @@ void KernelDock::prepareMinifilterCallbackTree()
         [pass]() { pass->restart = true; });
     const auto continuePass =
         [owner, timerGuard, pass, language, filterKeyword, searchFields, matches,
-         sourceChanged, refreshLanguage = languageChanged && !sourceChanged]() {
+         sourceRevision, sourcePendingProperty, refreshLanguage = languageChanged]() {
             if (!owner || !timerGuard) return;
             const auto finish = [timerGuard]() {
                 if (!timerGuard) return;
@@ -2902,9 +3001,10 @@ void KernelDock::prepareMinifilterCallbackTree()
                 timerGuard->setObjectName(QString());
                 timerGuard->deleteLater();
             };
-            auto* tree = owner->m_minifilterCallbackTree;
+            const QPointer<QTreeWidget> tree(owner->m_minifilterCallbackTree);
             if (timerGuard->objectName().isEmpty() || tree == nullptr
                 || !tree->isVisible() || owner->m_minifilterCallbackSourceDirty
+                || owner->m_callbackEnumSourceRevision != sourceRevision
                 || owner->m_callbackEnumFilterEdit->text().trimmed() != filterKeyword
                 || ks::i18n::LanguageManager::instance().currentLanguageId() != language)
             {
@@ -2912,9 +3012,10 @@ void KernelDock::prepareMinifilterCallbackTree()
                 finish();
                 return;
             }
-            if (!sourceChanged && ks::ui::DeferItemViewUiCommitIfContextMenuOpen(owner.data(),
+            if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
+                coordinator && coordinator->deferPresentationIfBlocked(owner.data(),
                 QStringLiteral("kernel_minifilter_filter_batch"),
-                {owner->m_callbackEnumTable, tree}, [timerGuard]() {
+                {owner->m_callbackEnumTable, tree.data()}, [timerGuard]() {
                     if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start();
                 })) return;
             if (pass->restart)
@@ -2936,7 +3037,7 @@ void KernelDock::prepareMinifilterCallbackTree()
             budget.start();
             int processed = 0;
             while (pass->parentIndex < tree->topLevelItemCount()
-                && (sourceChanged || (processed < 256 && budget.nsecsElapsed() < 4'000'000)))
+                && processed < 256 && budget.nsecsElapsed() < 4'000'000)
             {
                 auto* parentItem = tree->topLevelItem(pass->parentIndex);
                 if (pass->childIndex < 0)
@@ -2963,27 +3064,47 @@ void KernelDock::prepareMinifilterCallbackTree()
                 ++processed;
             }
             tree->setUpdatesEnabled(batchUpdatesEnabled);
+            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
             if (pass->parentIndex < tree->topLevelItemCount())
             {
                 timerGuard->start();
                 return;
             }
             tree->setProperty(KernelSearchLanguageProperty, language);
+            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
             owner->m_minifilterCallbackFilterDirty = false;
             for (auto* selectedItem : tree->selectedItems())
+            {
                 if (selectedItem->isHidden() || (selectedItem->parent() != nullptr && selectedItem->parent()->isHidden()))
                     selectedItem->setSelected(false);
+                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            }
             auto* currentItem = tree->currentItem();
             if (currentItem != nullptr && (currentItem->isHidden()
                 || (currentItem->parent() != nullptr && currentItem->parent()->isHidden())))
                 tree->setCurrentItem(nullptr);
+            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
             finish();
+            if (owner && owner->m_minifilterCallbackTree
+                && owner->m_callbackEnumSourceRevision == sourceRevision
+                && owner->m_minifilterCallbackTree->property(sourcePendingProperty).toBool())
+            {
+                const QPointer<QTreeWidget> readyTree(owner->m_minifilterCallbackTree);
+                const bool updatesEnabled = readyTree->property("source_updates_enabled").toBool();
+                const bool forceDisabled = readyTree->property("source_force_disabled").toBool();
+                readyTree->setProperty(sourcePendingProperty, false);
+                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
+                readyTree->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
+                readyTree->setEnabled(!forceDisabled);
+                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
+                readyTree->setUpdatesEnabled(updatesEnabled);
+            }
         };
     connect(timer, &QTimer::timeout, timer, continuePass);
-    // A new source retains its synchronous first filtered frame. Ordinary
-    // filter/language requests can keep the previous visible tree while yielding.
-    if (sourceChanged) continuePass();
-    else timer->start(0);
+    // Initial and subsequent filters share the same budget. A new source only
+    // becomes paintable/interactive after its complete first filter is ready.
+    timer->start(0);
 }
 
 bool KernelDock::currentCallbackEnumSourceIndex(std::size_t& sourceIndexOut) const

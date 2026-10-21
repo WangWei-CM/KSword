@@ -1288,6 +1288,7 @@ private:
     QTreeWidget* m_minifilterCallbackTree = nullptr;
     bool m_minifilterCallbackSourceDirty = true;
     bool m_minifilterCallbackFilterDirty = true;
+    std::uint64_t m_callbackEnumSourceRevision = 0; // Advances only when the canonical callback snapshot is replaced.
     QPersistentModelIndex m_callbackEnumSeparatorIndex;                // m_minifilterCallbackTree：Filter -> Pre/Post 回调树。
     ks::ui::StructuredFieldView* m_callbackEnumDetailEditor = nullptr;         // m_callbackEnumDetailEditor：回调遍历详情文本框。
     QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：嵌入在回调遍历页底部的移除面板容器。
