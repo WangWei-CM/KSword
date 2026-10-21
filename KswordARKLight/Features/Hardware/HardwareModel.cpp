@@ -64,11 +64,15 @@ void AddProperty(HardwareDeviceDetail& detail, const std::wstring& name, const s
 HardwareModel::HardwareModel() = default;
 
 void HardwareModel::setDevices(std::vector<HardwareDeviceNode> devices) {
-    devices_ = std::move(devices);
+    devices_ = std::make_shared<const std::vector<HardwareDeviceNode>>(std::move(devices));
     rebuildRoots();
 }
 
 const std::vector<HardwareDeviceNode>& HardwareModel::devices() const {
+    return *devices_;
+}
+
+std::shared_ptr<const std::vector<HardwareDeviceNode>> HardwareModel::deviceSnapshot() const noexcept {
     return devices_;
 }
 
@@ -77,10 +81,10 @@ const std::vector<int>& HardwareModel::rootIndices() const {
 }
 
 const HardwareDeviceNode* HardwareModel::deviceAt(int index) const {
-    if (index < 0 || index >= static_cast<int>(devices_.size())) {
+    if (index < 0 || index >= static_cast<int>(devices_->size())) {
         return nullptr;
     }
-    return &devices_[index];
+    return &(*devices_)[index];
 }
 
 std::wstring HardwareModel::textForColumn(const HardwareDeviceNode& node, int column) const {
@@ -127,8 +131,8 @@ HardwareDeviceDetail HardwareModel::detailFromNode(const HardwareDeviceNode& nod
 
 HardwareAuditSummary HardwareModel::auditSummary() const {
     HardwareAuditSummary summary;
-    summary.totalDevices = devices_.size();
-    for (const HardwareDeviceNode& node : devices_) {
+    summary.totalDevices = devices_->size();
+    for (const HardwareDeviceNode& node : *devices_) {
         if (IsInputDevice(node)) {
             ++summary.inputDevices;
         }
@@ -158,7 +162,7 @@ HardwareAuditSummary HardwareModel::auditSummary() const {
 
 void HardwareModel::rebuildRoots() {
     rootIndices_.clear();
-    for (const HardwareDeviceNode& node : devices_) {
+    for (const HardwareDeviceNode& node : *devices_) {
         if (node.parentIndex < 0) {
             rootIndices_.push_back(node.index);
         }
