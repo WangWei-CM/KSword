@@ -4,6 +4,7 @@
 #include "../UI/AsyncCleanupRegistry.h"
 #include <mutex>
 #include <QImage>
+#include <QHideEvent>
 #include <QPixmap>
 #include <Objbase.h>
 
@@ -51,6 +52,7 @@ StartupDock::StartupDock(QWidget* parent)
 
 StartupDock::~StartupDock()
 {
+    m_filterRefreshTimer->stop();
     m_exportOperation->close();
     m_iconOperation->close();
     m_destroying.store(true);
@@ -154,6 +156,7 @@ void StartupDock::showEvent(QShowEvent* event)
 
     if (m_initialRefreshDone)
     {
+        ensureCurrentCategoryProjection();
         return;
     }
 
@@ -171,6 +174,40 @@ void StartupDock::showEvent(QShowEvent* event)
         {
             requestAsyncRefresh(true);
         });
+}
+
+void StartupDock::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    // Collection/archiving continues. Only the QObject/item projection yields while hidden.
+    if (m_tableRebuildInProgress)
+    {
+        m_tableRebuildTimer->stop();
+        m_projectionBuildActive = false;
+        finishIncrementalTableRebuild();
+    }
+}
+
+bool StartupDock::isCategoryProjectionReady(const StartupCategory category) const
+{
+    const auto index = static_cast<std::size_t>(category);
+    return index < m_renderedProjectionRevision.size()
+        && !m_filterRefreshPending && !m_projectionInvalidationPending
+        && m_renderedProjectionRevision[index] == m_projectionRevision
+        && !(m_tableRebuildInProgress && m_projectionBuildCategory == category);
+}
+
+void StartupDock::ensureCurrentCategoryProjection()
+{
+    if (m_destroying.load() || !isVisible()) return;
+    if (m_filterRefreshPending)
+    {
+        applyFilterAndRefresh();
+        return;
+    }
+    if (!isCategoryProjectionReady(currentCategory())
+        || (m_tableRebuildInProgress && m_projectionBuildCategory != currentCategory()))
+        rebuildAllTables(false, false);
 }
 
 StartupDock::StartupCategory StartupDock::currentCategory() const

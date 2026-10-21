@@ -245,7 +245,7 @@ void StartupDock::initializeConnections()
         });
     connect(m_filterEdit, &QLineEdit::textChanged, this, [this](const QString&)
         {
-            applyFilterAndRefresh();
+            scheduleFilterRefresh();
         });
     connect(m_hideMicrosoftCheck, &QCheckBox::toggled, this, [this](const bool)
         {
@@ -324,7 +324,7 @@ void StartupDock::showEntryContextMenu(
     QTableWidget* tableWidget,
     const QPoint& localPos)
 {
-    if (tableWidget == nullptr)
+    if (tableWidget == nullptr || !isCategoryProjectionReady(category))
     {
         return;
     }
@@ -519,6 +519,7 @@ void StartupDock::showEntryContextMenu(
 
 void StartupDock::showRegistryContextMenu(const QPoint& localPos)
 {
+    if (!isCategoryProjectionReady(StartupCategory::Registry)) return;
     if (m_registryTree == nullptr)
     {
         return;
@@ -810,14 +811,14 @@ void StartupDock::settleExportReceipt(const QString& errorText)
 {
     m_exportPendingReceipt = false;
     m_exportReceiptPath.clear();
-    if (m_exportButton) m_exportButton->setEnabled(!m_tableRebuildInProgress && !m_exportOperation->isInFlight());
+    if (m_exportButton) m_exportButton->setEnabled(isCategoryProjectionReady(currentCategory()) && !m_exportOperation->isInFlight());
     if (!errorText.isEmpty())
         QMessageBox::warning(this, startupText("startup.dialog.title", QStringLiteral("启动项")), errorText);
 }
 
 void StartupDock::reconcileExportReceipt()
 {
-    if (m_exportButton) m_exportButton->setEnabled(!m_tableRebuildInProgress && !m_exportOperation->isInFlight());
+    if (m_exportButton) m_exportButton->setEnabled(isCategoryProjectionReady(currentCategory()) && !m_exportOperation->isInFlight());
     if (m_exportPendingReceipt && !m_exportOperation->isInFlight())
         settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。"))
             + QLatin1Char('\n') + m_exportReceiptPath);
@@ -827,14 +828,14 @@ void StartupDock::exportCurrentView()
 {
     const QPointer<StartupDock> guarded(this);
     reconcileExportReceipt();
-    if (!guarded || m_tableRebuildInProgress || m_exportOperation->isInFlight()) return;
+    if (!guarded || !isCategoryProjectionReady(currentCategory()) || m_exportOperation->isInFlight()) return;
     const QString outputPath = QFileDialog::getSaveFileName(this,
         startupText("startup.dialog.export.title", QStringLiteral("导出启动项")), QStringLiteral("StartupEntries.txt"),
         QStringLiteral("Text Files (*.txt);;All Files (*.*)"));
     if (!guarded || outputPath.trimmed().isEmpty()) return;
     reconcileExportReceipt();
     if (!guarded) return;
-    if (m_tableRebuildInProgress || m_exportOperation->isInFlight())
+    if (!isCategoryProjectionReady(currentCategory()) || m_exportOperation->isInFlight())
     {
         QMessageBox::warning(this, startupText("startup.dialog.title", QStringLiteral("启动项")),
             ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
@@ -932,6 +933,16 @@ void StartupDock::exportCurrentView()
         });
     if (!ticket && guarded && m_exportPendingReceipt)
         settleExportReceipt(ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
+}
+
+void StartupDock::scheduleFilterRefresh()
+{
+    m_filterRefreshPending = true;
+    m_filterRefreshTimer->start();
+    if (m_exportButton) m_exportButton->setEnabled(false);
+    if (m_copyButton) m_copyButton->setEnabled(false);
+    if (auto* table = currentCategoryTable()) table->setEnabled(false);
+    else if (m_registryTree) m_registryTree->setEnabled(false);
 }
 
 void StartupDock::applyFilterAndRefresh()
@@ -1564,6 +1575,7 @@ void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
 
 int StartupDock::findEntryIndexByTableRow(const StartupCategory category, const int row) const
 {
+    if (!isCategoryProjectionReady(category)) return -1;
     QTableWidget* tableWidget = nullptr;
     switch (category)
     {

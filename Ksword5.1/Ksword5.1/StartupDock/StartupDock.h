@@ -18,7 +18,8 @@
 #include <QSet>
 #include <QWidget>
 
-#include <atomic>   // std::atomic_bool：后台刷新运行状态。
+#include <atomic>
+#include <array>   // std::atomic_bool：后台刷新运行状态。
 #include <cstddef>  // std::size_t：分批落表进度坐标。
 #include <cstdint>  // std::uint32_t：PID、状态值与标识字段。
 #include <deque>    // std::deque：按枚举完成顺序缓存阶段结果。
@@ -35,6 +36,7 @@ class QLineEdit;
 class QPushButton;
 class QEvent;
 class QShowEvent;
+class QHideEvent;
 class QTabWidget;
 class QTableWidget;
 class QTableWidgetItem;
@@ -68,6 +70,7 @@ protected:
     // - 避免主窗口启动阶段被启动项全量扫描阻塞。
     void showEvent(QShowEvent* event) override;
     void changeEvent(QEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 public:
     // StartupCategory：
@@ -179,7 +182,10 @@ private:
     void processNextRefreshStageResult();
     void markBackendEnumerationCompleted();
     void completeRefreshAfterUiCommit();
-    void rebuildAllTables(bool processesRefreshStage = false);
+    void rebuildAllTables(bool processesRefreshStage = false, bool invalidateProjection = true);
+    void ensureCurrentCategoryProjection();
+    bool isCategoryProjectionReady(StartupCategory category) const;
+    void scheduleFilterRefresh();
     void continueIncrementalTableRebuild();
     void finishIncrementalTableRebuild();
     void initializeRegistryTreeGroup(RegistryGroupRebuildTarget* target);
@@ -283,6 +289,14 @@ private:
     bool m_iconDrainScheduled = false;
     QHash<QString, QIcon> m_iconCache;        // m_iconCache：路径到图标缓存。
     QTimer* m_refreshTimer = nullptr;         // m_refreshTimer：自动刷新定时器。
+    QTimer* m_filterRefreshTimer = nullptr;
+    bool m_filterRefreshPending = false;
+    bool m_projectionInvalidationPending = false;
+    quint64 m_projectionRevision = 1;
+    std::array<quint64, 9> m_renderedProjectionRevision{};
+    StartupCategory m_projectionBuildCategory = StartupCategory::All;
+    quint64 m_projectionBuildRevision = 0;
+    bool m_projectionBuildActive = false;
     QTimer* m_tableRebuildTimer = nullptr;    // m_tableRebuildTimer：分时落表调度器。
     std::vector<TableRebuildTarget> m_tableRebuildTargets; // m_tableRebuildTargets：待分批填充的表格。
     std::vector<RegistryGroupRebuildTarget> m_registryRebuildTargets; // m_registryRebuildTargets：待分批填充的注册表分组。

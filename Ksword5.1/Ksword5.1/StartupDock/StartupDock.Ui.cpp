@@ -4,6 +4,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
@@ -188,6 +189,14 @@ void StartupDock::initializeUi()
         this,
         &StartupDock::continueIncrementalTableRebuild);
 
+    m_filterRefreshTimer = new QTimer(this);
+    m_filterRefreshTimer->setSingleShot(true);
+    m_filterRefreshTimer->setInterval(120);
+    connect(m_filterRefreshTimer, &QTimer::timeout, this, &StartupDock::applyFilterAndRefresh);
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        ensureCurrentCategoryProjection();
+    });
+
     m_rootLayout->addWidget(m_toolbarWidget, 0);
     m_rootLayout->addWidget(m_sideTabWidget, 1);
     // 工具条和分类Tab共同组成整页，外角放在页根并沿用原四边4px。
@@ -341,16 +350,40 @@ void StartupDock::applyTranslatedHeaders()
     }
 }
 
-void StartupDock::rebuildAllTables(const bool processesRefreshStage)
+void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool invalidateProjection)
 {
     if (m_tableRebuildTimer == nullptr || m_destroying.load())
     {
         return;
     }
 
-    // 结果对象只能在 UI 线程创建，但不能再用一个长循环独占事件循环。
-    // 每次过滤、语言切换或新快照到达都会重建工作队列；零间隔单次定时器
-    // 让主窗口在两个短时间片之间继续处理绘制、拖动和 Dock 切换。
+    m_projectionInvalidationPending = m_projectionInvalidationPending || invalidateProjection;
+    m_tableRebuildProcessesRefreshStage = m_tableRebuildProcessesRefreshStage || processesRefreshStage;
+    const QList<QAbstractItemView*> startupViews = {
+        m_allTable, m_logonTable, m_servicesTable, m_driversTable, m_tasksTable,
+        m_imageHijackTable, m_wmiTable, m_hiddenTable, m_registryTree
+    };
+    const QPointer<StartupDock> guarded(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+        QStringLiteral("startup-current-projection-rebuild"), startupViews,
+        [guarded, processesRefreshStage, invalidateProjection]() {
+            if (guarded) guarded->rebuildAllTables(processesRefreshStage, invalidateProjection);
+        })) return;
+
+    m_filterRefreshTimer->stop();
+    if (m_projectionInvalidationPending)
+    {
+        m_projectionInvalidationPending = false;
+        ++m_projectionRevision;
+        m_filterRefreshPending = false;
+    }
+    m_projectionBuildActive = false;
+    m_projectionBuildCategory = currentCategory();
+    m_projectionBuildRevision = m_projectionRevision;
+    // Retain hidden projections as disabled, stale views of the canonical snapshot.
+    // They are rebuilt only when selected; no hidden row/tree allocation here.
+    for (QAbstractItemView* view : startupViews) if (view) view->setEnabled(false);
+
     m_tableRebuildTimer->stop();
     m_tableRebuildProcessesRefreshStage =
         m_tableRebuildProcessesRefreshStage || processesRefreshStage;
@@ -372,6 +405,13 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
     {
         m_copyButton->setEnabled(false);
     }
+
+    if (!isVisible() || m_renderedProjectionRevision[static_cast<std::size_t>(currentCategory())] == m_projectionRevision)
+    {
+        finishIncrementalTableRebuild();
+        return;
+    }
+    m_projectionBuildActive = true;
 
     const std::array<std::pair<StartupCategory, QTableWidget*>, 8> allTableTargets{
         std::pair{ StartupCategory::All, m_allTable },
@@ -428,7 +468,7 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
         m_tableRebuildTargets.push_back(std::move(target));
     };
 
-    // 先填充用户当前看见的分类；剩余分类继续在后续时间片中完成。
+    // Only the selected category owns an item projection for this revision.
     for (const auto& [category, tableWidget] : allTableTargets)
     {
         if (category == visibleCategory)
@@ -437,12 +477,7 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
             break;
         }
     }
-    for (const auto& [category, tableWidget] : allTableTargets)
-    {
-        appendTableTarget(category, tableWidget);
-    }
-
-    if (m_registryTree != nullptr)
+    if (m_registryTree != nullptr && visibleCategory == StartupCategory::Registry)
     {
         m_registryTree->setEnabled(false);
         m_registryTree->clear();
@@ -697,40 +732,26 @@ void StartupDock::finishIncrementalTableRebuild()
 {
     const bool processesRefreshStage = m_tableRebuildProcessesRefreshStage;
     m_tableRebuildInProgress = false;
+    if (m_projectionBuildActive && m_projectionBuildRevision == m_projectionRevision)
+        m_renderedProjectionRevision[static_cast<std::size_t>(m_projectionBuildCategory)] = m_projectionRevision;
+    m_projectionBuildActive = false;
     m_tableRebuildProcessesRefreshStage = false;
     m_rebuildRegistryFirst = false;
     m_tableRebuildTargets.clear();
     m_registryRebuildTargets.clear();
 
-    const std::array<QTableWidget*, 8> tableList{
-        m_allTable,
-        m_logonTable,
-        m_servicesTable,
-        m_driversTable,
-        m_tasksTable,
-        m_imageHijackTable,
-        m_wmiTable,
-        m_hiddenTable
+    const std::array<std::pair<StartupCategory, QTableWidget*>, 8> tableList{
+        std::pair{StartupCategory::All, m_allTable}, std::pair{StartupCategory::Logon, m_logonTable},
+        std::pair{StartupCategory::Services, m_servicesTable}, std::pair{StartupCategory::Drivers, m_driversTable},
+        std::pair{StartupCategory::Tasks, m_tasksTable}, std::pair{StartupCategory::ImageHijack, m_imageHijackTable},
+        std::pair{StartupCategory::Wmi, m_wmiTable}, std::pair{StartupCategory::Hidden, m_hiddenTable}
     };
-    for (QTableWidget* tableWidget : tableList)
-    {
-        if (tableWidget != nullptr)
-        {
-            tableWidget->setEnabled(true);
-        }
-    }
-    if (m_registryTree != nullptr)
-    {
-        m_registryTree->setEnabled(true);
-    }
-    if (m_exportButton != nullptr)
-    {
-        m_exportButton->setEnabled(!m_exportOperation->isInFlight());
-    }
-    if (m_copyButton != nullptr)
-    {
-        m_copyButton->setEnabled(true);
-    }
+    for (const auto& [category, tableWidget] : tableList)
+        if (tableWidget) tableWidget->setEnabled(isCategoryProjectionReady(category));
+    if (m_registryTree) m_registryTree->setEnabled(isCategoryProjectionReady(StartupCategory::Registry));
+    const bool ready = isCategoryProjectionReady(currentCategory());
+    if (m_exportButton) m_exportButton->setEnabled(ready && !m_exportOperation->isInFlight());
+    if (m_copyButton) m_copyButton->setEnabled(ready);
 
     if (processesRefreshStage)
     {
@@ -873,7 +894,7 @@ bool StartupDock::isRegistryBackedStartupEntry(const StartupEntry& entry) const
 
 int StartupDock::findEntryIndexByRegistryTreeItem(const QTreeWidgetItem* treeItem) const
 {
-    if (treeItem == nullptr)
+    if (treeItem == nullptr || !isCategoryProjectionReady(StartupCategory::Registry))
     {
         return -1;
     }
