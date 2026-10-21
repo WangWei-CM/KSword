@@ -467,22 +467,27 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
     {
         if (m_ssdtTable->property(KernelSearchLanguageProperty).toString() != language)
         {
+            resetKernelResultFilterCache(m_ssdtTable);
             for (int row = 0; row < m_ssdtTable->rowCount(); ++row)
             {
                 auto* item = m_ssdtTable->item(row, 0);
                 if (item == nullptr) continue;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_ssdtRows.size())
+                {
                     item->setData(KernelSearchFieldsRole, searchFields(m_ssdtRows[sourceIndex]));
+                    rememberKernelResultFilterRow(m_ssdtTable, row);
+                }
             }
             m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
         }
-        applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
+        applyKernelResultFilterAsync(m_ssdtTable, m_ssdtFilterEdit);
         return;
     }
 
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
     m_ssdtTable->setSortingEnabled(false);
+    resetKernelResultFilterCache(m_ssdtTable);
     m_ssdtTable->setRowCount(0);
 
     for (std::size_t sourceIndex = 0; sourceIndex < m_ssdtRows.size(); ++sourceIndex)
@@ -521,6 +526,7 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
         m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
         m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
         m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
+        rememberKernelResultFilterRow(m_ssdtTable, rowIndex);
     }
 
     m_ssdtTable->setSortingEnabled(true);

@@ -2,6 +2,7 @@
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/ThemeItemForeground.h"
 
@@ -20,6 +21,8 @@
 #include "../theme.h"
 
 #include <QBrush>
+#include <QElapsedTimer>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -747,6 +750,208 @@ void KernelDock::selectFirstObjectNamespaceEntryItem()
     m_objectNamespaceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.object_namespace.empty.tree", QStringLiteral("当前对象命名空间树为空。"))));
 }
 
+struct KernelDock::KernelResultFilterProjection
+{
+    QPointer<QTableWidget> table;
+    QPointer<QLineEdit> edit;
+    QPointer<ks::ui::AsyncOperation> operation;
+    QString keyword;
+    quint64 sourceRevision = 0;
+    std::uint64_t ticket = 0;
+    quint64 layoutRevision = 0;
+    QVector<QPersistentModelIndex> identities;
+    QVector<quint8> matches;
+    QPersistentModelIndex separator;
+    QSet<QPersistentModelIndex> excluded;
+    qsizetype cursor = 0;
+    bool hasDeferredMatch = false;
+};
+
+int KernelDock::kernelResultFilterSlot(const QTableWidget* table) const
+{
+    const std::array<const QTableWidget*, 7> tables{m_atomTable, m_ssdtTable,
+        m_shadowSsdtTable, m_inlineHookTable, m_iatEatHookTable, m_timerDpcTable, m_callbackEnumTable};
+    for (std::size_t index = 0; index < tables.size(); ++index)
+        if (table != nullptr && table == tables[index]) return static_cast<int>(index);
+    return -1;
+}
+
+void KernelDock::resetKernelResultFilterCache(QTableWidget* table)
+{
+    const int slot = kernelResultFilterSlot(table);
+    if (slot < 0) return;
+    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
+    ++cache.revision;
+    if (cache.operation) cache.operation->cancel();
+    cache.fields = {};
+    cache.identities = {};
+}
+
+void KernelDock::rememberKernelResultFilterRow(QTableWidget* table, const int row)
+{
+    const int slot = kernelResultFilterSlot(table);
+    if (slot < 0 || table->item(row, 0) == nullptr) return;
+    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
+    cache.fields.push_back(table->item(row, 0)->data(KernelSearchFieldsRole).toStringList());
+    cache.identities.push_back(QPersistentModelIndex(table->model()->index(row, 0)));
+}
+
+void KernelDock::applyKernelResultFilterAsync(QTableWidget* table, QLineEdit* edit, const int separatorRow)
+{
+    const int slot = kernelResultFilterSlot(table);
+    if (slot < 0 || edit == nullptr) return;
+    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
+    const QString keyword = edit->text().trimmed();
+    if (keyword.isEmpty())
+    {
+        if (cache.operation) cache.operation->cancel();
+        // Keep the existing constant-work clear-filter and separator semantics.
+        applyKernelResultFilter(table, edit, separatorRow);
+        return;
+    }
+    if (!cache.operation) cache.operation = new ks::ui::AsyncOperation(table);
+    struct Request { QString keyword; QVector<QStringList> fields; };
+    using Result = QVector<quint8>;
+    const auto identities = cache.identities; // GUI only; never part of Request/worker.
+    const auto sourceRevision = cache.revision;
+    const QPersistentModelIndex separator = separatorRow >= 0
+        ? QPersistentModelIndex(table->model()->index(separatorRow, 0)) : QPersistentModelIndex();
+    const QPointer<KernelDock> owner(this);
+    const QPointer<QTableWidget> tableGuard(table);
+    const QPointer<QLineEdit> editGuard(edit);
+    cache.operation->submit<Request, Result>(Request{keyword, cache.fields},
+        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
+            Result matches;
+            matches.reserve(request.fields.size());
+            for (qsizetype index = 0; index < request.fields.size(); ++index)
+            {
+                if ((index & 255) == 0 && token.isCanceled()) return Result{};
+                const auto& fields = request.fields[index];
+                matches.push_back(std::any_of(fields.cbegin(), fields.cend(), [&request](const QString& field) {
+                    return field.contains(request.keyword, Qt::CaseInsensitive);
+                }) ? 1 : 0);
+            }
+            return matches;
+        },
+        [this, owner, tableGuard, editGuard, identities, sourceRevision, keyword, separator]
+        (const Result& matches, const std::uint64_t ticket) {
+            if (!owner || !tableGuard || !editGuard || matches.size() != identities.size()) return true;
+            const int currentSlot = kernelResultFilterSlot(tableGuard);
+            if (currentSlot < 0) return true;
+            const auto& current = m_kernelResultFilterCaches[static_cast<std::size_t>(currentSlot)];
+            if (current.revision != sourceRevision || editGuard->text().trimmed() != keyword) return true;
+            auto projection = std::make_shared<KernelResultFilterProjection>();
+            projection->table = tableGuard;
+            projection->edit = editGuard;
+            projection->operation = current.operation;
+            projection->keyword = keyword;
+            projection->sourceRevision = sourceRevision;
+            projection->ticket = ticket;
+            projection->layoutRevision = ks::ui::TableRowFilterIdentityRevision(tableGuard);
+            projection->identities = identities;
+            projection->matches = matches;
+            projection->separator = separator;
+            // Queue even a small result so AsyncOperation has entered awaitingCommit.
+            QTimer::singleShot(0, this, [this, projection]() { continueKernelResultFilter(projection); });
+            return false;
+        },
+        [](std::exception_ptr) {
+            // Keep the last complete accepted filter; never publish a partial/error set.
+            // The next input/source request can retry through the same operation.
+        });
+}
+
+void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFilterProjection>& projection)
+{
+    if (!projection->operation) return;
+    const auto finish = [&projection]() { if (projection->operation) projection->operation->completeDeferred(projection->ticket); };
+    if (!projection->table || !projection->edit || !projection->operation->isCurrent(projection->ticket))
+    {
+        finish();
+        return;
+    }
+    auto* table = projection->table.data();
+    const int slot = kernelResultFilterSlot(table);
+    if (slot < 0 || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision
+        || projection->edit->text().trimmed() != projection->keyword)
+    {
+        finish();
+        return;
+    }
+    const QPointer<KernelDock> owner(this);
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(table,
+        QStringLiteral("kernel_result_filter_async"), {table}, [owner, projection]() {
+            if (owner) owner->continueKernelResultFilter(projection);
+        })) return;
+    if (!owner || !projection->table || !projection->edit || !projection->operation) return;
+    if (!projection->operation->isCurrent(projection->ticket)
+        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision
+        || projection->edit->text().trimmed() != projection->keyword) { finish(); return; }
+
+    const quint64 layoutRevision = ks::ui::TableRowFilterIdentityRevision(table);
+    if (projection->layoutRevision != layoutRevision)
+    {
+        // Sorting preserves the captured identities. Restart only the bounded GUI
+        // identity pass so the separator still follows its original physical-row rule.
+        projection->layoutRevision = layoutRevision;
+        projection->cursor = 0;
+        projection->excluded.clear();
+        projection->hasDeferredMatch = false;
+    }
+    QElapsedTimer budget;
+    budget.start();
+    int accepted = 0;
+    while (projection->cursor < projection->identities.size()
+        && accepted < 256 && budget.nsecsElapsed() < 4'000'000)
+    {
+        const qsizetype index = projection->cursor++;
+        const auto& identity = projection->identities[index];
+        if (!identity.isValid() || identity.model() != table->model())
+        {
+            finish();
+            return;
+        }
+        if (!projection->matches[index]) projection->excluded.insert(identity);
+        else if (projection->separator.isValid() && identity.row() > projection->separator.row())
+            projection->hasDeferredMatch = true;
+        ++accepted;
+    }
+    if (projection->cursor < projection->identities.size())
+    {
+        QTimer::singleShot(0, this, [this, projection]() { continueKernelResultFilter(projection); });
+        return;
+    }
+    if (projection->separator.isValid() && !projection->hasDeferredMatch)
+        projection->excluded.insert(projection->separator);
+    ks::ui::SetTableRowFilterBusinessOwnership(table,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    if (!owner || !projection->table || !projection->edit || !projection->operation) { finish(); return; }
+    if (!projection->operation->isCurrent(projection->ticket)
+        || projection->edit->text().trimmed() != projection->keyword
+        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision)
+    { finish(); return; }
+    ks::ui::ApplyTableRowFilterIncrementally(table, projection->excluded);
+    if (!owner || !projection->table || !projection->edit || !projection->operation) { finish(); return; }
+    if (!projection->operation->isCurrent(projection->ticket)
+        || projection->edit->text().trimmed() != projection->keyword
+        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision)
+    { finish(); return; }
+    // Same canonical deselection as the original synchronous helper.
+    if (const QPointer<QItemSelectionModel> selection = table->selectionModel())
+    {
+        QItemSelection deselect;
+        for (const QModelIndex& index : selection->selectedRows())
+            if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
+                deselect.select(table->model()->index(index.row(), 0),
+                    table->model()->index(index.row(), table->columnCount() - 1));
+        if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
+        if (!owner || !projection->table || !selection) { finish(); return; }
+        if (ks::ui::IsTableRowExcludedByFilter(table, table->currentRow()))
+            selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+    }
+    finish();
+}
+
 void KernelDock::rebuildAtomTable(const bool sourceChanged)
 {
     if (m_atomTable == nullptr)
@@ -762,22 +967,27 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
     {
         if (m_atomTable->property(KernelSearchLanguageProperty).toString() != language)
         {
+            resetKernelResultFilterCache(m_atomTable);
             for (int row = 0; row < m_atomTable->rowCount(); ++row)
             {
                 auto* item = m_atomTable->item(row, 0);
                 if (item == nullptr) continue;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_atomRows.size())
+                {
                     item->setData(KernelSearchFieldsRole, searchFields(m_atomRows[sourceIndex]));
+                    rememberKernelResultFilterRow(m_atomTable, row);
+                }
             }
             m_atomTable->setProperty(KernelSearchLanguageProperty, language);
         }
-        applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
+        applyKernelResultFilterAsync(m_atomTable, m_atomFilterEdit);
         return;
     }
 
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
     m_atomTable->setSortingEnabled(false);
+    resetKernelResultFilterCache(m_atomTable);
     m_atomTable->setRowCount(0);
 
     for (std::size_t sourceIndex = 0; sourceIndex < m_atomRows.size(); ++sourceIndex)
@@ -815,6 +1025,7 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
         m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
         m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
         m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
+        rememberKernelResultFilterRow(m_atomTable, rowIndex);
     }
 
     m_atomTable->setSortingEnabled(true);

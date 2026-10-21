@@ -2506,16 +2506,20 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
     {
         if (m_callbackEnumTable->property(KernelSearchLanguageProperty).toString() != language)
         {
+            resetKernelResultFilterCache(m_callbackEnumTable);
             for (int row = 0; row < m_callbackEnumTable->rowCount(); ++row)
             {
                 auto* item = m_callbackEnumTable->item(row, 0);
                 std::size_t sourceIndex = 0U;
                 if (callbackEnumReadSourceIndex(item, m_callbackEnumRows.size(), sourceIndex))
+                {
                     item->setData(KernelSearchFieldsRole, searchFields(m_callbackEnumRows[sourceIndex]));
+                    rememberKernelResultFilterRow(m_callbackEnumTable, row);
+                }
             }
             m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
         }
-        applyKernelResultFilter(m_callbackEnumTable, m_callbackEnumFilterEdit, m_callbackEnumSeparatorIndex.row());
+        applyKernelResultFilterAsync(m_callbackEnumTable, m_callbackEnumFilterEdit, m_callbackEnumSeparatorIndex.row());
         m_minifilterCallbackFilterDirty = true;
         prepareMinifilterCallbackTree();
         return;
@@ -2524,6 +2528,7 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
     m_minifilterCallbackSourceDirty = true;
     m_callbackEnumSeparatorIndex = QPersistentModelIndex();
     m_callbackEnumTable->setSortingEnabled(false);
+    resetKernelResultFilterCache(m_callbackEnumTable);
     m_callbackEnumTable->setRowCount(0);
 
     std::vector<std::size_t> successfulSourceIndices;
@@ -2614,6 +2619,7 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileVersion), fileVersionItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileDescription), fileDescriptionItem);
         m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Altitude), altitudeItem);
+        rememberKernelResultFilterRow(m_callbackEnumTable, rowIndex);
     };
 
     for (const std::size_t sourceIndex : successfulSourceIndices)

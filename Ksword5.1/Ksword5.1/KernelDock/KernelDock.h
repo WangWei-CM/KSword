@@ -18,6 +18,9 @@
 #include <QString>
 #include <QPointer>
 #include <QPersistentModelIndex>
+#include <QVector>
+#include <QStringList>
+#include <memory>
 #include <array>
 #include "../UI/PageNavigationCatalog.h"
 
@@ -38,6 +41,7 @@ namespace ksword::kernel_dock_internal
 }
 
 namespace ksword::kernel_navigation { class Registry; }
+namespace ks::ui { class AsyncOperation; }
 
 // Qt 前置声明：减少头文件耦合。
 class QPoint;
@@ -808,6 +812,23 @@ private:
     static constexpr auto KernelSearchLanguageProperty = "ksword_kernel_search_language";
     void applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, int separatorRow = -1);
     int firstKernelResultRow(const QTableWidget* table) const;
+    // Cached fields/identities are built only with source/language items. Workers
+    // read QStringList values; persistent indexes remain exclusively on the GUI.
+    struct KernelResultFilterCache
+    {
+        QPointer<ks::ui::AsyncOperation> operation;
+        quint64 revision = 0;
+        QVector<QStringList> fields;
+        QVector<QPersistentModelIndex> identities;
+    };
+    struct KernelResultFilterProjection;
+    std::array<KernelResultFilterCache, 7> m_kernelResultFilterCaches;
+    int kernelResultFilterSlot(const QTableWidget* table) const;
+    void resetKernelResultFilterCache(QTableWidget* table);
+    void rememberKernelResultFilterRow(QTableWidget* table, int row);
+    void applyKernelResultFilterAsync(QTableWidget* table, QLineEdit* edit, int separatorRow = -1);
+    void continueKernelResultFilter(const std::shared_ptr<KernelResultFilterProjection>& projection);
+
 
     // rebuildNtQueryTable：
     // - 作用：重建历史 NtQuery 结果表格。
