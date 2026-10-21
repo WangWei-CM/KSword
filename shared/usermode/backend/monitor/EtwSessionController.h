@@ -56,6 +56,10 @@ public:
 
     // stop requests ProcessTrace shutdown and releases ETW handles. No input.
     void stop();
+    // Exact retirement receipt: failed STOP/CloseTrace retains its original
+    // resource identity and returns false, so the value owner can retry safely.
+    bool stopChecked();
+    bool cleanupPending() const noexcept { return cleanupPending_.load(std::memory_order_acquire); }
 
     // running reports whether the controller currently owns an active session.
     bool running() const;
@@ -72,7 +76,7 @@ private:
     void publishStatus(const std::wstring& text);
     void publishLastError(const std::wstring& text);
     void stopOwnedSession();
-    void closeConsumer();
+    bool closeConsumer();
 
     mutable std::mutex mutex_;
     EventCallback eventCallback_;
@@ -86,6 +90,8 @@ private:
     EtwSessionEvidence evidence_;
     std::thread workerThread_;
     std::atomic<bool> running_{ false };
+    std::atomic_bool consumerFinished_{true};
+    std::atomic_bool cleanupPending_{false};
     std::atomic<bool> stopRequested_{ false };
 };
 
