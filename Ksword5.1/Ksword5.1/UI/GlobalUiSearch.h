@@ -90,8 +90,9 @@ namespace ks::ui
         using DockListProvider = std::function<QList<ads::CDockWidget*>()>;
         // DockPreparer：确保 Dock 懒加载内容已初始化（重入安全）。
         using DockPreparer = std::function<void(ads::CDockWidget*)>;
-        // NestedDockPreparer：在搜索前准备 Dock 内部的懒 Tab，登记真实嵌套导航目标。
-        using NestedDockPreparer = std::function<void(ads::CDockWidget*)>;
+        // CurrentPage prepares the selected branch; Global retains complete
+        // discovery until a source proves searchable body coverage.
+        using NestedDockPreparer = std::function<void(ads::CDockWidget*, UiSearchScope)>;
         // DockActivator：把 Dock 置前并设为当前页签（含关闭态恢复）。
         using DockActivator = std::function<void(ads::CDockWidget*)>;
 

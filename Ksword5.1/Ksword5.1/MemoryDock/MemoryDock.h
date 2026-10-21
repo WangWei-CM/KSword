@@ -146,7 +146,7 @@ public:
     // - 返回：true=已跳转；false=工作台不可用或被拒绝（原因在工作台状态条里）。
     bool openAddressInWorkbench(std::uint64_t address, bool kernelAddress = false);
     // prepareNavigationPages：按需准备工作台与内存调试页的真实控件树，供全局导航索引。
-    void prepareNavigationPages();
+    void prepareNavigationPages(bool currentPageOnly = false);
     static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr);
     QWidget* activateNavigationDescriptor(const QString& id);
     std::function<void(const QString&)> openPoolModuleDetails;

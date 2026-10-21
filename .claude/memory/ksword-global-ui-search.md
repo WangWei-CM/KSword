@@ -49,3 +49,9 @@
 `tools/Invoke-SearchHistoryUiTests.ps1` 在既有构建日志目录编译真实 CustomTitleBar、GlobalUiSearch、TableSearchSupport、CommandExecutionPopup 和 LanguageManager，CMD执行请求只接记录槽。当前128条离屏断言覆盖双向四节点、菜单/修饰键/弹层字段Tab、Enter/Esc、真实防抖后过滤快照恢复、空查询和未提交分片的取消；不运行真实命令或驱动。
 
 修饰键Tab按Qt正常焦点顺序移动时，当前表格上下文和名称可合法变化；范围不变应断言popup QTabBar索引，不能冻结包含动态表名的searchScopeDisplayText。切回搜索须同步空字符串，否则旧pending query可能重新启动；取消必须同时停止debounce、增加扫描代数并恢复原隐藏行快照。
+
+## 当前页面搜索的惰性范围（2026-10-21）
+
+- 当前页只搜索实际可见分支，不应为它构造所有隐藏的Memory/Misc子页。NestedDockPreparer传实际UiSearchScope，MainWindow将CurrentPage映射到prepareNavigationPages(true)，只保证当前根及其工作台/调试视图已准备。此路径不置全局prepared，之后全范围搜索仍完整准备全部原分支；Taskbar兼容路由及旧调用默认false。
+- 现有DockSearchCursor仍按64节点/4ms目标和完整表格游标恢复，保留当前可见性、字段、索引和查询代次；本步未改匹配/排序/过滤/高亮导航。全范围冷正文仍缺完整值索引，不能据此将searchComplete置true或关闭GN-009/FP-003。
+- 133项QtCore检查抽取真实Memory/Misc/MainWindow方法、原MainWindow搜索lambda与冻结旧路径；验证全范围调用等价、当前页0个无关工厂及构造中销毁/换页保护。实际产品GUI、语言/主题与可见正文仍由用户验收；未运行窗口、业务或驱动。

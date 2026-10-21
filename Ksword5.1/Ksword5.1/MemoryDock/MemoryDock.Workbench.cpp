@@ -75,8 +75,19 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
-void MemoryDock::prepareNavigationPages()
+void MemoryDock::prepareNavigationPages(const bool currentPageOnly)
 {
+    if (currentPageOnly)
+    {
+        const QPointer<MemoryDock> owner(this);
+        ensureCurrentLazyPage();
+        if (!owner || !m_tabWidget) { return; }
+        const QPointer<QWidget> current(m_tabWidget->currentWidget());
+        if (current && current == m_tabWorkbench) { ensureWorkbenchView(); }
+        if (!owner || !current || !m_tabWidget || m_tabWidget->currentWidget() != current) { return; }
+        if (current == m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
+        return;
+    }
     if (m_navigationPagesPrepared || m_tabWidget == nullptr)
     {
         return;

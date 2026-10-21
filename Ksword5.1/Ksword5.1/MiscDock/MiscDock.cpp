@@ -451,8 +451,13 @@ void MiscDock::activateTabByIndex(const int tabIndex)
     m_mainTabWidget->setCurrentIndex(tabIndex);
 }
 
-void MiscDock::prepareNavigationPages()
+void MiscDock::prepareNavigationPages(const bool currentPageOnly)
 {
+    if (currentPageOnly)
+    {
+        if (m_mainTabWidget) { ensureTabInitialized(m_mainTabWidget->currentIndex(), false); }
+        return;
+    }
     if (m_navigationPagesPrepared || m_mainTabWidget == nullptr)
     {
         return;

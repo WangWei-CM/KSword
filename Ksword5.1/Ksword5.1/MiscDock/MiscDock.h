@@ -65,7 +65,7 @@ public:
 
     // prepareNavigationPages：按需构造可见的嵌套页，供全局搜索/Taskbar 目录建立真实路由。
     // 只执行一次，不改变当前页签；不调用“首次激活”回调，避免目录请求启动轮询。
-    void prepareNavigationPages();
+    void prepareNavigationPages(bool currentPageOnly = false);
 
 private:
     int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
