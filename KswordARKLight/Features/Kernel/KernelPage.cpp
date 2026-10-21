@@ -6024,20 +6024,25 @@ void KernelPage::PumpObjectTreeProjection() {
     Ksword::Ui::BackgroundWorkRegistry::global().retry();
     if(commit->replacement) {
         if(!RetireKernelTreeValues(commit->projection))return;
-        commit->projection=std::move(commit->replacement);commit->adopted=false;commit->next=0;
+        commit->projection=std::move(commit->replacement);commit->adopted=false;commit->next=0;commit->deleteCursor=nullptr;commit->oldTreeEmpty=false;
     }
     auto projection=commit->projection;if(!projection)return;
     const auto started=::GetTickCount64();unsigned work=0;
     if(!commit->adopted) {
         // Delete only leaves. A single TVM_DELETEITEM must never recursively
         // erase an unbounded old subtree in one UI callback.
-        while(work<128 && ::GetTickCount64()-started<4) {
-            auto item=TreeView_GetRoot(objectNamespaceTree_);if(!item)break;
-            while(const auto child=TreeView_GetChild(objectNamespaceTree_,item))item=child;
-            if(!TreeView_DeleteItem(objectNamespaceTree_,item))return;
-            ++work;
+        while(work+4<=128 && ::GetTickCount64()-started<4) {
+            if(!commit->deleteCursor) {
+                commit->deleteCursor=TreeView_GetRoot(objectNamespaceTree_);++work;
+                if(!commit->deleteCursor){commit->oldTreeEmpty=true;break;}
+            }
+            const auto child=TreeView_GetChild(objectNamespaceTree_,commit->deleteCursor);++work;
+            if(child){commit->deleteCursor=child;continue;}
+            const auto parent=TreeView_GetParent(objectNamespaceTree_,commit->deleteCursor);++work;
+            if(!TreeView_DeleteItem(objectNamespaceTree_,commit->deleteCursor))return;
+            ++work;commit->deleteCursor=parent;
         }
-        if(TreeView_GetRoot(objectNamespaceTree_))return;
+        if(!commit->oldTreeEmpty)return;
         // This result already passed source/request validation before Begin.
         // Complete that accepted model while a newer worker is pending. Only
         // another validated Begin replaces it; worker failure leaves a complete
@@ -6048,18 +6053,18 @@ void KernelPage::PumpObjectTreeProjection() {
         objectNamespaceProjection_=projection;objectNamespaceTreeFeatureId_=descriptor->id;hasObjectNamespaceTreeFeatureId_=true;
         commit->adopted=true;
     }
-    while(commit->next<projection->treeNodes.size() && work<128 && ::GetTickCount64()-started<4) {
+    while(commit->next<projection->treeNodes.size() && work+2<=128 && ::GetTickCount64()-started<4) {
         const auto index=commit->next;const auto& node=projection->treeNodes[index];
         TVINSERTSTRUCTW insert{};insert.hInsertAfter=TVI_LAST;
         insert.hParent=node.parent?reinterpret_cast<HTREEITEM>(projection->nativeTreeHandles[node.parent-1]):TVI_ROOT;
         insert.item.mask=TVIF_TEXT|TVIF_PARAM;insert.item.pszText=const_cast<LPWSTR>(node.text.c_str());insert.item.lParam=reinterpret_cast<LPARAM>(node.state.get());
-        const auto item=TreeView_InsertItem(objectNamespaceTree_,&insert);
+        const auto item=TreeView_InsertItem(objectNamespaceTree_,&insert);++work;
         if(!item){::SetTimer(hwnd_,kTimerObjectTreeProjection,100,nullptr);return;}
         projection->nativeTreeHandles[index]=reinterpret_cast<std::uintptr_t>(item);
-        if(node.parent && projection->treeNodes[node.parent-1].expand)TreeView_Expand(objectNamespaceTree_,insert.hParent,TVE_EXPAND);
-        ++commit->next;++work;
+        if(node.parent && projection->treeNodes[node.parent-1].expand){TreeView_Expand(objectNamespaceTree_,insert.hParent,TVE_EXPAND);++work;}
+        ++commit->next;
     }
-    if(commit->next<projection->treeNodes.size())return;
+    if(commit->next<projection->treeNodes.size() || work+2>128)return;
     const auto selected=projection->treeSelected;
     const auto top=projection->treeTop;
     Ksword::Ui::RetireBackgroundValue(slot);::EnableWindow(objectNamespaceTree_,TRUE);::KillTimer(hwnd_,kTimerObjectTreeProjection);

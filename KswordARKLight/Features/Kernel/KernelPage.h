@@ -296,7 +296,7 @@ private:
     struct ObjectTreeProjectionCommit {
         HWND host=nullptr;
         std::shared_ptr<KernelValueProjection> projection,replacement,retired;
-        std::size_t next=0;bool adopted=false;
+        std::size_t next=0;bool adopted=false,oldTreeEmpty=false;HTREEITEM deleteCursor=nullptr;
     };
     std::array<std::shared_ptr<ObjectTreeProjectionCommit>,2> treeProjectionCommits_;
     bool committingTreeProjection_=false;
