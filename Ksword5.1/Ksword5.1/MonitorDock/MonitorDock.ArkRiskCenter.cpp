@@ -809,8 +809,8 @@ namespace
             auto previousEntries = std::move(m_entries); auto previousIndexes = std::move(m_indexes);
             m_entries = std::move(entries); m_indexes = std::move(indexes);
             endResetModel();
-            QThreadPool::globalInstance()->start(QRunnable::create(
-                [previousEntries = std::move(previousEntries), previousIndexes = std::move(previousIndexes)]() {}));
+            // Both publication roots already own retirement aliases. Releasing
+            // these small handles cannot destroy the full archive on this thread.
         }
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
@@ -1415,17 +1415,20 @@ void MonitorDock::refreshArkRiskCenterAsync()
         {
             return;
         }
+        // Create the retirement owner on this value worker before queuing a
+        // callback. A closed page or rejected ticket can release only aliases.
+        const auto deferredEntries = ks::ui::RetainCompleteExportSnapshot<std::vector<MonitorDock::ArkRiskCenterEntry>>(
+            std::make_shared<const std::vector<MonitorDock::ArkRiskCenterEntry>>(std::move(entries)));
+        const auto deferredStatusLines = ks::ui::RetainCompleteExportSnapshot<QStringList>(
+            std::make_shared<const QStringList>(std::move(statusLines)));
         QMetaObject::invokeMethod(
             guardThis.data(),
-            [guardThis, ticket, entries = std::move(entries), statusLines = std::move(statusLines)]() mutable {
+            [guardThis, ticket, deferredEntries, deferredStatusLines]() mutable {
                 if (guardThis == nullptr || guardThis->m_arkRiskRefreshTicket != ticket)
                 {
                     return;
                 }
 
-                auto deferredEntries =
-                    std::make_shared<std::vector<MonitorDock::ArkRiskCenterEntry>>(std::move(entries));
-                auto deferredStatusLines = std::make_shared<QStringList>(std::move(statusLines));
                 auto commit = [guardThis, ticket, deferredEntries, deferredStatusLines]() mutable
                 {
                     if (guardThis == nullptr || guardThis->m_arkRiskRefreshTicket != ticket)
@@ -1441,7 +1444,7 @@ void MonitorDock::refreshArkRiskCenterAsync()
                     auto previousEntries = std::move(guardThis->m_arkRiskCenterEntries);
                     guardThis->m_arkRiskCenterEntries = deferredEntries;
                     guardThis->m_arkRiskEntriesVersion = ticket;
-                    QThreadPool::globalInstance()->start(QRunnable::create([previousEntries = std::move(previousEntries)]() {}));
+                    // The old complete root is retired by its publication owner.
                     guardThis->rebuildArkRiskCenterTable();
                     guardThis->showArkRiskCenterDetailForCurrentRow();
                     if (guardThis->m_arkRiskStatusLabel != nullptr)
@@ -1499,8 +1502,9 @@ void MonitorDock::rebuildArkRiskCenterTable()
     const auto sortOrder = m_arkRiskTable->horizontalHeader()->sortIndicatorOrder();
     const auto dispatcher = m_arkRiskDispatcher;
     QThreadPool::globalInstance()->start(QRunnable::create([this, entries, filter, highOnly, sortColumn, sortOrder, ticket, dispatcher]() {
-        const auto indexes = std::make_shared<const std::vector<std::size_t>>(
-            buildArkRiskProjection(*entries, filter, highOnly, sortColumn, sortOrder));
+        const auto indexes = ks::ui::RetainCompleteExportSnapshot<std::vector<std::size_t>>(
+            std::make_shared<const std::vector<std::size_t>>(
+                buildArkRiskProjection(*entries, filter, highOnly, sortColumn, sortOrder)));
         dispatcher->post([this, entries, indexes, ticket]() {
             m_arkRiskProjectionRunning = false;
             if (ticket != m_arkRiskProjectionTicket) { rebuildArkRiskCenterTable(); return; }
