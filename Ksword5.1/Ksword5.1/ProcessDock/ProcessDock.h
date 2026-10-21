@@ -1,5 +1,6 @@
 #pragma once
 #include "../UI/TableCompleteExport.h"
+#include "../UI/FlatTableModel.h"
 
 // ============================================================
 // ProcessDock.h
