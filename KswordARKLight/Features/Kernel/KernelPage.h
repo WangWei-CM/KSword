@@ -444,6 +444,16 @@ private:
     int contextColumn_ = -1;
     int sortColumn_ = -1;
     bool sortAscending_ = true;
+    struct ChoiceProjectionCommit {
+        std::shared_ptr<KernelValueProjection> projection;
+        std::array<HWND,4> windows{};
+        std::size_t choice=0,next=0;bool cleared=false;
+    };
+    std::shared_ptr<ChoiceProjectionCommit> choiceProjectionCommit_;
+    const KernelValueProjection* completingChoiceProjection_=nullptr;
+    void BeginChoiceProjection(std::shared_ptr<KernelValueProjection> projection);
+    void PumpChoiceProjection();
+    void ResumeChoiceProjection();
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>> cachedProjectionTask_;
     std::uint64_t cachedProjectionRequestId_ = 0, projectionSourceSerial_ = 0;
     std::shared_ptr<const KernelProjectionSource> currentProjectionSource_;

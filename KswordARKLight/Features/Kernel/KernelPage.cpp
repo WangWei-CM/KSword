@@ -96,6 +96,7 @@ constexpr UINT kMsgCallbackFileIoCompleted = WM_APP + 610;
 constexpr UINT kMsgKernelSortCompleted = WM_APP + 611;
 constexpr UINT kMsgCachedProjectionCompleted = WM_APP + 612;
 constexpr UINT_PTR kTimerObjectTreeProjection=51091;
+constexpr UINT_PTR kTimerChoiceProjection=51092;
 constexpr UINT_PTR kTimerR0EvidenceFilter = 51057;
 constexpr int kIdCallbackGlobalEnabled = 51047;
 constexpr int kIdCallbackFileMonitorFsctlOnly = 51048;
@@ -1627,6 +1628,8 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         if(const auto* descriptor=CurrentDescriptor();descriptor && KernelUsesValueProjection(descriptor->id)) RequestCachedValueProjection(descriptor->id);
         break;
     case WM_SHOWWINDOW:
+        if(wParam)ResumeChoiceProjection();
+        else ::KillTimer(hwnd_,kTimerChoiceProjection);
         if(wParam)::SetTimer(hwnd_,kTimerObjectTreeProjection,16,nullptr);
         else ::KillTimer(hwnd_,kTimerObjectTreeProjection);
         if(wParam && deferredProjection_) ApplyCachedValueProjection(std::move(deferredProjection_));
@@ -1664,6 +1667,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         break;
     case WM_TIMER:
         if(wParam==kTimerObjectTreeProjection){PumpObjectTreeProjection();return 0;}
+        if(wParam==kTimerChoiceProjection){PumpChoiceProjection();return 0;}
         if (wParam == kTimerR0EvidenceFilter) {
             ::KillTimer(hwnd, kTimerR0EvidenceFilter);
             if (hasPendingR0EvidenceFilter_) {
@@ -4316,6 +4320,7 @@ void KernelPage::SelectCurrentFeature() {
         ClearResultTable();
         return;
     }
+    ResumeChoiceProjection();
     if (hasActiveFeatureId_ && activeFeatureId_ == descriptor->id) {
         ConfigureVisibleLayout();
         return;
@@ -5784,6 +5789,15 @@ void KernelPage::RequestCachedValueProjection(const KernelFeatureId featureId) {
     for(std::size_t index=0;index<choices.size();++index) {
         input->choicePresent[index]=choices[index]!=nullptr;
         if(!choices[index]) continue;
+        // A disabled combo may contain only a prefix of the new native items.
+        // Its immutable pending selection remains the filter input until commit.
+        if(choiceProjectionCommit_ && choiceProjectionCommit_->projection->input->source->featureId==featureId &&
+            choiceProjectionCommit_->projection->choices[index].changed) {
+            const auto& choice=choiceProjectionCommit_->projection->choices[index];
+            if(choice.selected>=0 && static_cast<std::size_t>(choice.selected)<choice.items.size())
+                input->selectedChoices[index]=choice.items[static_cast<std::size_t>(choice.selected)];
+            continue;
+        }
         const auto selected=::SendMessageW(choices[index],CB_GETCURSEL,0,0);
         if(selected<=0) continue;
         const auto length=::SendMessageW(choices[index],CB_GETLBTEXTLEN,static_cast<WPARAM>(selected),0);
@@ -5815,8 +5829,14 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     const auto treeIndex=source->featureId==KernelFeatureId::ObjectDirectoryRecursive?1U:0U;
     const auto acceptedTree=committingTreeProjection_ && projection->tree && treeProjectionCommits_[treeIndex] &&
         treeProjectionCommits_[treeIndex]->projection==projection && treeProjectionCommits_[treeIndex]->host==objectNamespaceTree_;
-    if(!acceptedTree && !KernelProjectionMatches(descriptor->id,cachedProjectionRequestId_,expected,*projection)) return;
+    const std::array<HWND,4> acceptedChoiceWindows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    const auto acceptedChoice=completingChoiceProjection_==projection.get() && choiceProjectionCommit_ &&
+        choiceProjectionCommit_->projection==projection && choiceProjectionCommit_->windows==acceptedChoiceWindows;
+    if(!acceptedTree && !acceptedChoice && !KernelProjectionMatches(descriptor->id,cachedProjectionRequestId_,expected,*projection)) return;
     if(!::IsWindowVisible(hwnd_)) {deferredProjection_=std::move(projection);return;}
+    if(std::any_of(projection->choices.begin(),projection->choices.end(),[](const auto& choice){return choice.changed;})) {
+        BeginChoiceProjection(std::move(projection));return;
+    }
     if(projection->tree && !committingTreeProjection_){BeginObjectTreeProjection(std::move(projection));return;}
 
     const int oldSelected=ListView_GetNextItem(resultList_,-1,LVNI_SELECTED);
@@ -5838,16 +5858,6 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     if(newSource){sortColumn_=-1;sortAscending_=true;pendingSorts_.erase(descriptor->id);}
     if(pending!=pendingProjectionSources_.end() && pending->second==source) pendingProjectionSources_.erase(pending);
     applyingCachedProjection_=true;
-    const std::array<HWND,4> choiceWindows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
-    for(std::size_t index=0;index<projection->choices.size();++index) {
-        const auto& choice=projection->choices[index];const auto window=choiceWindows[index];
-        if(!window || !choice.changed)continue;
-        ::SendMessageW(window,WM_SETREDRAW,FALSE,0);
-        ::SendMessageW(window,CB_RESETCONTENT,0,0);
-        for(const auto& item:choice.items)::SendMessageW(window,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item.c_str()));
-        ::SendMessageW(window,CB_SETCURSEL,static_cast<WPARAM>(choice.selected),0);
-        ::SendMessageW(window,WM_SETREDRAW,TRUE,0);::InvalidateRect(window,nullptr,FALSE);
-    }
     Ksword::Ui::ScopedListViewRedrawLock resultLock(resultList_);
     if(schemaChanged) {
         ClearResultGridOnly();
@@ -5864,6 +5874,75 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     if(selected>=0 && projection->selectionDetail) UpdateSelectedRowDetail();
     else if(projection->hasDetail) ::SetWindowTextW(detailEdit_,projection->detail.c_str());
     ConfigureVisibleLayout();InvalidateCurrentFeatureViewCache();
+}
+
+void KernelPage::ResumeChoiceProjection() {
+    const auto* descriptor=CurrentDescriptor();
+    const std::array<HWND,4> windows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    if(choiceProjectionCommit_ && descriptor && choiceProjectionCommit_->projection->input->source->featureId==descriptor->id &&
+        choiceProjectionCommit_->windows==windows && ::IsWindowVisible(hwnd_))::SetTimer(hwnd_,kTimerChoiceProjection,16,nullptr);
+    else ::KillTimer(hwnd_,kTimerChoiceProjection);
+}
+
+void KernelPage::BeginChoiceProjection(std::shared_ptr<KernelValueProjection> projection) {
+    const std::array<HWND,4> windows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    if(choiceProjectionCommit_) {
+        for(std::size_t index=0;index<windows.size();++index)
+            if(windows[index] && choiceProjectionCommit_->projection->choices[index].changed)::EnableWindow(windows[index],TRUE);
+    }
+    auto commit=std::make_shared<ChoiceProjectionCommit>();commit->projection=std::move(projection);commit->windows=windows;
+    choiceProjectionCommit_=std::move(commit);
+    for(std::size_t index=0;index<windows.size();++index)
+        if(windows[index] && choiceProjectionCommit_->projection->choices[index].changed)::EnableWindow(windows[index],FALSE);
+    ::SetTimer(hwnd_,kTimerChoiceProjection,16,nullptr);
+}
+
+void KernelPage::PumpChoiceProjection() {
+    auto commit=choiceProjectionCommit_;const auto* descriptor=CurrentDescriptor();
+    if(!commit || !descriptor || !::IsWindowVisible(hwnd_)) {::KillTimer(hwnd_,kTimerChoiceProjection);return;}
+    auto projection=commit->projection;
+    if(projection->input->source->featureId!=descriptor->id) {
+        ::KillTimer(hwnd_,kTimerChoiceProjection);return;
+    }
+    const std::array<HWND,4> windows{deviceDriverDirectoryCombo_,deviceDriverTypeCombo_,baseNamedScopeCombo_,baseNamedTypeCombo_};
+    if(commit->windows!=windows){::KillTimer(hwnd_,kTimerChoiceProjection);return;}
+    const auto started=::GetTickCount64();unsigned work=0;
+    while(commit->choice<windows.size() && work<128 && ::GetTickCount64()-started<4) {
+        const auto index=commit->choice;auto& choice=projection->choices[index];const auto window=windows[index];
+        if(!window || !choice.changed){++commit->choice;commit->next=0;commit->cleared=false;continue;}
+        if(!commit->cleared) {
+            const auto count=::SendMessageW(window,CB_GETCOUNT,0,0);
+            if(count==CB_ERR){::SetTimer(hwnd_,kTimerChoiceProjection,100,nullptr);return;}
+            if(count>0) {
+                // Delete the last native item only. CB_RESETCONTENT performs an
+                // unbounded old-string destruction inside one window message.
+                ++work;
+                if(::SendMessageW(window,CB_DELETESTRING,static_cast<WPARAM>(count-1),0)==CB_ERR) {
+                    ::SetTimer(hwnd_,kTimerChoiceProjection,100,nullptr);return;
+                }
+                continue;
+            }
+            commit->cleared=true;
+        }
+        if(commit->next<choice.items.size()) {
+            ++work;const auto& item=choice.items[commit->next];
+            const auto inserted=::SendMessageW(window,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item.c_str()));
+            if(inserted==CB_ERR || inserted==CB_ERRSPACE){::SetTimer(hwnd_,kTimerChoiceProjection,100,nullptr);return;}
+            ++commit->next;continue;
+        }
+        ::SendMessageW(window,CB_SETCURSEL,static_cast<WPARAM>(choice.selected),0);
+        ++commit->choice;commit->next=0;commit->cleared=false;
+    }
+    if(commit->choice<windows.size())return;
+    // All choices and the rows originate from one accepted source/request.
+    // Keep every participating combo disabled until that canonical swap.
+    for(std::size_t index=0;index<windows.size();++index) {
+        if(windows[index] && projection->choices[index].changed)::EnableWindow(windows[index],TRUE);
+        projection->choices[index].changed=false;
+    }
+    ::KillTimer(hwnd_,kTimerChoiceProjection);
+    completingChoiceProjection_=projection.get();ApplyCachedValueProjection(projection);completingChoiceProjection_=nullptr;
+    if(choiceProjectionCommit_==commit)choiceProjectionCommit_.reset();
 }
 
 void KernelPage::RebuildKernelHookListFromCache(const KernelFeatureId featureId) {
