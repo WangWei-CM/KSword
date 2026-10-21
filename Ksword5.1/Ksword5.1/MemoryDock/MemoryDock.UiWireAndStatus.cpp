@@ -1247,15 +1247,7 @@ void MemoryDock::initializePteConnections()
         showProcessPteTranslateDetailByCurrentRow();
         });
 
-    connect(m_processPteTranslateAddressEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildProcessPteTranslateTable();
-        showProcessPteTranslateDetailByCurrentRow();
-        });
 
-    connect(m_processPteTranslatePageCountSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
-        rebuildProcessPteTranslateTable();
-        showProcessPteTranslateDetailByCurrentRow();
-        });
 
     connect(m_processPteTranslateTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showProcessPteTranslateDetailByCurrentRow();
@@ -1283,30 +1275,14 @@ void MemoryDock::initializeProcessEvidenceConnections()
         showProcessMemoryEvidenceDetailByCurrentRow();
         });
 
-    connect(m_processMemoryEvidenceImageOnlyCheck, &QCheckBox::toggled, this, [this]() {
-        rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
-        });
 
-    connect(m_processMemoryEvidenceStartEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
-        });
 
-    connect(m_processMemoryEvidenceEndEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
-        });
 
     connect(m_processMemoryEvidenceFilterEdit, &QLineEdit::textChanged, this, [this]() {
         rebuildProcessMemoryEvidenceTable();
         showProcessMemoryEvidenceDetailByCurrentRow();
         });
 
-    connect(m_processMemoryEvidenceMaxRowsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
-        rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
-        });
 
     connect(m_processMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showProcessMemoryEvidenceDetailByCurrentRow();
