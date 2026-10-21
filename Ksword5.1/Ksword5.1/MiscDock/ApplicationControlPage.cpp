@@ -10,6 +10,7 @@
 #include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/BudgetedPlainTextTransfer.h"
 
 #include "../UI/CodeEditorWidget.h"
 
@@ -163,7 +164,7 @@ namespace
     struct WdacXmlSaveRequest
     {
         QString sourcePath;
-        QString xml;
+        QStringList xmlParts;
     };
     struct WdacXmlSaveResult
     {
@@ -183,7 +184,7 @@ namespace
 
     WdacXmlSaveResult saveWdacXmlValue(const WdacXmlSaveRequest& request)
     {
-        const QString xml = request.xml.trimmed();
+        const QString xml = request.xmlParts.join(QString()).trimmed();
         QXmlStreamReader reader(xml);
         QString root;
         while (!reader.atEnd())
@@ -552,10 +553,10 @@ namespace
         QString script;
     };
 
-    AppLockerXmlPrepared prepareAppLockerXmlValue(const QString& original, const ks::ui::AsyncOperationToken& token)
+    AppLockerXmlPrepared prepareAppLockerXmlValue(const QStringList& original, const ks::ui::AsyncOperationToken& token)
     {
         if (token.isCanceled()) return {};
-        const QString xml = original.trimmed();
+        const QString xml = original.join(QString()).trimmed();
         QXmlStreamReader reader(xml);
         QString root;
         while (!reader.atEnd())
@@ -1381,28 +1382,36 @@ namespace ks::misc
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         auto* editor = new CodeTextEdit(dialog);
         editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-        editor->setPlainText(originalXml);
         editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* transfer = new ks::ui::BudgetedPlainTextTransfer(editor);
+        auto* transferStatus = new QLabel(QStringLiteral("正在加载…"), dialog);
         auto* buttons = new QDialogButtonBox(dialog);
         auto* apply = buttons->addButton(QStringLiteral("保存并应用"), QDialogButtonBox::AcceptRole);
         buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
         layout->addWidget(hint);
+        layout->addWidget(transferStatus);
         layout->addWidget(editor, 1);
         ks::ui::StyleSecondaryButtonBox(buttons);
         ks::ui::StyleSecondaryFooter(buttons);
         layout->addWidget(buttons);
-        connect(apply, &QPushButton::clicked, dialog, &QDialog::accept);
+
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         const QPointer<ApplicationControlPage> guard(this);
-        const QPointer<CodeTextEdit> safeEditor(editor);
-        connect(dialog, &QDialog::finished, this, [guard, safeEditor](int code) {
+        const QPointer<QDialog> safeDialog(dialog);
+        const QPointer<ks::ui::BudgetedPlainTextTransfer> safeTransfer(transfer);
+        const QPointer<QLabel> safeTransferStatus(transferStatus);
+        auto acceptedParts = std::make_shared<QStringList>();
+        auto snapshotReady = std::make_shared<bool>(false);
+        connect(dialog, &QDialog::finished, this, [guard, safeTransfer, acceptedParts, snapshotReady](int code) {
             if (!guard) return;
-            if (code != QDialog::Accepted || !safeEditor)
+            if (code != QDialog::Accepted || !*snapshotReady)
             {
+                if (safeTransfer) safeTransfer->cancel();
+                if (!guard) return;
                 guard->setPolicyEditorBusy(false);
                 return;
             }
-            const QString xml = safeEditor->toPlainText(); // Only GUI extracts the complete accepted document.
+            const QStringList xml = std::move(*acceptedParts); // Worker joins all complete frozen parts.
             guard->m_appLockerPreparePending = true;
             const auto failed = [guard](std::exception_ptr) {
                 if (!guard) return;
@@ -1411,7 +1420,7 @@ namespace ks::misc
                 if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
                     QStringLiteral("策略验证未能完成，未提交更改。请重试。"));
             };
-            const auto ticket = guard->m_appLockerXmlPrepare->submit<QString, AppLockerXmlPrepared>(xml, prepareAppLockerXmlValue,
+            const auto ticket = guard->m_appLockerXmlPrepare->submit<QStringList, AppLockerXmlPrepared>(xml, prepareAppLockerXmlValue,
                 [guard](const AppLockerXmlPrepared& result, std::uint64_t) {
                     if (!guard) return true;
                     guard->m_appLockerPreparePending = false;
@@ -1438,7 +1447,48 @@ namespace ks::misc
                 }, failed);
             if (ticket == 0) failed({});
         });
+
+        const auto setActionsEnabled = [safeDialog, apply](bool enabled) {
+            if (!safeDialog) return;
+            for (QPushButton* button : {apply})
+            {
+                if (!safeDialog) return;
+                button->setEnabled(enabled);
+            }
+        };
+        const auto documentFailed = [guard, safeDialog]() {
+            if (safeDialog) safeDialog->reject();
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("文档处理未完成，未提交更改。请重试。"));
+        };
+        const auto startSnapshot = [safeDialog, safeTransfer, safeTransferStatus, acceptedParts, snapshotReady,
+            setActionsEnabled, documentFailed](bool deploy) {
+            if (!safeDialog || !safeTransfer || safeTransfer->isBusy()) return;
+            Q_UNUSED(deploy);
+            *snapshotReady = false;
+            setActionsEnabled(false);
+            if (!safeDialog || !safeTransfer) return;
+            if (safeTransferStatus) { safeTransferStatus->setText(QStringLiteral("正在处理…")); safeTransferStatus->show(); }
+            if (!safeDialog || !safeTransfer) return;
+            if (!safeTransfer->snapshot([safeDialog, acceptedParts, snapshotReady, documentFailed](bool ok, QStringList parts) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                *acceptedParts = std::move(parts);
+                *snapshotReady = true;
+                safeDialog->accept();
+            })) documentFailed();
+        };
+        connect(apply, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(false); });
+        setActionsEnabled(false);
         dialog->open();
+        if (!safeDialog || !safeTransfer) return;
+        if (!safeTransfer->load(originalXml,
+            [safeDialog, safeTransferStatus, setActionsEnabled, documentFailed](bool ok, QStringList) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                if (safeTransferStatus) safeTransferStatus->hide();
+                if (safeDialog) setActionsEnabled(true);
+            })) documentFailed();
     }
 
     void ApplicationControlPage::addAppLockerRule()
@@ -1738,32 +1788,39 @@ namespace ks::misc
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         auto* editor = new CodeTextEdit(dialog);
         editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-        editor->setPlainText(originalXml); // QTextDocument access remains on its GUI owner thread.
         editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* transfer = new ks::ui::BudgetedPlainTextTransfer(editor);
+        auto* transferStatus = new QLabel(QStringLiteral("正在加载…"), dialog);
         auto* buttons = new QDialogButtonBox(dialog);
         auto* save = buttons->addButton(QStringLiteral("保存源 XML"), QDialogButtonBox::AcceptRole);
         auto* deploy = buttons->addButton(QStringLiteral("保存并部署"), QDialogButtonBox::ActionRole);
         buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
         layout->addWidget(hint);
+        layout->addWidget(transferStatus);
         layout->addWidget(editor, 1);
         ks::ui::StyleSecondaryButtonBox(buttons);
         ks::ui::StyleSecondaryFooter(buttons);
         layout->addWidget(buttons);
         auto deployRequested = std::make_shared<bool>(false); // GUI callbacks only.
-        connect(save, &QPushButton::clicked, dialog, &QDialog::accept);
-        connect(deploy, &QPushButton::clicked, dialog, [dialog, deployRequested]() { *deployRequested = true; dialog->accept(); });
+
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         const QPointer<ApplicationControlPage> guard(this);
-        const QPointer<CodeTextEdit> safeEditor(editor);
-        connect(dialog, &QDialog::finished, this, [guard, safeEditor, deployRequested, sourcePath](int code) {
+        const QPointer<QDialog> safeDialog(dialog);
+        const QPointer<ks::ui::BudgetedPlainTextTransfer> safeTransfer(transfer);
+        const QPointer<QLabel> safeTransferStatus(transferStatus);
+        auto acceptedParts = std::make_shared<QStringList>();
+        auto snapshotReady = std::make_shared<bool>(false);
+        connect(dialog, &QDialog::finished, this, [guard, safeTransfer, acceptedParts, snapshotReady, deployRequested, sourcePath](int code) {
             if (!guard) return;
-            if (code != QDialog::Accepted || !safeEditor)
+            if (code != QDialog::Accepted || !*snapshotReady)
             {
+                if (safeTransfer) safeTransfer->cancel();
+                if (!guard) return;
                 guard->setPolicyEditorBusy(false);
                 return;
             }
-            // Snapshot the complete accepted document once. No revision can change after acceptance.
-            WdacXmlSaveRequest request{sourcePath, safeEditor->toPlainText()};
+            // Only a completed immutable document snapshot can be accepted for atomic save.
+            WdacXmlSaveRequest request{sourcePath, std::move(*acceptedParts)};
             const bool shouldDeploy = *deployRequested;
             guard->m_wdacSavePending = true;
             const auto failed = [guard, sourcePath](std::exception_ptr) {
@@ -1796,7 +1853,49 @@ namespace ks::misc
                 }, failed);
             if (ticket == 0) failed({});
         });
-        dialog->open(); // Window-modal without a nested stack-owned editor lifetime.
+
+        const auto setActionsEnabled = [safeDialog, save, deploy](bool enabled) {
+            if (!safeDialog) return;
+            for (QPushButton* button : {save, deploy})
+            {
+                if (!safeDialog) return;
+                button->setEnabled(enabled);
+            }
+        };
+        const auto documentFailed = [guard, safeDialog]() {
+            if (safeDialog) safeDialog->reject();
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                QStringLiteral("文档处理未完成，未提交更改。请重试。"));
+        };
+        const auto startSnapshot = [safeDialog, safeTransfer, safeTransferStatus, acceptedParts, snapshotReady,
+            setActionsEnabled, documentFailed, deployRequested](bool deploy) {
+            if (!safeDialog || !safeTransfer || safeTransfer->isBusy()) return;
+            *deployRequested = deploy;
+            *snapshotReady = false;
+            setActionsEnabled(false);
+            if (!safeDialog || !safeTransfer) return;
+            if (safeTransferStatus) { safeTransferStatus->setText(QStringLiteral("正在处理…")); safeTransferStatus->show(); }
+            if (!safeDialog || !safeTransfer) return;
+            if (!safeTransfer->snapshot([safeDialog, acceptedParts, snapshotReady, documentFailed](bool ok, QStringList parts) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                *acceptedParts = std::move(parts);
+                *snapshotReady = true;
+                safeDialog->accept();
+            })) documentFailed();
+        };
+        connect(save, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(false); });
+        connect(deploy, &QPushButton::clicked, dialog, [startSnapshot]() { startSnapshot(true); });
+        setActionsEnabled(false);
+        dialog->open();
+        if (!safeDialog || !safeTransfer) return;
+        if (!safeTransfer->load(originalXml,
+            [safeDialog, safeTransferStatus, setActionsEnabled, documentFailed](bool ok, QStringList) {
+                if (!safeDialog) return;
+                if (!ok) { documentFailed(); return; }
+                if (safeTransferStatus) safeTransferStatus->hide();
+                if (safeDialog) setActionsEnabled(true);
+            })) documentFailed();
     }
 
     void ApplicationControlPage::deploySavedWdacPolicy(const QString& sourcePath)
