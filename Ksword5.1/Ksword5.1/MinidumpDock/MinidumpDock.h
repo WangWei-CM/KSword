@@ -18,6 +18,7 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include "../UI/PageNavigationCatalog.h"
 #include <QSet>
 
 #include <atomic>
@@ -51,6 +52,9 @@ namespace ks::minidump
 class MinidumpDock final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MinidumpDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：建立界面并进入“等待选择转储文件”状态。
     // 参数 parent：Qt 父控件；返回值：无。
     explicit MinidumpDock(QWidget* parent = nullptr);
@@ -87,7 +91,9 @@ private:
     // 参数 result：解析结果；返回值：无。实现位于 MinidumpDock.Tables.cpp。
     void renderResult(const ks::minidump::DumpParseResult& result);
     void projectResult(const ks::minidump::DumpParseResult& result, QWidget* targetPage);
-    void registerResultTab(QWidget* page, const QString& title);
+    void registerResultTab(QWidget* page, const char* key, const char* sourceTitle);
+    QString rawMemoryNavigationId(std::size_t index) const;
+    QString rawMemoryNavigationTitle(std::size_t index) const;
     void renderCurrentResultPage();
     void renderCurrentRawMemoryPage();
     void retranslateResultPages();

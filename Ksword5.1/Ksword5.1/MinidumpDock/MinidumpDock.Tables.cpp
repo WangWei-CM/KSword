@@ -16,6 +16,7 @@
 // ============================================================
 
 #include "MinidumpDock.h"
+#include "../UI/ThemeBinding.h"
 
 #include "DumpAnalyzer.h"
 #include "DumpByteView.h"
@@ -326,8 +327,10 @@ QWidget* MinidumpDock::createStructuredTablePage(
     return page;
 }
 
-void MinidumpDock::registerResultTab(QWidget* page, const QString& title)
+void MinidumpDock::registerResultTab(QWidget* page, const char* key, const char* sourceTitle)
 {
+    page->setProperty("ksword_navigation_descriptor_id", QString::fromLatin1(key));
+    const QString title = translated(key, sourceTitle);
     const int index = m_resultTabs->indexOf(page);
     if (index < 0) m_resultTabs->addTab(page, title);
     else m_resultTabs->setTabText(index, title);
@@ -620,8 +623,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_analysisView,
-            translated("minidump.tab.analysis", "诊断结论"));
+            registerResultTab(m_analysisView, "minidump.tab.analysis", "诊断结论");
         }
         else if (targetPage == m_analysisView)
         {
@@ -851,8 +853,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_blameTable,
-            translated("minidump.tab.blame", "肇事模块"));
+            registerResultTab(m_blameTable, "minidump.tab.blame", "肇事模块");
         }
         else if (targetPage == m_blameTable)
         {
@@ -900,7 +901,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_overviewTable, translated("minidump.tab.overview", "概览"));
+            registerResultTab(m_overviewTable, "minidump.tab.overview", "概览");
         }
         else if (targetPage == m_overviewTable)
         {
@@ -953,8 +954,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_exceptionTable,
-            translated("minidump.tab.exception", "异常信息"));
+            registerResultTab(m_exceptionTable, "minidump.tab.exception", "异常信息");
         }
         else if (targetPage == m_exceptionTable)
         {
@@ -982,8 +982,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_executionContextTable,
-            translated("minidump.tab.execution_context", "崩溃现场"));
+            registerResultTab(m_executionContextTable, "minidump.tab.execution_context", "崩溃现场");
         }
         else if (targetPage == m_executionContextTable)
         {
@@ -1010,8 +1009,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_stackPage,
-            translated("minidump.tab.stack", "调用栈"));
+            registerResultTab(m_stackPage, "minidump.tab.stack", "调用栈");
         }
         else if (targetPage == m_stackPage)
         {
@@ -1066,8 +1064,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_crashHistoryTable,
-            translated("minidump.tab.crash_history", "崩溃历史"));
+            registerResultTab(m_crashHistoryTable, "minidump.tab.crash_history", "崩溃历史");
         }
         else if (targetPage == m_crashHistoryTable)
         {
@@ -1100,8 +1097,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_poolTagTable,
-            translated("minidump.tab.pool_tags", "池标记"));
+            registerResultTab(m_poolTagTable, "minidump.tab.pool_tags", "池标记");
         }
         else if (targetPage == m_poolTagTable)
         {
@@ -1132,8 +1128,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_symbolTable,
-            translated("minidump.tab.symbols", "符号"));
+            registerResultTab(m_symbolTable, "minidump.tab.symbols", "符号");
         }
         else if (targetPage == m_symbolTable)
         {
@@ -1167,8 +1162,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_registerTable,
-            translated("minidump.tab.registers", "寄存器"));
+            registerResultTab(m_registerTable, "minidump.tab.registers", "寄存器");
         }
         else if (targetPage == m_registerTable)
         {
@@ -1197,9 +1191,8 @@ void MinidumpDock::projectResult(
         if (targetPage == nullptr)
         {
             registerResultTab(m_streamTable,
-            result.kind == ks::minidump::DumpKind::UserMinidump
-                ? translated("minidump.tab.streams", "流目录")
-                : translated("minidump.tab.layout", "数据布局"));
+                result.kind == ks::minidump::DumpKind::UserMinidump ? "minidump.tab.streams" : "minidump.tab.layout",
+                result.kind == ks::minidump::DumpKind::UserMinidump ? "流目录" : "数据布局");
         }
         else if (targetPage == m_streamTable)
         {
@@ -1232,9 +1225,8 @@ void MinidumpDock::projectResult(
         if (targetPage == nullptr)
         {
             registerResultTab(m_modulePage,
-            result.kind == ks::minidump::DumpKind::UserMinidump
-                ? translated("minidump.tab.modules", "模块")
-                : translated("minidump.tab.drivers", "驱动"));
+                result.kind == ks::minidump::DumpKind::UserMinidump ? "minidump.tab.modules" : "minidump.tab.drivers",
+                result.kind == ks::minidump::DumpKind::UserMinidump ? "模块" : "驱动");
         }
         else if (targetPage == m_modulePage)
         {
@@ -1272,7 +1264,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_threadPage, translated("minidump.tab.threads", "线程"));
+            registerResultTab(m_threadPage, "minidump.tab.threads", "线程");
         }
         else if (targetPage == m_threadPage)
         {
@@ -1329,8 +1321,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_memoryPage,
-            translated("minidump.tab.memory", "内存区域"));
+            registerResultTab(m_memoryPage, "minidump.tab.memory", "内存区域");
         }
         else if (targetPage == m_memoryPage)
         {
@@ -1364,8 +1355,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_rawMemoryTabs,
-            translated("minidump.tab.raw_memory", "原始内存"));
+            registerResultTab(m_rawMemoryTabs, "minidump.tab.raw_memory", "原始内存");
         }
         else if (targetPage == m_rawMemoryTabs)
         {
@@ -1373,9 +1363,9 @@ void MinidumpDock::projectResult(
             m_buildingRawMemoryCatalog = true;
             for (std::size_t index = 0; index < result.byteBlocks.size(); ++index)
             {
-                const QString title = QStringLiteral("%1 %2")
-                    .arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
-                m_rawMemoryTabs->addTab(new QWidget(m_rawMemoryTabs), title);
+                auto* page = new QWidget(m_rawMemoryTabs);
+                page->setProperty("ksword_navigation_descriptor_id", rawMemoryNavigationId(index));
+                m_rawMemoryTabs->addTab(page, rawMemoryNavigationTitle(index));
             }
             m_buildingRawMemoryCatalog = false;
             renderCurrentRawMemoryPage();
@@ -1387,8 +1377,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_memoryView,
-            translated("minidump.tab.memory_view", "内存查看器"));
+            registerResultTab(m_memoryView, "minidump.tab.memory_view", "内存查看器");
         }
         else if (targetPage == m_memoryView)
         {
@@ -1401,7 +1390,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_handlePage, translated("minidump.tab.handles", "句柄"));
+            registerResultTab(m_handlePage, "minidump.tab.handles", "句柄");
         }
         else if (targetPage == m_handlePage)
         {
@@ -1436,8 +1425,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_unloadedTable,
-            translated("minidump.tab.unloaded", "已卸载模块"));
+            registerResultTab(m_unloadedTable, "minidump.tab.unloaded", "已卸载模块");
         }
         else if (targetPage == m_unloadedTable)
         {
@@ -1469,7 +1457,7 @@ void MinidumpDock::projectResult(
     {
         if (targetPage == nullptr)
         {
-            registerResultTab(m_reportEditor, translated("minidump.tab.report", "报告"));
+            registerResultTab(m_reportEditor, "minidump.tab.report", "报告");
         }
         else if (targetPage == m_reportEditor)
         {
@@ -1600,3 +1588,104 @@ ks::ui::FieldDocument MinidumpDock::buildReportText(const ks::minidump::DumpPars
     }
     return document;
 }
+
+QString MinidumpDock::rawMemoryNavigationId(const std::size_t index) const
+{
+    // 同一已接受结果代次内稳定；重新装载结果后旧block ID不能指向另一份dump。
+    return QStringLiteral("minidump.raw:%1:%2").arg(m_resultProjectionGeneration).arg(index);
+}
+QString MinidumpDock::rawMemoryNavigationTitle(const std::size_t index) const
+{
+    return QStringLiteral("%1 %2").arg(translated("minidump.raw.block", "数据块")).arg(index + 1);
+}
+ks::ui::PageNavigationCatalog MinidumpDock::navigationCatalog(const MinidumpDock* existing)
+{
+    ks::ui::PageNavigationCatalog catalog;
+    // 无解析结果就没有结果Tab，不能为目录创建/解析一份转储。
+    if (!existing || !existing->m_resultTabs) return catalog;
+    const QString rawId = QStringLiteral("minidump.tab.raw_memory");
+    bool hasRaw = false;
+    for (int index = 0; index < existing->m_resultTabs->count(); ++index)
+    {
+        QWidget* page = existing->m_resultTabs->widget(index);
+        const QString id = page->property("ksword_navigation_descriptor_id").toString();
+        if (id.isEmpty()) return {{}}; // 不完整迁移保持central真实回退，不能漏实际目录。
+        catalog.append({id, {}, existing->m_resultTabs->tabText(index), {},
+            existing->m_resultTabs->isTabVisible(index), existing->m_resultTabs->isTabEnabled(index),
+            existing->m_resultTabs->currentIndex() == index});
+        if (id == rawId) hasRaw = true;
+    }
+    if (hasRaw && existing->m_lastResult)
+    {
+        for (std::size_t index = 0; index < existing->m_lastResult->byteBlocks.size(); ++index)
+        {
+            const QString id = existing->rawMemoryNavigationId(index);
+            ks::ui::PageNavigationDescriptor descriptor{id, rawId, existing->rawMemoryNavigationTitle(index), {}, true, true, index == 0};
+            if (existing->m_rawMemoryTabs && index < static_cast<std::size_t>(existing->m_rawMemoryTabs->count()))
+            {
+                const int tab = static_cast<int>(index);
+                QWidget* page = existing->m_rawMemoryTabs->widget(tab);
+                if (page && page->property("ksword_navigation_descriptor_id").toString() == id)
+                {
+                    descriptor.title = existing->m_rawMemoryTabs->tabText(tab);
+                    descriptor.visible = existing->m_rawMemoryTabs->isTabVisible(tab);
+                    descriptor.enabled = existing->m_rawMemoryTabs->isTabEnabled(tab);
+                    descriptor.current = existing->m_rawMemoryTabs->currentIndex() == tab;
+                }
+            }
+            catalog.append(std::move(descriptor));
+        }
+    }
+    return catalog;
+}
+QWidget* MinidumpDock::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<MinidumpDock> self(this);
+    const auto permitted = [self, &id]() -> std::optional<QString> {
+        if (!self) return std::nullopt;
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        if (!resolved) return std::nullopt;
+        for (const auto& entry : *resolved)
+            if (entry.page.id == id && entry.page.visible && entry.page.enabled) return entry.page.parentId;
+        return std::nullopt;
+    };
+    const auto parent = permitted();
+    if (!parent) return nullptr;
+    const auto findPage = [](QTabWidget* tabs, const QString& key) -> QWidget* {
+        if (!tabs) return nullptr;
+        for (int index = 0; index < tabs->count(); ++index)
+            if (QWidget* page = tabs->widget(index); page && page->property("ksword_navigation_descriptor_id").toString() == key)
+                return page;
+        return nullptr;
+    };
+    const auto selectPage = [](QPointer<QTabWidget> tabs, QPointer<QWidget> page) -> bool {
+        if (!tabs || !page) return false;
+        const auto valid = [&]() { const int index = tabs && page ? tabs->indexOf(page) : -1;
+            return index >= 0 && tabs->isTabVisible(index) && tabs->isTabEnabled(index); };
+        if (!valid()) return false;
+        ks::ui::PrepareWidgetThemeBindingsForShow(page);
+        if (!valid()) return false;
+        tabs->setCurrentWidget(page);
+        if (!valid() || tabs->currentWidget() != page) return false;
+        ks::ui::PrepareWidgetThemeBindingsForShow(page);
+        return valid() && tabs->currentWidget() == page;
+    };
+    QPointer<QTabWidget> rootTabs = m_resultTabs;
+    QPointer<QWidget> rootPage = findPage(rootTabs, parent->isEmpty() ? id : *parent);
+    if (!selectPage(rootTabs, rootPage) || !self) return nullptr;
+    renderCurrentResultPage(); // 只接受具体目标后，沿原lazy投影入口准备目标结果壳。
+    if (!self || !rootTabs || !rootPage || rootTabs->currentWidget() != rootPage || !permitted()) return nullptr;
+    QPointer<QWidget> target = rootPage;
+    QPointer<QTabWidget> rawTabs;
+    if (!parent->isEmpty())
+    {
+        rawTabs = m_rawMemoryTabs;
+        target = findPage(rawTabs, id);
+        if (!selectPage(rawTabs, target) || !self) return nullptr;
+    }
+    if (!self || !rootTabs || !rootPage || !target || rootTabs->currentWidget() != rootPage
+        || (!parent->isEmpty() && (!rawTabs || rawTabs->currentWidget() != target)) || !permitted()) return nullptr;
+    return target.data();
+}
+namespace { const bool kMinidumpNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<MinidumpDock>(QStringLiteral("misc.minidump")); }
