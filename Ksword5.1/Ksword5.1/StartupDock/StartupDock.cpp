@@ -677,6 +677,7 @@ void StartupDock::processNextRefreshStageResult()
 
     // 首批结果到达时才切换离开旧快照；之后每个后端阶段都只向累计结果追加。
     // 每批落表完成前不处理下一批，保证用户看到的顺序与后端枚举顺序一致。
+    const int appendFrom = m_refreshSnapshotStarted ? static_cast<int>(m_entryList.size()) : -1;
     if (!m_refreshSnapshotStarted)
     {
         m_entryList.clear();
@@ -702,7 +703,7 @@ void StartupDock::processNextRefreshStageResult()
                 .arg(m_activeRefreshStageCount)
                 .arg(stageEntryCount)));
     }
-    rebuildAllTables(true);
+    rebuildAllTables(true, true, appendFrom);
 }
 
 void StartupDock::markBackendEnumerationCompleted()

@@ -144,6 +144,7 @@ private:
         QTableWidget* tableWidget = nullptr;
         std::deque<int> visibleEntryIndexList;
         std::size_t nextRowIndex = 0;
+        int baseRow = 0;
     };
 
     struct RegistryGroupRebuildTarget
@@ -195,7 +196,7 @@ private:
     void processNextRefreshStageResult();
     void markBackendEnumerationCompleted();
     void completeRefreshAfterUiCommit();
-    void rebuildAllTables(bool processesRefreshStage = false, bool invalidateProjection = true);
+    void rebuildAllTables(bool processesRefreshStage = false, bool invalidateProjection = true, int appendFrom = -1);
     void ensureCurrentCategoryProjection();
     bool isCategoryProjectionReady(StartupCategory category) const;
     void scheduleFilterRefresh();
@@ -309,6 +310,8 @@ private:
     bool m_projectionInvalidationPending = false;
     quint64 m_projectionRevision = 1;
     std::array<quint64, 9> m_renderedProjectionRevision{};
+    std::array<std::size_t, 9> m_renderedCanonicalCounts{};
+    std::array<int, 9> m_renderedRowCounts{};
     StartupCategory m_projectionBuildCategory = StartupCategory::All;
     quint64 m_projectionBuildRevision = 0;
     bool m_projectionBuildActive = false;

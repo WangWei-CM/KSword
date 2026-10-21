@@ -351,13 +351,21 @@ void StartupDock::applyTranslatedHeaders()
     }
 }
 
-void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool invalidateProjection)
+void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool invalidateProjection, const int appendFrom)
 {
     if (m_tableRebuildTimer == nullptr || m_destroying.load())
     {
         return;
     }
 
+    const auto categoryIndex = static_cast<std::size_t>(currentCategory());
+    QTableWidget* const visibleTable = currentCategoryTable();
+    const bool appendCurrentTable = processesRefreshStage && appendFrom >= 0
+        && !m_projectionInvalidationPending && !m_filterRefreshPending && !m_tableRebuildInProgress
+        && currentCategory() != StartupCategory::Registry && visibleTable
+        && m_renderedProjectionRevision[categoryIndex] == m_projectionRevision
+        && m_renderedCanonicalCounts[categoryIndex] == static_cast<std::size_t>(appendFrom)
+        && visibleTable->rowCount() == m_renderedRowCounts[categoryIndex];
     m_projectionInvalidationPending = m_projectionInvalidationPending || invalidateProjection;
     m_tableRebuildProcessesRefreshStage = m_tableRebuildProcessesRefreshStage || processesRefreshStage;
     const QList<QAbstractItemView*> startupViews = {
@@ -367,8 +375,8 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
     const QPointer<StartupDock> guarded(this);
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
         QStringLiteral("startup-current-projection-rebuild"), startupViews,
-        [guarded, processesRefreshStage, invalidateProjection]() {
-            if (guarded) guarded->rebuildAllTables(processesRefreshStage, invalidateProjection);
+        [guarded, processesRefreshStage, invalidateProjection, appendFrom]() {
+            if (guarded) guarded->rebuildAllTables(processesRefreshStage, invalidateProjection, appendFrom);
         })) return;
 
     m_filterRefreshTimer->stop();
@@ -431,12 +439,19 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
             TableRebuildTarget target;
             target.category = category;
             target.tableWidget = tableWidget;
+            target.baseRow = appendCurrentTable ? tableWidget->rowCount() : 0;
             m_tableRebuildTargets.push_back(std::move(target));
             break;
         }
     }
     m_projectionPreparation = std::make_shared<ProjectionPreparation>();
     m_projectionPreparation->hideEmptyPaths = m_hideEmptyPathCheck && m_hideEmptyPathCheck->isChecked();
+    if (appendCurrentTable)
+    {
+        // Previous rows/identities stay in place; scan/format only this stage's tail.
+        m_projectionPreparation->phase = ProjectionPreparation::Phase::Scan;
+        m_projectionPreparation->nextEntry = static_cast<std::size_t>(appendFrom);
+    }
 
     if (m_statusLabel != nullptr)
     {
@@ -626,10 +641,10 @@ void StartupDock::continueIncrementalTableRebuild()
                 && entryIndex >= 0
                 && entryIndex < static_cast<int>(m_entryList.size()))
             {
-                target.tableWidget->setRowCount(static_cast<int>(target.nextRowIndex) + 1);
+                target.tableWidget->setRowCount(target.baseRow + static_cast<int>(target.nextRowIndex) + 1);
                 appendEntryRow(
                     target.tableWidget,
-                    static_cast<int>(target.nextRowIndex),
+                    target.baseRow + static_cast<int>(target.nextRowIndex),
                     m_entryList[static_cast<std::size_t>(entryIndex)],
                     entryIndex);
             }
@@ -770,7 +785,17 @@ void StartupDock::finishIncrementalTableRebuild()
     const bool processesRefreshStage = m_tableRebuildProcessesRefreshStage;
     m_tableRebuildInProgress = false;
     if (m_projectionBuildActive && m_projectionBuildRevision == m_projectionRevision)
-        m_renderedProjectionRevision[static_cast<std::size_t>(m_projectionBuildCategory)] = m_projectionRevision;
+    {
+        const auto index = static_cast<std::size_t>(m_projectionBuildCategory);
+        m_renderedProjectionRevision[index] = m_projectionRevision;
+        m_renderedCanonicalCounts[index] = m_entryList.size();
+        if (m_projectionBuildCategory != StartupCategory::Registry)
+        {
+            for (const auto& target : m_tableRebuildTargets)
+                if (target.category == m_projectionBuildCategory && target.tableWidget)
+                    m_renderedRowCounts[index] = target.tableWidget->rowCount();
+        }
+    }
     m_projectionBuildActive = false;
     m_tableRebuildProcessesRefreshStage = false;
     m_rebuildRegistryFirst = false;
