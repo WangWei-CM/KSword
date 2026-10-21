@@ -16,6 +16,12 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <memory>
+#include <limits>
+#include <unordered_map>
+#include <utility>
 #include <thread>
 
 #pragma comment(lib, "winhttp.lib")
@@ -265,18 +271,361 @@ namespace
         return parsed.hypoCenter.trimmed();
     }
 
-    // sleepUntilStop 将长重连等待分段，以便 stop() 能在一百毫秒量级响应。
-    bool sleepUntilStop(const std::atomic_bool& stopRequested, DWORD milliseconds)
+    // AUX010 async transport core. No QObject or caller address enters WinHTTP context.
+    // Native callbacks only copy completion values and wake worker-side waiters.
+    class EarthquakeAsyncHandle;
+    struct EarthquakeHandleRegistry
     {
-        DWORD elapsed = 0;
-        while (elapsed < milliseconds && !stopRequested.load())
-        {
-            const DWORD step = std::min<DWORD>(100, milliseconds - elapsed);
-            ::Sleep(step);
-            elapsed += step;
-        }
-        return stopRequested.load();
+        std::mutex mutex;
+        DWORD_PTR nextId = 1;
+        std::unordered_map<DWORD_PTR, std::shared_ptr<EarthquakeAsyncHandle>> handles;
+    };
+    EarthquakeHandleRegistry& earthquakeHandleRegistry()
+    {
+        // Normally empty after stop. A failed native CloseHandle must retain its
+        // buffers/context for any late callback; the process reclaims quarantine.
+        static auto* registry = new EarthquakeHandleRegistry;
+        return *registry;
     }
+
+    class EarthquakeAsyncHandle final
+    {
+    public:
+        enum class Kind { Request, WebSocket };
+        enum class Handshake { None, Send, Headers };
+        struct Result
+        {
+            DWORD error = ERROR_WINHTTP_OPERATION_CANCELLED;
+            DWORD bytes = 0;
+            WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE;
+        };
+        struct Slot
+        {
+            bool pending = false;
+            bool done = false;
+            Result result;
+        };
+
+        explicit EarthquakeAsyncHandle(Kind kind) : m_kind(kind) {}
+
+        static std::shared_ptr<EarthquakeAsyncHandle> create(Kind kind)
+        {
+            auto value = std::make_shared<EarthquakeAsyncHandle>(kind);
+            auto& registry = earthquakeHandleRegistry();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            if (registry.nextId == 0) { ::SetLastError(ERROR_ARITHMETIC_OVERFLOW); return {}; }
+            value->m_id = registry.nextId;
+            registry.nextId = registry.nextId == std::numeric_limits<DWORD_PTR>::max() ? 0 : registry.nextId + 1;
+            registry.handles.emplace(value->m_id, value);
+            return value;
+        }
+        DWORD_PTR id() const { return m_id; }
+
+        static void CALLBACK statusCallback(HINTERNET handle, DWORD_PTR id, DWORD status, void* info, DWORD size) noexcept
+        {
+            if (id == 0 || status == WINHTTP_CALLBACK_STATUS_HANDLE_CREATED) return;
+            try
+            {
+                std::shared_ptr<EarthquakeAsyncHandle> state;
+                {
+                    auto& registry = earthquakeHandleRegistry();
+                    std::lock_guard<std::mutex> lock(registry.mutex);
+                    const auto found = registry.handles.find(id);
+                    if (found == registry.handles.end()) return;
+                    state = found->second;
+                }
+                state->onStatus(handle, status, info, size);
+            }
+            catch (...) { /* Never unwind into WinHTTP; all normal paths allocate no memory. */ }
+        }
+
+        // The session callback is inherited before this handle can issue async work.
+        // A socket context is supplied atomically by CompleteUpgrade; request context
+        // is armed here before publishing the handle to the stopping thread.
+        bool adopt(HINTERNET handle, bool contextAlreadySet)
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_identity = handle;
+            }
+            m_handle = handle;
+            m_everAdopted = true;
+            m_contextArmed = contextAlreadySet;
+            if (!contextAlreadySet)
+            {
+                DWORD_PTR context = m_id;
+                if (!::WinHttpSetOption(handle, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof(context)))
+                {
+                    closeLocked();
+                    return false;
+                }
+                m_contextArmed = true;
+            }
+            if (m_closeRequested) { closeLocked(); return false; }
+            return true;
+        }
+
+        bool configureRequest(bool bypassProxy, DWORD* error)
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            if (!availableLocked()) { *error = ERROR_WINHTTP_OPERATION_CANCELLED; return false; }
+            if (bypassProxy)
+            {
+                WINHTTP_PROXY_INFO proxy = {};
+                proxy.dwAccessType = WINHTTP_ACCESS_TYPE_NO_PROXY;
+                proxy.lpszProxy = WINHTTP_NO_PROXY_NAME;
+                proxy.lpszProxyBypass = WINHTTP_NO_PROXY_BYPASS;
+                if (!::WinHttpSetOption(m_handle, WINHTTP_OPTION_PROXY, &proxy, sizeof(proxy)))
+                { *error = ::GetLastError(); return false; }
+            }
+            if (!::WinHttpSetOption(m_handle, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0))
+            { *error = ::GetLastError(); return false; }
+            return true;
+        }
+
+        DWORD sendRequest()
+        {
+            {
+                std::lock_guard<std::mutex> api(m_apiMutex);
+                if (!availableLocked()) return ERROR_WINHTTP_OPERATION_CANCELLED;
+                { std::lock_guard<std::mutex> lock(m_mutex); if (!begin(m_request)) return ERROR_INVALID_OPERATION; m_handshake = Handshake::Send; }
+                if (!::WinHttpSendRequest(m_handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                    WINHTTP_NO_REQUEST_DATA, 0, 0, m_id))
+                    immediateFailure(m_request, ::GetLastError());
+            }
+            return await(m_request).error;
+        }
+        DWORD receiveHeaders()
+        {
+            {
+                std::lock_guard<std::mutex> api(m_apiMutex);
+                if (!availableLocked()) return ERROR_WINHTTP_OPERATION_CANCELLED;
+                { std::lock_guard<std::mutex> lock(m_mutex); if (!begin(m_request)) return ERROR_INVALID_OPERATION; m_handshake = Handshake::Headers; }
+                if (!::WinHttpReceiveResponse(m_handle, nullptr)) immediateFailure(m_request, ::GetLastError());
+            }
+            return await(m_request).error;
+        }
+        bool queryStatus(DWORD* status, DWORD* error)
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            if (!availableLocked()) { *error = ERROR_WINHTTP_OPERATION_CANCELLED; return false; }
+            DWORD bytes = sizeof(*status);
+            if (!::WinHttpQueryHeaders(m_handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                WINHTTP_HEADER_NAME_BY_INDEX, status, &bytes, WINHTTP_NO_HEADER_INDEX))
+            { *error = ::GetLastError(); return false; }
+            return true;
+        }
+        HINTERNET upgrade(DWORD_PTR context, DWORD* error)
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            if (!availableLocked()) { *error = ERROR_WINHTTP_OPERATION_CANCELLED; return nullptr; }
+            HINTERNET socket = ::WinHttpWebSocketCompleteUpgrade(m_handle, context);
+            if (socket == nullptr) *error = ::GetLastError();
+            return socket;
+        }
+
+        Result receive()
+        {
+            {
+                std::lock_guard<std::mutex> api(m_apiMutex);
+                if (!availableLocked()) return {};
+                { std::lock_guard<std::mutex> lock(m_mutex); if (!begin(m_read)) return {ERROR_INVALID_OPERATION}; }
+                const DWORD error = ::WinHttpWebSocketReceive(m_handle, m_receiveBuffer.data(),
+                    static_cast<DWORD>(m_receiveBuffer.size()), nullptr, nullptr);
+                if (error != ERROR_SUCCESS) immediateFailure(m_read, error);
+            }
+            return await(m_read);
+        }
+        DWORD sendPing()
+        {
+            {
+                std::lock_guard<std::mutex> api(m_apiMutex);
+                if (!availableLocked()) return ERROR_WINHTTP_OPERATION_CANCELLED;
+                { std::lock_guard<std::mutex> lock(m_mutex); if (!begin(m_write)) return ERROR_INVALID_OPERATION; }
+                const DWORD error = ::WinHttpWebSocketSend(m_handle, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                    m_pingBuffer.data(), static_cast<DWORD>(m_pingBuffer.size()));
+                if (error != ERROR_SUCCESS) immediateFailure(m_write, error);
+            }
+            return await(m_write).error;
+        }
+        const unsigned char* receivedData() const { return m_receiveBuffer.data(); }
+
+        void close()
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            m_closeRequested = true;
+            closeLocked();
+        }
+        // A reserved upgrade context may have been canceled before a native handle
+        // existed. No callback is promised for a failed creation.
+        void abandonUncreated()
+        {
+            std::lock_guard<std::mutex> api(m_apiMutex);
+            if (m_everAdopted) return;
+            markTerminal(false);
+            eraseContext();
+        }
+        bool waitClosed()
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_changed.wait(lock, [this]() { return m_handleClosing || m_closeFailed; });
+            return !m_closeFailed;
+        }
+
+    private:
+        bool availableLocked() const { return m_handle != nullptr && !m_closeRequested; }
+        static bool begin(Slot& slot)
+        {
+            if (slot.pending || slot.done) return false;
+            slot = {}; slot.pending = true;
+            return true;
+        }
+        static void complete(Slot& slot, const Result& result)
+        {
+            if (!slot.pending) return;
+            slot.pending = false; slot.done = true; slot.result = result;
+        }
+        Result await(Slot& slot)
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_changed.wait(lock, [this, &slot]() { return slot.done || m_handleClosing || m_closeFailed; });
+            const Result result = slot.done ? slot.result : Result();
+            slot.done = false; // The caller consumes the receipt before this lane may be reused.
+            return result;
+        }
+        void immediateFailure(Slot& slot, DWORD error)
+        {
+            if (error == ERROR_IO_PENDING) return;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            complete(slot, {error});
+            m_changed.notify_all();
+        }
+        void eraseContext()
+        {
+            auto& registry = earthquakeHandleRegistry();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            registry.handles.erase(m_id);
+        }
+        void markTerminal(bool failed)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_closeFailed = failed;
+            m_handleClosing = !failed;
+            complete(m_request, {}); complete(m_read, {}); complete(m_write, {});
+            m_changed.notify_all();
+        }
+        void closeLocked()
+        {
+            // Serialize only API invocations, never completion waits. No native API
+            // may reuse the raw value once we remove it before CloseHandle.
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                complete(m_request, {}); complete(m_read, {}); complete(m_write, {});
+                m_changed.notify_all();
+            }
+            HINTERNET handle = m_handle;
+            m_handle = nullptr;
+            if (handle == nullptr) return;
+            const BOOL closed = ::WinHttpCloseHandle(handle);
+            if (!m_contextArmed)
+            {
+                markTerminal(closed == FALSE);
+                if (closed != FALSE) eraseContext();
+            }
+            else if (closed == FALSE)
+            {
+                // A failed close cannot justify freeing buffers or retrying a raw
+                // handle. Retain the context independently of the Qt owner.
+                markTerminal(true);
+            }
+        }
+        void onStatus(HINTERNET handle, DWORD status, void* info, DWORD size)
+        {
+            bool terminal = false;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (handle != m_identity) return; // Stable ID plus identity rejects raw-handle ABA.
+                if (status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING)
+                {
+                    m_handleClosing = true;
+                    complete(m_request, {}); complete(m_read, {}); complete(m_write, {});
+                    terminal = true;
+                }
+                else if (status == WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE && m_handshake == Handshake::Send)
+                    complete(m_request, {ERROR_SUCCESS});
+                else if (status == WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE && m_handshake == Handshake::Headers)
+                    complete(m_request, {ERROR_SUCCESS});
+                else if ((status == WINHTTP_CALLBACK_STATUS_READ_COMPLETE || status == WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE)
+                    && m_kind == Kind::WebSocket)
+                {
+                    Result result{ERROR_WINHTTP_INVALID_SERVER_RESPONSE};
+                    if (info != nullptr && size >= sizeof(WINHTTP_WEB_SOCKET_STATUS))
+                    {
+                        const auto& value = *static_cast<const WINHTTP_WEB_SOCKET_STATUS*>(info);
+                        result = {ERROR_SUCCESS, value.dwBytesTransferred, value.eBufferType};
+                        if (status == WINHTTP_CALLBACK_STATUS_READ_COMPLETE && result.bytes > m_receiveBuffer.size())
+                            result.error = ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
+                    }
+                    complete(status == WINHTTP_CALLBACK_STATUS_READ_COMPLETE ? m_read : m_write, result);
+                }
+                else if (status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR)
+                {
+                    DWORD error = ERROR_WINHTTP_INTERNAL_ERROR;
+                    if (info != nullptr && size >= sizeof(WINHTTP_ASYNC_RESULT))
+                        error = static_cast<const WINHTTP_ASYNC_RESULT*>(info)->dwError;
+                    if (m_kind == Kind::Request) complete(m_request, {error});
+                    else if (info != nullptr && size >= sizeof(WINHTTP_WEB_SOCKET_ASYNC_RESULT))
+                    {
+                        const auto operation = static_cast<const WINHTTP_WEB_SOCKET_ASYNC_RESULT*>(info)->Operation;
+                        if (operation == WINHTTP_WEB_SOCKET_RECEIVE_OPERATION) complete(m_read, {error});
+                        else if (operation == WINHTTP_WEB_SOCKET_SEND_OPERATION) complete(m_write, {error});
+                        else { complete(m_read, {error}); complete(m_write, {error}); }
+                    }
+                    else { complete(m_read, {error}); complete(m_write, {error}); }
+                }
+                m_changed.notify_all();
+            }
+            if (terminal) eraseContext(); // HANDLE_CLOSING is WinHTTP's final callback.
+        }
+
+        const Kind m_kind;
+        DWORD_PTR m_id = 0;
+        std::mutex m_apiMutex;
+        std::mutex m_mutex;
+        std::condition_variable m_changed;
+        HINTERNET m_handle = nullptr; // m_apiMutex only, removed before the first close call.
+        HINTERNET m_identity = nullptr; // m_mutex; immutable after initial adoption.
+        bool m_contextArmed = false;
+        bool m_everAdopted = false;
+        bool m_closeRequested = false;
+        bool m_handleClosing = false;
+        bool m_closeFailed = false;
+        Handshake m_handshake = Handshake::None;
+        Slot m_request, m_read, m_write;
+        std::array<unsigned char, 8192> m_receiveBuffer{};
+        std::array<char, 4> m_pingBuffer{'p', 'i', 'n', 'g'};
+    };
+
+    struct EarthquakeNativeHandle
+    {
+        HINTERNET handle = nullptr;
+        explicit EarthquakeNativeHandle(HINTERNET value) : handle(value) {}
+        ~EarthquakeNativeHandle() { if (handle != nullptr) ::WinHttpCloseHandle(handle); }
+        HINTERNET release() { return std::exchange(handle, nullptr); }
+        EarthquakeNativeHandle(const EarthquakeNativeHandle&) = delete;
+        EarthquakeNativeHandle& operator=(const EarthquakeNativeHandle&) = delete;
+    };
+    struct EarthquakeAsyncHandleCleanup
+    {
+        std::shared_ptr<EarthquakeAsyncHandle> handle;
+        ~EarthquakeAsyncHandleCleanup()
+        {
+            if (handle) { handle->close(); handle->abandonUncreated(); handle->waitClosed(); }
+        }
+    };
+    // End AUX010 async transport core.
+
 }
 
 // Private 将 WinHTTP 线程、事件聚合和可选音频队列收束到实现文件，保持 Taskbar 公共头稳定。
@@ -309,8 +658,9 @@ public:
     struct SourceRuntime
     {
         std::thread thread;                  // 该来源唯一接收线程。
-        std::mutex socketMutex;              // 协调 stop 与阻塞 receive 的套接字关闭。
-        HINTERNET socket = nullptr;          // 当前已升级的 WebSocket 句柄。
+        std::mutex handlesMutex; // Only copies current value owners, never held across WinHTTP.
+        std::shared_ptr<EarthquakeAsyncHandle> request;
+        std::shared_ptr<EarthquakeAsyncHandle> socket;
         std::atomic_bool connected{ false }; // 当前连接状态。
         std::atomic_bool everConnected{ false }; // 本进程中至少一次成功连接。
         std::atomic_bool preferDirect{ false }; // 上次直连成功后优先跳过系统代理。
@@ -335,47 +685,50 @@ public:
     // start：启动默认来源的工作线程；重复调用不创建第二组连接。
     void start()
     {
-        if (started.exchange(true))
-        {
-            return;
-        }
-
+        if (started.exchange(true)) return;
         stopRequested.store(false);
-        for (int sourceIndex = 0; sourceIndex < kSourceCount; ++sourceIndex)
+        try
         {
-            if (!kSources[sourceIndex].enabledByDefault)
+            for (int sourceIndex = 0; sourceIndex < kSourceCount; ++sourceIndex)
             {
-                continue;
+                if (!kSources[sourceIndex].enabledByDefault) continue;
+                runtimes[sourceIndex].thread = std::thread([this, sourceIndex]() {
+                    try { sourceThreadMain(sourceIndex); }
+                    catch (...)
+                    {
+                        closeSourceSocket(sourceIndex);
+                        runtimes[sourceIndex].connected.store(false);
+                        postSourceStatusChange();
+                    }
+                });
             }
-            runtimes[sourceIndex].thread = std::thread(&Private::sourceThreadMain, this, sourceIndex);
+            keepaliveThread = std::thread(&Private::keepaliveThreadMain, this);
         }
-        keepaliveThread = std::thread(&Private::keepaliveThreadMain, this);
+        catch (...)
+        {
+            // Partial thread creation still cancels and joins every accepted worker.
+            stop();
+            postSourceStatusChange();
+        }
     }
 
-    // stop：先关闭所有 WebSocket 打断 receive，再等待每个来源线程有序退出。
+    // stop：取消握手与收发，唤醒退避等待，再等待来源线程与最终回调。
     void stop()
     {
-        if (!started.exchange(false))
+        if (!started.exchange(false)) return;
         {
-            return;
+            // Pair the predicate store with waitUntilStop's mutex so a notify
+            // cannot be lost between its predicate check and atomic wait.
+            std::lock_guard<std::mutex> lock(stopWaitMutex);
+            stopRequested.store(true);
         }
-
-        stopRequested.store(true);
-        for (int sourceIndex = 0; sourceIndex < kSourceCount; ++sourceIndex)
-        {
-            closeSourceSocket(sourceIndex);
-        }
-        if (keepaliveThread.joinable())
-        {
-            keepaliveThread.join();
-        }
+        stopChanged.notify_all();
+        // Cancel each request/socket, including send/DNS/TLS/header/upgrade phases.
+        // Handle close serializes only native invocation return, never a network wait.
+        for (int sourceIndex = 0; sourceIndex < kSourceCount; ++sourceIndex) closeSourceSocket(sourceIndex);
+        if (keepaliveThread.joinable()) keepaliveThread.join();
         for (SourceRuntime& runtime : runtimes)
-        {
-            if (runtime.thread.joinable())
-            {
-                runtime.thread.join();
-            }
-        }
+            if (runtime.thread.joinable()) runtime.thread.join();
     }
 
     // warningsSnapshot：清理超时事件后构造 UI 不可变快照，调用方不持有锁。
@@ -405,7 +758,7 @@ public:
         return warnings;
     }
 
-    // statusesSnapshot：从原子连接状态读取诊断信息，不需要长期持有网络线程的 socketMutex。
+    // statusesSnapshot：从原子连接状态读取诊断信息，不持有网络句柄锁。
     QList<TaskbarEarthquakeSourceStatus> statusesSnapshot() const
     {
         const ULONGLONG now = ::GetTickCount64();
@@ -467,196 +820,152 @@ public:
         }
     }
 
+    struct PublishedSourceHandle
+    {
+        SourceRuntime& runtime;
+        std::shared_ptr<EarthquakeAsyncHandle> value;
+        bool request;
+        bool active = true;
+        PublishedSourceHandle(SourceRuntime& source, std::shared_ptr<EarthquakeAsyncHandle> handle, bool isRequest)
+            : runtime(source), value(std::move(handle)), request(isRequest)
+        {
+            std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+            (request ? runtime.request : runtime.socket) = value;
+        }
+        ~PublishedSourceHandle()
+        {
+            if (!active) return;
+            std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+            auto& current = request ? runtime.request : runtime.socket;
+            if (current == value) current.reset();
+        }
+    };
+    bool waitUntilStop(DWORD milliseconds)
+    {
+        std::unique_lock<std::mutex> lock(stopWaitMutex);
+        return stopChanged.wait_for(lock, std::chrono::milliseconds(milliseconds), [this]() { return stopRequested.load(); });
+    }
+
     // sourceThreadMain：维护单个来源的 WinHTTP WebSocket，失败时指数退避重连。
     void sourceThreadMain(int sourceIndex)
     {
         SourceRuntime& runtime = runtimes[sourceIndex];
         const SourceConfig& config = kSources[sourceIndex];
-        HINTERNET session = ::WinHttpOpen(L"KSword Taskbar/1.0 EEW", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (session == nullptr)
-        {
-            return;
-        }
-
-        ::WinHttpSetTimeouts(session, 5000, 5000, 5000, 90000);
+        EarthquakeNativeHandle session(::WinHttpOpen(L"KSword Taskbar/1.0 EEW", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC));
+        if (session.handle == nullptr) return;
+        if (::WinHttpSetStatusCallback(session.handle, EarthquakeAsyncHandle::statusCallback,
+            WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS | WINHTTP_CALLBACK_FLAG_HANDLES, 0) == WINHTTP_INVALID_STATUS_CALLBACK) return;
+        ::WinHttpSetTimeouts(session.handle, 5000, 5000, 5000, 90000);
         DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
 #ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
         secureProtocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
 #endif
-        ::WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
+        ::WinHttpSetOption(session.handle, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
 
         DWORD reconnectDelayMs = kReconnectBaseMs;
         while (!stopRequested.load())
         {
-            DWORD httpStatus = 0;
-            DWORD lastError = ERROR_SUCCESS;
+            DWORD httpStatus = 0, lastError = ERROR_SUCCESS;
             bool usedDirect = runtime.preferDirect.load();
-            HINTERNET socket = connectSourceWebSocket(session, config, usedDirect, &httpStatus, &lastError);
-            if (socket == nullptr && httpStatus == 0 && lastError != ERROR_WINHTTP_TIMEOUT && !stopRequested.load())
+            auto socket = connectSourceWebSocket(sourceIndex, session.handle, config, usedDirect, &httpStatus, &lastError);
+            if (!socket && httpStatus == 0 && lastError != ERROR_WINHTTP_TIMEOUT && !stopRequested.load())
             {
                 usedDirect = !usedDirect;
-                socket = connectSourceWebSocket(session, config, usedDirect, &httpStatus, &lastError);
+                socket = connectSourceWebSocket(sourceIndex, session.handle, config, usedDirect, &httpStatus, &lastError);
             }
-
-            if (socket == nullptr)
+            if (!socket)
             {
                 runtime.connected.store(false);
                 postSourceStatusChange();
                 const bool serverBusy = httpStatus == 429 || httpStatus == 503 || lastError == ERROR_WINHTTP_TIMEOUT;
-                const DWORD delay = serverBusy ? kServerBusyReconnectMs : reconnectDelayMs;
-                sleepUntilStop(stopRequested, delay);
+                waitUntilStop(serverBusy ? kServerBusyReconnectMs : reconnectDelayMs);
                 reconnectDelayMs = std::min<DWORD>(kReconnectMaxMs, reconnectDelayMs + kReconnectBaseMs);
                 continue;
             }
 
+            EarthquakeAsyncHandleCleanup socketCleanup{socket};
             reconnectDelayMs = kReconnectBaseMs;
             runtime.preferDirect.store(usedDirect);
+            runtime.lastPingTick.store(0); // A ping from an old transport cannot belong to this epoch.
+            if (!stopRequested.load())
             {
-                std::lock_guard<std::mutex> lock(runtime.socketMutex);
-                runtime.socket = socket;
+                runtime.connected.store(true);
+                runtime.everConnected.store(true);
+                postSourceStatusChange();
+                receiveSourceMessages(sourceIndex, socket);
             }
-            runtime.connected.store(true);
-            runtime.everConnected.store(true);
-            postSourceStatusChange();
-            receiveSourceMessages(sourceIndex, socket);
             closeSourceSocketIfCurrent(sourceIndex, socket);
             runtime.connected.store(false);
             postSourceStatusChange();
-            if (!stopRequested.load())
-            {
-                sleepUntilStop(stopRequested, reconnectDelayMs);
-            }
+            if (!stopRequested.load()) waitUntilStop(reconnectDelayMs);
         }
-
-        ::WinHttpCloseHandle(session);
     }
 
     // connectSourceWebSocket：完成 HTTPS 升级，返回成功的 WebSocket 或 nullptr，并回传失败类型。
-    HINTERNET connectSourceWebSocket(HINTERNET session, const SourceConfig& config, bool bypassProxy,
-        DWORD* httpStatus, DWORD* lastError)
+    std::shared_ptr<EarthquakeAsyncHandle> connectSourceWebSocket(int sourceIndex, HINTERNET session,
+        const SourceConfig& config, bool bypassProxy, DWORD* httpStatus, DWORD* lastError)
     {
-        if (httpStatus != nullptr)
-        {
-            *httpStatus = 0;
-        }
-        if (lastError != nullptr)
-        {
-            *lastError = ERROR_SUCCESS;
-        }
+        *httpStatus = 0;
+        *lastError = ERROR_SUCCESS;
+        if (stopRequested.load()) { *lastError = ERROR_WINHTTP_OPERATION_CANCELLED; return {}; }
+        EarthquakeNativeHandle connection(::WinHttpConnect(session, config.host, INTERNET_DEFAULT_HTTPS_PORT, 0));
+        if (connection.handle == nullptr) { *lastError = ::GetLastError(); return {}; }
+        EarthquakeNativeHandle nativeRequest(::WinHttpOpenRequest(connection.handle, L"GET", config.path, nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+        if (nativeRequest.handle == nullptr) { *lastError = ::GetLastError(); return {}; }
+        auto request = EarthquakeAsyncHandle::create(EarthquakeAsyncHandle::Kind::Request);
+        if (!request) { *lastError = ::GetLastError(); return {}; }
+        EarthquakeAsyncHandleCleanup requestCleanup{request};
+        const bool requestAdopted = request->adopt(nativeRequest.handle, false);
+        nativeRequest.release(); // adopt owns/closes it even when context setup fails.
+        if (!requestAdopted) { *lastError = ::GetLastError(); return {}; }
+        PublishedSourceHandle publishedRequest(runtimes[sourceIndex], request, true);
+        if (stopRequested.load()) { *lastError = ERROR_WINHTTP_OPERATION_CANCELLED; return {}; }
+        if (!request->configureRequest(bypassProxy, lastError)) return {};
+        *lastError = request->sendRequest();
+        if (*lastError != ERROR_SUCCESS) return {};
+        if (stopRequested.load()) { *lastError = ERROR_WINHTTP_OPERATION_CANCELLED; return {}; }
+        *lastError = request->receiveHeaders();
+        if (*lastError != ERROR_SUCCESS) return {};
+        if (!request->queryStatus(httpStatus, lastError) || *httpStatus != 101) return {};
 
-        HINTERNET connection = ::WinHttpConnect(session, config.host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-        if (connection == nullptr)
-        {
-            if (lastError != nullptr)
-            {
-                *lastError = ::GetLastError();
-            }
-            return nullptr;
-        }
-
-        HINTERNET request = ::WinHttpOpenRequest(connection, L"GET", config.path, nullptr,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-        if (request == nullptr)
-        {
-            if (lastError != nullptr)
-            {
-                *lastError = ::GetLastError();
-            }
-            ::WinHttpCloseHandle(connection);
-            return nullptr;
-        }
-
-        if (bypassProxy)
-        {
-            WINHTTP_PROXY_INFO proxyInfo = {};
-            proxyInfo.dwAccessType = WINHTTP_ACCESS_TYPE_NO_PROXY;
-            proxyInfo.lpszProxy = WINHTTP_NO_PROXY_NAME;
-            proxyInfo.lpszProxyBypass = WINHTTP_NO_PROXY_BYPASS;
-            ::WinHttpSetOption(request, WINHTTP_OPTION_PROXY, &proxyInfo, sizeof(proxyInfo));
-        }
-
-        ::WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-        const BOOL sent = ::WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-        const BOOL received = sent != FALSE && ::WinHttpReceiveResponse(request, nullptr) != FALSE;
-        if (received == FALSE)
-        {
-            if (lastError != nullptr)
-            {
-                *lastError = ::GetLastError();
-            }
-            ::WinHttpCloseHandle(request);
-            ::WinHttpCloseHandle(connection);
-            return nullptr;
-        }
-
-        DWORD status = 0;
-        DWORD statusSize = sizeof(status);
-        ::WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
-        if (httpStatus != nullptr)
-        {
-            *httpStatus = status;
-        }
-        if (status != 101)
-        {
-            ::WinHttpCloseHandle(request);
-            ::WinHttpCloseHandle(connection);
-            return nullptr;
-        }
-
-        HINTERNET socket = ::WinHttpWebSocketCompleteUpgrade(request, 0);
-        if (socket == nullptr && lastError != nullptr)
-        {
-            *lastError = ::GetLastError();
-        }
-        ::WinHttpCloseHandle(request);
-        ::WinHttpCloseHandle(connection);
+        auto socket = EarthquakeAsyncHandle::create(EarthquakeAsyncHandle::Kind::WebSocket);
+        if (!socket) { *lastError = ::GetLastError(); return {}; }
+        EarthquakeAsyncHandleCleanup socketCleanup{socket};
+        PublishedSourceHandle publishedSocket(runtimes[sourceIndex], socket, false);
+        if (stopRequested.load()) { *lastError = ERROR_WINHTTP_OPERATION_CANCELLED; return {}; }
+        EarthquakeNativeHandle nativeSocket(request->upgrade(socket->id(), lastError));
+        if (nativeSocket.handle == nullptr) return {};
+        const bool socketAdopted = socket->adopt(nativeSocket.handle, true);
+        nativeSocket.release();
+        if (!socketAdopted || stopRequested.load())
+        { *lastError = ERROR_WINHTTP_OPERATION_CANCELLED; return {}; }
+        // Transfer the upgraded state to the receive loop. Request/connection
+        // scope cleanup completes independently before this return is published.
+        socketCleanup.handle.reset();
+        publishedSocket.active = false;
         return socket;
     }
 
     // receiveSourceMessages：接收分片文本帧，完整报文才交给 JSON 解析和事件聚合。
-    void receiveSourceMessages(int sourceIndex, HINTERNET socket)
+    void receiveSourceMessages(int sourceIndex, const std::shared_ptr<EarthquakeAsyncHandle>& socket)
     {
         SourceRuntime& runtime = runtimes[sourceIndex];
         QByteArray message;
-        std::array<unsigned char, 8192> buffer = {};
         while (!stopRequested.load())
         {
-            DWORD bytesRead = 0;
-            WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
-            const DWORD result = ::WinHttpWebSocketReceive(socket, buffer.data(),
-                static_cast<DWORD>(buffer.size()), &bytesRead, &bufferType);
-            if (result != ERROR_SUCCESS || bufferType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE)
-            {
-                break;
-            }
-
+            const auto result = socket->receive();
+            if (result.error != ERROR_SUCCESS || result.type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE || stopRequested.load()) break;
             const ULONGLONG now = ::GetTickCount64();
             runtime.lastMessageTick.store(now);
-            if (runtime.lastPingTick.load() != 0)
-            {
-                const ULONGLONG lastPing = runtime.lastPingTick.exchange(0);
-                if (now >= lastPing)
-                {
-                    runtime.latencyMs.store(now - lastPing);
-                }
-            }
+            const ULONGLONG lastPing = runtime.lastPingTick.exchange(0);
+            if (lastPing != 0 && now >= lastPing) runtime.latencyMs.store(now - lastPing);
             postSourceStatusChange();
-
-            if (bufferType != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE &&
-                bufferType != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE)
-            {
-                continue;
-            }
-
-            message.append(reinterpret_cast<const char*>(buffer.data()), static_cast<qsizetype>(bytesRead));
-            if (bufferType == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE)
-            {
-                continue;
-            }
-
+            if (result.type != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE
+                && result.type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) continue;
+            message.append(reinterpret_cast<const char*>(socket->receivedData()), static_cast<qsizetype>(result.bytes));
+            if (result.type == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) continue;
             const ParsedWarningMessage parsed = parseMessageForProvider(kSources[sourceIndex].provider, message);
             message.clear();
             applySourceEvent(sourceIndex, parsed);
@@ -740,56 +1049,44 @@ public:
     void closeSourceSocket(int sourceIndex)
     {
         SourceRuntime& runtime = runtimes[sourceIndex];
-        HINTERNET socket = nullptr;
+        std::shared_ptr<EarthquakeAsyncHandle> request, socket;
         {
-            std::lock_guard<std::mutex> lock(runtime.socketMutex);
+            std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+            request = runtime.request;
             socket = runtime.socket;
-            runtime.socket = nullptr;
         }
-        if (socket != nullptr)
-        {
-            ::WinHttpCloseHandle(socket);
-        }
+        // No runtime mutex is held during native invocation/cancellation or waits.
+        if (request) request->close();
+        if (socket) socket->close();
     }
 
     // closeSourceSocketIfCurrent：仅接收线程仍拥有该句柄时关闭，避免 stop() 与接收线程双重关闭。
-    void closeSourceSocketIfCurrent(int sourceIndex, HINTERNET socket)
+    void closeSourceSocketIfCurrent(int sourceIndex, const std::shared_ptr<EarthquakeAsyncHandle>& socket)
     {
         SourceRuntime& runtime = runtimes[sourceIndex];
-        bool ownsSocket = false;
         {
-            std::lock_guard<std::mutex> lock(runtime.socketMutex);
-            if (runtime.socket == socket)
-            {
-                runtime.socket = nullptr;
-                ownsSocket = true;
-            }
+            std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+            if (runtime.socket == socket) runtime.socket.reset();
         }
-        if (ownsSocket)
-        {
-            ::WinHttpCloseHandle(socket);
-        }
+        // Identity is the shared state/unique context, never a reusable raw value.
+        if (socket) socket->close();
     }
 
-    // sendSourcePing：保活线程是唯一发送方；socketMutex 将 send 与 stop() 的关闭操作串行化。
+    // sendSourcePing：保活线程是唯一发送方，完成等待不占 runtime/API 锁。
     void sendSourcePing(int sourceIndex)
     {
-        // 保活线程是唯一发送方；socketMutex 将 send 与 stop() 的关闭操作串行化。
         SourceRuntime& runtime = runtimes[sourceIndex];
-        std::lock_guard<std::mutex> lock(runtime.socketMutex);
-        if (runtime.socket == nullptr || !runtime.connected.load())
+        std::shared_ptr<EarthquakeAsyncHandle> socket;
         {
-            return;
+            std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+            socket = runtime.socket;
         }
-
-        const char ping[] = "ping";
+        if (!socket || !runtime.connected.load() || stopRequested.load()) return;
         const ULONGLONG now = ::GetTickCount64();
-        const DWORD result = ::WinHttpWebSocketSend(runtime.socket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-            const_cast<char*>(ping), static_cast<DWORD>(sizeof(ping) - 1));
-        if (result == ERROR_SUCCESS)
-        {
-            runtime.lastPingTick.store(now);
-        }
+        const DWORD error = socket->sendPing(); // Completion wait holds no socket/runtime/API lock.
+        if (error != ERROR_SUCCESS || stopRequested.load()) return;
+        std::lock_guard<std::mutex> lock(runtime.handlesMutex);
+        if (runtime.socket == socket && runtime.connected.load()) runtime.lastPingTick.store(now);
     }
 
     // keepaliveThreadMain：每 30 秒发送一次轻量 ping，接收线程仍独占 WebSocket receive 调用。
@@ -808,7 +1105,7 @@ public:
                     sendSourcePing(sourceIndex);
                 }
             }
-            sleepUntilStop(stopRequested, kKeepalivePingIntervalMs);
+            waitUntilStop(kKeepalivePingIntervalMs);
         }
     }
 
@@ -932,6 +1229,8 @@ public:
     TaskbarEarthquakeClient* owner;          // 外部 QObject，用于安全发布信号。
     std::atomic_bool started{ false };       // start/stop 幂等保护。
     std::atomic_bool stopRequested{ false }; // 后台线程退出标记。
+    std::mutex stopWaitMutex;
+    std::condition_variable stopChanged; // Wakes keepalive/reconnect immediately, without polling sleeps.
     std::array<SourceRuntime, kSourceCount> runtimes; // 每预警源的线程与连接状态。
     std::thread keepaliveThread;             // 唯一保活发送线程，不与接收线程竞争 send 调用。
     mutable std::mutex eventsMutex;          // 保护 events 的合并和清理操作。
