@@ -11,6 +11,7 @@
 
 #include "../Framework.h"
 #include "../UI/StructuredFieldView.h"
+#include "../UI/ImmutableValueTable.h"
 
 #include <QWidget>
 #include <QStringList>
@@ -126,15 +127,16 @@ private:
     ks::ui::StructuredFieldView* m_windowDetailEditor = nullptr;      // m_windowDetailEditor：当前选中 HWND 的快照/按需详情。
 
     // 结构化审计表格（可排序，展示全部行）。
-    QTableWidget* m_windowsTable = nullptr;     // m_windowsTable：Win32K 窗口表。
-    QTableWidget* m_guiThreadsTable = nullptr;  // m_guiThreadsTable：GUI 线程表。
-    QTableWidget* m_sessionTable = nullptr;     // m_sessionTable：Win32K session 表。
-    QTableWidget* m_hotkeysTable = nullptr;     // m_hotkeysTable：热键表。
-    QTableWidget* m_hooksTable = nullptr;       // m_hooksTable：Hook 表。
-    QTableWidget* m_clipboardTable = nullptr;   // m_clipboardTable：剪贴板属性/值表。
-    QTableWidget* m_deviceTable = nullptr;      // m_deviceTable：GPU/显示/watchdog 设备审计表。
+    ks::ui::ImmutableValueTable* m_windowsTable = nullptr;     // m_windowsTable：Win32K 窗口表。
+    ks::ui::ImmutableValueTable* m_guiThreadsTable = nullptr;  // m_guiThreadsTable：GUI 线程表。
+    ks::ui::ImmutableValueTable* m_sessionTable = nullptr;     // m_sessionTable：Win32K session 表。
+    ks::ui::ImmutableValueTable* m_hotkeysTable = nullptr;     // m_hotkeysTable：热键表。
+    ks::ui::ImmutableValueTable* m_hooksTable = nullptr;       // m_hooksTable：Hook 表。
+    ks::ui::ImmutableValueTable* m_clipboardTable = nullptr;   // m_clipboardTable：剪贴板属性/值表。
+    ks::ui::ImmutableValueTable* m_deviceTable = nullptr;      // m_deviceTable：GPU/显示/watchdog 设备审计表。
 
     ks::ui::AsyncOperation* m_auditOperation = nullptr;
+    quint64 m_auditViewRevision = 0, m_summaryViewRevision = ~quint64(0);
 
     // 刷新控制。
     std::atomic_bool m_refreshing{ false };     // m_refreshing：后台刷新互斥。
