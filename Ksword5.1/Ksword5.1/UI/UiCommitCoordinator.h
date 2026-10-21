@@ -9,6 +9,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QString>
+#include "PerfTrace.h"
 
 #include <functional>
 
@@ -112,6 +113,10 @@ namespace ks::ui
             bool waitsForValueCapture = false;        // Pure presentation only.
             bool waitsForExposure = false;            // Explicit known owner/targets at admission.
             QList<QObject*> presentationHosts;        // Index identities only; never dereference.
+#if KSWORD_PERF_TRACE_ENABLED
+            PerfTraceContext traceContext;
+            qint64 deferredAtNs = -1;
+#endif
         };
 
         using PendingMap = QMap<quint64, PendingCommit>;

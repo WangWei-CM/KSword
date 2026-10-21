@@ -40,6 +40,7 @@ namespace
 {
     std::atomic_bool notifyTraceReady{false};
     thread_local ks::ui::PerfNotifyScope* currentNotifyScope = nullptr;
+    thread_local ks::ui::PerfTraceContext currentTraceContext;
 
     struct NotifyCpuSample
     {
@@ -92,6 +93,9 @@ namespace
         qint64 count = -1;
         quint64 scopeId = 0;
         quint64 parentScopeId = 0;
+        quint64 actionId = 0, requestId = 0, parentRequestId = 0;
+        quintptr threadId = 0;
+        QString origin;
         int eventType = -1;
         qint64 selfWallNs = -1, threadCycles = -1, selfThreadCycles = -1;
         qint64 threadCpu100ns = -1, selfThreadCpu100ns = -1;
@@ -162,6 +166,19 @@ namespace
         session.insert(QStringLiteral("qt"), QString::fromLatin1(qVersion()));
         session.insert(QStringLiteral("build_stamp"), QStringLiteral(__DATE__ " " __TIME__));
         session.insert(QStringLiteral("version"), state->applicationVersion);
+        session.insert(QStringLiteral("pid"), static_cast<double>(::GetCurrentProcessId()));
+        // Bound the clock alignment with external Windows ETW/WPR evidence.
+        // This is a calibration, not a measured display/presentation event.
+        LARGE_INTEGER frequency{}, qpc{};
+        const auto syncBefore = referenceClock().nsecsElapsed();
+        if (::QueryPerformanceFrequency(&frequency) && ::QueryPerformanceCounter(&qpc))
+        {
+            const auto syncAfter = referenceClock().nsecsElapsed();
+            session.insert(QStringLiteral("qpc_frequency"), QString::number(frequency.QuadPart));
+            session.insert(QStringLiteral("clock_sync_qpc"), QString::number(qpc.QuadPart));
+            session.insert(QStringLiteral("clock_sync_before_ns"), static_cast<double>(syncBefore));
+            session.insert(QStringLiteral("clock_sync_after_ns"), static_cast<double>(syncAfter));
+        }
         session.insert(QStringLiteral("exe"), state->executable);
         session.insert(QStringLiteral("writer_thread"), QString::number(
             reinterpret_cast<quintptr>(QThread::currentThreadId())));
@@ -210,6 +227,12 @@ namespace
                 record.insert(QStringLiteral("op"), value.operation);
                 record.insert(QStringLiteral("t"), value.atNs / 1000000.0);
                 record.insert(QStringLiteral("t_ns"), static_cast<double>(value.atNs));
+                record.insert(QStringLiteral("action_id"), QString::number(value.actionId));
+                record.insert(QStringLiteral("request_id"), QString::number(value.requestId));
+                record.insert(QStringLiteral("thread_id"), QString::number(value.threadId));
+                if (value.parentRequestId)
+                    record.insert(QStringLiteral("parent_request_id"), QString::number(value.parentRequestId));
+                if (!value.origin.isEmpty()) record.insert(QStringLiteral("origin"), value.origin);
                 if (!value.target.isEmpty())
                     record.insert(QStringLiteral("target"), value.target);
                 if (!value.context.isEmpty())
@@ -234,7 +257,8 @@ namespace
                     record.insert(QStringLiteral("attribution"), QStringLiteral("unattributed_interval"));
                     record.insert(QStringLiteral("interval_ns"), static_cast<double>(value.endNs - value.beginNs));
                 }
-                if (value.eventType >= 0)
+                if (value.eventType >= 0) record.insert(QStringLiteral("event_type"), value.eventType);
+                if (value.event == QStringLiteral("notify_dispatch"))
                 {
                     record.insert(QStringLiteral("measurement"), QStringLiteral("qt_notify_dispatch"));
                     record.insert(QStringLiteral("event_type"), value.eventType);
@@ -331,6 +355,36 @@ namespace ks::ui
         }
 
         quint64 nextNotifyId() { return m_nextScopeId.fetch_add(1, std::memory_order_relaxed); }
+
+        void recordAsync(const char* stage, PerfTraceContext context, qint64 count,
+            qint64 beganAtNs, quint64 parentRequestId = 0)
+        {
+            auto record = makeRecord("async_stage", stage, QString());
+            record.actionId = context.actionId;
+            record.requestId = context.requestId;
+            record.parentRequestId = parentRequestId;
+            record.count = count;
+            if (beganAtNs >= 0)
+            {
+                record.beginNs = beganAtNs;
+                record.endNs = record.atNs;
+                record.durationNs = std::max<qint64>(0, record.endNs - beganAtNs);
+            }
+            enqueue(std::move(record));
+        }
+
+        void recordInput(bool begin, PerfTraceContext context, const QString& target,
+            int eventType, bool spontaneous)
+        {
+            auto record = makeRecord(begin ? "input_begin" : "input_dispatch_end",
+                "perf_input_dispatch", target);
+            record.actionId = context.actionId;
+            record.requestId = context.requestId;
+            record.eventType = eventType;
+            record.origin = spontaneous ? QStringLiteral("qt_spontaneous_input")
+                : QStringLiteral("qt_synthetic_input");
+            enqueue(std::move(record));
+        }
 
         void recordNotify(TraceRecord record)
         {
@@ -450,6 +504,7 @@ namespace ks::ui
             record.beginNs = startedAtNs;
             record.endNs = endedAtNs;
             record.durationNs = overrunNs;
+            record.actionId = record.requestId = 0; // No single action owns the preceding interval.
             enqueue(std::move(record));
         }
 
@@ -460,6 +515,8 @@ namespace ks::ui
             record.event = QString::fromLatin1(event);
             record.operation = QString::fromUtf8(operation);
             record.target = target;
+            record.actionId = currentTraceContext.actionId;
+            record.requestId = currentTraceContext.requestId;
             {
                 std::lock_guard<std::mutex> lock(m_contextMutex);
                 record.context = m_cachedContext;
@@ -469,6 +526,7 @@ namespace ks::ui
 
         void enqueue(TraceRecord record)
         {
+            record.threadId = reinterpret_cast<quintptr>(QThread::currentThreadId());
             {
                 std::lock_guard<std::mutex> lock(m_writer->mutex);
                 if (m_writer->closed)
@@ -480,7 +538,7 @@ namespace ks::ui
                     m_writer->records.push_back(std::move(record));
                     ++m_writer->accepted;
                     auto& queued = m_writer->records.back();
-                    if (queued.eventType >= 0)
+                    if (queued.event == QStringLiteral("notify_dispatch"))
                         queued.probeUntilEnqueueNs = queued.probeSetupNs
                             + referenceClock().nsecsElapsed() - queued.endNs;
                 }
@@ -550,7 +608,38 @@ namespace ks::ui
         catch (...) { return false; }
     }
 
-    PerfNotifyScope::PerfNotifyScope(QObject* receiver, const int eventType) noexcept
+    PerfTraceContext CapturePerfTraceContext() noexcept { return currentTraceContext; }
+
+    PerfTraceContext BeginPerfAsyncTrace() noexcept
+    {
+        try
+        {
+            if (!notifyTraceReady.load(std::memory_order_relaxed)) return {};
+            auto context = currentTraceContext;
+            const auto parentRequest = context.requestId;
+            context.requestId = PerfTrace::instance().nextNotifyId();
+            PerfTrace::instance().recordAsync("perf_async_requested", context, -1, -1, parentRequest);
+            return context;
+        }
+        catch (...) { return {}; }
+    }
+
+    void RecordPerfAsyncTrace(const char* stage, PerfTraceContext context,
+        qint64 count, qint64 beganAtNs) noexcept
+    {
+        try
+        {
+            if (notifyTraceReady.load(std::memory_order_relaxed) && (context.requestId || context.actionId))
+                PerfTrace::instance().recordAsync(stage, context, count, beganAtNs);
+        }
+        catch (...) {}
+    }
+
+    PerfTraceContextScope::PerfTraceContextScope(PerfTraceContext context) noexcept
+        : m_previous(currentTraceContext) { currentTraceContext = context; }
+    PerfTraceContextScope::~PerfTraceContextScope() noexcept { currentTraceContext = m_previous; }
+
+    PerfNotifyScope::PerfNotifyScope(QObject* receiver, const int eventType, const QEvent* event) noexcept
     {
         try
         {
@@ -564,6 +653,26 @@ namespace ks::ui
             m_scopeId = PerfTrace::instance().nextNotifyId();
             m_parent = currentNotifyScope;
             m_eventType = eventType;
+            m_previousContext = m_context = currentTraceContext;
+            const bool input = eventType == QEvent::MouseButtonPress || eventType == QEvent::MouseMove || eventType == QEvent::MouseButtonRelease
+                || eventType == QEvent::MouseButtonDblClick || eventType == QEvent::KeyPress
+                || eventType == QEvent::KeyRelease || eventType == QEvent::Wheel
+                || eventType == QEvent::TouchBegin || eventType == QEvent::TouchUpdate
+                || eventType == QEvent::TouchEnd || eventType == QEvent::TabletPress
+                || eventType == QEvent::TabletMove || eventType == QEvent::TabletRelease;
+            if (input)
+            {
+                m_inputEvent = event;
+                // Qt can forward the same event through multiple notify calls.
+                // A nested event loop's distinct input must get its own ID.
+                m_inputAction = !event || !m_parent || m_parent->m_inputEvent != event;
+                if (m_inputAction)
+                {
+                    m_context = {PerfTrace::instance().nextNotifyId(), 0};
+                    m_inputSpontaneous = event && event->spontaneous();
+                    PerfTrace::instance().recordInput(true, m_context, m_target, eventType, m_inputSpontaneous);
+                }
+            }
             const auto cpu = sampleNotifyCpu();
             m_startedCycles = cpu.cycles;
             m_startedCpu100ns = cpu.time100ns;
@@ -572,6 +681,7 @@ namespace ks::ui
             m_startedAtNs = referenceClock().nsecsElapsed();
             m_setupNs = m_startedAtNs - setupStarted;
             currentNotifyScope = this;
+            currentTraceContext = m_context;
             m_active = true;
         }
         catch (...) {} // Diagnostics must not change event delivery.
@@ -581,6 +691,7 @@ namespace ks::ui
     {
         if (!m_active) return;
         currentNotifyScope = m_parent;
+        currentTraceContext = m_previousContext;
         try
         {
             const auto endedAt = referenceClock().nsecsElapsed();
@@ -610,6 +721,10 @@ namespace ks::ui
             record.scopeId = m_scopeId;
             record.parentScopeId = m_parent ? m_parent->m_scopeId : 0;
             record.eventType = m_eventType;
+            record.actionId = m_context.actionId;
+            record.requestId = m_context.requestId;
+            if (m_inputAction)
+                PerfTrace::instance().recordInput(false, m_context, m_target, m_eventType, m_inputSpontaneous);
             record.target = std::move(m_target);
             record.selfWallNs = std::max<qint64>(0, wall - m_childWallNs);
             if (cyclesValid)
@@ -630,22 +745,33 @@ namespace ks::ui
         catch (...) {}
     }
 
-    PerfScope::PerfScope(const char* operation, QString target)
+    PerfScope::PerfScope(const char* operation, QString target) noexcept
         : m_operationToken(operation), m_targetLabel(std::move(target))
     {
-        m_startedAtNs = referenceClock().nsecsElapsed();
-        m_scopeId = PerfTrace::instance().beginScope(m_operationToken, m_targetLabel, m_startedAtNs);
+        if (!operation) { m_finished = true; return; }
+        try
+        {
+            m_context = currentTraceContext;
+            m_startedAtNs = referenceClock().nsecsElapsed();
+            m_scopeId = PerfTrace::instance().beginScope(m_operationToken, m_targetLabel, m_startedAtNs);
+        }
+        catch (...) { m_finished = true; }
     }
 
-    PerfScope::~PerfScope() { finish(); }
+    PerfScope::~PerfScope() noexcept { finish(); }
 
-    void PerfScope::finish()
+    void PerfScope::finish() noexcept
     {
         if (m_finished)
             return;
         m_finished = true;
-        PerfTrace::instance().recordSpan(m_operationToken, m_targetLabel,
-            referenceClock().nsecsElapsed() - m_startedAtNs, m_itemCount, m_scopeId, m_startedAtNs);
+        try
+        {
+            PerfTraceContextScope context(m_context);
+            PerfTrace::instance().recordSpan(m_operationToken, m_targetLabel,
+                referenceClock().nsecsElapsed() - m_startedAtNs, m_itemCount, m_scopeId, m_startedAtNs);
+        }
+        catch (...) {}
     }
 }
 #endif

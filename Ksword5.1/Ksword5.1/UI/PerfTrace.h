@@ -4,6 +4,7 @@
 #include <QString>
 
 class QObject;
+class QEvent;
 
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
@@ -17,6 +18,31 @@ class QObject;
 namespace ks::ui
 {
 #if KSWORD_PERF_TRACE_ENABLED
+
+    // Values only: an input action can have many independent asynchronous
+    // requests. Zero means no proven input/request parent, never "latest".
+    struct PerfTraceContext
+    {
+        quint64 actionId = 0;
+        quint64 requestId = 0;
+    };
+    PerfTraceContext CapturePerfTraceContext() noexcept;
+    PerfTraceContext BeginPerfAsyncTrace() noexcept;
+    void RecordPerfAsyncTrace(const char* stage, PerfTraceContext context,
+        qint64 count = -1, qint64 beganAtNs = -1) noexcept;
+
+    // Restore the submitting action around an existing worker/UI callback;
+    // does not retain a receiver, schedule work, or change request admission.
+    class PerfTraceContextScope final
+    {
+    public:
+        explicit PerfTraceContextScope(PerfTraceContext context) noexcept;
+        ~PerfTraceContextScope() noexcept;
+        PerfTraceContextScope(const PerfTraceContextScope&) = delete;
+        PerfTraceContextScope& operator=(const PerfTraceContextScope&) = delete;
+    private:
+        PerfTraceContext m_previous;
+    };
 
     // 记录一次操作边界耗时（毫秒）。token 为稳定记号，target 为 dock 键、表名等上下文。
     void RecordPerfSpan(const char* operationToken, const QString& targetLabel, qint64 durationMs);
@@ -51,7 +77,7 @@ namespace ks::ui
     class PerfNotifyScope final
     {
     public:
-        PerfNotifyScope(QObject* receiver, int eventType) noexcept;
+        PerfNotifyScope(QObject* receiver, int eventType, const QEvent* event = nullptr) noexcept;
         ~PerfNotifyScope() noexcept;
         PerfNotifyScope(const PerfNotifyScope&) = delete;
         PerfNotifyScope& operator=(const PerfNotifyScope&) = delete;
@@ -65,14 +91,17 @@ namespace ks::ui
         int m_eventType = -1;
         bool m_active = false, m_cyclesValid = false, m_cpuValid = false;
         bool m_childCyclesValid = true, m_childCpuValid = true;
+        PerfTraceContext m_context, m_previousContext;
+        const QEvent* m_inputEvent = nullptr; // identity only; never read after dispatch
+        bool m_inputAction = false, m_inputSpontaneous = false;
     };
 
     // 作用域计时器：构造时开始计时，析构时自动记录，允许提前结束或补充计数。
     class PerfScope final
     {
     public:
-        PerfScope(const char* operationToken, QString targetLabel);
-        ~PerfScope();
+        PerfScope(const char* operationToken, QString targetLabel) noexcept;
+        ~PerfScope() noexcept;
 
         PerfScope(const PerfScope&) = delete;
         PerfScope& operator=(const PerfScope&) = delete;
@@ -81,7 +110,7 @@ namespace ks::ui
         void setItemCount(const qint64 itemCount) { m_itemCount = itemCount; }
 
         // 立即结束计时并按当前耗时记录，重复调用只生效一次。
-        void finish();
+        void finish() noexcept;
 
     private:
         const char* m_operationToken = nullptr;
@@ -90,6 +119,7 @@ namespace ks::ui
         quint64 m_scopeId = 0;
         qint64 m_itemCount = -1;
         bool m_finished = false;
+        PerfTraceContext m_context;
     };
 
 #else
@@ -106,7 +136,7 @@ namespace ks::ui
     class PerfNotifyScope final
     {
     public:
-        PerfNotifyScope(QObject*, int) noexcept {}
+        PerfNotifyScope(QObject*, int, const QEvent* = nullptr) noexcept {}
     };
 
     // 关闭时的作用域计时器空实现：签名与开启时一致，调用点不需要条件编译。

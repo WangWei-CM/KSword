@@ -116,6 +116,8 @@ namespace
         void stop(const char* outcome = "canceled")
         {
 #if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope context(m_perfContext);
+            disconnect(m_perfFrameConnection);
             // 采集：动画结束或被新滚动打断时，记录总时长与驱动帧数。
             if (m_running && m_perfActive)
             {
@@ -155,6 +157,7 @@ namespace
             // 采集：本段动画开始累计帧数，由 advance 推进。
             m_perfActive = true;
             m_perfFrames = 0;
+            m_perfContext = ks::ui::CapturePerfTraceContext();
 #endif
             for (QWidget* parent = m_bar->parentWidget(); parent; parent = parent->parentWidget())
             {
@@ -166,6 +169,19 @@ namespace
             }
             if (m_frameSource)
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                const auto frameContext = m_perfContext;
+                const auto frameTarget = m_bar->objectName();
+                m_perfFrameConnection = connect(m_frameSource, &QOpenGLWidget::frameSwapped,
+                    this, [frameContext, frameTarget]()
+                    {
+                        // The signal boundary, not the queued animation callback.
+                        // A GL swap is not proof that a physical display showed it.
+                        const ks::ui::PerfTraceContextScope context(frameContext);
+                        try { ks::ui::RecordPerfMark("perf_scroll_gpu_frame_swapped", frameTarget); }
+                        catch (...) {}
+                    }, Qt::DirectConnection);
+#endif
                 const quint64 generation = m_generation;
                 m_frameConnection = connect(m_frameSource, &QOpenGLWidget::frameSwapped,
                     this, [this, generation]()
@@ -206,6 +222,7 @@ namespace
         void advance()
         {
 #if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope context(m_perfContext);
             // 同步驱动区间单独记录，包含最后一帧；不测异步 paint/合成/呈现。
             ks::ui::PerfScope framePerf("perf_scroll_driver_sync_work",
                 m_bar.isNull() ? QString() : m_bar->objectName());
@@ -265,6 +282,8 @@ namespace
 #if KSWORD_PERF_TRACE_ENABLED
         bool m_perfActive = false;      // 采集：本段动画是否正在累计帧数。
         int m_perfFrames = 0;           // 采集：本段动画已推进的帧数。
+        ks::ui::PerfTraceContext m_perfContext;
+        QMetaObject::Connection m_perfFrameConnection;
 #endif
     };
 
@@ -774,9 +793,11 @@ namespace
                 (watchedWidget == area->viewport() ? QStringLiteral("/viewport") :
                     QStringLiteral("/content"));
             const qint64 startNs = ks::ui::PerfTraceNowNs();
+            const auto traceContext = ks::ui::CapturePerfTraceContext();
             QPointer<QAbstractScrollArea> guard(area);
-            QTimer::singleShot(0, this, [this, guard, pendingBit, targetLabel, operationToken, startNs]()
+            QTimer::singleShot(0, this, [this, guard, pendingBit, targetLabel, operationToken, startNs, traceContext]()
             {
+                const ks::ui::PerfTraceContextScope context(traceContext);
                 if (guard == nullptr)
                 {
                     return;

@@ -263,6 +263,10 @@ namespace ks::ui
         pending.owner = owner;
         pending.key = key;
         pending.action = std::move(action);
+#if KSWORD_PERF_TRACE_ENABLED
+        pending.traceContext = CapturePerfTraceContext();
+        pending.deferredAtNs = PerfTraceNowNs();
+#endif
         pending.waitsForValueCapture = waitsForValueCapture;
         pending.waitsForExposure = waitsForExposure;
         for (QAbstractItemView* const view : views)
@@ -437,6 +441,11 @@ namespace ks::ui
                     m_executingOwner = pending.owner;
                     m_executingKey = pending.key;
                     m_legacyGuardAvailable = true;
+#if KSWORD_PERF_TRACE_ENABLED
+                    const PerfTraceContextScope context(pending.traceContext);
+                    PerfScope phase("perf_ui_deferred_commit", pending.key);
+                    RecordPerfAsyncTrace("perf_ui_commit_barrier_latency", pending.traceContext, -1, pending.deferredAtNs);
+#endif
                     pending.action();
                     if (self.isNull()) return;
                     m_legacyGuardAvailable = false;

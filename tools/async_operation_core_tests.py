@@ -14,7 +14,7 @@ source = (a.source_root or root).resolve()
 out = a.output_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 ui = Path('Ksword5.1/Ksword5.1/UI'); proof={'production_inputs':{}}
-for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h'):
+for name in ('AsyncOperation.h', 'AsyncOperation.cpp', 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h', 'PerfTrace.h'):
     src = source / ui / name
     if not src.exists() and a.dependency_source_root:
         src = a.dependency_source_root.resolve() / ui / name

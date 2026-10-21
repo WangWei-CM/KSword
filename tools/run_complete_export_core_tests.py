@@ -36,7 +36,7 @@ def main() -> int:
         path.mkdir(exist_ok=True)
     manifest = {'scope': 'QCoreApplication + fake devices, no QWidget/clipboard/business/real file writes', 'sources': {}}
     for name in ('CompleteExport.h', 'CompleteExport.cpp', 'AsyncOperation.h', 'AsyncOperation.cpp',
-                 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h'):
+                 'AsyncUiDispatcher.h', 'AsyncCleanupRegistry.h', 'PerfTrace.h'):
         relative = Path('Ksword5.1/Ksword5.1/UI') / name
         candidate = source / relative
         original = candidate if candidate.is_file() else root / relative

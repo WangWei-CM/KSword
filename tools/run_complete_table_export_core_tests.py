@@ -6,7 +6,7 @@ root=(a.repository_root or next(x for x in Path(__file__).resolve().parents if (
 manifest={'scope':'QCoreApplication + actual capture/serializer; UI integration symbols stubbed and never invoked; no Widgets/clipboard/real output/business IO','sources':{}}
 for n in ['CompleteExportCapture.h','CompleteExportCapture.cpp','TableCompleteExport.h','TableCompleteExport.cpp','UiCommitCoordinator.h']:
  data=(source/'Ksword5.1/Ksword5.1/UI'/n).read_bytes(); (out/'UI'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()
-for n in ['CompleteExport.h','CompleteExport.cpp','AsyncOperation.h','AsyncOperation.cpp','AsyncUiDispatcher.h','AsyncCleanupRegistry.h']:
+for n in ['CompleteExport.h','CompleteExport.cpp','AsyncOperation.h','AsyncOperation.cpp','AsyncUiDispatcher.h','AsyncCleanupRegistry.h','PerfTrace.h']:
  rel=Path('Ksword5.1/Ksword5.1/UI')/n; candidate=foundation/rel; original=candidate if candidate.is_file() else root/rel; data=original.read_bytes(); (out/'UI'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()
 for n in ['LanguageManager.h','LanguageManager.cpp']:
  data=(a.i18n_source_dir/n).read_bytes(); (out/'Internationalization'/n).write_bytes(data); manifest['sources'][n]=hashlib.sha256(data).hexdigest()

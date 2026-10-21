@@ -20,12 +20,19 @@ namespace ks::ui
         bool transaction = false; // 请求发布前写入，此后只读。
         AsyncOperation::Cleanup cleanup; // 只持值资源的最终回调。
         std::shared_ptr<AsyncCleanupRegistry::Lease> shutdownLease;
+#if KSWORD_PERF_TRACE_ENABLED
+        PerfTraceContext traceContext;
+#endif
 
         // 所有终态竞争同一个 CAS；收尾不能把异常带入 Qt functor 析构。
         void settle(const AsyncOperationOutcome outcome)
         {
             if (!settled.exchange(true))
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                const PerfTraceContextScope context(traceContext);
+                PerfScope phase(traceContext.requestId ? "perf_async_cleanup" : nullptr, QString());
+#endif
                 // 收尾闭包本身也可能拥有最后一个值资源；其析构必须先于lease归还。
                 auto valueCleanup = std::move(cleanup);
                 try
@@ -38,6 +45,11 @@ namespace ks::ui
                 }
                 valueCleanup = {}; // 不把capture留到request/队列最后一个引用销毁。
                 shutdownLease.reset(); // 值收尾结束后才允许进程退出。
+#if KSWORD_PERF_TRACE_ENABLED
+                // Request settlement can precede a canceled query's actual
+                // worker return. Do not label this as presentation or ready.
+                RecordPerfAsyncTrace("perf_async_settled", traceContext, static_cast<qint64>(outcome));
+#endif
             }
         }
     };
@@ -101,6 +113,13 @@ namespace ks::ui
         return m_request ? m_request->generation : 0;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    PerfTraceContext AsyncOperationToken::perfTraceContext() const noexcept
+    {
+        return m_request ? m_request->traceContext : PerfTraceContext{};
+    }
+#endif
+
     // 即使投递成功，Qt 稍后丢弃该 functor 时也会走同一状态收尾。
     void AsyncOperationToken::deliver(std::any result, std::exception_ptr failure) const noexcept
     {
@@ -111,6 +130,10 @@ namespace ks::ui
         const auto shared = m_shared; // 共享的非 UI 请求状态。
         const auto request = m_request; // 本次请求身份。
         request->workerFinished.store(true);
+#if KSWORD_PERF_TRACE_ENABLED
+        const auto deliveryQueuedAtNs = PerfTraceNowNs();
+        RecordPerfAsyncTrace("perf_async_delivery_queued", request->traceContext);
+#endif
         const auto dispatcher = m_dispatcher;
         AsyncOperation* const receiver = m_receiver; // 仅在排队回调中使用。
         const auto dropped = [shared, request, dispatcher, receiver]() noexcept
@@ -127,8 +150,15 @@ namespace ks::ui
         };
         try
         {
-            m_dispatcher->post([receiver, request, result = std::move(result), failure]()
+            m_dispatcher->post([receiver, request, result = std::move(result), failure
+#if KSWORD_PERF_TRACE_ENABLED
+                , deliveryQueuedAtNs
+#endif
+            ]()
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                RecordPerfAsyncTrace("perf_async_delivery_latency", request->traceContext, -1, deliveryQueuedAtNs);
+#endif
                 receiver->complete(request, result, failure);
             }, dropped);
         }
@@ -163,6 +193,9 @@ namespace ks::ui
         auto request = std::make_shared<AsyncOperationRequestState>(); // 新请求的值状态。
         request->cleanup = std::move(cleanup);
         request->transaction = job.transaction;
+#if KSWORD_PERF_TRACE_ENABLED
+        request->traceContext = BeginPerfAsyncTrace();
+#endif
         auto rejection = AsyncOperationOutcome::OwnerClosed;
         std::shared_ptr<AsyncOperationRequestState> replaced; // 旧 pending 的收尾对象。
         std::shared_ptr<AsyncOperationRequestState> deferred; // worker 已结束的旧请求。
@@ -221,6 +254,10 @@ namespace ks::ui
             request->settle(rejection);
             return 0;
         }
+#if KSWORD_PERF_TRACE_ENABLED
+        RecordPerfAsyncTrace(request->transaction ? "perf_async_transaction_admitted" : "perf_async_query_admitted",
+            request->traceContext, static_cast<qint64>(request->generation));
+#endif
         for (const auto& oldRequest : { replaced, deferred })
         {
             if (oldRequest)
@@ -274,6 +311,10 @@ namespace ks::ui
     void AsyncOperation::complete(const std::shared_ptr<AsyncOperationRequestState>& request,
         const std::any& result, std::exception_ptr failure)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        const PerfTraceContextScope context(request->traceContext);
+        PerfScope phase(request->traceContext.requestId ? "perf_async_ui_commit" : nullptr, QString());
+#endif
         Q_ASSERT(QThread::currentThread() == thread());
         reconcileDroppedJobs();
         if (!m_active || m_active->request != request)
@@ -297,6 +338,9 @@ namespace ks::ui
             }
             if (!committed && isCurrent(request->generation))
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                RecordPerfAsyncTrace("perf_async_apply_deferred", request->traceContext);
+#endif
                 m_active->awaitingCommit = true;
                 return;
             }

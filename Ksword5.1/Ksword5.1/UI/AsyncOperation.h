@@ -3,6 +3,7 @@
 // 页面拥有控制器；后台只携带值请求、取消令牌和共享投递门禁。
 // 一条控制器最多执行一个 worker，并把后续请求合并为最新一个。
 #include "AsyncUiDispatcher.h"
+#include "PerfTrace.h"
 
 #include <QObject>
 #include <QRunnable>
@@ -44,6 +45,9 @@ namespace ks::ui
         std::uint64_t generation() const;
         // 结束后台步骤，排队交给控制器；拒绝或丢队列会统一收尾。
         void deliver(std::any result, std::exception_ptr failure = {}) const noexcept;
+#if KSWORD_PERF_TRACE_ENABLED
+        PerfTraceContext perfTraceContext() const noexcept;
+#endif
 
     private:
         friend class AsyncOperation;
@@ -117,6 +121,11 @@ namespace ks::ui
                 // worker 不持页面守卫；业务查询仍使用既有全局 Qt 线程池。
                 auto* task = QRunnable::create([request, worker, token]()
                 {
+#if KSWORD_PERF_TRACE_ENABLED
+                    const auto traceContext = token.perfTraceContext();
+                    const PerfTraceContextScope context(traceContext);
+                    PerfScope phase(traceContext.requestId ? "perf_async_worker" : nullptr, QString());
+#endif
                     try
                     {
                         if constexpr (!Transaction)

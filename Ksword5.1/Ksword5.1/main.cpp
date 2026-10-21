@@ -59,7 +59,7 @@ namespace
         using QApplication::QApplication;
         bool notify(QObject* receiver, QEvent* event) override
         {
-            ks::ui::PerfNotifyScope dispatch(receiver, event ? static_cast<int>(event->type()) : -1);
+            ks::ui::PerfNotifyScope dispatch(receiver, event ? static_cast<int>(event->type()) : -1, event);
             return QApplication::notify(receiver, event);
         }
     };
