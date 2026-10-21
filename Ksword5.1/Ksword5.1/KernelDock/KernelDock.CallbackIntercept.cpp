@@ -96,6 +96,9 @@ Q_DECLARE_METATYPE(CallbackRuleModel)
 
 namespace
 {
+    constexpr int RuleCustomMaskDraftRole = Qt::UserRole + 1;
+    constexpr int RuleEditorCursorRole = Qt::UserRole + 2;
+
     enum class GroupColumn : int
     {
         Id = 0,
@@ -5410,9 +5413,124 @@ private:
         setRuleDetailWidget(ruleTable, detailRow, detailPanel);
 
         refreshRuleGroupComboForCell(groupCombo, ruleModel.groupId);
+        auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId));
+        if (source != nullptr && source->data(RuleCustomMaskDraftRole).isValid())
+        {
+            if (auto* custom = operationPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit")))
+                custom->setText(source->data(RuleCustomMaskDraftRole).toString());
+            source->setData(RuleCustomMaskDraftRole, {});
+        }
+        if (source != nullptr)
+        {
+            const auto cursors = source->data(RuleEditorCursorRole).toList();
+            const QList<QLineEdit*> edits{
+                operationPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleInitiatorEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleTargetEdit")),
+                detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"))};
+            for (qsizetype index = 0; index < edits.size() && index < cursors.size(); ++index)
+                if (edits[index]) edits[index]->setCursorPosition(cursors[index].toInt());
+            source->setData(RuleEditorCursorRole, {});
+        }
+        m_materializedRuleRows.push_back(ruleAnchor);
         // Clear the frozen seed only after every existing editor was populated.
         // Header items remain canonical for enabled/name/timeout/priority edits.
         if (auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId))) source->setData(Qt::UserRole, {});
+    }
+
+    bool ruleEditorsMayBeReclaimed(const QPersistentModelIndex& anchor) const
+    {
+        if (!anchor.isValid()) return false;
+        auto* table = qobject_cast<QTableWidget*>(anchor.model()->parent());
+        if (table == nullptr) return false;
+        const int row = anchor.row();
+        if (table->isVisible() && table->viewport()->isVisible())
+        {
+            const int firstAt = table->rowAt(0);
+            const int lastAt = table->rowAt(table->viewport()->height() - 1);
+            const int first = firstAt < 0 ? -1 : normalizeRuleHeaderRow(firstAt);
+            const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+            // Keep one neighbouring rule on either side to avoid edge churn.
+            if (first >= 0 && row >= first - 2 && row <= last + 2) return false;
+        }
+        const auto protectedEditor = [](QWidget* widget) {
+            if (widget == nullptr) return false;
+            auto* focus = QApplication::focusWidget();
+            auto* popup = QApplication::activePopupWidget();
+            if ((focus != nullptr && (widget == focus || widget->isAncestorOf(focus)))
+                || (popup != nullptr && (widget == popup || widget->isAncestorOf(popup)))) return true;
+            // QLineEdit has no public undo-stack serialization. Retain edited
+            // text controls rather than silently discarding undo or selection.
+            for (const auto* edit : widget->findChildren<QLineEdit*>())
+                if (edit->isUndoAvailable() || edit->isRedoAvailable() || edit->hasSelectedText()) return true;
+            return false;
+        };
+        for (int column = 0; column < table->columnCount(); ++column)
+            if (protectedEditor(table->cellWidget(row, column))
+                || protectedEditor(table->cellWidget(row + 1, column))) return false;
+        return true;
+    }
+
+    bool reclaimRuleEditors(const QPersistentModelIndex& anchor)
+    {
+        if (!ruleEditorsMayBeReclaimed(anchor)) return false;
+        auto* table = qobject_cast<QTableWidget*>(anchor.model()->parent());
+        const int row = anchor.row();
+        auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+        auto* group = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::GroupId)));
+        auto* operation = table->cellWidget(row, static_cast<int>(RuleColumn::OperationMask));
+        auto* match = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::MatchMode)));
+        auto* action = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::Action)));
+        auto* decision = qobject_cast<QComboBox*>(table->cellWidget(row, static_cast<int>(RuleColumn::TimeoutDefaultDecision)));
+        auto* detail = table->cellWidget(row + 1, static_cast<int>(RuleColumn::GroupId));
+        if (!source || !group || !operation || !match || !action || !decision || !detail) return false;
+        auto* custom = operation->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCustomMaskEdit"));
+        auto* initiator = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleInitiatorEdit"));
+        auto* target = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleTargetEdit"));
+        auto* comment = detail->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"));
+        if (!custom || !initiator || !target || !comment) return false;
+
+        CallbackRuleModel draft;
+        draft.groupId = group->currentData().toUInt();
+        draft.matchMode = match->currentData().toUInt();
+        draft.action = action->currentData().toUInt();
+        draft.timeoutDefaultDecision = decision->currentData().toUInt();
+        // Preserve checkbox bits and the raw custom text independently. OR-ing
+        // them here would change checkbox states or lose an invalid draft.
+        draft.operationMask = 0U;
+        for (const auto* check : operation->findChildren<QCheckBox*>(QString(), Qt::FindDirectChildrenOnly))
+            if (check->isChecked()) draft.operationMask |= check->property("operationMaskBit").toUInt();
+        draft.initiatorPattern = initiator->text();
+        draft.targetPattern = target->text();
+        draft.comment = comment->text();
+        source->setData(RuleCustomMaskDraftRole, custom->text());
+        source->setData(RuleEditorCursorRole, QVariantList{custom->cursorPosition(), initiator->cursorPosition(),
+            target->cursorPosition(), comment->cursorPosition()});
+        source->setData(Qt::UserRole, QVariant::fromValue(draft));
+        const auto setSummary = [table, row](RuleColumn column, const QString& text) {
+            if (auto* item = table->item(row, static_cast<int>(column))) item->setText(text);
+        };
+        setSummary(RuleColumn::GroupId, group->currentText());
+        setSummary(RuleColumn::MatchMode, match->currentText());
+        setSummary(RuleColumn::Action, action->currentText());
+        setSummary(RuleColumn::TimeoutDefaultDecision, decision->currentText());
+        setSummary(RuleColumn::OperationMask, operationMaskToText(draft.operationMask)
+            + (custom->text().isEmpty() ? QString() : QStringLiteral(" | ") + custom->text()));
+        if (auto* item = table->item(row + 1, static_cast<int>(RuleColumn::GroupId)))
+            item->setText(QStringList{draft.initiatorPattern, draft.targetPattern, draft.comment}.join(QLatin1Char(' ')));
+        for (int column = 0; column < table->columnCount(); ++column)
+        {
+            if (table->cellWidget(row, column)) table->removeCellWidget(row, column);
+            if (table->cellWidget(row + 1, column)) table->removeCellWidget(row + 1, column);
+        }
+        return true;
+    }
+
+    bool hasReclaimableRuleEditors() const
+    {
+        for (const auto& anchor : m_materializedRuleRows)
+            if (ruleEditorsMayBeReclaimed(anchor)) return true;
+        return false;
     }
 
     bool hasVisibleRuleDrafts(QTableWidget* table) const
@@ -5474,7 +5592,7 @@ private:
         m_moveRuleUpButton->setEnabled(editable);
         m_moveRuleDownButton->setEnabled(editable);
         if (m_ruleProjectionTimer == nullptr) return;
-        if ((pending || editors) && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
+        if ((pending || editors || (currentRuleTable() != nullptr && hasReclaimableRuleEditors())) && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
         else m_ruleProjectionTimer->stop();
     }
 
@@ -5497,6 +5615,16 @@ private:
         QElapsedTimer budget; budget.start();
         int count = 0;
         materializeVisibleRuleEditors(table, type, budget, count);
+        for (auto it = m_materializedRuleRows.begin(); it != m_materializedRuleRows.end();)
+        {
+            if (!it->isValid()) { it = m_materializedRuleRows.erase(it); continue; }
+            if (count < 4 && (count == 0 || budget.elapsed() < 3) && reclaimRuleEditors(*it))
+            {
+                it = m_materializedRuleRows.erase(it);
+                ++count;
+            }
+            else ++it;
+        }
         while (pending != m_pendingRuleRows.end() && !pending->isEmpty() && count < 4 && (count == 0 || budget.elapsed() < 3))
         {
             const auto rule = pending->takeFirst();
@@ -5717,6 +5845,14 @@ private:
             }
 
             bool operationParseOk = lazy;
+            if (lazy && ruleIdItem->data(RuleCustomMaskDraftRole).isValid())
+            {
+                const auto customText = ruleIdItem->data(RuleCustomMaskDraftRole).toString().trimmed();
+                quint32 customMask = 0U;
+                if (!customText.isEmpty())
+                    operationParseOk = parseUnsignedText(normalizeMaskTextForEdit(customText), &customMask);
+                if (operationParseOk) ruleModel.operationMask |= customMask;
+            }
             if (!lazy) ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
             if (!operationParseOk || ruleModel.operationMask == 0U)
             {
@@ -6337,6 +6473,7 @@ private:
     {
         m_ignoreUiSignal = true;
         m_pendingRuleRows.clear();
+        m_materializedRuleRows.clear();
         if (m_ruleProjectionTimer != nullptr) m_ruleProjectionTimer->stop();
 
         if (m_globalEnabledCheck != nullptr)
@@ -6418,6 +6555,7 @@ private:
     QTableWidget* m_groupTable = nullptr;
     QHash<quint32, QList<CallbackRuleModel>> m_pendingRuleRows;
     QTimer* m_ruleProjectionTimer = nullptr;
+    QVector<QPersistentModelIndex> m_materializedRuleRows;
     QStandardItemModel* m_groupOptionsModel = nullptr;
     QVector<QPair<quint32, QString>> m_groupOptions;
     QHash<quint32, QString> m_groupOptionLabels;
