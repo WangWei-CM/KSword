@@ -271,6 +271,8 @@ KernelDock::KernelDock(QWidget* parent)
 KernelDock::~KernelDock()
 {
     // Close GUI delivery before member caches and source identities are destroyed.
+    for (auto& operation : m_kernelActionOperations)
+        if (operation) operation->close();
     for (auto& cache : m_kernelResultFilterCaches)
         if (cache.operation) cache.operation->close();
 }

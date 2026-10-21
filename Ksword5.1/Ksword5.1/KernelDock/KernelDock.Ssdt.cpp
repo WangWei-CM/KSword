@@ -1,4 +1,5 @@
 #include "../UI/StructuredFieldView.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -257,7 +258,8 @@ void KernelDock::initializeSsdtTab()
             && entry->cleanBaselineAvailable
             && entry->cleanBaselineDiffers
             && entry->tableEntryAddress != 0U
-            && !m_ssdtRefreshRunning.load());
+            && !m_ssdtRefreshRunning.load()
+            && (!m_kernelActionOperations[2] || !m_kernelActionOperations[2]->isBusy()));
     });
     connect(m_ssdtTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         if (m_ssdtTable == nullptr)
@@ -536,6 +538,8 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
 
 void KernelDock::restoreSelectedSsdtBaseline()
 {
+    if (m_ssdtRefreshRunning.load()
+        || (m_kernelActionOperations[2] && m_kernelActionOperations[2]->isBusy())) return;
     const KernelSsdtEntry* selected = currentSsdtEntry();
     if (selected == nullptr
         || !selected->cleanBaselineAvailable
@@ -558,18 +562,24 @@ void KernelDock::restoreSelectedSsdtBaseline()
     }
 
     const KernelSsdtEntry snapshot = *selected;
-    const ksword::ark::DriverClient client;
-    const ksword::ark::KernelInlinePatchResult preflight =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            0UL);
-    if (!preflight.io.ok
-        || preflight.status
-            != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+    auto& slot = m_kernelActionOperations[2];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot]()
+        {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_ssdtRefreshRunning.load();
+            m_refreshSsdtButton->setEnabled(!busy && !scanning);
+            const KernelSsdtEntry* entry = currentSsdtEntry();
+            m_restoreSsdtButton->setEnabled(!busy && !scanning && entry != nullptr
+                && entry->cleanBaselineAvailable && entry->cleanBaselineDiffers
+                && entry->tableEntryAddress != 0U);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation = slot;
+    using Result = ksword::ark::KernelInlinePatchResult;
+    const auto reportPreflightFailure = [this](const Result& preflight)
     {
         QMessageBox::critical(
             this,
@@ -586,95 +596,140 @@ void KernelDock::restoreSelectedSsdtBaseline()
                     8,
                     16,
                     QChar('0')));
-        return;
-    }
-
-    const QMessageBox::StandardButton warning =
-        QMessageBox::warning(
-            this,
-            kernelText(
-                "kernel.ssdt.restore.warning.title",
-                QStringLiteral("高风险内核表项恢复")),
-            kernelText(
-                "kernel.ssdt.restore.warning.body",
-                QStringLiteral(
-                    "即将把 SSDT[%1] 槽位从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
-                    "R0 会在写入前再次逐字节比较当前值；任何并发变化都会使操作失败。"
-                    "错误恢复可能立即导致系统崩溃。\n\n映像：%4"))
-                .arg(snapshot.serviceIndex)
-                .arg(static_cast<qulonglong>(snapshot.currentTableValue),
-                    0,
-                    16)
-                .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
-                    0,
-                    16)
-                .arg(snapshot.cleanBaselinePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-    if (warning != QMessageBox::Yes)
+    };
+    const auto presentApplied = [this, expectedSize = snapshot.tableEntrySize](const Result& applied)
     {
-        return;
-    }
+        const QPointer<KernelDock> guard(this);
+        if (!applied.io.ok
+            || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
+            || applied.bytesPatched != expectedSize)
+        {
+            QMessageBox::critical(
+                this,
+                kernelText(
+                    "kernel.ssdt.restore.title",
+                    QStringLiteral("SSDT 槽位恢复")),
+                kernelText(
+                    "kernel.ssdt.restore.failed",
+                    QStringLiteral(
+                        "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
+                    .arg(applied.io.win32Error)
+                    .arg(applied.status)
+                    .arg(static_cast<unsigned long>(applied.lastStatus),
+                        8,
+                        16,
+                        QChar('0'))
+                    .arg(applied.bytesPatched));
+            if (guard) refreshSsdtAsync();
+            return;
+        }
 
-    // 最终确认改为直接点击：不再要求输入确认短语，默认聚焦“否”避免误触。
-    const auto confirmation = QMessageBox::warning(
-        this,
-        kernelText(
-            "kernel.ssdt.restore.confirm.title",
-            QStringLiteral("最终确认")),
-        kernelText(
-            "kernel.ssdt.restore.confirm.final",
-            QStringLiteral("确认按基线恢复该 SSDT 表项？该操作会改写内核数据。")),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (confirmation != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    m_restoreSsdtButton->setEnabled(false);
-    const ksword::ark::KernelInlinePatchResult applied =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    if (!applied.io.ok
-        || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
-        || applied.bytesPatched != snapshot.tableEntrySize)
-    {
-        QMessageBox::critical(
+        QMessageBox::information(
             this,
             kernelText(
                 "kernel.ssdt.restore.title",
                 QStringLiteral("SSDT 槽位恢复")),
             kernelText(
-                "kernel.ssdt.restore.failed",
+                "kernel.ssdt.restore.success",
                 QStringLiteral(
-                    "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
-                .arg(applied.io.win32Error)
-                .arg(applied.status)
-                .arg(static_cast<unsigned long>(applied.lastStatus),
-                    8,
-                    16,
-                    QChar('0'))
-                .arg(applied.bytesPatched));
-        refreshSsdtAsync();
-        return;
-    }
+                    "槽位已按验证基线恢复，并已触发重新扫描。")));
+        if (guard) refreshSsdtAsync();
+    };
+    operation->submit<KernelSsdtEntry, Result>(snapshot,
+        [](const KernelSsdtEntry& value, const ks::ui::AsyncOperationToken&)
+        {
+            return ksword::ark::DriverClient().patchInlineHook(
+                value.tableEntryAddress, KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
+                value.tableEntrySize, value.currentTableBytes, value.cleanTableBytes, 0UL);
+        },
+        [this, snapshot, operation, reportPreflightFailure, presentApplied](
+            const Result& preflight, const std::uint64_t ticket)
+        {
+            if (!preflight.io.ok || preflight.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+            {
+                reportPreflightFailure(preflight);
+                return true;
+            }
+            const QPointer<KernelDock> guard(this);
+            const QMessageBox::StandardButton warning =
+                QMessageBox::warning(
+                    this,
+                    kernelText(
+                        "kernel.ssdt.restore.warning.title",
+                        QStringLiteral("高风险内核表项恢复")),
+                    kernelText(
+                        "kernel.ssdt.restore.warning.body",
+                        QStringLiteral(
+                            "即将把 SSDT[%1] 槽位从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
+                            "R0 会在写入前再次逐字节比较当前值；任何并发变化都会使操作失败。"
+                            "错误恢复可能立即导致系统崩溃。\n\n映像：%4"))
+                        .arg(snapshot.serviceIndex)
+                        .arg(static_cast<qulonglong>(snapshot.currentTableValue),
+                            0,
+                            16)
+                        .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
+                            0,
+                            16)
+                        .arg(snapshot.cleanBaselinePath),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+            if (!guard || warning != QMessageBox::Yes)
+            {
+                return true;
+            }
 
-    QMessageBox::information(
-        this,
-        kernelText(
-            "kernel.ssdt.restore.title",
-            QStringLiteral("SSDT 槽位恢复")),
-        kernelText(
-            "kernel.ssdt.restore.success",
-            QStringLiteral(
-                "槽位已按验证基线恢复，并已触发重新扫描。")));
-    refreshSsdtAsync();
+            // 最终确认改为直接点击：不再要求输入确认短语，默认聚焦“否”避免误触。
+            const auto confirmation = QMessageBox::warning(
+                this,
+                kernelText(
+                    "kernel.ssdt.restore.confirm.title",
+                    QStringLiteral("最终确认")),
+                kernelText(
+                    "kernel.ssdt.restore.confirm.final",
+                    QStringLiteral("确认按基线恢复该 SSDT 表项？该操作会改写内核数据。")),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (!guard || confirmation != QMessageBox::Yes)
+            {
+                return true;
+            }
+
+            // Keep the preflight gate occupied through both modal confirmations.
+            // Defer the handoff until AsyncOperation has marked this receipt deferred.
+            QTimer::singleShot(0, this, [this, snapshot, operation, ticket, presentApplied]()
+            {
+                if (!operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!operation) return;
+                const auto accepted = operation->submitTransaction<KernelSsdtEntry, Result>(snapshot,
+                    [](const KernelSsdtEntry& value)
+                    {
+                        return ksword::ark::DriverClient().patchInlineHook(
+                            value.tableEntryAddress, KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
+                            value.tableEntrySize, value.currentTableBytes, value.cleanTableBytes,
+                            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
+                    },
+                    [presentApplied](const Result& applied, std::uint64_t)
+                    {
+                        presentApplied(applied);
+                        return true;
+                    },
+                    [presentApplied](std::exception_ptr)
+                    {
+                        Result failed{};
+                        failed.io.win32Error = ERROR_UNHANDLED_EXCEPTION;
+                        presentApplied(failed);
+                    });
+                if (accepted != 0 && m_restoreSsdtButton) m_restoreSsdtButton->setEnabled(false);
+            });
+            return false;
+        },
+        [reportPreflightFailure](std::exception_ptr)
+        {
+            Result failed{};
+            failed.io.win32Error = ERROR_UNHANDLED_EXCEPTION;
+            reportPreflightFailure(failed);
+        });
 }
 
 bool KernelDock::currentSsdtSourceIndex(std::size_t& sourceIndexOut) const

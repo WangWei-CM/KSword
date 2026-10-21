@@ -823,6 +823,8 @@ private:
     };
     struct KernelResultFilterProjection;
     std::array<KernelResultFilterCache, 7> m_kernelResultFilterCaches;
+    // Independent action gates: callback row/manual removal, SSDT, ShadowSSDT, inline patch.
+    std::array<QPointer<ks::ui::AsyncOperation>, 5> m_kernelActionOperations;
     int kernelResultFilterSlot(const QTableWidget* table) const;
     void resetKernelResultFilterCache(QTableWidget* table);
     void rememberKernelResultFilterRow(QTableWidget* table, int row);
