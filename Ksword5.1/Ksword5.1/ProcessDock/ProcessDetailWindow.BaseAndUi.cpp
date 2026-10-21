@@ -3318,7 +3318,7 @@ void ProcessDetailWindow::ensureEmbeddedNetworkView()
         const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
         if (m_embeddedNetworkDock == nullptr)
         {
-            m_embeddedNetworkDock = new NetworkDock(page);
+            m_embeddedNetworkDock = new NetworkDock(page, NetworkDock::ConstructScope::ProcessConnections);
             m_embeddedNetworkDock->hide();
             attachEmbeddedDockToTabLayout(m_embeddedNetworkLayout, m_embeddedNetworkPlaceholder, m_embeddedNetworkDock);
         m_embeddedNetworkDock->setProcessDetailConnectionScope();
@@ -3393,7 +3393,7 @@ void ProcessDetailWindow::ensureEmbeddedWindowView()
         const ks::ui::ScopedWidgetThemePreparation prepareMountedTab(page);
         if (m_embeddedWindowDock == nullptr)
         {
-            m_embeddedWindowDock = new OtherDock(page);
+            m_embeddedWindowDock = new OtherDock(page, OtherDock::PageScope::WindowListOnly, QVector<quint32>{targetProcessId});
             m_embeddedWindowDock->hide();
             attachEmbeddedDockToTabLayout(m_embeddedWindowLayout, m_embeddedWindowPlaceholder, m_embeddedWindowDock);
         m_embeddedWindowDock->setWindowListOnlyScope();
