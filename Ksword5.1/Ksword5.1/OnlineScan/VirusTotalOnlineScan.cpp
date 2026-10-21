@@ -4098,11 +4098,12 @@ void VirusTotalOnlineScan::requestProfileFilter(const QString& text)
                 if (index >= request.previous.size() || request.previous.at(index) != visible) result.changed.push_back(static_cast<int>(index));
             }
             return result;
-        }, [this](const ProfileFilterResult& result, std::uint64_t) {
-            if (result.revision != m_profileFilterRevision) return;
+        }, [this](const ProfileFilterResult& result, std::uint64_t) -> bool {
+            if (result.revision != m_profileFilterRevision) return true;
             m_profileFilterProjection = std::make_shared<ProfileFilterResult>(result);
             m_profileFilterApplyOffset = m_profileFilterExpandOffset = 0;
             continueProfileFilterProjection(result.revision);
+            return true;
         }, [this, revision](std::exception_ptr) {
             if (revision != m_profileFilterRevision) return;
             const auto& current = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
