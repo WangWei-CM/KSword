@@ -5413,6 +5413,132 @@ void ProcessDock::refreshThemeVisuals()
     }
 }
 
+const ProcessDock::NavigationDefinitions& ProcessDock::navigationDefinitions()
+{
+    // These rows are consumed by both the real tab factories and the cold catalog.
+    static const NavigationDefinitions definitions{{
+        {"list", "", "process.tab.list", "进程列表",
+            {QStringLiteral("PID"), QStringLiteral("CPU"), QStringLiteral("GPU")}, true},
+        {"threads", "", "process.tab.threads", "线程列表",
+            {QStringLiteral("PID"), QStringLiteral("TID")}, false},
+        {"cross_view", "", "process.tab.cross_view", "Process Cross-View",
+            {QStringLiteral("Cross-View"), QStringLiteral("R0")}, false},
+        {"cross_view.process", "cross_view", "process.cross_view.process_tab", "Process Cross-View",
+            {QStringLiteral("EPROCESS"), QStringLiteral("PID")}, true},
+        {"cross_view.thread", "cross_view", "process.cross_view.thread_tab", "Thread Cross-View",
+            {QStringLiteral("ETHREAD"), QStringLiteral("TID")}, false},
+        {"create", "", "process.tab.create", "创建进程",
+            {QStringLiteral("CreateProcessW"), QStringLiteral("Token"), QStringLiteral("lpApplicationName"), QStringLiteral("lpCommandLine")}, false}
+    }};
+    return definitions;
+}
+
+void ProcessDock::registerNavigationTab(const NavigationPage page, QTabWidget* const tabs,
+    QWidget* const widget, const QIcon& icon)
+{
+    const auto row = static_cast<std::size_t>(page);
+    const auto& definitions = navigationDefinitions();
+    if (row >= definitions.size() || tabs == nullptr || widget == nullptr) return;
+    const auto& definition = definitions[row];
+    const QString key = QString::fromUtf8(definition.translationKey);
+    const QString fallback = QString::fromUtf8(definition.fallbackTitle);
+    const QString title = ks::i18n::LanguageManager::instance().text(key, fallback);
+    const int existingIndex = tabs->indexOf(widget);
+    if (existingIndex < 0) tabs->addTab(widget, icon, title);
+    else
+    {
+        tabs->setTabText(existingIndex, title);
+        tabs->setTabIcon(existingIndex, icon);
+    }
+    ks::i18n::LanguageManager::instance().bindTab(tabs, widget, key, fallback);
+    m_navigationPages[row] = widget;
+    m_navigationTabs[row] = tabs;
+}
+
+ks::ui::PageNavigationCatalog ProcessDock::navigationCatalog(const ProcessDock* const existing)
+{
+    const auto& definitions = navigationDefinitions();
+    ks::ui::PageNavigationCatalog result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (std::size_t row = 0; row < definitions.size(); ++row)
+    {
+        const auto& definition = definitions[row];
+        ks::ui::PageNavigationDescriptor descriptor;
+        descriptor.id = QString::fromUtf8(definition.id);
+        descriptor.parentId = QString::fromUtf8(definition.parentId);
+        const QString fallback = QString::fromUtf8(definition.fallbackTitle);
+        descriptor.title = ks::i18n::LanguageManager::instance().text(QString::fromUtf8(definition.translationKey), fallback);
+        descriptor.searchTexts = definition.searchTexts;
+        descriptor.searchTexts.append(fallback);
+        descriptor.current = definition.defaultCurrent;
+        if (existing != nullptr)
+        {
+            const auto widget = existing->m_navigationPages[row];
+            const auto tabs = existing->m_navigationTabs[row];
+            const int index = widget != nullptr && tabs != nullptr ? tabs->indexOf(widget.data()) : -1;
+            descriptor.visible = index >= 0 && tabs->isTabVisible(index);
+            descriptor.enabled = index >= 0 && tabs->isEnabled() && tabs->isTabEnabled(index);
+            descriptor.current = index >= 0 && tabs->currentWidget() == widget.data();
+            if (index >= 0) descriptor.title = tabs->tabText(index);
+        }
+        descriptor.searchTexts.append(descriptor.title);
+        descriptor.searchTexts.removeDuplicates();
+        result.append(std::move(descriptor));
+    }
+    return result;
+}
+
+QWidget* ProcessDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto& definitions = navigationDefinitions();
+    const auto found = std::find_if(definitions.begin(), definitions.end(), [&id](const NavigationDefinition& definition) {
+        return id == QString::fromUtf8(definition.id);
+    });
+    if (found == definitions.end()) return nullptr;
+    std::vector<std::size_t> chain;
+    auto row = static_cast<std::size_t>(found - definitions.begin());
+    for (;;)
+    {
+        chain.push_back(row);
+        const QString parentId = QString::fromUtf8(definitions[row].parentId);
+        if (parentId.isEmpty()) break;
+        const auto parent = std::find_if(definitions.begin(), definitions.end(), [&parentId](const NavigationDefinition& definition) {
+            return parentId == QString::fromUtf8(definition.id);
+        });
+        if (parent == definitions.end() || chain.size() >= definitions.size()) return nullptr;
+        row = static_cast<std::size_t>(parent - definitions.begin());
+    }
+    // Validate the whole route before its first selection, then revalidate each hop.
+    const auto available = [this](const std::size_t index) {
+        const auto widget = m_navigationPages[index];
+        const auto tabs = m_navigationTabs[index];
+        const int tabIndex = widget != nullptr && tabs != nullptr ? tabs->indexOf(widget.data()) : -1;
+        return tabIndex >= 0 && tabs->isTabVisible(tabIndex) && tabs->isEnabled()
+            && tabs->isTabEnabled(tabIndex);
+    };
+    for (const auto index : chain) if (!available(index)) return nullptr;
+    const QPointer<ProcessDock> owner(this);
+    QPointer<QWidget> target = m_navigationPages[chain.front()];
+    for (auto hop = chain.rbegin(); hop != chain.rend(); ++hop)
+    {
+        if (owner.isNull() || !available(*hop)) return nullptr;
+        const auto tabs = m_navigationTabs[*hop];
+        const auto widget = m_navigationPages[*hop];
+        if (tabs->currentWidget() != widget.data())
+            tabs->setCurrentWidget(widget.data()); // original currentChanged semantics stay intact
+        if (owner.isNull() || tabs.isNull() || widget.isNull()
+            || tabs->currentWidget() != widget.data() || !available(*hop)) return nullptr;
+    }
+    if (owner.isNull()) return nullptr;
+    for (const auto index : chain)
+    {
+        if (!available(index) || m_navigationTabs[index]->currentWidget() != m_navigationPages[index].data())
+            return nullptr;
+    }
+    return target.data();
+}
+
+
 void ProcessDock::initializeUi()
 {
     // 根布局只容纳一个顶部 tab 控件。
@@ -6199,12 +6325,7 @@ void ProcessDock::initializeProcessTable()
     m_processPageLayout->addWidget(m_processTable, 1);
 
     // 满足需求 3.1：侧边栏 Tab 中包含“进程列表”页签。
-    m_sideTabWidget->addTab(m_processListPage, blueTintedIcon(IconProcessMain), "进程列表");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_processListPage,
-        QStringLiteral("process.tab.list"),
-        QStringLiteral("进程列表"));
+    registerNavigationTab(NavigationPage::List, m_sideTabWidget, m_processListPage, blueTintedIcon(IconProcessMain));
     m_sideTabWidget->setCurrentIndex(0);
     refreshSideTabIconContrast();
 }
@@ -6667,12 +6788,7 @@ void ProcessDock::initializeCreateProcessPage()
     m_siFillAttributeEdit->setToolTip("STARTUPINFO.dwFillAttribute：控制台颜色/样式位；可在下方复选框组合。");
     m_tokenDesiredAccessEdit->setToolTip("Token DesiredAccess：令牌访问掩码；可在下方复选框组合。");
 
-    m_sideTabWidget->addTab(m_createProcessPage, blueTintedIcon(IconStart), "创建进程");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_createProcessPage,
-        QStringLiteral("process.tab.create"),
-        QStringLiteral("创建进程"));
+    registerNavigationTab(NavigationPage::Create, m_sideTabWidget, m_createProcessPage, blueTintedIcon(IconStart));
     refreshSideTabIconContrast();
     initializeCreateProcessConnections();
 }
@@ -18692,4 +18808,10 @@ void ProcessDock::openProcessDetailWindowByPid(const std::uint32_t pid)
         queriedRecord.pid,
         queriedRecord.creationTime100ns);
     showProcessDetailWindowForRecord(identityKey, queriedRecord);
+}
+
+namespace
+{
+    [[maybe_unused]] const bool kProcessNavigationRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<ProcessDock>(QStringLiteral("process"));
 }

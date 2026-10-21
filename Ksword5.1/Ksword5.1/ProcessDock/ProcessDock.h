@@ -13,6 +13,7 @@
 #include "../ksword/process/process_cpu_core_etw_monitor.h"
 #include "ProcessEtwCaptureLifecycle.h"
 #include "ProcessActivityHistory.h"
+#include "../UI/PageNavigationCatalog.h"
 
 #include <QColor>
 #include <QHash>
@@ -122,6 +123,9 @@ public:
     // 入参：无。
     // 返回：无。
     void refreshThemeVisuals();
+
+    static ks::ui::PageNavigationCatalog navigationCatalog(const ProcessDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
     // requestOpenProcessDetailByPid 作用：
     // - 外部模块按 PID 打开进程详情窗口；
@@ -576,7 +580,23 @@ public:
     };
 
 private:
-    // ======== UI 初始化相关 ========
+    enum class NavigationPage : std::size_t { List, Threads, CrossView, CrossViewProcess, CrossViewThread, Create, Count };
+    struct NavigationDefinition
+    {
+        const char* id;
+        const char* parentId;
+        const char* translationKey;
+        const char* fallbackTitle;
+        QStringList searchTexts;
+        bool defaultCurrent;
+    };
+    using NavigationDefinitions = std::array<NavigationDefinition, static_cast<std::size_t>(NavigationPage::Count)>;
+    static const NavigationDefinitions& navigationDefinitions();
+    void registerNavigationTab(NavigationPage page, QTabWidget* tabs, QWidget* widget, const QIcon& icon = QIcon());
+    std::array<QPointer<QWidget>, static_cast<std::size_t>(NavigationPage::Count)> m_navigationPages;
+    std::array<QPointer<QTabWidget>, static_cast<std::size_t>(NavigationPage::Count)> m_navigationTabs;
+
+    // ======== UI 初始化相关 =======
     void initializeUi();
     void initializeTopControls();
     void initializeProcessActivityPanel();

@@ -831,18 +831,8 @@ void ProcessDock::initializeCrossViewPage()
                 ? static_cast<quint32>(processId)
                 : 0U;
         });
-    innerTabs->addTab(m_processCrossViewTable, QStringLiteral("Process Cross-View"));
-    innerTabs->addTab(m_threadCrossViewTable, QStringLiteral("Thread Cross-View"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        innerTabs,
-        m_processCrossViewTable,
-        QStringLiteral("process.cross_view.process_tab"),
-        QStringLiteral("Process Cross-View"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        innerTabs,
-        m_threadCrossViewTable,
-        QStringLiteral("process.cross_view.thread_tab"),
-        QStringLiteral("Thread Cross-View"));
+    registerNavigationTab(NavigationPage::CrossViewProcess, innerTabs, m_processCrossViewTable);
+    registerNavigationTab(NavigationPage::CrossViewThread, innerTabs, m_threadCrossViewTable);
     splitter->addWidget(innerTabs);
 
     // Cross-View 详情区直接接受结构字段，保留查找、复制与全部详情布局。
@@ -868,12 +858,7 @@ void ProcessDock::initializeCrossViewPage()
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
 
-    m_sideTabWidget->addTab(m_crossViewPage, blueTintedIcon(":/Icon/process_tree.svg"), QStringLiteral("Process Cross-View"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_crossViewPage,
-        QStringLiteral("process.tab.cross_view"),
-        QStringLiteral("Process Cross-View"));
+    registerNavigationTab(NavigationPage::CrossView, m_sideTabWidget, m_crossViewPage, blueTintedIcon(":/Icon/process_tree.svg"));
 }
 
 void ProcessDock::initializeCrossViewConnections()

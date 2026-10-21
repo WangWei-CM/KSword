@@ -801,12 +801,7 @@ void ProcessDock::initializeThreadPage()
     applyThreadColumnLayout(ThreadColumnLayout::PresetA);
 
     m_threadPageLayout->addWidget(m_threadTable, 1);
-    m_sideTabWidget->addTab(m_threadPage, blueTintedIcon(IconThreadTab), "线程列表");
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_sideTabWidget,
-        m_threadPage,
-        QStringLiteral("process.tab.threads"),
-        QStringLiteral("线程列表"));
+    registerNavigationTab(NavigationPage::Threads, m_sideTabWidget, m_threadPage, blueTintedIcon(IconThreadTab));
     refreshSideTabIconContrast();
 }
 
