@@ -13,6 +13,7 @@
 #include "UI/AsyncCleanupRegistry.h"
 #include "UI/AsyncOperation.h"
 #include "UI/TableInteractionSupport.h"
+#include "UI/TableHeaderSortingSupport.h"
 #include "UI/RetainedCleanupJob.h"
 #include <QFileSystemWatcher>
 #include <QElapsedTimer>
@@ -1509,10 +1510,13 @@ namespace
             return {};
         }
         int storedCount() const { return static_cast<int>(m_rows.size()); }
+        bool hasUnpublishedRows() const { return m_published < storedCount(); }
         void append(const PluginResultRow& row) { m_rows.push_back(row); }
         void publish()
         {
-            const int count = storedCount();
+            // A hidden run may have accumulated all 10000 rows. Keep each
+            // source/proxy/header notification bounded when it becomes visible.
+            const int count = qMin(storedCount(), m_published + 256);
             if (count == m_published) return;
             beginInsertRows({}, m_published, count - 1);
             m_published = count;
@@ -1825,11 +1829,26 @@ namespace
             }
             if (!guard) return;
             if (m_resultTable && m_resultTable->isVisible()) {
-                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("plugin-result-projection"), {m_resultTable},
+                if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this, QStringLiteral("plugin-result-projection"), {m_resultTable},
                     [guard]() { if (guard) guard->schedulePresentation(); })) return;
-                m_resultModel->publish(); // One row-range notification; no per-cell allocation or hidden proxy rebuilding.
+                if (m_resultModel->hasUnpublishedRows() &&
+                    !m_resultTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) {
+                    // Existing complete-value actions must not capture a
+                    // temporary prefix while these row slices are pending.
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+                    if (!guard) return;
+                    ks::ui::SetTableHeaderClickSortingEnabled(m_resultTable, false);
+                    if (!guard) return;
+                }
+                m_resultModel->publish(); // At most 256 rows; existing complete-value capture is protected above.
                 if (!guard) return;
-                if (m_finished && !m_sortingActivated) { m_sortingActivated = true; m_resultTable->setSortingEnabled(true); }
+                if (!m_resultModel->hasUnpublishedRows()) {
+                    if (m_finished && !m_sortingActivated) { m_sortingActivated = true; m_resultTable->setSortingEnabled(true); }
+                    if (!guard) return;
+                    m_resultTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                    if (!guard) return;
+                    ks::ui::SetTableHeaderClickSortingEnabled(m_resultTable, true);
+                }
             }
             if (!guard) return;
             if (m_summaryDirty) { m_summaryDirty = false; presentSummary(m_pendingSummary); }
@@ -1850,7 +1869,8 @@ namespace
             if (!guard) return;
             project(m_diagnostics, m_pendingDiagnostics);
             if (!guard) return;
-            if ((m_plainOutput && m_plainOutput->isVisible() && !m_pendingPlainOutput.empty()) ||
+            if ((m_resultTable && m_resultTable->isVisible() && m_resultModel->hasUnpublishedRows()) ||
+                (m_plainOutput && m_plainOutput->isVisible() && !m_pendingPlainOutput.empty()) ||
                 (m_diagnostics->isVisible() && !m_pendingDiagnostics.empty())) schedulePresentation();
         }
         void consumeParsedOutput()
