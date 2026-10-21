@@ -1396,6 +1396,9 @@ private:
     bool m_processCrossViewProjectionDirty = true;
     bool m_threadCrossViewProjectionDirty = true;
     bool m_crossViewProjectionQueued = false;
+    std::uint64_t m_crossViewProjectionRevision = 0;
+    QPointer<QObject> m_processCrossViewProjectionJob;
+    QPointer<QObject> m_threadCrossViewProjectionJob;
     std::uint64_t m_crossViewRefreshTicket = 0; // Cross-View 查询序号。
 
     // ======== 右键菜单绑定状态 ========
