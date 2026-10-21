@@ -7099,6 +7099,16 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    ", advice=": ", advice=",
+    "CloseTrace": "CloseTrace",
+    "ControlTraceW(STOP)": "ControlTraceW(STOP)",
+    "HardwareSampling": "HardwareSampling",
+    "[ProcessDock] HVM transaction cleanup, outcome=": "[ProcessDock] HVM transaction cleanup, outcome=",
+    "[ProcessDock] HVM transaction completed, pid=": "[ProcessDock] HVM transaction completed, pid=",
+    "lpApplicationName": "lpApplicationName",
+    "lpCommandLine": "lpCommandLine",
+    "process export source closed": "进程导出来源已关闭",
+    "process export source version changed": "进程导出来源版本已改变",
     "导出当前结果范围": "导出当前结果范围",
     "结果在准备期间发生变化，已取消本次准备；请重试导出。": "结果在准备期间发生变化，已取消本次准备；请重试导出。",
     "取消导出准备": "取消导出准备",
