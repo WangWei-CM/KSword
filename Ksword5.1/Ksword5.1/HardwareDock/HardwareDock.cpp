@@ -5,6 +5,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../UI/FloatingScrollbars.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include "../UI/TableInteractionSupport.h"
@@ -92,6 +93,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -3351,10 +3353,6 @@ namespace
         PDH_STATUS openQueryStatus = ERROR_SUCCESS;  // openQueryStatus：PdhOpenQueryW 返回值，供失败日志使用。
     };
 
-    // hardwareDockCpuCounterInitializing 作用：
-    // - 标记当前是否已有一轮后台 PDH 初始化在执行；
-    // - 防止初始化未完成期间每秒刷新重复投递任务。
-    std::atomic_bool hardwareDockCpuCounterInitializing{ false };
 
     // createHardwareDockCpuCounters 作用：
     // - 入参 coreCount：逻辑核心数量，决定注册多少个 \Processor(n) 计数器；
@@ -3420,17 +3418,7 @@ namespace
         return counterBundle;
     }
 
-    // closeHardwareDockCpuCounters 作用：
-    // - 入参 counterBundle：待释放的句柄集合；
-    // - 处理：关闭 PDH 查询，供控件已销毁或句柄已由更早一轮接管时丢弃结果；
-    // - 返回：无返回值。
-    void closeHardwareDockCpuCounters(const HardwareDockCpuCounterBundle& counterBundle)
-    {
-        if (counterBundle.cpuQueryHandle != nullptr)
-        {
-            ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.cpuQueryHandle));
-        }
-    }
+
 }
 
 namespace
@@ -4079,6 +4067,542 @@ namespace
     }
 }
 
+// The sampling service owns its PDH lifetime and network deltas on one persistent thread.
+// It deliberately has no QWidget/model/chart references. Hidden views do not stop collection.
+struct HardwareDock::SamplingReceipt final
+{
+    std::mutex mutex;
+    bool finished = false; // Physical completion is independent of Qt callback delivery.
+    std::shared_ptr<PerformanceSample> sample;
+};
+
+struct HardwareDock::SamplingState final : QObject
+{
+    const int coreCount = static_cast<int>(std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)));
+    std::vector<bool> m_metricCoreValid;
+    QString m_primaryNetworkAdapterName;
+    std::uint64_t m_primaryNetworkLinkBitsPerSecond = 0;
+    struct NetworkBaseline
+    {
+        bool lastOperational = false;
+        bool hasPreviousSample = false;
+        std::uint64_t lastRxBytes = 0;
+        std::uint64_t lastTxBytes = 0;
+        std::uint64_t linkBitsPerSecond = 0;
+        qint64 lastSampleMs = 0;
+    };
+    std::unordered_map<std::uint64_t, NetworkBaseline> networkBaselines;
+    void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。
+    std::vector<void*> m_coreCounterHandles;  // m_coreCounterHandles：每核利用率计数器句柄。
+    void* m_cpuPerformanceCounterHandle = nullptr; // m_cpuPerformanceCounterHandle：CPU 总体性能百分比计数器。
+    void* m_cpuFrequencyCounterHandle = nullptr; // m_cpuFrequencyCounterHandle：CPU 基准频率计数器。
+    void* m_diskPerfQueryHandle = nullptr;    // m_diskPerfQueryHandle：磁盘速率查询句柄。
+    void* m_diskReadCounterHandle = nullptr;  // m_diskReadCounterHandle：磁盘读速率计数器句柄。
+    void* m_diskWriteCounterHandle = nullptr; // m_diskWriteCounterHandle：磁盘写速率计数器句柄。
+
+    void retireCpuQuery()
+    {
+        if (m_cpuPerfQueryHandle != nullptr) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
+        m_cpuPerfQueryHandle = nullptr;
+        m_coreCounterHandles.clear();
+        m_cpuPerformanceCounterHandle = nullptr;
+        m_cpuFrequencyCounterHandle = nullptr;
+    }
+    void retireDiskQuery()
+    {
+        if (m_diskPerfQueryHandle != nullptr) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
+        m_diskPerfQueryHandle = nullptr;
+        m_diskReadCounterHandle = nullptr;
+        m_diskWriteCounterHandle = nullptr;
+    }
+    ~SamplingState() override
+    {
+        retireCpuQuery();
+        retireDiskQuery();
+    }
+    bool samplePerCoreUsage(std::vector<double>*, double*);
+    bool sampleCpuEffectiveSpeed(double*) const;
+    bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>*);
+    bool sampleMemoryUsage(double*);
+    bool sampleDiskRates(std::vector<DiskRateSample>*);
+    bool sampleNetworkRates(std::vector<NetworkRateSample>*);
+    bool sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot*) const;
+    PerformanceSample collect()
+    {
+        PerformanceSample sample;
+        sample.cpuValid = samplePerCoreUsage(&sample.coreUsage, &sample.totalCpuUsage);
+        sample.coreValid = m_metricCoreValid;
+        sampleCpuEffectiveSpeed(&sample.cpuSpeedGhz);
+        sampleCpuPowerInfo(&sample.powerInfo);
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        sample.memoryValid = ::GlobalMemoryStatusEx(&memory) == TRUE;
+        if (sample.memoryValid)
+        {
+            sample.memoryUsagePercent = static_cast<double>(memory.dwMemoryLoad);
+            sample.totalPhysicalBytes = memory.ullTotalPhys;
+            sample.availablePhysicalBytes = memory.ullAvailPhys;
+        }
+        ULONGLONG installedKb = 0;
+        ::GetPhysicallyInstalledSystemMemory(&installedKb);
+        sample.installedMemoryKb = installedKb;
+        sample.systemPerformanceValid = sampleSystemPerformanceSnapshot(&sample.systemPerformance);
+        sample.diskValid = sampleDiskRates(&sample.diskSamples);
+        sample.networkValid = sampleNetworkRates(&sample.networkSamples);
+        sample.primaryNetworkAdapterName = m_primaryNetworkAdapterName;
+        sample.primaryNetworkLinkBitsPerSecond = m_primaryNetworkLinkBitsPerSecond;
+        sample.sampleTimeMs = QDateTime::currentMSecsSinceEpoch();
+        return sample;
+    }
+};
+
+bool HardwareDock::SamplingState::samplePerCoreUsage(
+    std::vector<double>* coreUsageOut,
+    double* totalUsageOut)
+{
+    if (coreUsageOut == nullptr || totalUsageOut == nullptr)
+    {
+        return false;
+    }
+    coreUsageOut->clear();
+    m_metricCoreValid.clear();
+    *totalUsageOut = 0.0; // 查询早退也不能保留上一帧的有效性或总值。
+    if (m_cpuPerfQueryHandle == nullptr)
+    {
+        const auto counters = createHardwareDockCpuCounters(coreCount);
+        m_cpuPerfQueryHandle = counters.cpuQueryHandle;
+        m_coreCounterHandles = counters.coreCounterHandles;
+        m_cpuPerformanceCounterHandle = counters.cpuPerformanceCounterHandle;
+        m_cpuFrequencyCounterHandle = counters.cpuFrequencyCounterHandle;
+    }
+    coreUsageOut->assign(static_cast<std::size_t>(coreCount), 0.0);
+    m_metricCoreValid.assign(static_cast<std::size_t>(coreCount), false);
+    if (m_cpuPerfQueryHandle == nullptr)
+    {
+        return false;
+    }
+
+    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle);
+    const PDH_STATUS collectStatus = ::PdhCollectQueryData(queryHandle);
+    if (collectStatus != ERROR_SUCCESS)
+    {
+        retireCpuQuery();
+        return false;
+    }
+
+    double usageSum = 0.0;
+    int validCount = 0;
+
+    for (std::size_t coreIndex = 0; coreIndex < m_coreCounterHandles.size(); ++coreIndex)
+    {
+        void* counterHandleVoid = m_coreCounterHandles[coreIndex];
+        if (counterHandleVoid == nullptr)
+        {
+            continue;
+        }
+
+        PDH_FMT_COUNTERVALUE formattedValue{};
+        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
+            PDH_FMT_DOUBLE,
+            nullptr,
+            &formattedValue);
+        if (readStatus != ERROR_SUCCESS
+            || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
+                && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
+            || !std::isfinite(formattedValue.doubleValue))
+        {
+            continue;
+        }
+
+        const double usageValue = std::clamp(formattedValue.doubleValue, 0.0, 100.0);
+        (*coreUsageOut)[coreIndex] = usageValue;
+        m_metricCoreValid[coreIndex] = true; // 部分失败核的0占位不能成为有效历史样本。
+        usageSum += usageValue;
+        ++validCount;
+    }
+
+    *totalUsageOut = validCount > 0 ? (usageSum / static_cast<double>(validCount)) : 0.0;
+    return validCount > 0;
+}
+
+bool HardwareDock::SamplingState::sampleCpuEffectiveSpeed(double* speedGhzOut) const
+{
+    if (speedGhzOut == nullptr
+        || m_cpuPerformanceCounterHandle == nullptr
+        || m_cpuFrequencyCounterHandle == nullptr)
+    {
+        return false;
+    }
+
+    const auto readCounterValue =
+        [](void* counterHandle, double* valueOut)
+        {
+            if (counterHandle == nullptr || valueOut == nullptr)
+            {
+                return false;
+            }
+            PDH_FMT_COUNTERVALUE formattedValue{};
+            const PDH_STATUS status = ::PdhGetFormattedCounterValue(
+                reinterpret_cast<PDH_HCOUNTER>(counterHandle),
+                PDH_FMT_DOUBLE,
+                nullptr,
+                &formattedValue);
+            if (status != ERROR_SUCCESS
+                || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
+                    && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
+                || !std::isfinite(formattedValue.doubleValue))
+            {
+                return false;
+            }
+            *valueOut = formattedValue.doubleValue;
+            return true;
+        };
+
+    double performancePercent = 0.0;
+    double baseFrequencyMhz = 0.0;
+    if (!readCounterValue(m_cpuPerformanceCounterHandle, &performancePercent)
+        || !readCounterValue(m_cpuFrequencyCounterHandle, &baseFrequencyMhz))
+    {
+        return false;
+    }
+
+    const double effectiveFrequencyMhz = baseFrequencyMhz * performancePercent / 100.0;
+    if (!std::isfinite(effectiveFrequencyMhz)
+        || effectiveFrequencyMhz <= 0.0
+        || effectiveFrequencyMhz > 20000.0)
+    {
+        return false;
+    }
+
+    *speedGhzOut = effectiveFrequencyMhz / 1000.0;
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut)
+{
+    if (powerInfoOut == nullptr)
+    {
+        return false;
+    }
+
+    const ULONG logicalProcessorCount = std::max<ULONG>(
+        1,
+        static_cast<ULONG>(coreCount));
+    // KsProcessorPowerInformation 用途：
+    // - 与 CallNtPowerInformation(ProcessorInformation) 输出结构保持二进制兼容；
+    // - 避免不同 SDK 版本缺少 PROCESSOR_POWER_INFORMATION 定义导致编译失败。
+    struct KsProcessorPowerInformation
+    {
+        ULONG Number;            // Number：逻辑处理器编号。
+        ULONG MaxMhz;            // MaxMhz：最大频率。
+        ULONG CurrentMhz;        // CurrentMhz：当前频率。
+        ULONG MhzLimit;          // MhzLimit：限频上限。
+        ULONG MaxIdleState;      // MaxIdleState：最大空闲状态。
+        ULONG CurrentIdleState;  // CurrentIdleState：当前空闲状态。
+    };
+    std::vector<KsProcessorPowerInformation> nativeInfoList(logicalProcessorCount);
+
+    const NTSTATUS ntStatus = ::CallNtPowerInformation(
+        ProcessorInformation,
+        nullptr,
+        0,
+        nativeInfoList.data(),
+        static_cast<ULONG>(nativeInfoList.size() * sizeof(KsProcessorPowerInformation)));
+    if (ntStatus != 0)
+    {
+        return false;
+    }
+
+    powerInfoOut->clear();
+    powerInfoOut->reserve(nativeInfoList.size());
+    for (const KsProcessorPowerInformation& nativeInfo : nativeInfoList)
+    {
+        CpuPowerSnapshot snapshot;
+        snapshot.coreIndex = nativeInfo.Number;
+        snapshot.currentMhz = nativeInfo.CurrentMhz;
+        snapshot.maxMhz = nativeInfo.MaxMhz;
+        snapshot.limitMhz = nativeInfo.MhzLimit;
+        powerInfoOut->push_back(snapshot);
+    }
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleMemoryUsage(double* memoryUsagePercentOut)
+{
+    if (memoryUsagePercentOut == nullptr)
+    {
+        return false;
+    }
+
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
+    {
+        *memoryUsagePercentOut = 0.0;
+        return false;
+    }
+
+    *memoryUsagePercentOut = static_cast<double>(memoryStatus.dwMemoryLoad);
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleDiskRates(std::vector<DiskRateSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    if (m_diskPerfQueryHandle == nullptr)
+    {
+        PDH_HQUERY queryHandle = nullptr;
+        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
+        {
+            return false;
+        }
+
+        PDH_HCOUNTER readCounterHandle = nullptr;
+        PDH_HCOUNTER writeCounterHandle = nullptr;
+        const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(*)\\Disk Read Bytes/sec",
+            0,
+            &readCounterHandle);
+        const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
+            queryHandle,
+            L"\\PhysicalDisk(*)\\Disk Write Bytes/sec",
+            0,
+            &writeCounterHandle);
+        if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
+        {
+            ::PdhCloseQuery(queryHandle);
+            return false;
+        }
+
+        m_diskPerfQueryHandle = queryHandle;
+        m_diskReadCounterHandle = readCounterHandle;
+        m_diskWriteCounterHandle = writeCounterHandle;
+        ::PdhCollectQueryData(queryHandle);
+    }
+
+    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
+    if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
+    {
+        retireDiskQuery();
+        return false;
+    }
+
+    DWORD readBufferSize = 0;
+    DWORD readItemCount = 0;
+    PDH_STATUS readQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        &readBufferSize,
+        &readItemCount,
+        nullptr);
+    if (readQueryStatus != PDH_MORE_DATA || readBufferSize == 0 || readItemCount == 0)
+    {
+        sampleListOut->clear();
+        return true;
+    }
+
+    std::vector<unsigned char> readBuffer(readBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* readItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(readBuffer.data());
+    readQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        &readBufferSize,
+        &readItemCount,
+        readItemPointer);
+    if (readQueryStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    DWORD writeBufferSize = 0;
+    DWORD writeItemCount = 0;
+    PDH_STATUS writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        nullptr);
+    if (writeQueryStatus != PDH_MORE_DATA || writeBufferSize == 0 || writeItemCount == 0)
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> writeBuffer(writeBufferSize);
+    PDH_FMT_COUNTERVALUE_ITEM_W* writeItemPointer =
+        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(writeBuffer.data());
+    writeQueryStatus = ::PdhGetFormattedCounterArrayW(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        &writeBufferSize,
+        &writeItemCount,
+        writeItemPointer);
+    if (writeQueryStatus != ERROR_SUCCESS)
+    {
+        return false;
+    }
+
+    // PhysicalDisk arrays share instance identity; avoid pairing every read with every write.
+    QHash<QString, double> writeRates;
+    writeRates.reserve(static_cast<int>(writeItemCount));
+    for (DWORD writeIndex = 0; writeIndex < writeItemCount; ++writeIndex)
+    {
+        const auto& item = writeItemPointer[writeIndex];
+        if (item.FmtValue.CStatus == ERROR_SUCCESS)
+        {
+            const QString key = QString::fromWCharArray(item.szName != nullptr ? item.szName : L"").trimmed().toCaseFolded();
+            if (!writeRates.contains(key))
+            {
+                writeRates.insert(key, std::max(0.0, item.FmtValue.doubleValue));
+            }
+        }
+    }
+    sampleListOut->clear();
+    sampleListOut->reserve(readItemCount);
+    for (DWORD readIndex = 0; readIndex < readItemCount; ++readIndex)
+    {
+        const PDH_FMT_COUNTERVALUE_ITEM_W& readItem = readItemPointer[readIndex];
+        const QString instanceNameText = QString::fromWCharArray(
+            readItem.szName != nullptr ? readItem.szName : L"").trimmed();
+        if (instanceNameText.isEmpty() || instanceNameText == QStringLiteral("_Total"))
+        {
+            continue;
+        }
+        if (readItem.FmtValue.CStatus != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        DiskRateSample sample;
+        sample.instanceNameText = instanceNameText;
+        sample.displayNameText = simplifyDiskInstanceName(instanceNameText);
+        sample.readBytesPerSec = std::max(0.0, readItem.FmtValue.doubleValue);
+        sample.writeBytesPerSec = writeRates.value(instanceNameText.toCaseFolded(), 0.0);
+        sampleListOut->push_back(sample);
+    }
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut)
+{
+    if (sampleListOut == nullptr)
+    {
+        return false;
+    }
+
+    MIB_IF_TABLE2* tablePointer = nullptr;
+    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
+    {
+        return false;
+    }
+
+    sampleListOut->clear();
+    sampleListOut->reserve(tablePointer->NumEntries);
+    const qint64 nowMs = static_cast<qint64>(::GetTickCount64());
+    std::unordered_set<std::uint64_t> observedKeys;
+    std::uint64_t primaryTrafficBytes = 0;
+    QString primaryAdapterName;
+    std::uint64_t primaryLinkBitsPerSecond = 0;
+    std::unordered_set<std::uint64_t> ipInterfaceKeys;
+    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
+    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
+    {
+        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
+        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
+        {
+            continue;
+        }
+
+        NetworkRateSample sample;
+        sample.interfaceKey = interfaceLuidToKey(static_cast<std::uint64_t>(rowValue.InterfaceLuid.Value));
+        sample.displayNameText = QString::fromWCharArray(rowValue.Alias).trimmed();
+        if (sample.displayNameText.isEmpty())
+        {
+            sample.displayNameText = QString::fromWCharArray(rowValue.Description).trimmed();
+        }
+        sample.linkBitsPerSecond = std::max<std::uint64_t>(
+            static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
+            static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
+        sample.physical = rowValue.InterfaceAndOperStatusFlags.HardwareInterface != 0;
+        sample.operational = rowValue.OperStatus == IfOperStatusUp;
+        sample.totalRxBytes = static_cast<std::uint64_t>(rowValue.InOctets);
+        sample.totalTxBytes = static_cast<std::uint64_t>(rowValue.OutOctets);
+
+        observedKeys.insert(sample.interfaceKey);
+        NetworkBaseline& device = networkBaselines[sample.interfaceKey];
+            const qint64 elapsedMs = nowMs - device.lastSampleMs;
+            if (sample.operational && device.lastOperational
+                && device.hasPreviousSample && elapsedMs > 0)
+            {
+                const std::uint64_t deltaRx = sample.totalRxBytes >= device.lastRxBytes
+                    ? (sample.totalRxBytes - device.lastRxBytes)
+                    : 0;
+                const std::uint64_t deltaTx = sample.totalTxBytes >= device.lastTxBytes
+                    ? (sample.totalTxBytes - device.lastTxBytes)
+                    : 0;
+                sample.rxBytesPerSec = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
+                sample.txBytesPerSec = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
+            }
+            device.lastRxBytes = sample.totalRxBytes;
+            device.lastTxBytes = sample.totalTxBytes;
+            device.lastSampleMs = nowMs;
+            device.linkBitsPerSecond = sample.linkBitsPerSecond;
+            device.lastOperational = sample.operational;
+            device.hasPreviousSample = true;
+        const std::uint64_t trafficBytes = sample.totalRxBytes + sample.totalTxBytes;
+        if (sample.operational && trafficBytes >= primaryTrafficBytes)
+        {
+            primaryTrafficBytes = trafficBytes;
+            primaryAdapterName = sample.displayNameText;
+            primaryLinkBitsPerSecond = sample.linkBitsPerSecond;
+        }
+        sampleListOut->push_back(sample);
+    }
+    ::FreeMibTable(tablePointer);
+    // A removed interface must establish a fresh baseline if its LUID later returns.
+    for (auto it = networkBaselines.begin(); it != networkBaselines.end();)
+    {
+        if (observedKeys.find(it->first) == observedKeys.end()) it = networkBaselines.erase(it);
+        else ++it;
+    }
+    m_primaryNetworkAdapterName = primaryAdapterName;
+    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
+    return true;
+}
+
+bool HardwareDock::SamplingState::sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const
+{
+    if (snapshotOut == nullptr)
+    {
+        return false;
+    }
+
+    PERFORMANCE_INFORMATION perfInfo{};
+    perfInfo.cb = sizeof(perfInfo);
+    if (::GetPerformanceInfo(&perfInfo, sizeof(perfInfo)) == FALSE)
+    {
+        return false;
+    }
+
+    // pageSizeBytes 用途：把页数指标统一转换为字节单位。
+    const std::uint64_t pageSizeBytes = static_cast<std::uint64_t>(perfInfo.PageSize);
+    snapshotOut->processCount = static_cast<std::uint32_t>(perfInfo.ProcessCount);
+    snapshotOut->threadCount = static_cast<std::uint32_t>(perfInfo.ThreadCount);
+    snapshotOut->handleCount = static_cast<std::uint32_t>(perfInfo.HandleCount);
+    snapshotOut->commitTotalBytes = static_cast<std::uint64_t>(perfInfo.CommitTotal) * pageSizeBytes;
+    snapshotOut->commitLimitBytes = static_cast<std::uint64_t>(perfInfo.CommitLimit) * pageSizeBytes;
+    snapshotOut->cachedBytes = static_cast<std::uint64_t>(perfInfo.SystemCache) * pageSizeBytes;
+    snapshotOut->pagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelPaged) * pageSizeBytes;
+    snapshotOut->nonPagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelNonpaged) * pageSizeBytes;
+    return true;
+}
+
 HardwareDock::HardwareDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -4121,6 +4645,7 @@ HardwareDock::HardwareDock(QWidget* parent)
 
 HardwareDock::~HardwareDock()
 {
+    if (m_samplingDispatcher) m_samplingDispatcher->close();
     clearUtilizationFollowHooks();
     delete m_utilizationPickDialog.data();
     m_utilizationPickDialog = nullptr;
@@ -4140,21 +4665,12 @@ HardwareDock::~HardwareDock()
         m_refreshTimer->stop();
     }
 
-    if (m_cpuPerfQueryHandle != nullptr)
+    if (m_samplingThread != nullptr)
     {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
-        m_cpuPerfQueryHandle = nullptr;
-        m_coreCounterHandles.clear();
-        m_cpuPerformanceCounterHandle = nullptr;
-        m_cpuFrequencyCounterHandle = nullptr;
-    }
-
-    if (m_diskPerfQueryHandle != nullptr)
-    {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
-        m_diskPerfQueryHandle = nullptr;
-        m_diskReadCounterHandle = nullptr;
-        m_diskWriteCounterHandle = nullptr;
+        // Finish the single accepted collection before the worker destroys its PDH queries.
+        m_samplingThread->quit();
+        m_samplingThread->wait();
+        m_samplingState = nullptr;
     }
 
     if (m_gpuPerfQueryHandle != nullptr)
@@ -8539,108 +9055,97 @@ void HardwareDock::refreshSystemVolumeInfo()
 
 void HardwareDock::initializePerformanceCounters()
 {
-    // 计数器初始化整体异步化：
-    // - PdhOpenQueryW + 逐核 PdhAddEnglishCounterW + \Processor Information 首次触达合计上百毫秒；
-    // - 原来只是延后到首帧之后，仍然压在 UI 线程；现在交给线程池，完成后回投接管句柄；
-    // - 句柄就绪前 samplePerCoreUsage 直接返回 false，界面按 0 占位显示。
-    if (m_cpuPerfQueryHandle != nullptr)
+    if (m_samplingThread != nullptr) return;
+    m_samplingThread = new QThread(this);
+    m_samplingThread->setObjectName(QStringLiteral("HardwareSampling"));
+    m_samplingState = new SamplingState();
+    m_samplingState->moveToThread(m_samplingThread);
+    connect(m_samplingThread, &QThread::finished, m_samplingState, &QObject::deleteLater);
+    m_samplingThread->start();
+}
+
+void HardwareDock::reconcilePerformanceSample()
+{
+    const auto receipt = m_samplingReceipt;
+    if (!receipt) return;
+    std::shared_ptr<PerformanceSample> sample;
     {
-        return;
+        std::lock_guard<std::mutex> lock(receipt->mutex);
+        if (!receipt->finished) return;
+        sample = std::move(receipt->sample);
     }
-
-    // expectedInitializingValue 用途：CAS 期望值（false=当前没有初始化任务在跑）。
-    bool expectedInitializingValue = false;
-    if (!hardwareDockCpuCounterInitializing.compare_exchange_strong(expectedInitializingValue, true))
-    {
-        return;
-    }
-
-    // coreCount 必须在 UI 线程读取：m_coreChartEntries 保存的是图表控件。
-    const int coreCount = static_cast<int>(m_coreChartEntries.size());
-
-    // applicationContext 与事件循环同寿命；工作线程不解引用 Dock 指针。
-    QObject* const applicationContext = QCoreApplication::instance();
-    if (applicationContext == nullptr)
-    {
-        hardwareDockCpuCounterInitializing.store(false);
-        return;
-    }
-
-    // safeThis 用途：后台任务可能晚于 Dock 销毁，回投后必须验证生命周期。
-    const QPointer<HardwareDock> safeThis(this);
-    QThreadPool::globalInstance()->start(
-        [applicationContext, safeThis, coreCount]()
-        {
-            // 后台线程只做纯数据采集，产出可跨线程搬运的句柄值类型。
-            const HardwareDockCpuCounterBundle counterBundle = createHardwareDockCpuCounters(coreCount);
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                applicationContext,
-                [safeThis, counterBundle]()
-                {
-                    if (safeThis.isNull())
-                    {
-                        closeHardwareDockCpuCounters(counterBundle);
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    if (counterBundle.cpuQueryHandle == nullptr)
-                    {
-                        kLogEvent event;
-                        warn << event
-                            << "[HardwareDock] 初始化PDH失败：PdhOpenQueryW, status="
-                            << counterBundle.openQueryStatus
-                            << eol;
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    if (safeThis->m_cpuPerfQueryHandle != nullptr)
-                    {
-                        // 更早一轮初始化已经接管句柄，本轮结果直接释放避免泄漏。
-                        closeHardwareDockCpuCounters(counterBundle);
-                        hardwareDockCpuCounterInitializing.store(false);
-                        return;
-                    }
-
-                    safeThis->m_cpuPerfQueryHandle = counterBundle.cpuQueryHandle;
-                    safeThis->m_coreCounterHandles = counterBundle.coreCounterHandles;
-                    safeThis->m_cpuPerformanceCounterHandle = counterBundle.cpuPerformanceCounterHandle;
-                    safeThis->m_cpuFrequencyCounterHandle = counterBundle.cpuFrequencyCounterHandle;
-                    hardwareDockCpuCounterInitializing.store(false);
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk)
-            {
-                closeHardwareDockCpuCounters(counterBundle);
-                hardwareDockCpuCounterInitializing.store(false);
-            }
-        });
+    // Clear ownership before applying: a late old delivery cannot consume a newer frame.
+    m_samplingReceipt.reset();
+    m_samplingInFlight = false;
+    if (sample) applyPerformanceSample(*sample);
 }
 
 void HardwareDock::refreshAllViews()
 {
-    std::vector<double> coreUsageList;
-    coreUsageList.reserve(m_coreChartEntries.size());
-    double totalCpuUsage = 0.0;
-    m_metricCpuValid = samplePerCoreUsage(&coreUsageList, &totalCpuUsage);
-    if (!m_metricCpuValid)
+    // Also recover a physically completed frame if Qt discarded its delivery event.
+    reconcilePerformanceSample();
+    if (m_samplingInFlight) return;
+    initializePerformanceCounters();
+    if (m_samplingState == nullptr) return;
+    if (!m_samplingDispatcher)
+        m_samplingDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+    const auto dispatcher = m_samplingDispatcher;
+    const auto receipt = std::make_shared<SamplingReceipt>();
+    m_samplingReceipt = receipt;
+    m_samplingInFlight = true;
+    SamplingState* const state = m_samplingState;
+    bool queued = false;
+    try
     {
-        coreUsageList.assign(m_coreChartEntries.size(), 0.0);
-        totalCpuUsage = 0.0;
+        queued = QMetaObject::invokeMethod(state,
+            [dispatcher, receipt, state, receiver = this]()
+            {
+                std::shared_ptr<PerformanceSample> sample;
+                try { sample = std::make_shared<PerformanceSample>(state->collect()); }
+                catch (...) { /* A failed provider/allocation still retires the physical lane. */ }
+                {
+                    std::lock_guard<std::mutex> lock(receipt->mutex);
+                    receipt->sample = std::move(sample);
+                    receipt->finished = true;
+                }
+                // Only the lifecycle-gated UI callback dereferences receiver. A failed or
+                // discarded post retains the pure value receipt for the next timer tick.
+                try { dispatcher->post([receiver, receipt]()
+                {
+                    if (receiver->m_samplingReceipt == receipt)
+                        receiver->reconcilePerformanceSample();
+                }); } catch (...) {}
+            }, Qt::QueuedConnection);
     }
+    catch (...) {}
+    if (!queued)
+    {
+        // No worker accepted this request; publish the same physical terminal state
+        // and let the receipt owner alone release the GUI gate.
+        {
+            std::lock_guard<std::mutex> lock(receipt->mutex);
+            receipt->finished = true;
+        }
+        reconcilePerformanceSample();
+    }
+}
 
-    double memoryUsagePercent = 0.0;
-    sampleMemoryUsage(&memoryUsagePercent);
-
+void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
+{
+    m_lastPerformanceSample = sample;
+    const std::vector<double>& coreUsageList = sample.coreUsage;
+    const double totalCpuUsage = sample.cpuValid ? sample.totalCpuUsage : 0.0;
+    const double memoryUsagePercent = sample.memoryUsagePercent;
+    m_metricCpuValid = sample.cpuValid;
+    m_metricCoreValid = sample.coreValid;
+    m_primaryNetworkAdapterName = sample.primaryNetworkAdapterName;
+    m_primaryNetworkLinkBitsPerSecond = sample.primaryNetworkLinkBitsPerSecond;
     double diskReadBytesPerSec = 0.0;
     double diskWriteBytesPerSec = 0.0;
     double diskReadAverageBytesPerSec = 0.0;
     double diskWriteAverageBytesPerSec = 0.0;
-    std::vector<DiskRateSample> diskSampleList;
-    m_metricDiskValid = sampleDiskRates(&diskSampleList);
+    const auto& diskSampleList = sample.diskSamples;
+    m_metricDiskValid = sample.diskValid;
     if (m_metricDiskValid)
     {
         for (const DiskRateSample& sample : diskSampleList)
@@ -8665,8 +9170,8 @@ void HardwareDock::refreshAllViews()
     double networkTxBytesPerSec = 0.0;
     double networkRxAverageBytesPerSec = 0.0;
     double networkTxAverageBytesPerSec = 0.0;
-    std::vector<NetworkRateSample> networkSampleList;
-    m_metricNetworkValid = sampleNetworkRates(&networkSampleList);
+    const auto& networkSampleList = sample.networkSamples;
+    m_metricNetworkValid = sample.networkValid;
     if (m_metricNetworkValid)
     {
         for (const NetworkRateSample& sample : networkSampleList)
@@ -8709,14 +9214,9 @@ void HardwareDock::refreshAllViews()
         gpuUsagePercent = 0.0;
     }
 
-    std::vector<CpuPowerSnapshot> powerInfoList;
-    sampleCpuPowerInfo(&powerInfoList);
-    double sampledCpuSpeedGhz = 0.0;
-    m_lastCpuSpeedGhz = sampleCpuEffectiveSpeed(&sampledCpuSpeedGhz)
-        ? sampledCpuSpeedGhz
-        : 0.0;
-
-    m_metricSampleTimeMs = QDateTime::currentMSecsSinceEpoch(); // 本帧图表共用真实采样时刻。
+    const auto& powerInfoList = sample.powerInfo;
+    m_lastCpuSpeedGhz = sample.cpuSpeedGhz;
+    m_metricSampleTimeMs = sample.sampleTimeMs;
     ++m_sampleCounter;
     pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
     pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
@@ -8776,521 +9276,13 @@ void HardwareDock::refreshAllViews()
     }
 }
 
-bool HardwareDock::samplePerCoreUsage(
-    std::vector<double>* coreUsageOut,
-    double* totalUsageOut)
-{
-    if (coreUsageOut == nullptr || totalUsageOut == nullptr)
-    {
-        return false;
-    }
-    coreUsageOut->clear();
-    m_metricCoreValid.clear();
-    *totalUsageOut = 0.0; // 查询早退也不能保留上一帧的有效性或总值。
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        initializePerformanceCounters();
-    }
-    coreUsageOut->assign(m_coreCounterHandles.size(), 0.0);
-    m_metricCoreValid.assign(m_coreCounterHandles.size(), false);
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        return false;
-    }
 
-    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle);
-    const PDH_STATUS collectStatus = ::PdhCollectQueryData(queryHandle);
-    if (collectStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
 
-    double usageSum = 0.0;
-    int validCount = 0;
 
-    for (std::size_t coreIndex = 0; coreIndex < m_coreCounterHandles.size(); ++coreIndex)
-    {
-        void* counterHandleVoid = m_coreCounterHandles[coreIndex];
-        if (counterHandleVoid == nullptr)
-        {
-            continue;
-        }
 
-        PDH_FMT_COUNTERVALUE formattedValue{};
-        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
-            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
-            PDH_FMT_DOUBLE,
-            nullptr,
-            &formattedValue);
-        if (readStatus != ERROR_SUCCESS
-            || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
-                && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
-            || !std::isfinite(formattedValue.doubleValue))
-        {
-            continue;
-        }
 
-        const double usageValue = std::clamp(formattedValue.doubleValue, 0.0, 100.0);
-        (*coreUsageOut)[coreIndex] = usageValue;
-        m_metricCoreValid[coreIndex] = true; // 部分失败核的0占位不能成为有效历史样本。
-        usageSum += usageValue;
-        ++validCount;
-    }
 
-    *totalUsageOut = validCount > 0 ? (usageSum / static_cast<double>(validCount)) : 0.0;
-    return validCount > 0;
-}
 
-bool HardwareDock::sampleCpuEffectiveSpeed(double* speedGhzOut) const
-{
-    if (speedGhzOut == nullptr
-        || m_cpuPerformanceCounterHandle == nullptr
-        || m_cpuFrequencyCounterHandle == nullptr)
-    {
-        return false;
-    }
-
-    const auto readCounterValue =
-        [](void* counterHandle, double* valueOut)
-        {
-            if (counterHandle == nullptr || valueOut == nullptr)
-            {
-                return false;
-            }
-            PDH_FMT_COUNTERVALUE formattedValue{};
-            const PDH_STATUS status = ::PdhGetFormattedCounterValue(
-                reinterpret_cast<PDH_HCOUNTER>(counterHandle),
-                PDH_FMT_DOUBLE,
-                nullptr,
-                &formattedValue);
-            if (status != ERROR_SUCCESS
-                || (formattedValue.CStatus != PDH_CSTATUS_VALID_DATA
-                    && formattedValue.CStatus != PDH_CSTATUS_NEW_DATA)
-                || !std::isfinite(formattedValue.doubleValue))
-            {
-                return false;
-            }
-            *valueOut = formattedValue.doubleValue;
-            return true;
-        };
-
-    double performancePercent = 0.0;
-    double baseFrequencyMhz = 0.0;
-    if (!readCounterValue(m_cpuPerformanceCounterHandle, &performancePercent)
-        || !readCounterValue(m_cpuFrequencyCounterHandle, &baseFrequencyMhz))
-    {
-        return false;
-    }
-
-    const double effectiveFrequencyMhz = baseFrequencyMhz * performancePercent / 100.0;
-    if (!std::isfinite(effectiveFrequencyMhz)
-        || effectiveFrequencyMhz <= 0.0
-        || effectiveFrequencyMhz > 20000.0)
-    {
-        return false;
-    }
-
-    *speedGhzOut = effectiveFrequencyMhz / 1000.0;
-    return true;
-}
-
-bool HardwareDock::sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut)
-{
-    if (powerInfoOut == nullptr)
-    {
-        return false;
-    }
-
-    const ULONG logicalProcessorCount = std::max<ULONG>(
-        1,
-        static_cast<ULONG>(m_coreChartEntries.size()));
-    // KsProcessorPowerInformation 用途：
-    // - 与 CallNtPowerInformation(ProcessorInformation) 输出结构保持二进制兼容；
-    // - 避免不同 SDK 版本缺少 PROCESSOR_POWER_INFORMATION 定义导致编译失败。
-    struct KsProcessorPowerInformation
-    {
-        ULONG Number;            // Number：逻辑处理器编号。
-        ULONG MaxMhz;            // MaxMhz：最大频率。
-        ULONG CurrentMhz;        // CurrentMhz：当前频率。
-        ULONG MhzLimit;          // MhzLimit：限频上限。
-        ULONG MaxIdleState;      // MaxIdleState：最大空闲状态。
-        ULONG CurrentIdleState;  // CurrentIdleState：当前空闲状态。
-    };
-    std::vector<KsProcessorPowerInformation> nativeInfoList(logicalProcessorCount);
-
-    const NTSTATUS ntStatus = ::CallNtPowerInformation(
-        ProcessorInformation,
-        nullptr,
-        0,
-        nativeInfoList.data(),
-        static_cast<ULONG>(nativeInfoList.size() * sizeof(KsProcessorPowerInformation)));
-    if (ntStatus != 0)
-    {
-        return false;
-    }
-
-    powerInfoOut->clear();
-    powerInfoOut->reserve(nativeInfoList.size());
-    for (const KsProcessorPowerInformation& nativeInfo : nativeInfoList)
-    {
-        CpuPowerSnapshot snapshot;
-        snapshot.coreIndex = nativeInfo.Number;
-        snapshot.currentMhz = nativeInfo.CurrentMhz;
-        snapshot.maxMhz = nativeInfo.MaxMhz;
-        snapshot.limitMhz = nativeInfo.MhzLimit;
-        powerInfoOut->push_back(snapshot);
-    }
-    return true;
-}
-
-bool HardwareDock::sampleMemoryUsage(double* memoryUsagePercentOut)
-{
-    if (memoryUsagePercentOut == nullptr)
-    {
-        return false;
-    }
-
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
-    {
-        *memoryUsagePercentOut = 0.0;
-        return false;
-    }
-
-    *memoryUsagePercentOut = static_cast<double>(memoryStatus.dwMemoryLoad);
-    return true;
-}
-
-bool HardwareDock::sampleDiskRates(std::vector<DiskRateSample>* sampleListOut)
-{
-    if (sampleListOut == nullptr)
-    {
-        return false;
-    }
-
-    if (m_diskPerfQueryHandle == nullptr)
-    {
-        PDH_HQUERY queryHandle = nullptr;
-        if (::PdhOpenQueryW(nullptr, 0, &queryHandle) != ERROR_SUCCESS || queryHandle == nullptr)
-        {
-            return false;
-        }
-
-        PDH_HCOUNTER readCounterHandle = nullptr;
-        PDH_HCOUNTER writeCounterHandle = nullptr;
-        const PDH_STATUS addReadStatus = ::PdhAddEnglishCounterW(
-            queryHandle,
-            L"\\PhysicalDisk(*)\\Disk Read Bytes/sec",
-            0,
-            &readCounterHandle);
-        const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
-            queryHandle,
-            L"\\PhysicalDisk(*)\\Disk Write Bytes/sec",
-            0,
-            &writeCounterHandle);
-        if (addReadStatus != ERROR_SUCCESS || addWriteStatus != ERROR_SUCCESS)
-        {
-            ::PdhCloseQuery(queryHandle);
-            return false;
-        }
-
-        m_diskPerfQueryHandle = queryHandle;
-        m_diskReadCounterHandle = readCounterHandle;
-        m_diskWriteCounterHandle = writeCounterHandle;
-        ::PdhCollectQueryData(queryHandle);
-    }
-
-    const PDH_HQUERY queryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
-    if (::PdhCollectQueryData(queryHandle) != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    DWORD readBufferSize = 0;
-    DWORD readItemCount = 0;
-    PDH_STATUS readQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
-        PDH_FMT_DOUBLE,
-        &readBufferSize,
-        &readItemCount,
-        nullptr);
-    if (readQueryStatus != PDH_MORE_DATA || readBufferSize == 0 || readItemCount == 0)
-    {
-        sampleListOut->clear();
-        return true;
-    }
-
-    std::vector<unsigned char> readBuffer(readBufferSize);
-    PDH_FMT_COUNTERVALUE_ITEM_W* readItemPointer =
-        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(readBuffer.data());
-    readQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
-        PDH_FMT_DOUBLE,
-        &readBufferSize,
-        &readItemCount,
-        readItemPointer);
-    if (readQueryStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    DWORD writeBufferSize = 0;
-    DWORD writeItemCount = 0;
-    PDH_STATUS writeQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
-        PDH_FMT_DOUBLE,
-        &writeBufferSize,
-        &writeItemCount,
-        nullptr);
-    if (writeQueryStatus != PDH_MORE_DATA || writeBufferSize == 0 || writeItemCount == 0)
-    {
-        return false;
-    }
-
-    std::vector<unsigned char> writeBuffer(writeBufferSize);
-    PDH_FMT_COUNTERVALUE_ITEM_W* writeItemPointer =
-        reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(writeBuffer.data());
-    writeQueryStatus = ::PdhGetFormattedCounterArrayW(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
-        PDH_FMT_DOUBLE,
-        &writeBufferSize,
-        &writeItemCount,
-        writeItemPointer);
-    if (writeQueryStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    sampleListOut->clear();
-    sampleListOut->reserve(readItemCount);
-    for (DWORD readIndex = 0; readIndex < readItemCount; ++readIndex)
-    {
-        const PDH_FMT_COUNTERVALUE_ITEM_W& readItem = readItemPointer[readIndex];
-        const QString instanceNameText = QString::fromWCharArray(
-            readItem.szName != nullptr ? readItem.szName : L"").trimmed();
-        if (instanceNameText.isEmpty() || instanceNameText == QStringLiteral("_Total"))
-        {
-            continue;
-        }
-        if (readItem.FmtValue.CStatus != ERROR_SUCCESS)
-        {
-            continue;
-        }
-
-        DiskRateSample sample;
-        sample.instanceNameText = instanceNameText;
-        sample.displayNameText = simplifyDiskInstanceName(instanceNameText);
-        sample.readBytesPerSec = std::max(0.0, readItem.FmtValue.doubleValue);
-        for (DWORD writeIndex = 0; writeIndex < writeItemCount; ++writeIndex)
-        {
-            const PDH_FMT_COUNTERVALUE_ITEM_W& writeItem = writeItemPointer[writeIndex];
-            const QString writeInstanceNameText = QString::fromWCharArray(
-                writeItem.szName != nullptr ? writeItem.szName : L"").trimmed();
-            if (QString::compare(writeInstanceNameText, instanceNameText, Qt::CaseInsensitive) == 0
-                && writeItem.FmtValue.CStatus == ERROR_SUCCESS)
-            {
-                sample.writeBytesPerSec = std::max(0.0, writeItem.FmtValue.doubleValue);
-                break;
-            }
-        }
-        sampleListOut->push_back(sample);
-    }
-    return true;
-}
-
-bool HardwareDock::sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut)
-{
-    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    std::vector<DiskRateSample> sampleList;
-    const bool sampleOk = sampleDiskRates(&sampleList);
-    if (!sampleOk)
-    {
-        return false;
-    }
-
-    double totalReadBytesPerSec = 0.0;
-    double totalWriteBytesPerSec = 0.0;
-    for (const DiskRateSample& sample : sampleList)
-    {
-        totalReadBytesPerSec += std::max(0.0, sample.readBytesPerSec);
-        totalWriteBytesPerSec += std::max(0.0, sample.writeBytesPerSec);
-    }
-    *readBytesPerSecOut = totalReadBytesPerSec;
-    *writeBytesPerSecOut = totalWriteBytesPerSec;
-    return true;
-}
-
-bool HardwareDock::sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut)
-{
-    if (rxBytesPerSecOut == nullptr || txBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    MIB_IF_TABLE2* tablePointer = nullptr;
-    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
-    {
-        return false;
-    }
-
-    std::uint64_t totalRxBytes = 0;
-    std::uint64_t totalTxBytes = 0;
-    std::uint64_t primaryTrafficBytes = 0;
-    QString primaryAdapterName;
-    std::uint64_t primaryLinkBitsPerSecond = 0;
-    std::unordered_set<std::uint64_t> ipInterfaceKeys;
-    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
-    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
-    {
-        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
-        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
-        {
-            continue;
-        }
-
-        totalRxBytes += static_cast<std::uint64_t>(rowValue.InOctets);
-        totalTxBytes += static_cast<std::uint64_t>(rowValue.OutOctets);
-
-        // 对齐任务管理器展示口径：
-        // - 选择当前“累计流量最高”的活动网卡作为主展示网卡；
-        // - 记录其链路速率，供详情页显示。
-        const std::uint64_t rowTrafficBytes = static_cast<std::uint64_t>(rowValue.InOctets)
-            + static_cast<std::uint64_t>(rowValue.OutOctets);
-        if (rowTrafficBytes >= primaryTrafficBytes)
-        {
-            primaryTrafficBytes = rowTrafficBytes;
-            primaryAdapterName = QString::fromWCharArray(rowValue.Alias);
-            primaryLinkBitsPerSecond = std::max<std::uint64_t>(
-                static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
-                static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
-        }
-    }
-    ::FreeMibTable(tablePointer);
-
-    m_primaryNetworkAdapterName = primaryAdapterName;
-    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
-
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastNetworkSampleMs <= 0)
-    {
-        m_lastNetworkSampleMs = nowMs;
-        m_lastNetworkRxBytes = totalRxBytes;
-        m_lastNetworkTxBytes = totalTxBytes;
-        *rxBytesPerSecOut = 0.0;
-        *txBytesPerSecOut = 0.0;
-        return true;
-    }
-
-    const qint64 elapsedMs = nowMs - m_lastNetworkSampleMs;
-    if (elapsedMs <= 0)
-    {
-        return false;
-    }
-
-    const std::uint64_t deltaRx = totalRxBytes >= m_lastNetworkRxBytes
-        ? (totalRxBytes - m_lastNetworkRxBytes)
-        : 0;
-    const std::uint64_t deltaTx = totalTxBytes >= m_lastNetworkTxBytes
-        ? (totalTxBytes - m_lastNetworkTxBytes)
-        : 0;
-    m_lastNetworkSampleMs = nowMs;
-    m_lastNetworkRxBytes = totalRxBytes;
-    m_lastNetworkTxBytes = totalTxBytes;
-
-    *rxBytesPerSecOut = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
-    *txBytesPerSecOut = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
-    return true;
-}
-
-bool HardwareDock::sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut)
-{
-    if (sampleListOut == nullptr)
-    {
-        return false;
-    }
-
-    MIB_IF_TABLE2* tablePointer = nullptr;
-    if (::GetIfTable2(&tablePointer) != NO_ERROR || tablePointer == nullptr)
-    {
-        return false;
-    }
-
-    sampleListOut->clear();
-    sampleListOut->reserve(tablePointer->NumEntries);
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    std::uint64_t primaryTrafficBytes = 0;
-    QString primaryAdapterName;
-    std::uint64_t primaryLinkBitsPerSecond = 0;
-    std::unordered_set<std::uint64_t> ipInterfaceKeys;
-    const bool hasIpTable = collectNetworkIpInterfaceKeys(&ipInterfaceKeys);
-    for (ULONG rowIndex = 0; rowIndex < tablePointer->NumEntries; ++rowIndex)
-    {
-        const MIB_IF_ROW2& rowValue = tablePointer->Table[rowIndex];
-        if (!isMonitoredNetworkInterface(rowValue, ipInterfaceKeys, hasIpTable))
-        {
-            continue;
-        }
-
-        NetworkRateSample sample;
-        sample.interfaceKey = interfaceLuidToKey(static_cast<std::uint64_t>(rowValue.InterfaceLuid.Value));
-        sample.displayNameText = QString::fromWCharArray(rowValue.Alias).trimmed();
-        if (sample.displayNameText.isEmpty())
-        {
-            sample.displayNameText = QString::fromWCharArray(rowValue.Description).trimmed();
-        }
-        sample.linkBitsPerSecond = std::max<std::uint64_t>(
-            static_cast<std::uint64_t>(rowValue.ReceiveLinkSpeed),
-            static_cast<std::uint64_t>(rowValue.TransmitLinkSpeed));
-        sample.physical = rowValue.InterfaceAndOperStatusFlags.HardwareInterface != 0;
-        sample.operational = rowValue.OperStatus == IfOperStatusUp;
-        sample.totalRxBytes = static_cast<std::uint64_t>(rowValue.InOctets);
-        sample.totalTxBytes = static_cast<std::uint64_t>(rowValue.OutOctets);
-
-        const int deviceIndex = ensureNetworkUtilizationDevice(
-            sample,
-            static_cast<int>(sampleListOut->size()));
-        if (deviceIndex >= 0 && deviceIndex < static_cast<int>(m_networkUtilDevices.size()))
-        {
-            NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
-            const qint64 elapsedMs = nowMs - device.lastSampleMs;
-            if (sample.operational && device.lastOperational
-                && device.hasPreviousSample && elapsedMs > 0)
-            {
-                const std::uint64_t deltaRx = sample.totalRxBytes >= device.lastRxBytes
-                    ? (sample.totalRxBytes - device.lastRxBytes)
-                    : 0;
-                const std::uint64_t deltaTx = sample.totalTxBytes >= device.lastTxBytes
-                    ? (sample.totalTxBytes - device.lastTxBytes)
-                    : 0;
-                sample.rxBytesPerSec = static_cast<double>(deltaRx) * 1000.0 / static_cast<double>(elapsedMs);
-                sample.txBytesPerSec = static_cast<double>(deltaTx) * 1000.0 / static_cast<double>(elapsedMs);
-            }
-            device.lastRxBytes = sample.totalRxBytes;
-            device.lastTxBytes = sample.totalTxBytes;
-            device.lastSampleMs = nowMs;
-            device.linkBitsPerSecond = sample.linkBitsPerSecond;
-            device.lastOperational = sample.operational;
-            device.hasPreviousSample = true;
-        }
-        const std::uint64_t trafficBytes = sample.totalRxBytes + sample.totalTxBytes;
-        if (sample.operational && trafficBytes >= primaryTrafficBytes)
-        {
-            primaryTrafficBytes = trafficBytes;
-            primaryAdapterName = sample.displayNameText;
-            primaryLinkBitsPerSecond = sample.linkBitsPerSecond;
-        }
-        sampleListOut->push_back(sample);
-    }
-    ::FreeMibTable(tablePointer);
-    m_primaryNetworkAdapterName = primaryAdapterName;
-    m_primaryNetworkLinkBitsPerSecond = primaryLinkBitsPerSecond;
-    return true;
-}
 
 bool HardwareDock::sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut)
 {
@@ -10003,32 +9995,6 @@ bool HardwareDock::sampleGpuMemoryInfoByDxgi()
     return querySuccess;
 }
 
-bool HardwareDock::sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const
-{
-    if (snapshotOut == nullptr)
-    {
-        return false;
-    }
-
-    PERFORMANCE_INFORMATION perfInfo{};
-    perfInfo.cb = sizeof(perfInfo);
-    if (::GetPerformanceInfo(&perfInfo, sizeof(perfInfo)) == FALSE)
-    {
-        return false;
-    }
-
-    // pageSizeBytes 用途：把页数指标统一转换为字节单位。
-    const std::uint64_t pageSizeBytes = static_cast<std::uint64_t>(perfInfo.PageSize);
-    snapshotOut->processCount = static_cast<std::uint32_t>(perfInfo.ProcessCount);
-    snapshotOut->threadCount = static_cast<std::uint32_t>(perfInfo.ThreadCount);
-    snapshotOut->handleCount = static_cast<std::uint32_t>(perfInfo.HandleCount);
-    snapshotOut->commitTotalBytes = static_cast<std::uint64_t>(perfInfo.CommitTotal) * pageSizeBytes;
-    snapshotOut->commitLimitBytes = static_cast<std::uint64_t>(perfInfo.CommitLimit) * pageSizeBytes;
-    snapshotOut->cachedBytes = static_cast<std::uint64_t>(perfInfo.SystemCache) * pageSizeBytes;
-    snapshotOut->pagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelPaged) * pageSizeBytes;
-    snapshotOut->nonPagedPoolBytes = static_cast<std::uint64_t>(perfInfo.KernelNonpaged) * pageSizeBytes;
-    return true;
-}
 
 void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double memoryUsagePercent)
 {
@@ -10037,17 +10003,14 @@ void HardwareDock::updateOverviewText(const double cpuUsagePercent, const double
         return;
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    ::GlobalMemoryStatusEx(&memoryStatus);
 
     const QString summaryText = ks::i18n::contextText(
         QStringLiteral("hardware.overview.summary"),
         QStringLiteral("CPU总体利用率: %1%    内存利用率: %2%    可用内存: %3 / 总内存: %4    %5"))
         .arg(cpuUsagePercent, 0, 'f', 1)
         .arg(memoryUsagePercent, 0, 'f', 1)
-        .arg(bytesToGiBText(memoryStatus.ullAvailPhys))
-        .arg(bytesToGiBText(memoryStatus.ullTotalPhys))
+        .arg(bytesToGiBText(m_lastPerformanceSample.availablePhysicalBytes))
+        .arg(bytesToGiBText(m_lastPerformanceSample.totalPhysicalBytes))
         .arg(m_r0HardwareHealthSummaryText);
     m_overviewSummaryLabel->setText(summaryText);
 }
@@ -10126,14 +10089,11 @@ void HardwareDock::updateUtilizationView(
         MemoryCompositionHistoryWidget::CompositionSample memorySample;
         memorySample.usedPercent = memoryUsagePercent;
 
-        SystemPerformanceSnapshot perfSnapshot;
-        const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
-        MEMORYSTATUSEX memoryStatus{};
-        memoryStatus.dwLength = sizeof(memoryStatus);
-        const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
-        if (perfOk && memoryStatusOk && memoryStatus.ullTotalPhys > 0ULL)
+        const auto& perfSnapshot = m_lastPerformanceSample.systemPerformance;
+        const bool perfOk = m_lastPerformanceSample.systemPerformanceValid;
+        if (perfOk && m_lastPerformanceSample.memoryValid && m_lastPerformanceSample.totalPhysicalBytes > 0ULL)
         {
-            const double totalPhysicalBytes = static_cast<double>(memoryStatus.ullTotalPhys);
+            const double totalPhysicalBytes = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes);
             memorySample.cachedPercent = static_cast<double>(perfSnapshot.cachedBytes) / totalPhysicalBytes * 100.0;
             memorySample.pagedPoolPercent = static_cast<double>(perfSnapshot.pagedPoolBytes) / totalPhysicalBytes * 100.0;
             memorySample.nonPagedPoolPercent = static_cast<double>(perfSnapshot.nonPagedPoolBytes) / totalPhysicalBytes * 100.0;
@@ -10314,13 +10274,11 @@ void HardwareDock::updateUtilizationSidebarCards(
         m_cpuNavCard->appendSample(cpuUsagePercent);
     }
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (m_memoryNavCard != nullptr && ::GlobalMemoryStatusEx(&memoryStatus) == TRUE)
+    if (m_memoryNavCard != nullptr && m_lastPerformanceSample.memoryValid)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double totalGiB = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB =
-            static_cast<double>(memoryStatus.ullTotalPhys - memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+            static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes - m_lastPerformanceSample.availablePhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double cachedPercent = std::clamp(
             100.0 - memoryUsagePercent,
             0.0,
@@ -10812,8 +10770,8 @@ void HardwareDock::updateTaskManagerDetailLabels(
     const UtilizationStatisticSnapshot cpuStats = buildStatisticSnapshot(m_cpuUsageHistoryPercent);
 
     // 系统性能快照用于进程/线程/句柄与提交内存统计。
-    SystemPerformanceSnapshot perfSnapshot;
-    const bool perfOk = sampleSystemPerformanceSnapshot(&perfSnapshot);
+    const auto& perfSnapshot = m_lastPerformanceSample.systemPerformance;
+    const bool perfOk = m_lastPerformanceSample.systemPerformanceValid;
 
     // uptimeSeconds 用途：系统已运行秒数，显示为任务管理器风格时间串。
     const std::uint64_t uptimeSeconds = static_cast<std::uint64_t>(::GetTickCount64() / 1000ULL);
@@ -10942,13 +10900,11 @@ void HardwareDock::updateTaskManagerDetailLabels(
     // 返回行为：无返回值，CPU 页面会在当前事件循环内按最新文本高度完成重排。
     adjustUtilizationChartHeights();
 
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    const bool memoryStatusOk = (::GlobalMemoryStatusEx(&memoryStatus) == TRUE);
+    const bool memoryStatusOk = m_lastPerformanceSample.memoryValid;
     if (memoryStatusOk)
     {
-        const double totalGiB = static_cast<double>(memoryStatus.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
-        const double availableGiB = static_cast<double>(memoryStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+        const double totalGiB = static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
+        const double availableGiB = static_cast<double>(m_lastPerformanceSample.availablePhysicalBytes) / (1024.0 * 1024.0 * 1024.0);
         const double usedGiB = totalGiB - availableGiB;
         if (m_memoryCapacityLabel != nullptr)
         {
@@ -10983,11 +10939,10 @@ void HardwareDock::updateTaskManagerDetailLabels(
 
     if (m_memoryUtilSecondaryDetailLabel != nullptr)
     {
-        ULONGLONG installedMemoryKb = 0;
-        ::GetPhysicallyInstalledSystemMemory(&installedMemoryKb);
+        const auto installedMemoryKb = m_lastPerformanceSample.installedMemoryKb;
         const double installedBytes = static_cast<double>(installedMemoryKb) * 1024.0;
         const double reservedBytes = memoryStatusOk
-            ? std::max(0.0, installedBytes - static_cast<double>(memoryStatus.ullTotalPhys))
+            ? std::max(0.0, installedBytes - static_cast<double>(m_lastPerformanceSample.totalPhysicalBytes))
             : 0.0;
         m_memoryUtilSecondaryDetailLabel->setText(
             ks::i18n::contextText(

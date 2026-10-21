@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>   // std::atomic_bool：异步探测任务互斥。
 #include <cstdint>  // std::uint64_t：保存采样累计值与时间戳。
+#include <memory>
 #include <utility>
 #include <vector>   // std::vector：保存每核图表与采样数据。
 
@@ -56,9 +57,12 @@ class QStackedWidget;
 class QTabWidget;
 class QTableWidget;
 class QTimer;
+class QThread;
 class QValueAxis;
 class QVBoxLayout;
 class QWidget;
+
+namespace ks::ui { class AsyncUiDispatcher; }
 
 class HardwareDock final : public QWidget
 {
@@ -464,20 +468,44 @@ private:
     // ===================== 采样与刷新 =====================
     void initializePerformanceCounters();
     void refreshAllViews();
-    bool samplePerCoreUsage(
-        std::vector<double>* coreUsageOut,
-        double* totalUsageOut);
-    bool sampleCpuEffectiveSpeed(double* speedGhzOut) const;
-    bool sampleCpuPowerInfo(std::vector<CpuPowerSnapshot>* powerInfoOut);
-    bool sampleMemoryUsage(double* memoryUsagePercentOut);
-    bool sampleDiskRates(std::vector<DiskRateSample>* sampleListOut);
-    bool sampleDiskRate(double* readBytesPerSecOut, double* writeBytesPerSecOut);
-    bool sampleNetworkRates(std::vector<NetworkRateSample>* sampleListOut);
-    bool sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut);
+    // One completed collection; no GUI object or PDH handle crosses this boundary.
+    struct PerformanceSample
+    {
+        qint64 sampleTimeMs = 0;
+        std::vector<double> coreUsage;
+        std::vector<bool> coreValid;
+        double totalCpuUsage = 0.0;
+        bool cpuValid = false;
+        double cpuSpeedGhz = 0.0;
+        std::vector<CpuPowerSnapshot> powerInfo;
+        double memoryUsagePercent = 0.0;
+        bool memoryValid = false;
+        std::uint64_t totalPhysicalBytes = 0;
+        std::uint64_t availablePhysicalBytes = 0;
+        std::uint64_t installedMemoryKb = 0;
+        SystemPerformanceSnapshot systemPerformance;
+        bool systemPerformanceValid = false;
+        std::vector<DiskRateSample> diskSamples;
+        bool diskValid = false;
+        std::vector<NetworkRateSample> networkSamples;
+        bool networkValid = false;
+        QString primaryNetworkAdapterName;
+        std::uint64_t primaryNetworkLinkBitsPerSecond = 0;
+    };
+    struct SamplingState;
+    struct SamplingReceipt;
+    void reconcilePerformanceSample();
+    void applyPerformanceSample(const PerformanceSample& sample);
+    SamplingState* m_samplingState = nullptr; // Owned and destroyed by the dedicated sampling thread.
+    QThread* m_samplingThread = nullptr;
+    bool m_samplingInFlight = false; // GUI-owned gate; reconciled against physical completion.
+    std::shared_ptr<SamplingReceipt> m_samplingReceipt;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_samplingDispatcher;
+    PerformanceSample m_lastPerformanceSample;
+
     bool sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut);
     bool sampleGpuUsage(double* gpuUsagePercentOut);
     bool sampleGpuMemoryInfoByDxgi();
-    bool sampleSystemPerformanceSnapshot(SystemPerformanceSnapshot* snapshotOut) const;
     void updateOverviewText(double cpuUsagePercent, double memoryUsagePercent);
     void updateUtilizationView(
         const std::vector<double>& coreUsageList,
@@ -908,13 +936,6 @@ private:
     std::vector<GpuUtilizationDevice> m_gpuUtilDevices; // m_gpuUtilDevices：GPU利用率多设备页。
 
     // PDH 性能计数器句柄（用 void* 规避头文件引入 Windows 细节）。
-    void* m_cpuPerfQueryHandle = nullptr;     // m_cpuPerfQueryHandle：PDH 查询句柄。
-    std::vector<void*> m_coreCounterHandles;  // m_coreCounterHandles：每核利用率计数器句柄。
-    void* m_cpuPerformanceCounterHandle = nullptr; // m_cpuPerformanceCounterHandle：CPU 总体性能百分比计数器。
-    void* m_cpuFrequencyCounterHandle = nullptr; // m_cpuFrequencyCounterHandle：CPU 基准频率计数器。
-    void* m_diskPerfQueryHandle = nullptr;    // m_diskPerfQueryHandle：磁盘速率查询句柄。
-    void* m_diskReadCounterHandle = nullptr;  // m_diskReadCounterHandle：磁盘读速率计数器句柄。
-    void* m_diskWriteCounterHandle = nullptr; // m_diskWriteCounterHandle：磁盘写速率计数器句柄。
     void* m_gpuPerfQueryHandle = nullptr;     // m_gpuPerfQueryHandle：GPU 利用率查询句柄。
     void* m_gpuCounterHandle = nullptr;       // m_gpuCounterHandle：GPU 引擎利用率计数器句柄。
     void* m_gpuDedicatedMemoryCounterHandle = nullptr; // m_gpuDedicatedMemoryCounterHandle：系统专用显存占用计数器句柄。
