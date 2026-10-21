@@ -1,15 +1,31 @@
 #include "StartupDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/AsyncOperation.h"
+#include "../UI/AsyncCleanupRegistry.h"
+#include <mutex>
 #include <QImage>
 #include <QPixmap>
 #include <Objbase.h>
 
 using namespace startup_dock_detail;
 
+struct StartupDock::StartupRefreshSession
+{
+    enum class State { Running, Complete, Stopped, Failed };
+    std::mutex mutex;
+    std::deque<RefreshStageResult> pending;
+    std::atomic_bool stopping{false};
+    State state = State::Running;
+};
+
 StartupDock::StartupDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_refreshOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_refreshOperation->setStateChangedCallback([this]() { drainRefreshSession(); });
+    m_refreshDrainTimer = new QTimer(this);
+    m_refreshDrainTimer->setSingleShot(true);
+    connect(m_refreshDrainTimer, &QTimer::timeout, this, [this]() { drainRefreshSession(); });
     m_actionOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     m_actionOperation->setStateChangedCallback([this]() { reconcileStartupActionReceipt(); });
     m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
@@ -43,10 +59,9 @@ StartupDock::~StartupDock()
         m_tableRebuildTimer->stop();
     }
     m_actionOperation->close();
-    if (m_refreshThread != nullptr && m_refreshThread->joinable())
-    {
-        m_refreshThread->join();
-    }
+    if (m_refreshSession) m_refreshSession->stopping.store(true);
+    m_refreshDrainTimer->stop();
+    m_refreshOperation->close();
     if (m_refreshTimer != nullptr)
     {
         m_refreshTimer->stop();
@@ -79,30 +94,25 @@ void StartupDock::changeEvent(QEvent* event)
     }
     if (m_refreshInProgress.load())
     {
-        m_statusLabel->setText(
+        m_statusLabel->setText(refreshStatusText(
             m_refreshQueued.load()
                 ? startupText(
                     "startup.status.refresh_queued",
                     QStringLiteral("状态：后台刷新进行中，已记录新的刷新请求"))
                 : startupText(
                     "startup.status.refreshing",
-                    QStringLiteral("状态：后台正在枚举启动项...")));
+                    QStringLiteral("状态：后台正在枚举启动项..."))));
     }
     else if (!m_initialRefreshDone)
     {
-        m_statusLabel->setText(
+        m_statusLabel->setText(refreshStatusText(
             startupText(
                 "startup.status.initial",
-                QStringLiteral("状态：首次打开该页时加载启动项")));
+                QStringLiteral("状态：首次打开该页时加载启动项"))));
     }
     else
     {
-        m_statusLabel->setText(
-            startupText(
-                "startup.status.summary",
-                QStringLiteral("状态：共 %1 条，当前分类 %2"))
-                .arg(m_entryList.size())
-                .arg(categoryToText(currentCategory())));
+        m_statusLabel->setText(refreshSummaryText());
     }
 }
 
@@ -150,8 +160,8 @@ void StartupDock::showEvent(QShowEvent* event)
     m_initialRefreshDone = true;
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(
-            startupText("startup.status.first_load", QStringLiteral("状态：首次打开，正在加载启动项...")));
+        m_statusLabel->setText(refreshStatusText(
+            startupText("startup.status.first_load", QStringLiteral("状态：首次打开，正在加载启动项..."))));
     }
 
     // 延迟到事件循环末尾再发起首次后台枚举：
@@ -389,19 +399,24 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
         }
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.refresh_queued",
-                    QStringLiteral("状态：后台刷新进行中，已记录新的刷新请求")));
+                    QStringLiteral("状态：后台刷新进行中，已记录新的刷新请求"))));
         }
         return;
     }
 
-    if (m_refreshThread != nullptr && m_refreshThread->joinable())
+    auto session = std::make_shared<StartupRefreshSession>();
+    auto lease = ks::ui::AsyncCleanupRegistry::global().acquire([session]() { session->stopping.store(true); });
+    if (!lease)
     {
-        m_refreshThread->join();
+        m_refreshQueued = false;
+        if (m_statusLabel) m_statusLabel->setText(refreshStatusText(ks::i18n::sourceText(QStringLiteral("状态：宿主正在关闭，启动项刷新未提交。"))));
+        return;
     }
-
+    m_refreshSession = session;
+    m_currentRefreshSucceeded = false;
     m_refreshInProgress = true;
     m_refreshQueued = false;
     m_pendingRefreshStageResults.clear();
@@ -422,8 +437,8 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
         3.0f);
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(
-            startupText("startup.status.refreshing", QStringLiteral("状态：后台正在枚举启动项...")));
+        m_statusLabel->setText(refreshStatusText(
+            startupText("startup.status.refreshing", QStringLiteral("状态：后台正在枚举启动项..."))));
     }
 
     const int progressPid = m_progressPid;
@@ -443,116 +458,112 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
     const std::string backendCompletedProgressText = startupText(
         "startup.progress.backend_completed",
         QStringLiteral("ks::startup 后端枚举完成")).toStdString();
-    m_refreshThread = std::make_unique<std::thread>(
-        [this,
-         progressPid,
-         enumerationProgressTexts,
-         backendCompletedProgressText]()
-        {
-            if (m_destroying.load())
+    struct Request {
+        std::shared_ptr<StartupRefreshSession> session;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+        int progressPid;
+        std::array<std::string, 9> progressTexts;
+        std::string completedText;
+    } request{session, std::move(lease), progressPid, enumerationProgressTexts, backendCompletedProgressText};
+    struct Result {};
+    const std::string stoppedProgressText = ks::i18n::sourceText(QStringLiteral("启动项刷新已停止")).toStdString();
+    const auto ticket = m_refreshOperation->submit<Request, Result>(std::move(request),
+        [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+            const auto shouldStop = [&]() { return token.isCanceled() || input.session->stopping.load(); };
+            try
             {
-                return;
-            }
-
-            (void)ks::startup::EnumerateAllStartupEntries(
-                [progressPid, &enumerationProgressTexts](
-                    const ks::startup::StartupEnumerationStage,
-                    const std::size_t stageIndex,
-                    const std::size_t stageCount)
-                {
-                    constexpr std::array<float, 9> progressValues{
-                        5.0f,
-                        13.0f,
-                        21.0f,
-                        29.0f,
-                        44.0f,
-                        52.0f,
-                        63.0f,
-                        70.0f,
-                        80.0f
-                    };
-                    if (stageIndex >= stageCount
-                        || stageIndex >= enumerationProgressTexts.size()
-                        || stageIndex >= progressValues.size())
-                    {
-                        return;
-                    }
-                    kPro.set(
-                        progressPid,
-                        enumerationProgressTexts[stageIndex],
-                        0,
-                        progressValues[stageIndex]);
-                },
-                [this](
-                    const ks::startup::StartupEnumerationStage,
-                    const std::size_t stageIndex,
-                    const std::size_t stageCount,
-                    const std::vector<ks::startup::StartupEntry>& backendStageEntries)
-                {
-                    if (m_destroying.load())
-                    {
-                        return;
-                    }
-
-                    std::vector<StartupEntry> stageEntryList;
-                    stageEntryList.reserve(backendStageEntries.size());
-                    appendBackendStartupEntries(&stageEntryList, backendStageEntries);
-                    std::sort(
-                        stageEntryList.begin(),
-                        stageEntryList.end(),
-                        [](const StartupEntry& left, const StartupEntry& right)
-                        {
-                            if (left.category != right.category)
-                            {
-                                return static_cast<int>(left.category) < static_cast<int>(right.category);
-                            }
-                            if (left.itemNameText.compare(right.itemNameText, Qt::CaseInsensitive) != 0)
-                            {
-                                return left.itemNameText.compare(right.itemNameText, Qt::CaseInsensitive) < 0;
-                            }
-                            return left.locationText.compare(right.locationText, Qt::CaseInsensitive) < 0;
+                (void)ks::startup::EnumerateAllStartupEntries(
+                    [&input](const ks::startup::StartupEnumerationStage, const std::size_t stageIndex, const std::size_t stageCount) {
+                        constexpr std::array<float, 9> values{5.0f, 13.0f, 21.0f, 29.0f, 44.0f, 52.0f, 63.0f, 70.0f, 80.0f};
+                        if (stageIndex < stageCount && stageIndex < values.size()) kPro.set(input.progressPid, input.progressTexts[stageIndex], 0, values[stageIndex]);
+                    },
+                    [&input, &shouldStop](const ks::startup::StartupEnumerationStage, const std::size_t stageIndex,
+                        const std::size_t stageCount, const std::vector<ks::startup::StartupEntry>& backendEntries) {
+                        if (shouldStop()) return;
+                        RefreshStageResult stage;
+                        stage.stageIndex = stageIndex;
+                        stage.stageCount = stageCount;
+                        appendBackendStartupEntries(&stage.entryList, backendEntries);
+                        std::sort(stage.entryList.begin(), stage.entryList.end(), [](const StartupEntry& left, const StartupEntry& right) {
+                            if (left.category != right.category) return static_cast<int>(left.category) < static_cast<int>(right.category);
+                            const int name = left.itemNameText.compare(right.itemNameText, Qt::CaseInsensitive);
+                            return name == 0 ? left.locationText.compare(right.locationText, Qt::CaseInsensitive) < 0 : name < 0;
                         });
-
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this,
-                         stageIndex,
-                         stageCount,
-                         stageEntryList = std::move(stageEntryList)]() mutable
-                        {
-                            if (!m_destroying.load())
-                            {
-                                enqueueRefreshStageResult(
-                                    stageIndex,
-                                    stageCount,
-                                    std::move(stageEntryList));
-                            }
-                        },
-                        Qt::QueuedConnection);
-                });
-            kPro.set(
-                progressPid,
-                backendCompletedProgressText,
-                0,
-                93.0f);
-
-            if (m_destroying.load())
-            {
-                return;
+                        if (shouldStop()) return;
+                        std::lock_guard<std::mutex> lock(input.session->mutex);
+                        input.session->pending.push_back(std::move(stage));
+                    }, shouldStop);
+                const bool stopped = shouldStop();
+                if (!stopped) kPro.set(input.progressPid, input.completedText, 0, 93.0f);
+                std::lock_guard<std::mutex> lock(input.session->mutex);
+                input.session->state = stopped ? StartupRefreshSession::State::Stopped : StartupRefreshSession::State::Complete;
             }
-
-            QMetaObject::invokeMethod(
-                this,
-                [this]()
-                {
-                    if (!m_destroying.load())
-                    {
-                        markBackendEnumerationCompleted();
-                    }
-                },
-                Qt::QueuedConnection);
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(input.session->mutex);
+                input.session->state = StartupRefreshSession::State::Failed;
+            }
+            return Result{};
+        },
+        [this](const Result&, std::uint64_t) { drainRefreshSession(); return true; },
+        [this, session](std::exception_ptr) {
+            { std::lock_guard<std::mutex> lock(session->mutex); session->state = StartupRefreshSession::State::Failed; }
+            drainRefreshSession();
+        },
+        [progressPid, stoppedProgressText](const ks::ui::AsyncOperationOutcome outcome) {
+            if (outcome == ks::ui::AsyncOperationOutcome::OwnerClosed || outcome == ks::ui::AsyncOperationOutcome::Canceled)
+                kPro.set(progressPid, stoppedProgressText, 0, 100.0f);
         });
+    if (!ticket) { std::lock_guard<std::mutex> lock(session->mutex); session->state = StartupRefreshSession::State::Failed; }
+    m_refreshDrainTimer->start(0);
 }
+
+QString StartupDock::refreshStatusText(const QString& status) const
+{
+    if (m_refreshTerminalState == RefreshTerminalState::None) return status;
+    const QString terminal = ks::i18n::sourceText(m_refreshTerminalState == RefreshTerminalState::Stopped
+        ? QStringLiteral("状态：启动项枚举已停止，已显示结果可能不完整。")
+        : QStringLiteral("状态：启动项枚举失败，已显示结果可能不完整，请重试。"));
+    return terminal + QStringLiteral(" | ") + status;
+}
+
+QString StartupDock::refreshSummaryText() const
+{
+    return refreshStatusText(startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
+        .arg(m_entryList.size()).arg(categoryToText(currentCategory())));
+}
+
+void StartupDock::drainRefreshSession()
+{
+    if (m_destroying.load() || !m_refreshSession || !m_refreshInProgress) return;
+    const auto session = m_refreshSession;
+    RefreshStageResult stage;
+    bool hasStage = false;
+    StartupRefreshSession::State state;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (!session->pending.empty()) { stage = std::move(session->pending.front()); session->pending.pop_front(); hasStage = true; }
+        state = session->state;
+    }
+    if (hasStage)
+    {
+        const QPointer<StartupDock> guarded(this);
+        enqueueRefreshStageResult(stage.stageIndex, stage.stageCount, std::move(stage.entryList));
+        if (guarded) m_refreshDrainTimer->start(0);
+        return;
+    }
+    if (state == StartupRefreshSession::State::Running)
+    {
+        m_refreshDrainTimer->start(16);
+        return;
+    }
+    m_currentRefreshSucceeded = state == StartupRefreshSession::State::Complete;
+    if (!m_currentRefreshSucceeded)
+        m_refreshTerminalState = state == StartupRefreshSession::State::Stopped ? RefreshTerminalState::Stopped : RefreshTerminalState::Failed;
+    m_refreshSession.reset();
+    markBackendEnumerationCompleted();
+}
+
 
 void StartupDock::enqueueRefreshStageResult(
     const std::size_t stageIndex,
@@ -645,13 +656,13 @@ void StartupDock::processNextRefreshStageResult()
     m_activeRefreshStageEntryCount = stageEntryCount;
     if (m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(
+        m_statusLabel->setText(refreshStatusText(
             startupText(
                 "startup.status.applying_stage_results",
                 QStringLiteral("状态：正在添加第 %1/%2 阶段结果，本阶段 %3 条..."))
                 .arg(m_activeRefreshStageIndex + 1U)
                 .arg(m_activeRefreshStageCount)
-                .arg(stageEntryCount));
+                .arg(stageEntryCount)));
     }
     rebuildAllTables(true);
 }
@@ -678,13 +689,8 @@ void StartupDock::completeRefreshAfterUiCommit()
         return;
     }
 
-    if (m_statusLabel != nullptr)
-    {
-        m_statusLabel->setText(
-            startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
-            .arg(m_entryList.size())
-            .arg(categoryToText(currentCategory())));
-    }
+    if (m_currentRefreshSucceeded) m_refreshTerminalState = RefreshTerminalState::None;
+    if (m_statusLabel != nullptr) m_statusLabel->setText(refreshSummaryText());
 
     const int completedProgressPid = m_progressPid;
     m_progressPid = 0;
@@ -692,7 +698,7 @@ void StartupDock::completeRefreshAfterUiCommit()
     {
         kPro.set(
             completedProgressPid,
-            startupText("startup.progress.completed", QStringLiteral("启动项刷新完成")).toStdString(),
+            (m_refreshTerminalState == RefreshTerminalState::None ? startupText("startup.progress.completed", QStringLiteral("启动项刷新完成")) : refreshSummaryText()).toStdString(),
             0,
             100.0f);
     }
@@ -700,11 +706,12 @@ void StartupDock::completeRefreshAfterUiCommit()
     m_refreshInProgress = false;
 
     kLogEvent refreshEvent;
-    info << refreshEvent
-        << startupText("startup.log.refresh.completed", QStringLiteral("[StartupDock] 后台刷新完成, count="))
-               .toStdString()
-        << m_entryList.size()
-        << eol;
+    if (m_refreshTerminalState == RefreshTerminalState::None)
+        info << refreshEvent
+            << startupText("startup.log.refresh.completed", QStringLiteral("[StartupDock] 后台刷新完成, count=")).toStdString()
+            << m_entryList.size() << eol;
+    else
+        err << refreshEvent << refreshSummaryText().toStdString() << eol;
 
     if (m_refreshQueued)
     {

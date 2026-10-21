@@ -492,27 +492,27 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage)
     {
         if (m_tableRebuildProcessesRefreshStage)
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.applying_stage_results",
                     QStringLiteral("状态：正在添加第 %1/%2 阶段结果，本阶段 %3 条..."))
                     .arg(m_activeRefreshStageIndex + 1U)
                     .arg(m_activeRefreshStageCount)
-                    .arg(m_activeRefreshStageEntryCount));
+                    .arg(m_activeRefreshStageEntryCount)));
         }
         else if (m_refreshInProgress.load())
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.refreshing",
-                    QStringLiteral("状态：后台正在枚举启动项...")));
+                    QStringLiteral("状态：后台正在枚举启动项..."))));
         }
         else
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.rebuilding_view",
-                    QStringLiteral("状态：正在分批更新当前启动项视图...")));
+                    QStringLiteral("状态：正在分批更新当前启动项视图..."))));
         }
     }
 
@@ -739,13 +739,13 @@ void StartupDock::finishIncrementalTableRebuild()
             m_activeRefreshStageIndex + 1U);
         if (m_statusLabel != nullptr)
         {
-            m_statusLabel->setText(
+            m_statusLabel->setText(refreshStatusText(
                 startupText(
                     "startup.status.stage_results_applied",
                     QStringLiteral("状态：已添加 %1/%2 阶段，共 %3 条"))
                     .arg(m_appliedRefreshStageCount)
                     .arg(m_activeRefreshStageCount)
-                    .arg(m_entryList.size()));
+                    .arg(m_entryList.size())));
         }
         QTimer::singleShot(0, this, [this]()
             {
@@ -763,10 +763,7 @@ void StartupDock::finishIncrementalTableRebuild()
     }
     if (!m_refreshInProgress.load() && m_statusLabel != nullptr)
     {
-        m_statusLabel->setText(
-            startupText("startup.status.summary", QStringLiteral("状态：共 %1 条，当前分类 %2"))
-                .arg(m_entryList.size())
-                .arg(categoryToText(currentCategory())));
+        m_statusLabel->setText(refreshSummaryText());
     }
 }
 

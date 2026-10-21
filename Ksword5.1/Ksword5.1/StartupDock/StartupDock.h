@@ -170,6 +170,8 @@ private:
     // ===================== 枚举与刷新 =====================
     void refreshAllStartupEntries();
     void requestAsyncRefresh(bool forceRefresh);
+    struct StartupRefreshSession;
+    void drainRefreshSession();
     void enqueueRefreshStageResult(
         std::size_t stageIndex,
         std::size_t stageCount,
@@ -304,7 +306,14 @@ private:
     std::atomic_bool m_refreshQueued{ false };     // m_refreshQueued：刷新过程中是否又收到新请求。
     std::atomic_bool m_startupActionInProgress{ false }; // m_startupActionInProgress：可逆启停动作是否进行中。
     std::atomic_bool m_destroying{ false };        // m_destroying：析构已开始，后台线程不再投递 UI 回调。
-    std::unique_ptr<std::thread> m_refreshThread;  // m_refreshThread：后台枚举线程对象。
+    std::unique_ptr<ks::ui::AsyncOperation> m_refreshOperation;
+    std::shared_ptr<StartupRefreshSession> m_refreshSession;
+    QTimer* m_refreshDrainTimer = nullptr;
+    enum class RefreshTerminalState { None, Stopped, Failed };
+    RefreshTerminalState m_refreshTerminalState = RefreshTerminalState::None;
+    bool m_currentRefreshSucceeded = false;
+    QString refreshStatusText(const QString& status) const;
+    QString refreshSummaryText() const;  // m_refreshThread：后台枚举线程对象。
     std::unique_ptr<ks::ui::AsyncOperation> m_actionOperation;
     bool m_actionPendingReceipt = false;
     QString m_actionReceiptTitle;
