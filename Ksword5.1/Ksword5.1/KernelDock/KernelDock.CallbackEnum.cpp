@@ -23,6 +23,7 @@
 #include "../theme.h"
 
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QAction>
 #include <QApplication>
 #include <QBrush>
@@ -32,6 +33,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QHeaderView>
@@ -2705,18 +2707,31 @@ void KernelDock::prepareMinifilterCallbackTree()
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
     const bool languageChanged = m_minifilterCallbackTree->property(KernelSearchLanguageProperty).toString() != language;
     if (!m_minifilterCallbackSourceDirty && !m_minifilterCallbackFilterDirty && !languageChanged) return;
+    const QString filterKeyword = m_callbackEnumFilterEdit->text().trimmed();
+    constexpr auto filterPassName = "ksword_minifilter_filter_pass";
+    auto* previousPass = m_minifilterCallbackTree->findChild<QTimer*>(
+        QLatin1String(filterPassName), Qt::FindDirectChildrenOnly);
+    if (previousPass != nullptr)
+    {
+        // Show and currentChanged may both prepare the same visible branch.
+        if (!m_minifilterCallbackSourceDirty
+            && previousPass->property("keyword").toString() == filterKeyword
+            && previousPass->property("language").toString() == language) return;
+        previousPass->stop();
+        previousPass->setObjectName(QString());
+        previousPass->deleteLater();
+    }
     const QPointer<KernelDock> owner(this);
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
         QStringLiteral("kernel_minifilter_projection"), {m_callbackEnumTable, m_minifilterCallbackTree},
         [owner]() { if (owner) owner->prepareMinifilterCallbackTree(); })) return;
 
-    const QString filterKeyword = m_callbackEnumFilterEdit->text().trimmed();
     const auto searchFields = [](const KernelCallbackEnumEntry& entry) {
         return QStringList{entry.classText, entry.registrationTypeText, entry.sourceText, entry.sourceTrustText,
             entry.statusText, entry.nameText, callbackEnumPrimaryAddressText(entry), entry.modulePathText,
             entry.companyText, entry.fileVersionText, entry.fileDescriptionText, entry.altitudeText, entry.detailText};
     };
-    const auto matches = [&filterKeyword](const QTreeWidgetItem* item) {
+    const auto matches = [filterKeyword](const QTreeWidgetItem* item) {
         if (filterKeyword.isEmpty()) return true;
         const QStringList fields = item->data(0, KernelSearchFieldsRole).toStringList();
         return std::any_of(fields.cbegin(), fields.cend(), [&filterKeyword](const QString& field) {
@@ -2724,6 +2739,7 @@ void KernelDock::prepareMinifilterCallbackTree()
         });
     };
     const bool sourceChanged = m_minifilterCallbackSourceDirty;
+    const bool updatesEnabled = m_minifilterCallbackTree->updatesEnabled();
     m_minifilterCallbackTree->setUpdatesEnabled(false);
     if (sourceChanged)
     {
@@ -2847,38 +2863,121 @@ void KernelDock::prepareMinifilterCallbackTree()
         }
     }
 
-    const auto refreshLanguageCache = [this, &searchFields](QTreeWidgetItem* item) {
-        const auto sourceIndex = static_cast<std::size_t>(item->data(0, Qt::UserRole).toULongLong());
-        if (sourceIndex < m_callbackEnumRows.size())
-            item->setData(0, KernelSearchFieldsRole, searchFields(m_callbackEnumRows[sourceIndex]));
-    };
-    for (int parentIndex = 0; parentIndex < m_minifilterCallbackTree->topLevelItemCount(); ++parentIndex)
-    {
-        auto* parentItem = m_minifilterCallbackTree->topLevelItem(parentIndex);
-        if (languageChanged && !sourceChanged) refreshLanguageCache(parentItem);
-        const bool parentMatched = matches(parentItem);
-        bool childMatched = false;
-        for (int childIndex = 0; childIndex < parentItem->childCount(); ++childIndex)
-        {
-            auto* childItem = parentItem->child(childIndex);
-            if (languageChanged && !sourceChanged) refreshLanguageCache(childItem);
-            const bool rowMatched = matches(childItem);
-            childMatched = childMatched || rowMatched;
-            childItem->setHidden(!parentMatched && !rowMatched);
-        }
-        parentItem->setHidden(!parentMatched && !childMatched);
-    }
-    m_minifilterCallbackTree->setProperty(KernelSearchLanguageProperty, language);
     m_minifilterCallbackSourceDirty = false;
-    m_minifilterCallbackFilterDirty = false;
-    for (auto* selectedItem : m_minifilterCallbackTree->selectedItems())
-        if (selectedItem->isHidden() || (selectedItem->parent() != nullptr && selectedItem->parent()->isHidden()))
-            selectedItem->setSelected(false);
-    auto* currentItem = m_minifilterCallbackTree->currentItem();
-    if (currentItem != nullptr && (currentItem->isHidden()
-        || (currentItem->parent() != nullptr && currentItem->parent()->isHidden())))
-        m_minifilterCallbackTree->setCurrentItem(nullptr);
-    m_minifilterCallbackTree->setUpdatesEnabled(true);
+    m_minifilterCallbackFilterDirty = true;
+    m_minifilterCallbackTree->setUpdatesEnabled(updatesEnabled);
+
+    // Keep the original items/source identities. Only this visible tree's
+    // search-cache and visibility work yields between bounded GUI slices.
+    struct FilterPass
+    {
+        int parentIndex = 0;
+        int childIndex = -1;
+        bool parentMatched = false;
+        bool childMatched = false;
+        bool restart = false;
+    };
+    const auto pass = std::make_shared<FilterPass>();
+    auto* timer = new QTimer(m_minifilterCallbackTree);
+    timer->setObjectName(QLatin1String(filterPassName));
+    timer->setProperty("keyword", filterKeyword);
+    timer->setProperty("language", language);
+    timer->setSingleShot(true);
+    const QPointer<QTimer> timerGuard(timer);
+    connect(m_minifilterCallbackTree->model(), &QAbstractItemModel::layoutChanged, timer,
+        [pass]() { pass->restart = true; });
+    const auto continuePass =
+        [owner, timerGuard, pass, language, filterKeyword, searchFields, matches,
+         sourceChanged, refreshLanguage = languageChanged && !sourceChanged]() {
+            if (!owner || !timerGuard) return;
+            const auto finish = [timerGuard]() {
+                if (!timerGuard) return;
+                timerGuard->stop();
+                timerGuard->setObjectName(QString());
+                timerGuard->deleteLater();
+            };
+            auto* tree = owner->m_minifilterCallbackTree;
+            if (timerGuard->objectName().isEmpty() || tree == nullptr
+                || !tree->isVisible() || owner->m_minifilterCallbackSourceDirty
+                || owner->m_callbackEnumFilterEdit->text().trimmed() != filterKeyword
+                || ks::i18n::LanguageManager::instance().currentLanguageId() != language)
+            {
+                // Dirty flags remain set; the next visible/latest request retries.
+                finish();
+                return;
+            }
+            if (!sourceChanged && ks::ui::DeferItemViewUiCommitIfContextMenuOpen(owner.data(),
+                QStringLiteral("kernel_minifilter_filter_batch"),
+                {owner->m_callbackEnumTable, tree}, [timerGuard]() {
+                    if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start();
+                })) return;
+            if (pass->restart)
+            {
+                // Header sorting can move a branch between slices. Restart its
+                // cheap cursor pass rather than treating row numbers as identity.
+                pass->parentIndex = 0;
+                pass->childIndex = -1;
+                pass->restart = false;
+            }
+            const auto refreshLanguageCache = [owner, &searchFields](QTreeWidgetItem* item) {
+                const auto sourceIndex = static_cast<std::size_t>(item->data(0, Qt::UserRole).toULongLong());
+                if (sourceIndex < owner->m_callbackEnumRows.size())
+                    item->setData(0, KernelSearchFieldsRole, searchFields(owner->m_callbackEnumRows[sourceIndex]));
+            };
+            const bool batchUpdatesEnabled = tree->updatesEnabled();
+            tree->setUpdatesEnabled(false);
+            QElapsedTimer budget;
+            budget.start();
+            int processed = 0;
+            while (pass->parentIndex < tree->topLevelItemCount()
+                && (sourceChanged || (processed < 256 && budget.nsecsElapsed() < 4'000'000)))
+            {
+                auto* parentItem = tree->topLevelItem(pass->parentIndex);
+                if (pass->childIndex < 0)
+                {
+                    if (refreshLanguage) refreshLanguageCache(parentItem);
+                    pass->parentMatched = matches(parentItem);
+                    pass->childMatched = false;
+                    pass->childIndex = 0;
+                }
+                else if (pass->childIndex < parentItem->childCount())
+                {
+                    auto* childItem = parentItem->child(pass->childIndex++);
+                    if (refreshLanguage) refreshLanguageCache(childItem);
+                    const bool rowMatched = matches(childItem);
+                    pass->childMatched = pass->childMatched || rowMatched;
+                    childItem->setHidden(!pass->parentMatched && !rowMatched);
+                }
+                else
+                {
+                    parentItem->setHidden(!pass->parentMatched && !pass->childMatched);
+                    ++pass->parentIndex;
+                    pass->childIndex = -1;
+                }
+                ++processed;
+            }
+            tree->setUpdatesEnabled(batchUpdatesEnabled);
+            if (pass->parentIndex < tree->topLevelItemCount())
+            {
+                timerGuard->start();
+                return;
+            }
+            tree->setProperty(KernelSearchLanguageProperty, language);
+            owner->m_minifilterCallbackFilterDirty = false;
+            for (auto* selectedItem : tree->selectedItems())
+                if (selectedItem->isHidden() || (selectedItem->parent() != nullptr && selectedItem->parent()->isHidden()))
+                    selectedItem->setSelected(false);
+            auto* currentItem = tree->currentItem();
+            if (currentItem != nullptr && (currentItem->isHidden()
+                || (currentItem->parent() != nullptr && currentItem->parent()->isHidden())))
+                tree->setCurrentItem(nullptr);
+            finish();
+        };
+    connect(timer, &QTimer::timeout, timer, continuePass);
+    // A new source retains its synchronous first filtered frame. Ordinary
+    // filter/language requests can keep the previous visible tree while yielding.
+    if (sourceChanged) continuePass();
+    else timer->start(0);
 }
 
 bool KernelDock::currentCallbackEnumSourceIndex(std::size_t& sourceIndexOut) const
