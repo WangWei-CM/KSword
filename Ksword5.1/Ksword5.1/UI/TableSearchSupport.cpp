@@ -1,4 +1,5 @@
 #include "TableSearchSupport.h"
+#include "TableInteractionSupport.h"
 #include "ModelTextSearchCursor.h"
 #include "TableRowFilterSupport.h"
 #include "TableFreezeSupport.h"
@@ -1330,9 +1331,15 @@ namespace ks::ui
         return cursor;
     }
 
+    bool IsTableCellSearchPreparing(const std::shared_ptr<TableCellSearchCursor>& cursor)
+    {
+        return cursor && cursor->table
+            && cursor->table->property(TablePresentationPreparingProperty).toBool();
+    }
+
     bool ContinueTableCellSearch(const std::shared_ptr<TableCellSearchCursor>& cursor)
     {
-        if (!cursor || cursor->completed) return true;
+        if (!cursor) return true;
         if (cursor->table.isNull() || !cursor->modelScan || cursor->table->model() == nullptr
             || cursor->modelScan->model() == nullptr
             || cursor->table->model() != cursor->modelScan->model())
@@ -1340,6 +1347,15 @@ namespace ks::ui
             cursor->completed = cursor->cancelled = true;
             return true;
         }
+        if (IsTableCellSearchPreparing(cursor))
+        {
+            // Never accept a capped prefix as a complete table. Retain this
+            // cursor; the next non-preparing slice restarts the same model scan.
+            cursor->completed = false;
+            cursor->modelScan->invalidate();
+            return false;
+        }
+        if (cursor->completed) return true;
         QVector<int> columns;
         for (int column = 0; column < cursor->table->model()->columnCount(cursor->table->rootIndex()); ++column)
             if (!cursor->table->isColumnHidden(column)
@@ -1363,6 +1379,7 @@ namespace ks::ui
         if (!cursor || !cursor->modelScan || cursor->cancelled || cursor->table.isNull()
             || cursor->table->model() == nullptr || cursor->modelScan->model() == nullptr
             || cursor->table->model() != cursor->modelScan->model()
+            || IsTableCellSearchPreparing(cursor)
             || cursor->filterRevision != TableRowFilterIdentityRevision(cursor->table.data())) return false;
         QVector<int> columns;
         for (int column = 0; column < cursor->table->model()->columnCount(cursor->table->rootIndex()); ++column)
@@ -1378,6 +1395,7 @@ namespace ks::ui
         if (!cursor || !cursor->completed || cursor->cancelled || cursor->table.isNull()
             || !cursor->modelScan || cursor->table->model() == nullptr || cursor->modelScan->model() == nullptr
             || cursor->table->model() != cursor->modelScan->model()) return results;
+        if (IsTableCellSearchPreparing(cursor)) return results;
         QTableView* table = cursor->table.data();
         const QString tableName = ResolveTableSearchDisplayName(table);
         for (const auto& match : cursor->modelScan->matches())

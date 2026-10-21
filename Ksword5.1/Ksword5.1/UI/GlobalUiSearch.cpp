@@ -696,6 +696,7 @@ namespace ks::ui
         }
         ads::CDockWidget* dock() const { return m_dock.data(); }
         const QVector<UiSearchHit>& matches() const { return m_hits; }
+        bool waitingForFullTable() const { return IsTableCellSearchPreparing(m_tableScan); }
         bool advance()
         {
             if (!m_dock) { m_hits.clear(); return true; }
@@ -1591,7 +1592,7 @@ namespace ks::ui
                 m_tableSearchCursor = BeginTableCellSearch(m_pendingDirectTableView.data(), m_activeQueryText, kMaxTotalHits);
             if (!ContinueTableCellSearch(m_tableSearchCursor))
             {
-                QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                QTimer::singleShot(IsTableCellSearchPreparing(m_tableSearchCursor) ? 50 : 0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
                 return;
             }
             collectDirectTableSearchHits(
@@ -1641,7 +1642,7 @@ namespace ks::ui
                 }
                 if (m_dockSearchCursor && !m_dockSearchCursor->advance())
                 {
-                    QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                    QTimer::singleShot(m_dockSearchCursor->waitingForFullTable() ? 50 : 0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
                     return;
                 }
                 if (m_dockSearchCursor)

@@ -77,6 +77,8 @@ namespace ks::ui
     std::shared_ptr<TableCellSearchCursor> BeginTableCellSearch(
         QTableView* tableView, const QString& queryText, int maxHitCount);
     bool ContinueTableCellSearch(const std::shared_ptr<TableCellSearchCursor>& cursor);
+    // Preparing tables expose only a temporary prefix; callers can yield longer.
+    bool IsTableCellSearchPreparing(const std::shared_ptr<TableCellSearchCursor>& cursor);
     bool IsTableCellSearchCurrent(const std::shared_ptr<TableCellSearchCursor>& cursor);
     QVector<TableCellSearchMatch> CompletedTableCellSearchMatches(
         const std::shared_ptr<TableCellSearchCursor>& cursor);
