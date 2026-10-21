@@ -35,6 +35,53 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kMiscNavigation[] = {
+    {"misc.boot", "", "", "引导", true},
+    {"misc.sound", "", "", "声音来源", false},
+    {"misc.time", "", "", "系统变速", false},
+    {"misc.location", "", "misc.virtual_location.tab", "虚拟定位", false},
+    {"misc.bugcheck", "", "misc.bugcheck_diagnostics.tab", "蓝屏诊断", false},
+    {"misc.dse", "", "misc.disable_dse.tab", "禁用签名验证", false},
+    {"misc.cks", "", "misc.cks.tab", "CKS 管理", false},
+    {"misc.shell", "", "", "Shell 关联管理", false},
+    {"misc.disk", "", "", "磁盘编辑", false},
+    {"misc.app", "", "", "应用控制", false},
+    {"misc.clipboard", "", "misc.clipboard_guard.tab", "剪贴板保护", false},
+    {"misc.render", "", "misc.render_benchmark.tab", "渲染基准", false},
+    {"misc.drawing", "", "misc.desktop_drawing.tab", "桌面绘制", false},
+    {"misc.injection", "", "misc.window_injection.tab", "DWM / Win32k 注入", false},
+    {"misc.hvci", "", "misc.hvci_bypass.tab", "HVCI 绕过", false},
+    {"misc.rxpf", "", "misc.rxpf.tab", "RXPF 模拟", false},
+    {"misc.scanner", "", "misc.scanner.tab", "扫描器", false},
+    {"misc.minidump", "", "misc.minidump.tab", "转储分析", false},
+    {"misc.plugin", "", "misc.plugin.tab", "插件", false},
+    {"misc.theme", "", "misc.theme_check.tab", "主题检查", false}
+};
+const char* const kMiscChildKeys[] = {
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    "misc.cks",
+    "misc.context",
+    "misc.disk_editor",
+    "misc.app_control",
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    "misc.scanner",
+    "misc.minidump",
+    "misc.plugin",
+    "misc.theme_check"
+};
+}
+
 namespace
 {
     // buildHostLayout：
@@ -102,209 +149,91 @@ void MiscDock::initializeUi()
     // 父链一旦被刷成透明，插件画面就会变成黑块或不刷新。
     m_pluginHostWidget->setObjectName(QStringLiteral("ksMiscPluginHost"));
 
-    m_bootEditorTabIndex = m_mainTabWidget->addTab(
-        m_bootEditorHostWidget,
-        QStringLiteral("引导"));
+    m_bootEditorTabIndex = addNavigationTab(0, m_bootEditorHostWidget);
 
     // 声音来源页：
     // - R3 连续采样 Core Audio 输出会话峰值并归因到 PID；
     // - R0 复用进程 Cross-View 与 Runtime Detail 交叉核验候选 PID。
-    m_soundSourceTabIndex = m_mainTabWidget->addTab(
-        m_soundSourceHostWidget,
-        QIcon(QStringLiteral(":/Icon/sound_source.svg")),
-        QStringLiteral("声音来源"));
+    m_soundSourceTabIndex = addNavigationTab(1, m_soundSourceHostWidget, QIcon(QStringLiteral(":/Icon/sound_source.svg")));
 
     // 系统全局变速页：
     // - 通过 ArkDriverClient 控制 R0 性能计数器连续倍率映射；
     // - 永久展示失稳风险，并在每次启用前执行双重确认。
-    m_systemTimeTabIndex = m_mainTabWidget->addTab(
-        m_systemTimeHostWidget,
-        QIcon(QStringLiteral(":/Icon/system_time.svg")),
-        QStringLiteral("系统变速"));
+    m_systemTimeTabIndex = addNavigationTab(2, m_systemTimeHostWidget, QIcon(QStringLiteral(":/Icon/system_time.svg")));
 
     // 虚拟定位页：
     // - 把任意坐标写成 Windows 位置服务的“系统默认位置”，R3 被 ACL 拒绝时回退 R0 注册表 IOCTL；
     // - 只影响走 Windows 定位 API 的调用方，页面内长期展示这条生效边界。
-    m_virtualLocationTabIndex = m_mainTabWidget->addTab(
-        m_virtualLocationHostWidget,
-        QIcon(QStringLiteral(":/Icon/virtual_location.svg")),
-        QStringLiteral("虚拟定位"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_virtualLocationHostWidget,
-        QStringLiteral("misc.virtual_location.tab"),
-        QStringLiteral("虚拟定位"));
+    m_virtualLocationTabIndex = addNavigationTab(3, m_virtualLocationHostWidget, QIcon(QStringLiteral(":/Icon/virtual_location.svg")));
 
     // 蓝屏诊断入口默认隐藏。R3 配置自动安装或本次成功安装后，MainWindow 才会显式显示它。
-    m_bugcheckGuardTabIndex = m_mainTabWidget->addTab(
-        m_bugcheckGuardHostWidget,
-        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-        QStringLiteral("蓝屏诊断"));
+    m_bugcheckGuardTabIndex = addNavigationTab(4, m_bugcheckGuardHostWidget, QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")));
     // i18n 绑定挂在占位控件上：LanguageManager 按 QTabWidget::widget(index) 回读属性，
     // 占位控件才是常驻页签页，真实子页只是它的孩子。
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_bugcheckGuardHostWidget,
-        QStringLiteral("misc.bugcheck_diagnostics.tab"),
-        QStringLiteral("蓝屏诊断"));
     setBugcheckDiagnosticsVisible(false);
 
     // 驱动签名强制页：
     // - 运行时反汇编定位 CI.dll!g_CiOptions，用 R0 事务化内核写临时关闭 DSE；
     // - 写入前校验读回值的强制签名位与系统自报状态自洽，
     //   HVCI 开启时直接禁用操作，页面析构还会兜底把原值写回。
-    m_disableDseTabIndex = m_mainTabWidget->addTab(
-        m_disableDseHostWidget,
-        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-        QStringLiteral("禁用签名验证"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_disableDseHostWidget,
-        QStringLiteral("misc.disable_dse.tab"),
-        QStringLiteral("禁用签名验证"));
+    m_disableDseTabIndex = addNavigationTab(5, m_disableDseHostWidget, QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")));
 
     // CKS 是带签名策略的驱动信任管理，与临时关闭 DSE 的操作完全分开。
-    m_cksTabIndex = m_mainTabWidget->addTab(
-        m_cksHostWidget,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("CKS 管理"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_cksHostWidget,
-        QStringLiteral("misc.cks.tab"),
-        QStringLiteral("CKS 管理"));
+    m_cksTabIndex = addNavigationTab(6, m_cksHostWidget, QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
     // Shell 关联管理页：
     // - 覆盖右键菜单、URL 绑定、打开方式和 Explorer 第三方主页项；
     // - 仅在用户确认后删除表格绑定的精确注册表子树或值。
-    m_contextMenuCleanerTabIndex = m_mainTabWidget->addTab(
-        m_contextMenuCleanerHostWidget,
-        QIcon(QStringLiteral(":/Icon/log_track.svg")),
-        QStringLiteral("Shell 关联管理"));
+    m_contextMenuCleanerTabIndex = addNavigationTab(7, m_contextMenuCleanerHostWidget, QIcon(QStringLiteral(":/Icon/log_track.svg")));
 
     // 磁盘编辑页：
     // - 参考 DiskGenius 类工具布局，提供横向柱形分区图；
     // - 默认只读，用户显式解锁后才允许写回物理磁盘。
-    m_diskEditorTabIndex = m_mainTabWidget->addTab(
-        m_diskEditorHostWidget,
-        QIcon(QStringLiteral(":/Icon/disk_storage.svg")),
-        QStringLiteral("磁盘编辑"));
+    m_diskEditorTabIndex = addNavigationTab(8, m_diskEditorHostWidget, QIcon(QStringLiteral(":/Icon/disk_storage.svg")));
 
     // 应用控制页：
     // - 第一版仅做 AppLocker / WDAC / Defender / 事件日志只读诊断；
     // - 不修改、不删除、不禁用任何策略。
-    m_applicationControlTabIndex = m_mainTabWidget->addTab(
-        m_applicationControlHostWidget,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("应用控制"));
+    m_applicationControlTabIndex = addNavigationTab(9, m_applicationControlHostWidget, QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
     // 剪贴板保护页：
     // - 按 PID/映像名/路径管理剪贴板读/写/枚举策略，规则整表下发到驱动持久保存；
     // - 实际拦截发生在被注入到受管进程里的 APIMonitor_x64.dll（复用现有 hook 引擎）；
     // - 驱动本身只存表、不判定拦截，详见 shared/driver/KswordArkClipboardPolicyIoctl.h。
-    m_clipboardGuardTabIndex = m_mainTabWidget->addTab(
-        m_clipboardGuardHostWidget,
-        QIcon(QStringLiteral(":/Icon/clipboard_guard.svg")),
-        QStringLiteral("剪贴板保护"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_clipboardGuardHostWidget,
-        QStringLiteral("misc.clipboard_guard.tab"),
-        QStringLiteral("剪贴板保护"));
+    m_clipboardGuardTabIndex = addNavigationTab(10, m_clipboardGuardHostWidget, QIcon(QStringLiteral(":/Icon/clipboard_guard.svg")));
 
     // 渲染基准页：
     // - 量化主窗口整树重绘、拖动掉帧、DWM 合成与目标窗口响应；
     // - 全部测量都在 UI 线程执行，只在用户显式点击时运行。
-    m_renderBenchmarkTabIndex = m_mainTabWidget->addTab(
-        m_renderBenchmarkHostWidget,
-        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-        QStringLiteral("渲染基准"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_renderBenchmarkHostWidget,
-        QStringLiteral("misc.render_benchmark.tab"),
-        QStringLiteral("渲染基准"));
+    m_renderBenchmarkTabIndex = addNavigationTab(11, m_renderBenchmarkHostWidget, QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")));
 
     // 页面懒加载且默认不绘制；用户开始后可跨页运行，用全局热键停止。
-    m_desktopDrawingTabIndex = m_mainTabWidget->addTab(
-        m_desktopDrawingHostWidget,
-        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-        QStringLiteral("桌面绘制"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_desktopDrawingHostWidget,
-        QStringLiteral("misc.desktop_drawing.tab"),
-        QStringLiteral("桌面绘制"));
+    m_desktopDrawingTabIndex = addNavigationTab(12, m_desktopDrawingHostWidget, QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")));
 
-    m_windowInjectionTabIndex = m_mainTabWidget->addTab(
-        m_windowInjectionHostWidget, QStringLiteral("DWM / Win32k 注入"));
-    ks::i18n::LanguageManager::instance().bindTab(m_mainTabWidget,
-        m_windowInjectionHostWidget, QStringLiteral("misc.window_injection.tab"), QStringLiteral("DWM / Win32k 注入"));
+    m_windowInjectionTabIndex = addNavigationTab(13, m_windowInjectionHostWidget);
 
     // HVCI 绕过实验页：
     // - 在 HVCI 启用的环境下测试 MmChangeImageProtection 能否将映像页改成 NX、
     //   通过 MDL 别名写入修改后的内容、再恢复 RX 权限使修改持久化。
-    m_hvciBypassTabIndex = m_mainTabWidget->addTab(
-        m_hvciBypassHostWidget,
-        QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-        QStringLiteral("HVCI 绕过"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_hvciBypassHostWidget,
-        QStringLiteral("misc.hvci_bypass.tab"),
-        QStringLiteral("HVCI 绕过"));
+    m_hvciBypassTabIndex = addNavigationTab(14, m_hvciBypassHostWidget, QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")));
 
     // RXPF 模拟执行实验页：
     // - 接管影子 IDT 的 #PF 向量，对被标记为 NX 的内核映像页进行 x64 指令模拟；
     // - 无需恢复 RX 权限即可在 HVCI 下执行被修改的代码页。
-    m_rxpfTabIndex = m_mainTabWidget->addTab(
-        m_rxpfHostWidget,
-        QIcon(QStringLiteral(":/Icon/development/terminal_line.svg")),
-        QStringLiteral("RXPF 模拟"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_rxpfHostWidget,
-        QStringLiteral("misc.rxpf.tab"),
-        QStringLiteral("RXPF 模拟"));
+    m_rxpfTabIndex = addNavigationTab(15, m_rxpfHostWidget, QIcon(QStringLiteral(":/Icon/development/terminal_line.svg")));
 
     // 以下三页原本是顶层 Dock，为精简 dock 栏入口并入杂项：
     // - 页签顺序沿用它们在原 dock 栏中的相对先后（扫描器 -> 转储分析 -> 插件）；
     // - 三页都保持懒加载，打开“杂项”本身不会把扫描器/转储解析/插件宿主一起建出来。
-    m_scannerTabIndex = m_mainTabWidget->addTab(
-        m_scannerHostWidget,
-        QIcon(QStringLiteral(":/Icon/disk_analyze.svg")),
-        QStringLiteral("扫描器"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_scannerHostWidget,
-        QStringLiteral("misc.scanner.tab"),
-        QStringLiteral("扫描器"));
+    m_scannerTabIndex = addNavigationTab(16, m_scannerHostWidget, QIcon(QStringLiteral(":/Icon/disk_analyze.svg")));
 
-    m_minidumpTabIndex = m_mainTabWidget->addTab(
-        m_minidumpHostWidget,
-        QIcon(QStringLiteral(":/Icon/log_track.svg")),
-        QStringLiteral("转储分析"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_minidumpHostWidget,
-        QStringLiteral("misc.minidump.tab"),
-        QStringLiteral("转储分析"));
+    m_minidumpTabIndex = addNavigationTab(17, m_minidumpHostWidget, QIcon(QStringLiteral(":/Icon/log_track.svg")));
 
-    m_pluginTabIndex = m_mainTabWidget->addTab(
-        m_pluginHostWidget,
-        QIcon(QStringLiteral(":/Icon/process_details.svg")),
-        QStringLiteral("插件"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_mainTabWidget,
-        m_pluginHostWidget,
-        QStringLiteral("misc.plugin.tab"),
-        QStringLiteral("插件"));
+    m_pluginTabIndex = addNavigationTab(18, m_pluginHostWidget, QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
     // 主题检查使用真实主程序中的惰性页面，样例控件不逐个手工适配。
     m_themeCheckHostWidget = new QWidget(m_mainTabWidget);
-    m_themeCheckTabIndex = m_mainTabWidget->addTab(m_themeCheckHostWidget, QStringLiteral("主题检查"));
-    ks::i18n::LanguageManager::instance().bindTab(m_mainTabWidget, m_themeCheckHostWidget,
-        QStringLiteral("misc.theme_check.tab"), QStringLiteral("主题检查"));
+    m_themeCheckTabIndex = addNavigationTab(19, m_themeCheckHostWidget);
 
     // 页签切换：按需初始化对应子页。
     connect(
@@ -798,3 +727,124 @@ void MiscDock::initializePluginPage()
     pluginLayout->addWidget(m_pluginPage, 1);
     hostLayout->addWidget(pluginPanel, 1);
 }
+
+int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon)
+{
+    const int tabIndex = m_mainTabWidget->count();
+    m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
+    return tabIndex;
+}
+QWidget* MiscDock::navigationHost(const int index) const
+{
+    switch (index)
+    {
+    case 0: return m_bootEditorHostWidget;
+    case 1: return m_soundSourceHostWidget;
+    case 2: return m_systemTimeHostWidget;
+    case 3: return m_virtualLocationHostWidget;
+    case 4: return m_bugcheckGuardHostWidget;
+    case 5: return m_disableDseHostWidget;
+    case 6: return m_cksHostWidget;
+    case 7: return m_contextMenuCleanerHostWidget;
+    case 8: return m_diskEditorHostWidget;
+    case 9: return m_applicationControlHostWidget;
+    case 10: return m_clipboardGuardHostWidget;
+    case 11: return m_renderBenchmarkHostWidget;
+    case 12: return m_desktopDrawingHostWidget;
+    case 13: return m_windowInjectionHostWidget;
+    case 14: return m_hvciBypassHostWidget;
+    case 15: return m_rxpfHostWidget;
+    case 16: return m_scannerHostWidget;
+    case 17: return m_minidumpHostWidget;
+    case 18: return m_pluginHostWidget;
+    case 19: return m_themeCheckHostWidget;
+    default: return nullptr;
+    }
+}
+QWidget* MiscDock::navigationChild(const int index) const
+{
+    switch (index)
+    {
+    case 0: return m_bootEditorTab;
+    case 1: return m_soundSourcePage;
+    case 2: return m_systemTimePage;
+    case 3: return m_virtualLocationPage;
+    case 4: return m_bugcheckGuardPage;
+    case 5: return m_disableDsePage;
+    case 6: return m_cksPage;
+    case 7: return m_contextMenuCleanerTab;
+    case 8: return m_diskEditorTab;
+    case 9: return m_applicationControlPage;
+    case 10: return m_clipboardGuardPage;
+    case 11: return m_renderBenchmarkPage;
+    case 12: return m_desktopDrawingPage;
+    case 13: return m_windowInjectionPage;
+    case 14: return m_hvciBypassPage;
+    case 15: return m_rxpfPage;
+    case 16: return m_scannerPage;
+    case 17: return m_minidumpPage;
+    case 18: return m_pluginPage;
+    case 19: return m_themeCheckPage;
+    default: return nullptr;
+    }
+}
+ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existing)
+{
+    ks::ui::PageNavigationCatalog main;
+    for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (existing) main = existing->m_navigationTabs.describe(std::move(main));
+    else main[4].visible = false; // MainWindow以相同配置/会话状态修正尚未构造的入口。
+    ks::ui::PageNavigationCatalog schema;
+    for (int index = 0; index < static_cast<int>(std::size(kMiscNavigation)); ++index)
+    {
+        const auto& parent = main[index];
+        schema.append(parent);
+        if (!kMiscChildKeys[index]) continue;
+        const auto children = ks::ui::RegisteredPageNavigationCatalog(QString::fromLatin1(kMiscChildKeys[index]),
+            existing ? existing->navigationChild(index) : nullptr);
+        if (!children) continue;
+        const QString prefix = parent.id + QLatin1Char(':');
+        for (auto child : *children)
+        {
+            child.id.prepend(prefix);
+            child.parentId = child.parentId.isEmpty() ? parent.id : prefix + child.parentId;
+            schema.append(std::move(child));
+        }
+    }
+    return schema;
+}
+QWidget* MiscDock::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<MiscDock> self(this);
+    const QString parentId = id.section(QLatin1Char(':'), 0, 0);
+    int index = -1;
+    for (int candidate = 0; candidate < static_cast<int>(std::size(kMiscNavigation)); ++candidate)
+        if (parentId == QLatin1String(kMiscNavigation[candidate].id)) { index = candidate; break; }
+    if (index < 0) return nullptr;
+    const auto permitted = [self, &id](bool current) {
+        if (!self) return false;
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        if (!resolved) return false;
+        for (const auto& page : *resolved)
+            if (page.page.id == id) return page.page.visible && page.page.enabled && (!current || page.page.current);
+        return false;
+    };
+    if (!permitted(false)) return nullptr;
+    const QPointer<QTabWidget> tabs(m_mainTabWidget);
+    const QPointer<QWidget> host(navigationHost(index));
+    ensureTabInitialized(tabs ? tabs->indexOf(host) : -1, false);
+    if (!self || !tabs || !host || self->m_mainTabWidget != tabs || self->navigationHost(index) != host || !permitted(false)) return nullptr;
+    const QPointer<QWidget> child(self->navigationChild(index));
+    if (!self->m_navigationTabs.activate(parentId, navigationCatalog(self))) return nullptr;
+    if (!self || !tabs || !host || self->m_mainTabWidget != tabs || self->navigationHost(index) != host
+        || self->navigationChild(index) != child || tabs->currentWidget() != host || !permitted(false)) return nullptr;
+    if (id == parentId) return permitted(true) ? host.data() : nullptr;
+    if (!child || !kMiscChildKeys[index]) return nullptr;
+    const QPointer<QWidget> target(ks::ui::NavigateRegisteredPageNavigationCatalog(
+        QString::fromLatin1(kMiscChildKeys[index]), child, id.mid(parentId.size() + 1)));
+    if (!self || !tabs || !host || !child || !target || self->m_mainTabWidget != tabs || self->navigationHost(index) != host
+        || self->navigationChild(index) != child || tabs->currentWidget() != host || !permitted(true)) return nullptr;
+    return target.data();
+}
+namespace { const bool kMiscNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<MiscDock>(QStringLiteral("misc")); }

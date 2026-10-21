@@ -7427,7 +7427,14 @@ void MainWindow::initGlobalUiSearchController()
         const auto live = navigationLifetime.lock();
         if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return std::nullopt;
         const QString key = dock->property("ks_dock_layout_key").toString();
-        return ks::ui::RegisteredPageNavigationCatalog(key, existingNavigationContent(dock));
+        QWidget* const existing = existingNavigationContent(dock);
+        auto catalog = ks::ui::RegisteredPageNavigationCatalog(key, existing);
+        if (catalog && !existing && key == QStringLiteral("misc"))
+            for (auto& page : *catalog)
+                if (page.id == QStringLiteral("misc.bugcheck")) page.visible =
+                    navigationOwner->m_currentAppearanceSettings.bugcheckDiagnosticsAutoInstallEnabled ||
+                    navigationOwner->m_bugcheckDiagnosticsInstalledForSession || navigationOwner->m_bugcheckDiagnosticsEntryRequestedForSession;
+        return catalog;
     };
     const auto catalogNavigator = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
         (ads::CDockWidget* dock, const QString& id) -> QWidget*

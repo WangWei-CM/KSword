@@ -12,6 +12,7 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 
 class QTabWidget;
 class QVBoxLayout;
@@ -41,6 +42,9 @@ class MiscDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MiscDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：创建“杂项”根布局与内部 Tab。
     // - 参数 parent：Qt 父控件。
@@ -64,6 +68,11 @@ public:
     void prepareNavigationPages();
 
 private:
+    int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
+    QWidget* navigationHost(int index) const;
+    QWidget* navigationChild(int index) const;
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // initializeUi：
     // - 作用：初始化“杂项”页的控件树，只把页签占位控件建出来；
     // - 调用：构造函数中调用一次。
