@@ -2501,6 +2501,8 @@ void MemoryDock::publishCoreProjection(const std::shared_ptr<CoreProjectionData>
 void MemoryDock::pollCoreProjection()
 {
     const QPointer<MemoryDock> owner(this);
+    pollFirstScanPreparation();
+    if (!owner) { return; }
     pollRegionRefresh();
     if (!owner) { return; }
     if (m_coreProjectionJob && m_coreProjectionJob->done.load()) {
@@ -2522,7 +2524,7 @@ void MemoryDock::pollCoreProjection()
     if (m_moduleTable && m_moduleTable->isVisible()) { requestCoreProjection(CoreKind::Modules, false); }
     if (!owner) { return; }
     if (m_regionTable && m_regionTable->isVisible()) { requestCoreProjection(CoreKind::Regions, false); }
-    if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob) { m_coreProjectionPoll->stop(); }
+    if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation) { m_coreProjectionPoll->stop(); }
 }
 
 bool MemoryDock::coreProjectionIsCurrent(const CoreKind kind) const
@@ -2569,13 +2571,18 @@ void MemoryDock::pollRegionRefresh()
     const auto job = std::move(m_regionRefreshJob);
     if (!job->cancelled() && job->generation == m_processAttachmentGeneration.load()) {
         const QPointer<MemoryDock> owner(this);
-        const auto commit = [owner, job] {
+        m_regionSearchSnapshot = job->rows; m_regionSearchGeneration = job->generation;
+        m_regionSearchError = job->error != ERROR_SUCCESS ? job->error : !job->rows || job->rows->empty() ? ERROR_INVALID_DATA : ERROR_SUCCESS;
+        const bool hadSearch = bool(m_firstScanPreparation);
+        if (hadSearch) { acceptFirstScanRegionSnapshot(m_regionSearchSnapshot, m_regionSearchError); }
+        if (!owner) { return; }
+        const auto commit = [owner, job, hadSearch] {
             if (!owner || job->generation != owner->m_processAttachmentGeneration.load() || job->cancelled()) { return; }
             if (!job->rows || job->rows->empty()) {
                 owner->setProperty(kRegionRefreshInFlightProperty, false);
                 const bool pending = owner->property(kRegionRefreshPendingProperty).toBool();
                 owner->setProperty(kRegionRefreshPendingProperty, false);
-                reportRegionEnumerateFailure(owner, QStringLiteral("VirtualQueryEx 未返回有效区域。"));
+                if (!hadSearch) { reportRegionEnumerateFailure(owner, QStringLiteral("VirtualQueryEx 未返回有效区域。")); }
                 if (owner && pending && job->generation == owner->m_processAttachmentGeneration.load()) { owner->refreshMemoryRegionList(true); }
                 return;
             }
@@ -2593,7 +2600,15 @@ void MemoryDock::pollRegionRefresh()
     startPendingRegionRefresh();
 }
 
-void MemoryDock::refreshMemoryRegionList(const bool forceRequery, const bool requireSynchronousPrerequisite)
+void MemoryDock::requestFirstScanRegions()
+{
+    if (!m_regionCache->empty() && !m_regionCachePartial) { acceptFirstScanRegionSnapshot(m_regionCache, ERROR_SUCCESS); return; }
+    if (readBoolProperty(this, kRegionRefreshInFlightProperty) && m_regionSearchGeneration == m_processAttachmentGeneration.load()) { acceptFirstScanRegionSnapshot(m_regionSearchSnapshot, m_regionSearchError); return; }
+    if (readBoolProperty(this, kRegionRefreshInFlightProperty)) { return; }
+    refreshMemoryRegionList(true);
+}
+
+void MemoryDock::refreshMemoryRegionList(const bool forceRequery)
 {
     if (m_attachedProcessHandle == nullptr) {
         m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
@@ -2602,16 +2617,14 @@ void MemoryDock::refreshMemoryRegionList(const bool forceRequery, const bool req
     if (!forceRequery && !m_regionCache->empty()) { applyRegionFilterAndRebuildTable(); return; }
     if (readBoolProperty(this, kRegionRefreshInFlightProperty)) { setProperty(kRegionRefreshPendingProperty, true); return; }
     setProperty(kRegionRefreshFromAttachProperty, false);
-    if (requireSynchronousPrerequisite) {
-        // Compatibility edge retained solely until MEM-SEARCH-04 supplies its frozen async continuation.
-        QString error; std::vector<RegionEntry> rows;
-        if (!enumerateMemoryRegionsByVirtualQuery(m_attachedProcessHandle, rows, &error)) { reportRegionEnumerateFailure(this, error); return; }
-        m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(std::move(rows));
-        m_regionCachePartial = false; m_regionCacheError = 0; applyRegionFilterAndRebuildTable(); return;
-    }
     std::uint32_t error = ERROR_SUCCESS;
     const auto handle = duplicateAttachedProcessHandleForWorker(&error);
-    if (!handle) { reportRegionEnumerateFailure(this, QStringLiteral("VirtualQueryEx 未返回有效区域。")); return; }
+    if (!handle) {
+        if (m_firstScanPreparation) { acceptFirstScanRegionSnapshot({}, error != ERROR_SUCCESS ? error : ERROR_INVALID_HANDLE); }
+        else { reportRegionEnumerateFailure(this, QStringLiteral("VirtualQueryEx 未返回有效区域。")); }
+        return;
+    }
+    m_regionSearchSnapshot.reset(); m_regionSearchGeneration = UINT64_MAX; m_regionSearchError = ERROR_SUCCESS;
     auto job = std::make_shared<RegionRefreshJob>(); job->handle = handle; job->generation = m_processAttachmentGeneration.load(); job->lifetime = m_coreProjectionLifetime;
     m_regionRefreshPendingJob = job;
     if (m_regionRefreshJob) { m_regionRefreshJob->cancel.store(true); }
@@ -2621,6 +2634,8 @@ void MemoryDock::refreshMemoryRegionList(const bool forceRequery, const bool req
 
 void MemoryDock::cancelCoreProjection(const bool closing)
 {
+    cancelFirstScanPreparation();
+    m_regionSearchSnapshot.reset(); m_regionSearchGeneration = UINT64_MAX;
     if (closing) { m_coreProjectionLifetime->store(true); m_moduleRefreshLifetime->store(true); }
     if (m_coreProjectionJob) { m_coreProjectionJob->cancel.store(true); }
     if (m_regionRefreshJob) { m_regionRefreshJob->cancel.store(true); }

@@ -12,97 +12,77 @@ using namespace ksword::memory_dock_internal;
 // 作用：承载首次/再次扫描流程与后台扫描执行逻辑。
 // ============================================================
 
+struct MemoryDock::FirstScanPreparation {
+    ParsedSearchPattern pattern;
+    FirstScanOptions options;
+    std::shared_ptr<const std::vector<RegionEntry>> source;
+    std::vector<RegionEntry> filtered;
+    std::atomic_bool cancel{false}, done{false};
+    bool waiting = true, success = false;
+    QString error;
+};
+
 void MemoryDock::startFirstScan()
 {
-    // 首次扫描入口日志：记录当前附加 PID 与扫描参数。
-    kLogEvent firstScanStartEvent;
-    info << firstScanStartEvent
-        << "[MemoryDock] startFirstScan: 请求开始首次扫描, attachedPid="
-        << m_attachedPid
-        << ", scanThreadCount="
-        << m_scanThreadCount
-        << ", scanChunkSizeKB="
-        << m_scanChunkSizeKB
-        << eol;
+    if (m_scanInProgress.load()) { QMessageBox::information(this, "内存扫描", "当前已有扫描任务正在执行。"); return; }
+    if (!m_attachedProcessHandle || m_attachedPid == 0) { QMessageBox::warning(this, "内存扫描", "请先附加目标进程。"); return; }
+    auto preparation = ks::memory_detail::ValueStorage<FirstScanPreparation>();
+    QString error;
+    if (!parseSearchPatternFromUi(preparation->pattern, error) || !captureFirstScanOptions(preparation->options, error)) { QMessageBox::warning(this, "内存扫描", error); return; }
+    m_firstScanPreparation = preparation; m_scanInProgress.store(true); m_scanCancelRequested.store(false);
+    const QPointer<MemoryDock> owner(this);
+    for (auto* button : {m_firstScanButton, m_nextScanButton, m_resetScanButton}) { if (button) { button->setEnabled(false); } if (!owner) { return; } }
+    m_cancelScanButton->setEnabled(true); if (!owner) { return; }
+    m_scanProgressBar->setValue(0); if (!owner) { return; }
+    m_scanStatusLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Preparing scan regions..."))); if (!owner) { return; }
+    m_coreProjectionPoll->start(); requestFirstScanRegions();
+}
 
-    // 正在扫描时不允许重复发起，避免多个后台线程并发读同一状态。
-    if (m_scanInProgress.load())
-    {
-        kLogEvent firstScanBusyEvent;
-        warn << firstScanBusyEvent
-            << "[MemoryDock] startFirstScan: 已有扫描在执行，拒绝重复启动。"
-            << eol;
-        QMessageBox::information(this, "内存扫描", "当前已有扫描任务正在执行。");
-        return;
-    }
+void MemoryDock::acceptFirstScanRegionSnapshot(const std::shared_ptr<const std::vector<RegionEntry>>& rows, const std::uint32_t error)
+{
+    const auto preparation = m_firstScanPreparation;
+    if (!preparation || !preparation->waiting) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || preparation->cancel.load()) { cancelFirstScanPreparation(); return; }
+    if (error != 0) { finishFirstScanPreparation(ks::i18n::packedSourceText(QStringLiteral("Region enumeration is partial (Win32: %1)")).arg(error)); return; }
+    if (!rows || rows->empty()) { finishFirstScanPreparation(QStringLiteral("当前没有可用的内存区域，请先刷新区域列表。")); return; }
+    preparation->waiting = false; preparation->source = rows;
+    try { QThreadPool::globalInstance()->start([preparation] {
+        try { preparation->success = filterFirstScanRegions(preparation->options, *preparation->source, preparation->filtered, preparation->error, [preparation] { return preparation->cancel.load(); }); }
+        catch (...) { preparation->error = QStringLiteral("Memory table projection failed"); }
+        preparation->done.store(true);
+    }); } catch (...) { preparation->error = QStringLiteral("Memory table projection failed"); preparation->done.store(true); }
+}
 
-    // 首次扫描前必须附加进程。
-    if (m_attachedProcessHandle == nullptr || m_attachedPid == 0)
-    {
-        kLogEvent firstScanNoAttachEvent;
-        warn << firstScanNoAttachEvent
-            << "[MemoryDock] startFirstScan: 未附加进程，无法扫描。"
-            << eol;
-        QMessageBox::warning(this, "内存扫描", "请先附加目标进程。");
-        return;
-    }
+void MemoryDock::finishFirstScanPreparation(const QString& error, const bool cancelled)
+{
+    m_firstScanPreparation.reset(); m_scanInProgress.store(false); m_scanCancelRequested.store(false);
+    const QPointer<MemoryDock> owner(this);
+    for (auto* button : {m_firstScanButton, m_resetScanButton}) { if (button) { button->setEnabled(true); } if (!owner) { return; } }
+    m_nextScanButton->setEnabled(!m_searchResultCache.empty()); if (!owner) { return; }
+    m_cancelScanButton->setEnabled(false); if (!owner) { return; }
+    m_scanStatusLabel->setText(cancelled ? ks::i18n::packedSourceText(QStringLiteral("扫描已取消。")) : ks::i18n::sourceText(error));
+}
 
-    // 先解析输入值，再收集扫描区域，两步都可能失败并反馈可读错误。
-    ParsedSearchPattern pattern{};
-    QString parseError;
-    if (!parseSearchPatternFromUi(pattern, parseError))
-    {
-        kLogEvent firstScanParseFailEvent;
-        warn << firstScanParseFailEvent
-            << "[MemoryDock] startFirstScan: 解析扫描值失败, error="
-            << parseError.toStdString()
-            << eol;
-        QMessageBox::warning(this, "内存扫描", parseError);
-        return;
-    }
+void MemoryDock::cancelFirstScanPreparation()
+{
+    if (!m_firstScanPreparation) { return; }
+    m_firstScanPreparation->cancel.store(true); finishFirstScanPreparation({}, true);
+}
 
-    std::vector<RegionEntry> scanRegions;
-    QString regionError;
-    if (!collectSearchRegionsFromUi(scanRegions, regionError))
-    {
-        kLogEvent firstScanCollectFailEvent;
-        warn << firstScanCollectFailEvent
-            << "[MemoryDock] startFirstScan: 收集扫描区域失败, error="
-            << regionError.toStdString()
-            << eol;
-        QMessageBox::warning(this, "内存扫描", regionError);
-        return;
-    }
-
-    // 首次扫描会重置上一轮结果，并把“最近扫描类型”更新为当前下拉框类型。
-    m_lastSearchValueType = pattern.valueType;
-    m_searchResultCache.clear();
-    rebuildSearchResultTable();
-
-    // UI 状态切换：禁用发起按钮，启用取消按钮，展示准备中的提示文本。
-    m_scanInProgress.store(true);
-    m_scanCancelRequested.store(false);
-    m_firstScanButton->setEnabled(false);
-    m_nextScanButton->setEnabled(false);
-    m_resetScanButton->setEnabled(false);
-    m_cancelScanButton->setEnabled(true);
-    m_scanProgressBar->setValue(0);
-    m_scanStatusLabel->setText(
-        QString("扫描中：区域=%1，线程=%2")
-        .arg(scanRegions.size())
-        .arg(m_scanThreadCount));
-
-    // 首次扫描准备就绪日志：记录模式字节长度与区域总数。
-    kLogEvent firstScanPreparedEvent;
-    info << firstScanPreparedEvent
-        << "[MemoryDock] startFirstScan: 准备完成, patternBytes="
-        << pattern.exactBytes.size()
-        << ", regionCount="
-        << scanRegions.size()
-        << eol;
-
-    // 进入后台扫描线程，避免 ReadProcessMemory 循环阻塞主界面。
-    scanMemoryRegionsInBackground(scanRegions, pattern);
+void MemoryDock::pollFirstScanPreparation()
+{
+    const auto preparation = m_firstScanPreparation;
+    if (!preparation) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || preparation->cancel.load()) { cancelFirstScanPreparation(); return; }
+    if (!preparation->done.load()) { return; }
+    if (!preparation->success) { finishFirstScanPreparation(preparation->error); return; }
+    m_firstScanPreparation.reset();
+    m_lastSearchValueType = preparation->pattern.valueType; m_searchResultCache.clear();
+    const QPointer<MemoryDock> owner(this);
+    rebuildSearchResultTable(); if (!owner) { return; }
+    if (preparation->options.generation != m_processAttachmentGeneration.load() || preparation->options.pid != m_attachedPid || m_scanCancelRequested.load()) { finishFirstScanPreparation({}, true); return; }
+    m_scanStatusLabel->setText(QString("扫描中：区域=%1，线程=%2").arg(preparation->filtered.size()).arg(preparation->options.threads)); if (!owner) { return; }
+    scanMemoryRegionsInBackground(preparation->filtered, preparation->pattern, preparation->options);
 }
 
 void MemoryDock::startNextScan()
@@ -691,6 +671,7 @@ void MemoryDock::resetScanState()
 
 void MemoryDock::cancelCurrentScan()
 {
+    if (m_firstScanPreparation) { cancelFirstScanPreparation(); return; }
     // 仅当扫描进行中才设置取消标志；空闲状态下无需修改。
     if (m_scanInProgress.load())
     {
@@ -800,7 +781,7 @@ void MemoryDock::rebuildSearchResultTable()
 
 void MemoryDock::scanMemoryRegionsInBackground(
     const std::vector<RegionEntry>& scanRegions,
-    const ParsedSearchPattern& pattern)
+    const ParsedSearchPattern& pattern, const FirstScanOptions& options)
 {
     // 后台扫描入口日志：记录区域总数、线程数和匹配模式字节数。
     kLogEvent scanBackgroundStartEvent;
@@ -820,19 +801,19 @@ void MemoryDock::scanMemoryRegionsInBackground(
     const HANDLE processHandle = m_attachedProcessHandle;
     const std::vector<RegionEntry> regions = scanRegions;
     const ParsedSearchPattern scanPattern = pattern;
-    const std::uint32_t threadCount = std::max<std::uint32_t>(1, m_scanThreadCount);
+    const std::uint32_t threadCount = std::max<std::uint32_t>(1, options.threads);
     // 所有后端使用协议允许的完整分片，避免 R0 因扫描配置超出单次上限而全程跳过。
     const std::size_t chunkSize = static_cast<std::size_t>(
-        (std::min)(static_cast<std::uint64_t>((std::max)(64U, m_scanChunkSizeKB)) * 1024ULL,
+        (std::min)(static_cast<std::uint64_t>((std::max)(64U, options.chunkKB)) * 1024ULL,
             static_cast<std::uint64_t>(KSWORD_ARK_MEMORY_READ_MAX_BYTES)));
     const auto startTime = std::chrono::steady_clock::now();
     const std::shared_ptr<MemoryScanTaskState> taskState = m_scanTaskState;
 
     // 后端选择与 DDMA 会话必须在 UI 线程上按值快照下来：worker 跑起来之后
     // 用户随时可能改这两处配置，后台线程读一个变化中的会话会得到半新半旧的参数。
-    const ksword::memory_backend::MemoryAccessBackend scanBackend = currentSearchBackend();
-    const ksword::memory_backend::DdmaSession scanDdmaSession = currentDdmaSession();
-    const std::uint32_t scanTargetPid = m_attachedPid;
+    const ksword::memory_backend::MemoryAccessBackend scanBackend = options.backend;
+    const ksword::memory_backend::DdmaSession scanDdmaSession = options.ddma;
+    const std::uint32_t scanTargetPid = options.pid;
     const QString scanBackendName = ks::i18n::sourceText(
         ksword::memory_backend::backendDisplayName(scanBackend));
     const QString finishedMessage = ks::i18n::sourceText(QStringLiteral(

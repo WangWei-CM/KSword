@@ -590,7 +590,8 @@ private:
     // - 作用：刷新内存区域缓存并应用过滤展示。
     // - 参数 forceRequery：是否强制重新调用 VirtualQueryEx。
     // - 返回：无。
-    void refreshMemoryRegionList(bool forceRequery, bool requireSynchronousPrerequisite = false);
+    void refreshMemoryRegionList(bool forceRequery);
+    void requestFirstScanRegions();
 
     // requestDumpMemoryRegion：菜单前冻结进程句柄/创建时间和区域，选择路径后异步导出。
     // pid/processName 用于身份和提示；targetProcess 为独立租约；region/backend 固定导出范围和通道。
@@ -658,9 +659,21 @@ private:
     // - 参数 regionsOut：输出区域数组。
     // - 参数 errorTextOut：失败原因文本。
     // - 返回：true 成功；false 失败。
-    bool collectSearchRegionsFromUi(
-        std::vector<RegionEntry>& regionsOut,
-        QString& errorTextOut);
+    struct FirstScanOptions {
+        bool custom = false, image = false, heap = false, stack = false;
+        std::uint64_t start = 0, end = UINT64_MAX, generation = 0;
+        std::uint32_t pid = 0, threads = 1, chunkKB = 64;
+        ksword::memory_backend::MemoryAccessBackend backend{};
+        ksword::memory_backend::DdmaSession ddma;
+    };
+    bool captureFirstScanOptions(FirstScanOptions& options, QString& error) const;
+    static bool filterFirstScanRegions(const FirstScanOptions& options, const std::vector<RegionEntry>& source, std::vector<RegionEntry>& rows, QString& error, const std::function<bool()>& cancelled);
+    struct FirstScanPreparation;
+    std::shared_ptr<FirstScanPreparation> m_firstScanPreparation;
+    void acceptFirstScanRegionSnapshot(const std::shared_ptr<const std::vector<RegionEntry>>& rows, std::uint32_t error);
+    void pollFirstScanPreparation();
+    void finishFirstScanPreparation(const QString& error, bool cancelled = false);
+    void cancelFirstScanPreparation();
 
     // startFirstScan：
     // - 作用：执行“首次扫描”。
@@ -699,7 +712,7 @@ private:
     // - 返回：无。
     void scanMemoryRegionsInBackground(
         const std::vector<RegionEntry>& scanRegions,
-        const ParsedSearchPattern& pattern);
+        const ParsedSearchPattern& pattern, const FirstScanOptions& options);
 
 private:
     // ========================================================
@@ -1145,6 +1158,9 @@ private:
     std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);
     std::uint64_t m_coreLocaleGeneration = 0;
     QString m_moduleCacheStatusTemplate;
+    std::shared_ptr<const std::vector<RegionEntry>> m_regionSearchSnapshot;
+    std::uint64_t m_regionSearchGeneration = UINT64_MAX;
+    std::uint32_t m_regionSearchError = 0;
     bool m_regionCachePartial = false;
     std::uint32_t m_regionCacheError = 0;
     std::shared_ptr<const ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot> m_tamperCandidateSnapshot = ks::memory_detail::ValueStorage<ksword::memory_dock::TamperDetectionPage::ModuleCandidateSnapshot>();

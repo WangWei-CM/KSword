@@ -23681,6 +23681,7 @@
     "例如 PATH / TEMP / 自定义变量名": "例如 PATH / TEMP / 自定义变量名",
     "例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt": "例如: \"C:\\Windows\\System32\\notepad.exe\" C:\\test.txt",
     "例如：*": "例如：*",
+    "Preparing scan regions...": "正在准备扫描区域...",
     "例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）": "例如：* 或 C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe（支持自动转换）",
     "例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）": "例如：* 或 C:\\Windows\\System32\\notepad.exe（支持自动转换）",
     "例如：* 或 C:\\Windows\\System32\\reg.exe（支持自动转换）": "例如：* 或 C:\\Windows\\System32\\reg.exe（支持自动转换）",
