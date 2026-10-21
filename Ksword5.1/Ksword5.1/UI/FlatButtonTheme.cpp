@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QToolButton>
 #include <QVariant>
+#include <QStringView>
 #include <memory>
 #include <array>
 
@@ -114,11 +115,15 @@ namespace
 
     QString replaceOwnedBlock(QString style, const QString& replacement)
     {
+        if (style.isEmpty()) return replacement;
         const qsizetype begin = style.indexOf(QLatin1String(beginMarker));
         const qsizetype end = style.indexOf(QLatin1String(endMarker), begin);
         if (begin >= 0 && end >= begin)
         {
-            style.replace(begin, end + qstrlen(endMarker) - begin, replacement);
+            const qsizetype length = end + qstrlen(endMarker) - begin;
+            if (begin == 0 && length == style.size()) return replacement;
+            if (QStringView(style).mid(begin, length) != QStringView(replacement))
+                style.replace(begin, length, replacement);
         }
         else
         {
@@ -270,6 +275,57 @@ namespace
                 .arg(disabled.foreground.name());
         }
         return style + QStringLiteral("QToolButton::menu-button{background:transparent;border:none;}");
+    }
+
+    struct ButtonStyleKey
+    {
+        ButtonColorKey inputs; // Same complete palette/seed inputs as the color recipe.
+        int controlKind; // -1: global Auto recipe; 0/1: actual push/tool presentation.
+        bool operator==(const ButtonStyleKey& other) const
+        {
+            return inputs == other.inputs && controlKind == other.controlKind;
+        }
+    };
+
+    size_t qHash(const ButtonStyleKey& key, size_t seed = 0)
+    {
+        return qHashMulti(qHash(key.inputs, seed), key.controlKind);
+    }
+
+    // Share immutable QSS strings only. Each widget keeps its existing owner,
+    // palette, binding and selectors; this does not change the cascade.
+    QString ownedStyle(ks::ui::FlatButtonTone tone, ks::ui::FlatButtonAppearance appearance,
+        const QPalette& colors, const QAbstractButton* button = nullptr)
+    {
+        const ButtonStyleKey key{{{colors.color(QPalette::Active, QPalette::Base),
+            colors.color(QPalette::Active, QPalette::Highlight),
+            colors.color(QPalette::Active, QPalette::AlternateBase),
+            colors.color(QPalette::Active, QPalette::Text),
+            colors.color(QPalette::Active, QPalette::HighlightedText),
+            colors.color(QPalette::Disabled, QPalette::Text)},
+            KswordTheme::ThemeSeedGeneration, tone, appearance, ks::ui::FlatButtonState::Normal},
+            button == nullptr ? -1 : toolPresentation(button) ? 1 : 0};
+        static thread_local QHash<ButtonStyleKey, QString> cache;
+        static thread_local quint64 generation = 0;
+        const bool cacheable = KswordTheme::ActiveThemePreviewSeeds == nullptr;
+        if (cacheable)
+        {
+            if (generation != key.inputs.generation)
+            {
+                cache.clear(); // Do not retain old theme history.
+                generation = key.inputs.generation;
+            }
+            const auto found = cache.constFind(key);
+            if (found != cache.constEnd()) return found.value();
+        }
+        const QString style = QLatin1String(beginMarker) + buildStyle(tone, appearance, colors, button)
+            + QLatin1String(endMarker);
+        if (cacheable)
+        {
+            if (cache.size() >= 128) cache.clear();
+            cache.insert(key, style);
+        }
+        return style;
     }
 
     // 只对明确使用本组件标记的本地/父级样式登记绑定，不猜测未审核业务的动作色。
@@ -455,8 +511,7 @@ ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& p
 
 QString ks::ui::BuildFlatButtonStyle(FlatButtonTone tone, FlatButtonAppearance appearance)
 {
-    return QLatin1String(beginMarker) + buildStyle(tone, appearance, QApplication::palette())
-        + QLatin1String(endMarker);
+    return ownedStyle(tone, appearance, QApplication::palette());
 }
 
 void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, FlatButtonAppearance appearance)
@@ -494,8 +549,7 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         }
         const QPalette colors = buttonPalette(guardedButton.data());
         const auto actualAppearance = resolvedAppearance(tone, appearance, toolPresentation(guardedButton.data()));
-        const QString block = QLatin1String(beginMarker) + buildStyle(tone, appearance, colors, guardedButton.data())
-            + QLatin1String(endMarker);
+        const QString block = ownedStyle(tone, appearance, colors, guardedButton.data());
         const QString style = replaceOwnedBlock(currentStyle, block);
         *applied = true;
         if (style != guardedButton->styleSheet())
