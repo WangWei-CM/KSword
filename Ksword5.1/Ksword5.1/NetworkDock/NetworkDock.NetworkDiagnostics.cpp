@@ -627,6 +627,7 @@ void NetworkDock::applyRouteTableRead(const std::vector<RouteRecord>& records, c
 
 void NetworkDock::addRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     RouteRecord record;
     record.addressFamily = AF_INET;
     record.prefixLength = 24;
@@ -639,13 +640,6 @@ void NetworkDock::addRouteEntry()
     {
         return;
     }
-    MIB_IPFORWARD_ROW2 nativeRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("新增路由"), errorText);
-        return;
-    }
     if (isHighRiskRoute(record) && QMessageBox::question(
         this, QStringLiteral("新增高风险路由"),
         QStringLiteral("将新增以下路由：\n%1\n\n该路由可能影响系统网络连接，是否继续？").arg(routeSummaryText(record)),
@@ -653,45 +647,12 @@ void NetworkDock::addRouteEntry()
     {
         return;
     }
-    const DWORD createStatus = CreateIpForwardEntry2(&nativeRow);
-    if (createStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("新增系统路由"),
-            createStatus);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("新增路由"),
-                QStringLiteral("CreateIpForwardEntry2 失败，错误码=%1").arg(createStatus));
-        }
-        return;
-    }
-    if (persistent && !runNetshRouteCommand(QStringLiteral("add"), record, &errorText))
-    {
-        // privilegePromptHandled：活动路由仍需回滚，但权限提示后不再重复弹窗。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("持久化新增路由"),
-            errorText);
-        (void)DeleteIpForwardEntry2(&nativeRow);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("新增路由"),
-                QStringLiteral("持久化写入失败，已回滚活动路由。\n%1").arg(errorText));
-        }
-        return;
-    }
-    refreshRouteTable();
+    submitRouteMutation(0, {}, record, persistent);
 }
 
 void NetworkDock::editSelectedRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
     {
         QMessageBox::information(this, QStringLiteral("编辑路由"), QStringLiteral("请先选择一条路由。"));
@@ -720,90 +681,12 @@ void NetworkDock::editSelectedRouteEntry()
             return;
         }
     }
-    MIB_IPFORWARD_ROW2 originalRow{};
-    MIB_IPFORWARD_ROW2 targetRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(original, &originalRow, &errorText) || !routeRecordToNativeRow(target, &targetRow, &errorText))
-    {
-        QMessageBox::warning(this, QStringLiteral("编辑路由"), errorText);
-        return;
-    }
-    DWORD operationStatus = NO_ERROR;
-    if (sameRouteIdentity(original, target))
-    {
-        operationStatus = SetIpForwardEntry2(&targetRow);
-    }
-    else
-    {
-        operationStatus = CreateIpForwardEntry2(&targetRow);
-        if (operationStatus == NO_ERROR)
-        {
-            operationStatus = DeleteIpForwardEntry2(&originalRow);
-        }
-    }
-    if (operationStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("编辑系统路由"),
-            operationStatus);
-        if (!privilegePromptHandled)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("编辑路由"),
-                QStringLiteral("更新活动路由失败，错误码=%1").arg(operationStatus));
-        }
-        return;
-    }
-    if (persistent)
-    {
-        if (!sameRouteIdentity(original, target))
-        {
-            (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
-            if (!runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
-            {
-                // privilegePromptHandled：页面继续刷新，但不叠加旧通用失败框。
-                const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                    this,
-                    QStringLiteral("持久化编辑路由"),
-                    errorText);
-                if (!privilegePromptHandled)
-                {
-                    QMessageBox::warning(
-                        this,
-                        QStringLiteral("编辑路由"),
-                        QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
-                }
-            }
-        }
-        else if (!runNetshRouteCommand(QStringLiteral("set"), target, &errorText) &&
-                 !runNetshRouteCommand(QStringLiteral("add"), target, &errorText))
-        {
-            // privilegePromptHandled：页面继续刷新，但不叠加旧通用失败框。
-            const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-                this,
-                QStringLiteral("持久化编辑路由"),
-                errorText);
-            if (!privilegePromptHandled)
-            {
-                QMessageBox::warning(
-                    this,
-                    QStringLiteral("编辑路由"),
-                    QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(errorText));
-            }
-        }
-    }
-    else
-    {
-        (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
-    }
-    refreshRouteTable();
+    submitRouteMutation(1, original, target, persistent);
 }
 
 void NetworkDock::deleteSelectedRouteEntry()
 {
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
     if (m_routeTable == nullptr || m_routeTable->currentRow() < 0)
     {
         QMessageBox::information(this, QStringLiteral("删除路由"), QStringLiteral("请先选择一条路由。"));
@@ -823,32 +706,125 @@ void NetworkDock::deleteSelectedRouteEntry()
     {
         return;
     }
-    MIB_IPFORWARD_ROW2 nativeRow{};
-    QString errorText;
-    if (!routeRecordToNativeRow(record, &nativeRow, &errorText))
+    submitRouteMutation(2, record, {}, false);
+}
+
+
+void NetworkDock::submitRouteMutation(const int kind, RouteRecord original, RouteRecord target, const bool persistent)
+{
+    if (m_routeMutationOperation && m_routeMutationOperation->isBusy()) return;
+    if (!m_routeMutationOperation) m_routeMutationOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<NetworkDock> guard(this);
+    const auto updateBusy = [guard]()
     {
-        QMessageBox::warning(this, QStringLiteral("删除路由"), errorText);
-        return;
-    }
-    const DWORD deleteStatus = DeleteIpForwardEntry2(&nativeRow);
-    if (deleteStatus != NO_ERROR)
-    {
-        // privilegePromptHandled：结构化错误已触发恢复提示时跳过旧错误框。
-        const bool privilegePromptHandled = ks::ui::promptForPrivilegeFailure(
-            this,
-            QStringLiteral("删除系统路由"),
-            deleteStatus);
-        if (!privilegePromptHandled)
+        if (!guard) return;
+        const bool busy = guard->m_routeMutationOperation->isBusy();
+        for (auto* button : {guard->m_refreshRouteButton, guard->m_addRouteButton,
+            guard->m_editRouteButton, guard->m_removeRouteButton})
         {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("删除路由"),
-                QStringLiteral("DeleteIpForwardEntry2 失败，错误码=%1").arg(deleteStatus));
+            if (button) button->setEnabled(!busy);
+            if (!guard) return;
         }
-        return;
+        // A dropped delivery must still reconcile the authoritative system
+        // state. The accepted worker completes its transaction without GUI.
+        if (!busy) guard->refreshRouteTable();
+    };
+    m_routeMutationOperation->setStateChangedCallback(updateBusy);
+    struct Request { int kind; RouteRecord original; RouteRecord target; bool persistent; };
+    struct Result { DWORD status = NO_ERROR; QString title; QString scope; QString error; };
+    try
+    {
+        m_routeMutationOperation->submitTransaction<Request, Result>({kind, std::move(original), std::move(target), persistent},
+            [](const Request& request)
+            {
+                Result result;
+                const auto& original = request.original;
+                const auto& target = request.target;
+                MIB_IPFORWARD_ROW2 originalRow{};
+                MIB_IPFORWARD_ROW2 targetRow{};
+                result.title = request.kind == 0 ? QStringLiteral("新增路由")
+                    : request.kind == 1 ? QStringLiteral("编辑路由") : QStringLiteral("删除路由");
+                if ((request.kind != 0 && !routeRecordToNativeRow(original, &originalRow, &result.error))
+                    || (request.kind != 2 && !routeRecordToNativeRow(target, &targetRow, &result.error))) return result;
+                if (request.kind == 0)
+                {
+                    result.scope = QStringLiteral("新增系统路由");
+                    result.status = CreateIpForwardEntry2(&targetRow);
+                    if (result.status != NO_ERROR)
+                        result.error = QStringLiteral("CreateIpForwardEntry2 失败，错误码=%1").arg(result.status);
+                    else if (request.persistent && !runNetshRouteCommand(QStringLiteral("add"), target, &result.error))
+                    {
+                        // Finish the accepted rollback even after owner close;
+                        // cancellation only retires delivery, never half a route.
+                        (void)DeleteIpForwardEntry2(&targetRow);
+                        result.scope = QStringLiteral("持久化新增路由");
+                        result.error = QStringLiteral("持久化写入失败，已回滚活动路由。\n%1").arg(result.error);
+                    }
+                    return result;
+                }
+                if (request.kind == 2)
+                {
+                    result.scope = QStringLiteral("删除系统路由");
+                    result.status = DeleteIpForwardEntry2(&originalRow);
+                    if (result.status != NO_ERROR)
+                        result.error = QStringLiteral("DeleteIpForwardEntry2 失败，错误码=%1").arg(result.status);
+                    else (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                    return result;
+                }
+                result.scope = QStringLiteral("编辑系统路由");
+                const bool sameIdentity = sameRouteIdentity(original, target);
+                if (sameIdentity) result.status = SetIpForwardEntry2(&targetRow);
+                else
+                {
+                    result.status = CreateIpForwardEntry2(&targetRow);
+                    if (result.status == NO_ERROR) result.status = DeleteIpForwardEntry2(&originalRow);
+                }
+                if (result.status != NO_ERROR)
+                {
+                    result.error = QStringLiteral("更新活动路由失败，错误码=%1").arg(result.status);
+                    return result;
+                }
+                if (request.persistent)
+                {
+                    bool persisted = true;
+                    if (!sameIdentity)
+                    {
+                        (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                        persisted = runNetshRouteCommand(QStringLiteral("add"), target, &result.error);
+                    }
+                    else persisted = runNetshRouteCommand(QStringLiteral("set"), target, &result.error)
+                        || runNetshRouteCommand(QStringLiteral("add"), target, &result.error);
+                    if (!persisted)
+                    {
+                        result.scope = QStringLiteral("持久化编辑路由");
+                        result.error = QStringLiteral("活动路由已更新，但持久化写入失败：%1").arg(result.error);
+                    }
+                    else result.error.clear(); // A successful fallback supersedes its first error.
+                }
+                else (void)runNetshRouteCommand(QStringLiteral("delete"), original, nullptr);
+                return result;
+            },
+            [guard](const Result& result, std::uint64_t)
+            {
+                if (!guard || result.error.isEmpty()) return true;
+                const bool handled = !result.scope.isEmpty() && (result.status != NO_ERROR
+                    ? ks::ui::promptForPrivilegeFailure(guard, result.scope, result.status)
+                    : ks::ui::promptForPrivilegeFailure(guard, result.scope, result.error));
+                if (guard && !handled) QMessageBox::warning(guard, result.title, result.error);
+                return true;
+            },
+            [guard](std::exception_ptr)
+            {
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑路由"),
+                    QStringLiteral("更新活动路由失败，错误码=%1").arg(ERROR_NOT_ENOUGH_MEMORY));
+            });
     }
-    (void)runNetshRouteCommand(QStringLiteral("delete"), record, nullptr);
-    refreshRouteTable();
+    catch (...)
+    {
+        updateBusy();
+        if (guard) QMessageBox::warning(guard, QStringLiteral("编辑路由"),
+            QStringLiteral("更新活动路由失败，错误码=%1").arg(ERROR_NOT_ENOUGH_MEMORY));
+    }
 }
 
 void NetworkDock::initializeArpCacheTab()

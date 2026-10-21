@@ -406,6 +406,8 @@ private:
     void initializeRouteTableTab();
     void refreshRouteTable();
     void addRouteEntry();
+    void submitRouteMutation(int kind, RouteRecord original, RouteRecord target, bool persistent);
+    ks::ui::AsyncOperation* m_routeMutationOperation = nullptr;
     void editSelectedRouteEntry();
     void deleteSelectedRouteEntry();
 

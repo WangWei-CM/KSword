@@ -174,6 +174,7 @@ NetworkDock::~NetworkDock()
     }
     // Close delivery before member teardown; read workers only retain value state.
     if (m_routeReadOperation != nullptr) m_routeReadOperation->close();
+    if (m_routeMutationOperation != nullptr) m_routeMutationOperation->close();
     if (m_arpReadOperation != nullptr) m_arpReadOperation->close();
     if (m_dnsReadOperation != nullptr) m_dnsReadOperation->close();
     m_monitorGeneration.fetch_add(1);
