@@ -813,9 +813,10 @@ private:
     static constexpr auto KernelSearchLanguageProperty = "ksword_kernel_search_language";
     // Shared only by the seven existing result tables; all row fields remain at
     // their original page call sites. Refresh gates protect the accepted source.
+    // Metadata-only passes keep items/row identities and restore sorting once.
     void publishKernelResultRows(QTableWidget* table, std::size_t rowCount,
         std::function<void(std::size_t)> fillRow, std::function<void()> finalize,
-        std::function<void()> onReady);
+        std::function<void()> onReady, bool rebuildSource = true);
     void applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, int separatorRow = -1);
     int firstKernelResultRow(const QTableWidget* table) const;
     // Cached fields/identities are built only with source/language items. Workers

@@ -2541,9 +2541,9 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::functio
         if (m_callbackEnumTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_callbackEnumTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_callbackEnumTable);
-            for (int row = 0; row < m_callbackEnumTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_callbackEnumTable, static_cast<std::size_t>(m_callbackEnumTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_callbackEnumTable->item(row, 0);
                 std::size_t sourceIndex = 0U;
                 if (callbackEnumReadSourceIndex(item, m_callbackEnumRows.size(), sourceIndex))
@@ -2551,8 +2551,10 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::functio
                     item->setData(KernelSearchFieldsRole, searchFields(m_callbackEnumRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_callbackEnumTable, row);
                 }
-            }
-            m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildCallbackEnumTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_callbackEnumTable, m_callbackEnumFilterEdit, m_callbackEnumSeparatorIndex.row());
         m_minifilterCallbackFilterDirty = true;

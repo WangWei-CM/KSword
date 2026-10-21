@@ -957,48 +957,80 @@ void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFi
 
 void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t rowCount,
     std::function<void(std::size_t)> fillRow, std::function<void()> finalize,
-    std::function<void()> onReady)
+    std::function<void()> onReady, const bool rebuildSource)
 {
     const QPointer<QTableWidget> tableGuard(table);
     const QPointer<KernelDock> owner(this);
+    if (!tableGuard) return;
+    constexpr auto projectionName = "ksword_kernel_result_projection";
+    bool wasForceDisabled = table->testAttribute(Qt::WA_ForceDisabled);
+    bool wasSortingEnabled = table->isSortingEnabled();
+    if (auto* previous = table->findChild<QTimer*>(QLatin1String(projectionName), Qt::FindDirectChildrenOnly))
+    {
+        // A source refresh supersedes an in-flight metadata pass. Keep the
+        // original enabled/sorting baselines rather than inheriting its lock.
+        wasForceDisabled = previous->property("was_force_disabled").toBool();
+        wasSortingEnabled = previous->property("was_sorting_enabled").toBool();
+        previous->stop();
+        previous->setObjectName(QString());
+        previous->deleteLater();
+    }
     auto* timer = new QTimer(table);
+    timer->setObjectName(QLatin1String(projectionName));
+    timer->setProperty("was_force_disabled", wasForceDisabled);
+    timer->setProperty("was_sorting_enabled", wasSortingEnabled);
     timer->setSingleShot(true);
     const QPointer<QTimer> timerGuard(timer);
-    const bool wasForceDisabled = table->testAttribute(Qt::WA_ForceDisabled);
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
     table->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+    if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
     table->setEnabled(false);
+    if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
     connect(timer, &QTimer::timeout, this,
-        [this, owner, tableGuard, timerGuard, rowCount, wasForceDisabled,
+        [this, owner, tableGuard, timerGuard, rowCount, wasForceDisabled, wasSortingEnabled,
+            rebuildSource, language,
             cursor = std::size_t{0}, initialized = false, fillRow = std::move(fillRow),
             finalize = std::move(finalize), onReady = std::move(onReady)]() mutable {
-        if (!owner || !tableGuard || !timerGuard) return;
-        const auto resume = [timerGuard]() { if (timerGuard) timerGuard->start(0); };
+        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+        const auto resume = [timerGuard]() {
+            if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start(0);
+        };
         if (ks::ui::DeferTablePresentationIfValueCaptureOpen(tableGuard,
             QStringLiteral("kernel_result_source_projection"), {tableGuard}, resume)) return;
+        const bool staleLanguage = !rebuildSource
+            && ks::i18n::LanguageManager::instance().currentLanguageId() != language;
         QElapsedTimer budget;
         budget.start();
-        if (!initialized)
+        if (!initialized && !staleLanguage)
         {
             initialized = true;
             tableGuard->setSortingEnabled(false);
             resetKernelResultFilterCache(tableGuard);
-            tableGuard->setRowCount(0);
-            tableGuard->setRowCount(static_cast<int>(rowCount));
-            if (!owner || !tableGuard || !timerGuard) return;
+            if (rebuildSource)
+            {
+                tableGuard->setRowCount(0);
+                tableGuard->setRowCount(static_cast<int>(rowCount));
+            }
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
         }
         int rows = 0;
-        while (cursor < rowCount)
+        while (!staleLanguage && cursor < rowCount)
         {
             fillRow(cursor++);
-            if (!owner || !tableGuard || !timerGuard) return;
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
             if (++rows >= 64 || budget.elapsed() >= 4) break;
         }
-        if (cursor < rowCount) { resume(); return; }
-        timerGuard->deleteLater();
-        finalize(); // Preserve the original final sort/filter before readiness.
-        if (!owner || !tableGuard) return;
+        if (!staleLanguage && cursor < rowCount) { resume(); return; }
+        if (!staleLanguage) finalize(); // Source publication retains its original final sort/filter.
+        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+        if (!rebuildSource) tableGuard->setSortingEnabled(wasSortingEnabled);
+        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
         tableGuard->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
         tableGuard->setEnabled(!wasForceDisabled);
+        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+        timerGuard->setObjectName(QString());
+        timerGuard->deleteLater();
         if (onReady) onReady();
     });
     timer->start(0);
@@ -1021,19 +1053,21 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()
         if (m_atomTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_atomTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_atomTable);
-            for (int row = 0; row < m_atomTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_atomTable, static_cast<std::size_t>(m_atomTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_atomTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_atomRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_atomRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_atomTable, row);
                 }
-            }
-            m_atomTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_atomTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildAtomTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_atomTable, m_atomFilterEdit);
         return;

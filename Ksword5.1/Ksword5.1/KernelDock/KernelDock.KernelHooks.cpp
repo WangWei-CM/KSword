@@ -2637,19 +2637,21 @@ void KernelDock::rebuildShadowSsdtTable(const bool sourceChanged, std::function<
         if (m_shadowSsdtTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_shadowSsdtTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_shadowSsdtTable);
-            for (int row = 0; row < m_shadowSsdtTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_shadowSsdtTable, static_cast<std::size_t>(m_shadowSsdtTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_shadowSsdtTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_shadowSsdtRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_shadowSsdtRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_shadowSsdtTable, row);
                 }
-            }
-            m_shadowSsdtTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_shadowSsdtTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildShadowSsdtTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_shadowSsdtTable, m_shadowSsdtFilterEdit);
         return;
@@ -2703,19 +2705,21 @@ void KernelDock::rebuildInlineHookTable(const bool sourceChanged, std::function<
         if (m_inlineHookTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_inlineHookTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_inlineHookTable);
-            for (int row = 0; row < m_inlineHookTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_inlineHookTable, static_cast<std::size_t>(m_inlineHookTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_inlineHookTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_inlineHookRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_inlineHookRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_inlineHookTable, row);
                 }
-            }
-            m_inlineHookTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_inlineHookTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildInlineHookTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_inlineHookTable, m_inlineHookFilterEdit);
         return;
@@ -2786,19 +2790,21 @@ void KernelDock::rebuildIatEatHookTable(const bool sourceChanged, std::function<
         if (m_iatEatHookTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_iatEatHookTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_iatEatHookTable);
-            for (int row = 0; row < m_iatEatHookTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_iatEatHookTable, static_cast<std::size_t>(m_iatEatHookTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_iatEatHookTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_iatEatHookRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_iatEatHookRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_iatEatHookTable, row);
                 }
-            }
-            m_iatEatHookTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_iatEatHookTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildIatEatHookTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_iatEatHookTable, m_iatEatHookFilterEdit);
         return;
@@ -2855,19 +2861,21 @@ void KernelDock::rebuildTimerDpcTable(const bool sourceChanged, std::function<vo
         if (m_timerDpcTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_timerDpcTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_timerDpcTable);
-            for (int row = 0; row < m_timerDpcTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_timerDpcTable, static_cast<std::size_t>(m_timerDpcTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_timerDpcTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_timerDpcRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_timerDpcRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_timerDpcTable, row);
                 }
-            }
-            m_timerDpcTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_timerDpcTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildTimerDpcTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_timerDpcTable, m_timerDpcFilterEdit);
         return;

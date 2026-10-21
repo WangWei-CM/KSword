@@ -474,19 +474,21 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()
         if (m_ssdtTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_ssdtTable->property(KernelSearchLanguageProperty).toString() != language)
         {
-            resetKernelResultFilterCache(m_ssdtTable);
-            for (int row = 0; row < m_ssdtTable->rowCount(); ++row)
-            {
+            publishKernelResultRows(m_ssdtTable, static_cast<std::size_t>(m_ssdtTable->rowCount()),
+                [this, searchFields](const std::size_t cacheRow) {
+                const int row = static_cast<int>(cacheRow);
                 auto* item = m_ssdtTable->item(row, 0);
-                if (item == nullptr) continue;
+                if (item == nullptr) return;
                 const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
                 if (sourceIndex < m_ssdtRows.size())
                 {
                     item->setData(KernelSearchFieldsRole, searchFields(m_ssdtRows[sourceIndex]));
                     rememberKernelResultFilterRow(m_ssdtTable, row);
                 }
-            }
-            m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this, language]() {
+                    m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
+                }, [this]() { rebuildSsdtTable(false); }, false);
+            return;
         }
         applyKernelResultFilterAsync(m_ssdtTable, m_ssdtFilterEdit);
         return;
