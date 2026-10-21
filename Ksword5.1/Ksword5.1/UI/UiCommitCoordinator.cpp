@@ -24,6 +24,22 @@ namespace
     constexpr char kValueCaptureDepthProperty[] = "ksword_table_value_capture_depth";
     constexpr char kCoordinatorName[] = "ksword_ui_commit_coordinator";
 
+    // Empty/ambiguous owner groups retain the original commit semantics.
+    bool explicitPresentationHosts(QObject* owner, const QList<QAbstractItemView*>& views)
+    {
+        const auto* host = qobject_cast<QWidget*>(owner);
+        return host != nullptr && !views.isEmpty() && std::all_of(views.cbegin(), views.cend(), [host](const auto* view) {
+            return view != nullptr && (view == host || host->isAncestorOf(view));
+        });
+    }
+
+    bool targetsVisible(const QList<QAbstractItemView*>& views)
+    {
+        return std::any_of(views.cbegin(), views.cend(), [](const auto* view) {
+            return view != nullptr && view->isVisible();
+        });
+    }
+
     bool realLeftCtrlHeld()
     {
         return (::GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0;
@@ -139,11 +155,19 @@ namespace ks::ui
         {
             views.append(view.data());
         }
-        return pending.waitsForValueCapture ? isPresentationBlocked(views) : isBlocked(views);
+        return pending.waitsForValueCapture
+            ? isPresentationBlocked(views) || (pending.waitsForExposure
+                && explicitPresentationHosts(pending.owner.data(), views) && !targetsVisible(views))
+            : isBlocked(views);
     }
 
     void UiCommitCoordinator::removeIndex(const PendingCommit& pending)
     {
+        for (QObject* const host : pending.presentationHosts)
+        {
+            const auto found = m_pendingShowHosts.find(host);
+            if (found != m_pendingShowHosts.end() && --found.value() == 0) m_pendingShowHosts.erase(found);
+        }
         auto owner = m_pendingIndex.find(pending.ownerIdentity);
         if (owner == m_pendingIndex.end()) return;
         owner->remove(pending.key);
@@ -171,7 +195,13 @@ namespace ks::ui
         {
             m_watchedOwners.remove(owner);
             const auto generations = m_pendingIndex.take(owner);
-            for (const quint64 generation : generations) m_pending.remove(generation);
+            for (const quint64 generation : generations)
+            {
+                const auto pending = m_pending.find(generation);
+                if (pending == m_pending.end()) continue;
+                removeIndex(pending.value());
+                m_pending.erase(pending);
+            }
         });
     }
 
@@ -216,7 +246,10 @@ namespace ks::ui
         }
         // 先淘汰同键旧提交。松开 Ctrl 后先收到新快照时，旧快照不可随后覆盖它。
         removeMatching(owner, key);
-        const bool blocked = waitsForValueCapture ? isPresentationBlocked(views) : isBlocked(views);
+        const bool waitsForExposure = waitsForValueCapture && explicitPresentationHosts(owner, views);
+        const bool blocked = waitsForValueCapture
+            ? isPresentationBlocked(views) || (waitsForExposure && !targetsVisible(views))
+            : isBlocked(views);
         if (!blocked && (executingLegacyGuard || (!m_flushing && !m_roundActive && !m_continuationPending)))
         {
             if (!m_pending.isEmpty() && !m_flushing)
@@ -231,12 +264,20 @@ namespace ks::ui
         pending.key = key;
         pending.action = std::move(action);
         pending.waitsForValueCapture = waitsForValueCapture;
+        pending.waitsForExposure = waitsForExposure;
         for (QAbstractItemView* const view : views)
         {
             if (view != nullptr)
             {
                 pending.views.append(view);
             }
+        }
+        if (waitsForExposure)
+        {
+            pending.presentationHosts.append(owner);
+            for (QAbstractItemView* const view : views)
+                if (!pending.presentationHosts.contains(view)) pending.presentationHosts.append(view);
+            for (QObject* const host : pending.presentationHosts) ++m_pendingShowHosts[host];
         }
         watchOwner(owner);
         const quint64 generation = ++m_nextGeneration;
@@ -346,6 +387,7 @@ namespace ks::ui
             m_roundActive = true;
             m_roundCutoff = m_nextGeneration;
             m_roundCursor = 0;
+            m_roundVisiblePass = true;
         }
         QElapsedTimer elapsed;
         elapsed.start();
@@ -362,6 +404,13 @@ namespace ks::ui
             const auto next = m_pending.upperBound(m_roundCursor);
             if (next == m_pending.end() || next.key() > m_roundCutoff)
             {
+                if (m_roundVisiblePass)
+                {
+                    m_roundVisiblePass = false;
+                    m_roundCursor = 0;
+                    if (budgetExpired()) break;
+                    continue;
+                }
                 m_roundActive = false;
                 break;
             }
@@ -371,21 +420,29 @@ namespace ks::ui
                 removeIndex(next.value());
                 m_pending.erase(next);
             }
-            else if (!pendingBlocked(next.value()))
+            else
             {
-                // 原子目标组不拆开；预算只能约束多个 action 的串联，不能抢占单个 action。
-                PendingCommit pending = std::move(next.value());
-                removeIndex(pending);
-                m_pending.erase(next);
-                const QPointer<UiCommitCoordinator> self(this);
-                m_executingOwner = pending.owner;
-                m_executingKey = pending.key;
-                m_legacyGuardAvailable = true;
-                pending.action();
-                if (self.isNull()) return;
-                m_legacyGuardAvailable = false;
-                m_executingOwner.clear();
-                m_executingKey.clear();
+                // Both passes reuse the generation cursor; no sorting or full-map copy.
+                // One exposed member makes the whole atomic group foreground work.
+                const bool visible = std::any_of(next->views.cbegin(), next->views.cend(), [](const auto& view) {
+                    return view && view->isVisible();
+                });
+                if ((!m_roundVisiblePass || visible) && !pendingBlocked(next.value()))
+                {
+                    // 原子目标组不拆开；预算只能约束多个 action 的串联，不能抢占单个 action。
+                    PendingCommit pending = std::move(next.value());
+                    removeIndex(pending);
+                    m_pending.erase(next);
+                    const QPointer<UiCommitCoordinator> self(this);
+                    m_executingOwner = pending.owner;
+                    m_executingKey = pending.key;
+                    m_legacyGuardAvailable = true;
+                    pending.action();
+                    if (self.isNull()) return;
+                    m_legacyGuardAvailable = false;
+                    m_executingOwner.clear();
+                    m_executingKey.clear();
+                }
             }
             // 连屏障检查也计入同一份预算；游标跨续轮保存，避免反复从头扫描饥饿。
             if (budgetExpired()) break;
@@ -412,8 +469,15 @@ namespace ks::ui
     {
         if (event != nullptr)
         {
+            // Only explicitly indexed pending hosts wake hidden presentation work.
+            // Child views also receive Show when their hidden ancestors are exposed.
+            if ((event->type() == QEvent::Show || event->type() == QEvent::ParentChange
+                || event->type() == QEvent::Destroy) && m_pendingShowHosts.contains(watched))
+            {
+                notifyInteractionEnded();
+            }
             // 只把释放事件作为调度提示，flush 始终重查真实左 Ctrl 状态。
-            if (event->type() == QEvent::KeyRelease)
+            else if (event->type() == QEvent::KeyRelease)
             {
                 const auto* const key = static_cast<QKeyEvent*>(event);
                 if (key->key() == Qt::Key_Control && !key->isAutoRepeat())

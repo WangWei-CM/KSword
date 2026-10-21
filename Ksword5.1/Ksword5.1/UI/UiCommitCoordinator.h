@@ -65,8 +65,10 @@ namespace ks::ui
             const QList<QAbstractItemView*>& views,
             std::function<void()> action);
 
-        // Only pure presentation commits opt into the capture lease. Business
-        // cache, sampling and archive commits keep using deferIfBlocked/submit.
+        // Only pure presentation commits opt into capture/hidden-view deferral.
+        // Known QWidget owners with nonempty descendant targets keep only the
+        // latest hidden projection until an actual target/owner Show.
+        // Business cache, sampling and archive commits keep deferIfBlocked/submit.
         bool deferPresentationIfBlocked(
             QObject* owner,
             const QString& key,
@@ -108,6 +110,8 @@ namespace ks::ui
             QList<QPointer<QAbstractItemView>> views;  // 本次原子更新的目标集合。
             std::function<void()> action;             // 最新快照对应的提交动作。
             bool waitsForValueCapture = false;        // Pure presentation only.
+            bool waitsForExposure = false;            // Explicit known owner/targets at admission.
+            QList<QObject*> presentationHosts;        // Index identities only; never dereference.
         };
 
         using PendingMap = QMap<quint64, PendingCommit>;
@@ -134,10 +138,12 @@ namespace ks::ui
         UiCommitDrainOptions m_drainOptions;        // 全应用共享排空预算与测试时钟。
         PendingMap m_pending;                     // 按到达代次排序，回调重入不会使游标悬空。
         QHash<QObject*, QHash<QString, quint64>> m_pendingIndex; // owner/key 到最新代次。
+        QHash<QObject*, qsizetype> m_pendingShowHosts; // Only current explicit presentation hosts; shared app filter.
         quint64 m_nextGeneration = 0;              // 每个缓存提交的唯一到达代次。
         quint64 m_roundCutoff = 0;                 // 本轮只处理开始时已到达的快照。
         quint64 m_roundCursor = 0;                 // 跨软预算续轮恢复扫描位置。
         bool m_roundActive = false;               // 本轮尚有未扫描项。
+        bool m_roundVisiblePass = true;            // Same cutoff: visible first, then other targets.
         bool m_continuationPending = false;       // 新提交不得绕过已经让出的排空轮。
         bool m_flushRequested = false;            // 嵌套事件循环请求留到外层复查。
         QPointer<QObject> m_executingOwner;        // 当前原子回调的旧式 defer guard 身份。
