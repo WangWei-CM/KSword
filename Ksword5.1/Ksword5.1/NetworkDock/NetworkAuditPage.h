@@ -542,6 +542,7 @@ private:
     QTimer* m_crossAutoRefreshTimer = nullptr; // 原连接管理页自动刷新能力。
     QSet<quint32> m_processFilterSet; // 进程页带入的独立 PID 筛选。
     ks::ui::AsyncOperation* m_crossPreparation = nullptr;
+    ks::ui::AsyncOperation* m_crossFilterOperation = nullptr;
     std::shared_ptr<const AuditSnapshot> m_crossPrepareRequestedSource;
     std::uint64_t m_crossSourceGeneration = 0;
     std::uint64_t m_crossLanguageGeneration = 0;

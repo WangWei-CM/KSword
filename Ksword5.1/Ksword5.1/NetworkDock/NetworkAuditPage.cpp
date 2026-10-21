@@ -72,6 +72,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -824,6 +825,7 @@ NetworkAuditPage::~NetworkAuditPage()
 {
     m_asyncState->closing.store(true);
     if (m_crossPreparation) m_crossPreparation->close();
+    if (m_crossFilterOperation) m_crossFilterOperation->close();
     if (m_asyncState)
     {
         std::lock_guard<std::mutex> lock(m_asyncState->mutex);
@@ -2817,44 +2819,130 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
     if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
         QStringLiteral("network_cross_filter"), {m_tcpTable, m_udpTable, m_crossSummaryTable},
         [owner]() { if (owner) owner->applyCrossViewSearchFilter(); })) return;
-    const QString filter = m_crossSearchEdit ? m_crossSearchEdit->text().trimmed().toCaseFolded() : QString();
-    for (auto* table : {m_tcpTable, m_udpTable, m_crossSummaryTable})
+
+    // Capture only immutable values. Proxy order and persistent indexes remain GUI-owned.
+    struct Request
     {
-        if (!table) continue;
-        QSet<QPersistentModelIndex> excluded;
-        if (!filter.isEmpty() || !m_processFilterSet.isEmpty())
+        std::shared_ptr<const CrossViewPresentation> source;
+        QString filter;
+        QSet<quint32> processIds;
+        std::array<QVector<int>, 3> columns;
+    };
+    using Matches = std::array<std::vector<bool>, 3>;
+    Request request{m_displayedCrossView,
+        m_crossSearchEdit ? m_crossSearchEdit->text().trimmed().toCaseFolded() : QString(),
+        m_processFilterSet, {}};
+    const std::array<QTableView*, 3> tables{m_tcpTable, m_udpTable, m_crossSummaryTable};
+    for (std::size_t i = 0; i < tables.size(); ++i)
+        if (tables[i])
+            for (int column = 0; column < tables[i]->model()->columnCount(); ++column)
+                if (!tables[i]->isColumnHidden(column)) request.columns[i].append(column);
+
+    const auto publish = [owner, request](const Matches& matches)
+    {
+        const auto current = [&]()
         {
-            for (int row = 0; row < table->model()->rowCount(); ++row)
+            return owner && owner->m_displayedCrossView == request.source
+                && owner->m_crossLanguageGeneration == request.source->languageGeneration
+                && owner->m_processFilterSet == request.processIds
+                && (owner->m_crossSearchEdit ? owner->m_crossSearchEdit->text().trimmed().toCaseFolded() : QString()) == request.filter;
+        };
+        if (!current()) return true;
+        if (!owner->m_crossViewPage || !owner->m_crossViewPage->isVisible()) return true;
+        if (owner->m_projectionInProgress)
+        {
+            owner->m_projectionRequestedWhileBusy = true;
+            return true;
+        }
+        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+            QStringLiteral("network_cross_filter"), {owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable},
+            [owner]() { if (owner) owner->applyCrossViewSearchFilter(); })) return true;
+        const std::array<QTableView*, 3> currentTables{owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable};
+        const bool active = !request.filter.isEmpty() || !request.processIds.isEmpty();
+        // Check all captured columns before publishing any table, including a hidden-column change in flight.
+        for (std::size_t i = 0; i < currentTables.size(); ++i)
+        {
+            if (!currentTables[i]) continue;
+            QVector<int> columns;
+            for (int column = 0; column < currentTables[i]->model()->columnCount(); ++column)
+                if (!currentTables[i]->isColumnHidden(column)) columns.append(column);
+            if (columns != request.columns[i])
             {
-                const auto identity = table->model()->index(row, 0);
-                const auto pid = identity.data(Qt::UserRole + 171).toUInt();
-                bool matched = m_processFilterSet.isEmpty() || m_processFilterSet.contains(pid);
-                if (matched && !filter.isEmpty())
-                {
-                    matched = false;
-                    const auto fields = identity.data(Qt::UserRole + 170).toStringList();
-                    for (int column = 0; column < fields.size(); ++column)
-                        if (!table->isColumnHidden(column) && fields.at(column).contains(filter))
-                        { matched = true; break; }
-                }
-                if (!matched) excluded.insert(QPersistentModelIndex(identity));
+                if (owner->m_crossSearchTimer) owner->m_crossSearchTimer->start();
+                return true;
             }
         }
-        ks::ui::ApplyTableRowFilterIncrementally(table, excluded);
-        if (auto* selection = table->selectionModel())
+        for (std::size_t i = 0; i < currentTables.size(); ++i)
         {
-            QItemSelection removed;
-            for (const auto& index : selection->selectedRows())
-                if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
-                    removed.select(table->model()->index(index.row(), 0),
-                        table->model()->index(index.row(), table->model()->columnCount() - 1));
-            if (!removed.isEmpty()) selection->select(removed, QItemSelectionModel::Deselect);
-            if (ks::ui::IsTableRowExcludedByFilter(table, table->currentIndex().row()))
-                selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+            QTableView* const table = currentTables[i];
+            if (!table) continue;
+            auto* proxy = qobject_cast<QSortFilterProxyModel*>(table->model());
+            if (!proxy || (active && proxy->sourceModel()->rowCount() != static_cast<int>(matches[i].size()))) return true;
+            QSet<QPersistentModelIndex> excluded;
+            if (active)
+                for (int row = 0; row < proxy->rowCount(); ++row)
+                {
+                    const QModelIndex identity = proxy->index(row, 0);
+                    const int sourceRow = proxy->mapToSource(identity).row();
+                    if (sourceRow < 0 || sourceRow >= static_cast<int>(matches[i].size())) return true;
+                    if (!matches[i][static_cast<std::size_t>(sourceRow)]) excluded.insert(QPersistentModelIndex(identity));
+                }
+            ks::ui::ApplyTableRowFilterIncrementally(table, excluded);
+            if (!current()) return true;
+            if (auto* selection = table->selectionModel())
+            {
+                QItemSelection removed;
+                for (const auto& index : selection->selectedRows())
+                    if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
+                        removed.select(table->model()->index(index.row(), 0),
+                            table->model()->index(index.row(), table->model()->columnCount() - 1));
+                if (!removed.isEmpty()) selection->select(removed, QItemSelectionModel::Deselect);
+                if (!current()) return true;
+                if (ks::ui::IsTableRowExcludedByFilter(table, table->currentIndex().row()))
+                    selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+                if (!current()) return true;
+            }
         }
+        owner->m_crossFilterDirty = false;
+        owner->updateCrossViewActionState();
+        return true;
+    };
+    if (request.filter.isEmpty() && request.processIds.isEmpty())
+    {
+        if (m_crossFilterOperation) m_crossFilterOperation->cancel();
+        if (owner) publish(Matches{}); // Clearing a filter needs no worker or full row scan.
+        return;
     }
-    m_crossFilterDirty = false;
-    updateCrossViewActionState();
+    if (!m_crossFilterOperation) m_crossFilterOperation = new ks::ui::AsyncOperation(this);
+    m_crossFilterOperation->submit<Request, Matches>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token)
+        {
+            Matches result;
+            const std::array<const std::vector<CrossViewValue>*, 3> rows{
+                &value.source->tcpRows, &value.source->udpRows, &value.source->summaryRows};
+            for (std::size_t i = 0; i < rows.size(); ++i)
+            {
+                result[i].reserve(rows[i]->size());
+                for (const auto& row : *rows[i])
+                {
+                    if (token.isCanceled()) return Matches{};
+                    bool matched = value.processIds.isEmpty() || value.processIds.contains(row->processId);
+                    if (matched && !value.filter.isEmpty())
+                    {
+                        matched = false;
+                        for (int column : value.columns[i])
+                            if (column < row->searchFields.size() && row->searchFields.at(column).contains(value.filter))
+                            { matched = true; break; }
+                    }
+                    result[i].push_back(matched);
+                }
+            }
+            return result;
+        },
+        [owner, publish](const Matches& matches, const std::uint64_t ticket)
+        {
+            return !owner || !owner->m_crossFilterOperation->isCurrent(ticket) || publish(matches);
+        });
 }
 
 QIcon NetworkAuditPage::resolveProcessIcon(const std::uint32_t processId)
