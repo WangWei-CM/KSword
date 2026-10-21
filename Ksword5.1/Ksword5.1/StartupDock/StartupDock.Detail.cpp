@@ -198,7 +198,7 @@ void StartupDock::showSelectedEntryDetails(const StartupCategory category, QTabl
         const int entryIndex = findEntryIndexByRegistryTreeItem(currentItem);
         if (entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size()))
         {
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+            const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
             showStartupDetailDialog(
                 this,
                 startupText("startup.dialog.entry_detail.title", QStringLiteral("启动项详细信息 - %1"))
@@ -226,7 +226,7 @@ void StartupDock::showSelectedEntryDetails(const StartupCategory category, QTabl
         return;
     }
 
-    const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+    const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
     showStartupDetailDialog(
         this,
         startupText("startup.dialog.entry_detail.title", QStringLiteral("启动项详细信息 - %1"))
@@ -251,7 +251,7 @@ void StartupDock::openSelectedFileProperties(const StartupCategory category, QTa
         return;
     }
 
-    const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+    const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
     if (!entry.canOpenFileLocation || entry.imagePathText.trimmed().isEmpty())
     {
         QMessageBox::information(

@@ -564,7 +564,7 @@ bool StartupDock::continueProjectionPreparation()
             if (preparation.nextEntry < m_entryList.size())
             {
                 const int entryIndex = static_cast<int>(preparation.nextEntry++);
-                const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+                const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
                 if (m_projectionBuildCategory == StartupCategory::Registry)
                 {
                     if (isRegistryBackedStartupEntry(entry))
@@ -663,7 +663,7 @@ void StartupDock::continueIncrementalTableRebuild()
                 appendEntryRow(
                     target.tableWidget,
                     target.baseRow + static_cast<int>(target.nextRowIndex),
-                    m_entryList[static_cast<std::size_t>(entryIndex)],
+                    m_entryList.at(static_cast<std::size_t>(entryIndex)),
                     entryIndex);
             }
             ++target.nextRowIndex;
@@ -709,7 +709,7 @@ void StartupDock::continueIncrementalTableRebuild()
             {
                 appendRegistryTreeLeaf(
                     target.groupItem,
-                    m_entryList[static_cast<std::size_t>(entryIndex)],
+                    m_entryList.at(static_cast<std::size_t>(entryIndex)),
                     entryIndex);
             }
             ++target.nextEntryIndex;

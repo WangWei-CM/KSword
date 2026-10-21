@@ -353,7 +353,7 @@ void StartupDock::showEntryContextMenu(
         return;
     }
 
-    const StartupEntry entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+    const StartupEntry entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
     std::vector<StartupEntry> selectedEntryList;
     if (selectionModel != nullptr)
     {
@@ -368,7 +368,7 @@ void StartupDock::showEntryContextMenu(
                 && selectedEntryIndex < static_cast<int>(m_entryList.size()))
             {
                 selectedEntryList.push_back(
-                    m_entryList[static_cast<std::size_t>(selectedEntryIndex)]);
+                    m_entryList.at(static_cast<std::size_t>(selectedEntryIndex)));
             }
         }
     }
@@ -559,7 +559,7 @@ void StartupDock::showRegistryContextMenu(const QPoint& localPos)
     const bool hasRegistryEntry =
         entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size());
     const StartupEntry registryEntry = hasRegistryEntry
-        ? m_entryList[static_cast<std::size_t>(entryIndex)]
+        ? m_entryList.at(static_cast<std::size_t>(entryIndex))
         : StartupEntry{};
     QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
         &contextMenu,
@@ -691,7 +691,7 @@ void StartupDock::openSelectedFileLocation(const StartupCategory category, QTabl
         return;
     }
 
-    const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+    const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
     if (!entry.canOpenFileLocation || entry.imagePathText.trimmed().isEmpty())
     {
         QMessageBox::information(
@@ -730,7 +730,7 @@ void StartupDock::openSelectedRegistryLocation(const StartupCategory category, Q
             const int entryIndex = findEntryIndexByRegistryTreeItem(currentItem);
             if (entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size()))
             {
-                locationText = m_entryList[static_cast<std::size_t>(entryIndex)].locationText;
+                locationText = m_entryList.at(static_cast<std::size_t>(entryIndex)).locationText;
             }
         }
     }
@@ -739,7 +739,7 @@ void StartupDock::openSelectedRegistryLocation(const StartupCategory category, Q
         const int entryIndex = findEntryIndexByTableRow(category, tableWidget->currentRow());
         if (entryIndex >= 0 && entryIndex < static_cast<int>(m_entryList.size()))
         {
-            locationText = m_entryList[static_cast<std::size_t>(entryIndex)].locationText;
+            locationText = m_entryList.at(static_cast<std::size_t>(entryIndex)).locationText;
         }
     }
     if (locationText.trimmed().isEmpty())
@@ -787,7 +787,7 @@ void StartupDock::copySelectedRow(const StartupCategory category, QTableWidget* 
             return;
         }
 
-        const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+        const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
         QApplication::clipboard()->setText(startupEntryTsvRow(entry));
         return;
     }
@@ -803,7 +803,7 @@ void StartupDock::copySelectedRow(const StartupCategory category, QTableWidget* 
         return;
     }
 
-    const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+    const StartupEntry& entry = m_entryList.at(static_cast<std::size_t>(entryIndex));
     QApplication::clipboard()->setText(startupEntryTsvRow(entry));
 }
 
@@ -841,17 +841,12 @@ void StartupDock::exportCurrentView()
             ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
         return;
     }
-    struct ExportRow {
-        QString name, publisher, image, command, location, user, source, detail;
-        ks::startup::StartupActionKind kind;
-        ks::startup::StartupScmStartMode mode;
-        bool enabled;
-    };
     struct Request {
-        QString path; QStringList headers; std::vector<ExportRow> rows;
+        QString path; QStringList headers; QVector<StartupEntry> sourceRows; QVector<int> rowIndices;
         QHash<QString, QString> texts; ks::i18n::SourceTextSnapshot language;
     } request;
     request.path = outputPath;
+    request.sourceRows = m_entryList; // Frozen shared complete source, no per-entry GUI copy.
     request.headers = startupTableHeaders();
     request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     const auto captureText = [&request](const char* key, const QString& source) {
@@ -867,12 +862,8 @@ void StartupDock::exportCurrentView()
     captureText("startup.detail.scheduled_task", QStringLiteral("状态：%1；触发器：%2；描述：%3"));
     captureText("startup.detail.backup_record", QStringLiteral("KSword 备份记录：%1"));
     captureText("startup.detail.parking_path", QStringLiteral("KSword 暂存路径：%1"));
-    const auto appendEntry = [this, &request](const int index) {
-        if (index < 0 || index >= static_cast<int>(m_entryList.size())) return;
-        const auto& entry = m_entryList[static_cast<std::size_t>(index)];
-        request.rows.push_back({entry.itemNameText, entry.publisherText, entry.imagePathText, entry.commandText,
-            entry.locationText, entry.userText, entry.sourceTypeText, entry.detailText,
-            entry.backendEntry.actionKind, entry.backendEntry.actionLocator.serviceStartMode, entry.backendEntry.enabled});
+    const auto appendEntry = [&request](const int index) {
+        if (index >= 0 && index < request.sourceRows.size()) request.rowIndices.push_back(index);
     };
     const auto category = currentCategory();
     if (category == StartupCategory::Registry)
@@ -890,7 +881,7 @@ void StartupDock::exportCurrentView()
     {
         const auto* table = currentCategoryTable();
         if (!table) return;
-        request.rows.reserve(static_cast<std::size_t>(table->rowCount()));
+        request.rowIndices.reserve(table->rowCount());
         for (int row = 0; row < table->rowCount(); ++row)
             if (!ks::ui::IsTableRowExcludedByFilter(table, row))
                 appendEntry(findEntryIndexByTableRow(category, row));
@@ -910,11 +901,12 @@ void StartupDock::exportCurrentView()
                 return input.texts.value(QString::fromLatin1(key), source);
             };
             const StartupSourceResolver source = [&input](const QString& value) { return input.language.sourceText(value); };
-            for (const auto& row : input.rows)
+            for (const int index : input.rowIndices)
             {
-                QStringList fields{row.name, row.publisher, row.image, row.command, row.location,
-                    source(row.user), formatStartupStatusText(row.kind, row.mode, row.enabled, context),
-                    source(row.source), formatStartupDetailText(row.detail, context, source)};
+                const auto& row = input.sourceRows.at(index);
+                QStringList fields{row.itemNameText, row.publisherText, row.imagePathText, row.commandText, row.locationText,
+                    source(row.userText), formatStartupStatusText(row.backendEntry.actionKind, row.backendEntry.actionLocator.serviceStartMode, row.backendEntry.enabled, context),
+                    source(row.sourceTypeText), formatStartupDetailText(row.detailText, context, source)};
                 for (QString& field : fields) field = startupTsvField(field);
                 stream << fields.join(QChar('\t')) << '\n';
             }

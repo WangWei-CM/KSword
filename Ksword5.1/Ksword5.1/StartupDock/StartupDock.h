@@ -16,6 +16,7 @@
 #include <QIcon>
 #include <QPersistentModelIndex>
 #include <QSet>
+#include <QVector>
 #include <QWidget>
 
 #include <atomic>   // std::atomic_bool：后台刷新运行状态。
@@ -182,6 +183,8 @@ private:
         std::size_t stageIndex = 0;
         std::size_t stageCount = 0;
         std::vector<StartupEntry> entryList;
+        QVector<StartupEntry> canonicalRows;
+        std::size_t appendedCount = 0;
     };
 
     // ===================== 初始化 =====================
@@ -196,10 +199,7 @@ private:
     void requestAsyncRefresh(bool forceRefresh);
     struct StartupRefreshSession;
     void drainRefreshSession();
-    void enqueueRefreshStageResult(
-        std::size_t stageIndex,
-        std::size_t stageCount,
-        std::vector<StartupEntry> entryList);
+    void enqueueRefreshStageResult(RefreshStageResult stageResult);
     void processNextRefreshStageResult();
     void markBackendEnumerationCompleted();
     void completeRefreshAfterUiCommit();
@@ -300,7 +300,7 @@ private:
     QTableWidget* m_hiddenTable = nullptr;    // m_hiddenTable：隐藏项表。
 
     // ===================== 数据缓存 =====================
-    std::vector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
+    QVector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
     std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
     bool m_exportPendingReceipt = false;
     QString m_exportReceiptPath;

@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QHideEvent>
 #include <QPixmap>
+#include <QThreadPool>
 #include <Objbase.h>
 
 using namespace startup_dock_detail;
@@ -510,12 +511,13 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
             const auto shouldStop = [&]() { return token.isCanceled() || input.session->stopping.load(); };
             try
             {
+                QVector<StartupEntry> canonicalRows;
                 (void)ks::startup::EnumerateAllStartupEntries(
                     [&input](const ks::startup::StartupEnumerationStage, const std::size_t stageIndex, const std::size_t stageCount) {
                         constexpr std::array<float, 9> values{5.0f, 13.0f, 21.0f, 29.0f, 44.0f, 52.0f, 63.0f, 70.0f, 80.0f};
                         if (stageIndex < stageCount && stageIndex < values.size()) kPro.set(input.progressPid, input.progressTexts[stageIndex], 0, values[stageIndex]);
                     },
-                    [&input, &shouldStop](const ks::startup::StartupEnumerationStage, const std::size_t stageIndex,
+                    [&input, &shouldStop, &canonicalRows](const ks::startup::StartupEnumerationStage, const std::size_t stageIndex,
                         const std::size_t stageCount, const std::vector<ks::startup::StartupEntry>& backendEntries) {
                         if (shouldStop()) return;
                         RefreshStageResult stage;
@@ -528,6 +530,12 @@ void StartupDock::requestAsyncRefresh(const bool forceRefresh)
                             return name == 0 ? left.locationText.compare(right.locationText, Qt::CaseInsensitive) < 0 : name < 0;
                         });
                         if (shouldStop()) return;
+                        stage.appendedCount = stage.entryList.size();
+                        // Complete cumulative source preparation/detach stays on the enumeration worker.
+                        canonicalRows.reserve(canonicalRows.size() + static_cast<qsizetype>(stage.entryList.size()));
+                        for (StartupEntry& entry : stage.entryList) canonicalRows.push_back(std::move(entry));
+                        stage.entryList.clear();
+                        stage.canonicalRows = canonicalRows;
                         std::lock_guard<std::mutex> lock(input.session->mutex);
                         input.session->pending.push_back(std::move(stage));
                     }, shouldStop);
@@ -586,7 +594,7 @@ void StartupDock::drainRefreshSession()
     if (hasStage)
     {
         const QPointer<StartupDock> guarded(this);
-        enqueueRefreshStageResult(stage.stageIndex, stage.stageCount, std::move(stage.entryList));
+        enqueueRefreshStageResult(std::move(stage));
         if (guarded) m_refreshDrainTimer->start(0);
         return;
     }
@@ -603,23 +611,16 @@ void StartupDock::drainRefreshSession()
 }
 
 
-void StartupDock::enqueueRefreshStageResult(
-    const std::size_t stageIndex,
-    const std::size_t stageCount,
-    std::vector<StartupEntry> entryList)
+void StartupDock::enqueueRefreshStageResult(RefreshStageResult stageResult)
 {
     if (m_destroying.load()
         || !m_refreshInProgress.load()
-        || stageCount == 0U
-        || stageIndex >= stageCount)
+        || stageResult.stageCount == 0U
+        || stageResult.stageIndex >= stageResult.stageCount)
     {
         return;
     }
 
-    RefreshStageResult stageResult;
-    stageResult.stageIndex = stageIndex;
-    stageResult.stageCount = stageCount;
-    stageResult.entryList = std::move(entryList);
     m_pendingRefreshStageResults.push_back(std::move(stageResult));
     processNextRefreshStageResult();
 }
@@ -678,17 +679,11 @@ void StartupDock::processNextRefreshStageResult()
     // 首批结果到达时才切换离开旧快照；之后每个后端阶段都只向累计结果追加。
     // 每批落表完成前不处理下一批，保证用户看到的顺序与后端枚举顺序一致。
     const int appendFrom = m_refreshSnapshotStarted ? static_cast<int>(m_entryList.size()) : -1;
-    if (!m_refreshSnapshotStarted)
-    {
-        m_entryList.clear();
-        m_refreshSnapshotStarted = true;
-    }
-    const std::size_t stageEntryCount = stageResult.entryList.size();
-    m_entryList.reserve(m_entryList.size() + stageEntryCount);
-    for (StartupEntry& entry : stageResult.entryList)
-    {
-        m_entryList.push_back(std::move(entry));
-    }
+    m_refreshSnapshotStarted = true;
+    const std::size_t stageEntryCount = stageResult.appendedCount;
+    auto retired = std::move(m_entryList);
+    m_entryList = std::move(stageResult.canonicalRows); // O(1) GUI source commit; prefix prepared on worker.
+    QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
 
     m_activeRefreshStageIndex = stageResult.stageIndex;
     m_activeRefreshStageCount = stageResult.stageCount;
