@@ -11,6 +11,7 @@
 #include "../Framework.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../ksword/process/process_cpu_core_etw_monitor.h"
+#include "ProcessEtwCaptureLifecycle.h"
 
 #include <QColor>
 #include <QHash>
@@ -1348,13 +1349,16 @@ private:
     std::unordered_set<std::string> m_affinityRestoreCompletedIdentityKeys; // 已成功恢复或明确无规则的进程实例。
     std::unordered_map<std::string, AffinityRestoreRetryState> m_affinityRestoreRetryByIdentity; // 暂时失败且等待重试的进程实例。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
-    std::unique_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
+    std::shared_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
     bool m_processNetworkTrafficCaptureStarted = false; // ETW 采集器是否已经尝试启动。
     std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> m_cpuCoreUsageService; // 单个系统级 CSwitch 会话；后台快照任务共享生命周期。
     bool m_cpuCoreUsageCaptureStarted = false; // UI 线程状态：本轮监视周期内是否已经投递启动。
-    bool m_cpuCoreUsageStopInProgress = false; // UI 线程状态：异步 Stop/join 完成前禁止第二个会话。
     std::shared_ptr<std::atomic_bool> m_cpuCoreUsageCaptureDesired =
         std::make_shared<std::atomic_bool>(false); // 后台 Start 返回后读取的期望状态，解决快速开始/暂停竞态。
+    std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_processNetworkCaptureLifecycle =
+        std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
+    std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_cpuCoreCaptureLifecycle =
+        std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
     std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> m_latestCpuCoreUsageSnapshot; // 最近区间快照；UI 只交换共享指针，避免复制全量矩阵。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。

@@ -161,6 +161,44 @@
 
 namespace
 {
+    template<typename Service, typename StartedCallback>
+    void requestProcessEtwCapture(
+        const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
+        const std::shared_ptr<Service>& service,
+        const bool desired,
+        StartedCallback startedCallback)
+    {
+        if (service == nullptr || !lifecycle->Request(desired))
+        {
+            return;
+        }
+        QRunnable* task = QRunnable::create([lifecycle, service, startedCallback]()
+        {
+            using Operation = ks::process::ProcessEtwCaptureLifecycle::Operation;
+            for (;;)
+            {
+                switch (lifecycle->NextOperation())
+                {
+                case Operation::Start:
+                {
+                    const bool started = service->Start();
+                    lifecycle->CompleteStart(started);
+                    startedCallback(started, *service);
+                    break;
+                }
+                case Operation::Stop:
+                    service->Stop();
+                    lifecycle->CompleteStop();
+                    break;
+                case Operation::None:
+                    return;
+                }
+            }
+        });
+        task->setAutoDelete(true);
+        QThreadPool::globalInstance()->start(task);
+    }
+
     /*
      * R-1 进程处置对话框里预填的地址：目标主模块的入口点。
      *
@@ -4495,12 +4533,20 @@ ProcessDock::~ProcessDock()
     m_processIconExtractionPool.clear();
     m_processIconPathsInFlight.clear();
 
-    // 析构阶段先停止内部 ETW 消费线程：
-    // - 输入：无；
-    // - 处理：请求 ProcessNetworkEtwMonitor 退出并等待线程 join；
-    // - 返回：无，防止对象销毁后 ETW 回调继续访问成员。
+    // Only publish stop intent here. The worker owns Start/Stop/join and all late service references.
     stopProcessNetworkTrafficCapture();
     stopCpuCoreUsageCapture();
+    // Even an already stopped monitor calls Stop in its destructor. Transfer the Dock's last
+    // references to a worker, so service destruction cannot acquire ETW lifecycle locks on GUI.
+    QRunnable* releaseCaptureOwners = QRunnable::create([
+        networkService = std::move(m_processNetworkTrafficService),
+        cpuService = std::move(m_cpuCoreUsageService)]() mutable
+    {
+        networkService.reset();
+        cpuService.reset();
+    });
+    releaseCaptureOwners->setAutoDelete(true);
+    QThreadPool::globalInstance()->start(releaseCaptureOwners);
 
     // 析构阶段主动解除全局事件过滤器，避免 QApplication 后续点击事件访问已销毁 Dock。
     if (QApplication::instance() != nullptr)
@@ -4535,160 +4581,121 @@ bool ProcessDock::invokeMainWindowPidSlot(const char* methodName, const std::uin
 
 void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 {
-    // ensureProcessNetworkTrafficCaptureStarted：
-    // - 输入：无；
-    // - 处理：懒创建内部 ETW 累计器，后台仅按 PID 记录 TCP/UDP 收发字节；
-    // - 返回：无。失败时不回退到 Raw Socket 方案，进程表沿用现有差分结果。
     if (m_processNetworkTrafficCaptureStarted)
     {
         return;
     }
     m_processNetworkTrafficCaptureStarted = true;
-
     if (m_processNetworkTrafficService == nullptr)
     {
-        m_processNetworkTrafficService = std::make_unique<ks::network::ProcessNetworkEtwMonitor>();
+        m_processNetworkTrafficService = std::make_shared<ks::network::ProcessNetworkEtwMonitor>();
     }
-
-    const bool started = m_processNetworkTrafficService->Start();
-
-    // 同上：整句单条源文本，失败分支用 %1 承载 detail。
-    kLogEvent logEvent;
-    if (started)
-    {
-        info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
-    }
-    else
-    {
-        warn << logEvent
-            << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
-                .arg(QString::fromStdString(m_processNetworkTrafficService->LastErrorText()))
-                .toStdString()
-            << eol;
-    }
+    requestProcessEtwCapture(
+        m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, true,
+        [](const bool started, const ks::network::ProcessNetworkEtwMonitor& service)
+        {
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::stopProcessNetworkTrafficCapture()
 {
-    // stopProcessNetworkTrafficCapture：
-    // - 输入：无；
-    // - 处理：停止内部 ETW 会话，避免暂停或析构后继续累计；
-    // - 返回：无。
-    if (m_processNetworkTrafficService != nullptr)
-    {
-        m_processNetworkTrafficService->Stop();
-    }
     m_processNetworkTrafficCaptureStarted = false;
+    requestProcessEtwCapture(
+        m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, false,
+        [](const bool started, const ks::network::ProcessNetworkEtwMonitor& service)
+        {
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent << "[ProcessDock] 进程网络吞吐 ETW 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 进程网络吞吐 ETW 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::ensureCpuCoreUsageCaptureStarted()
 {
-    // 先记录期望状态：Stop 尚未完成时虽不能立刻启动，完成回调仍能据此恢复同一实例。
     m_cpuCoreUsageCaptureDesired->store(true, std::memory_order_release);
-    // 同一个旧会话仍在异步 Stop/join 时禁止创建新实例，确保进程页始终最多一个 CSwitch 会话。
-    if (m_cpuCoreUsageCaptureStarted || m_cpuCoreUsageStopInProgress)
+    if (m_cpuCoreUsageCaptureStarted)
     {
         return;
     }
     m_cpuCoreUsageCaptureStarted = true;
     if (m_cpuCoreUsageService == nullptr)
     {
-        m_cpuCoreUsageService =
-            std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
+        m_cpuCoreUsageService = std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
     }
-
-    // StartTrace/OpenTrace 只执行一次，但仍移到全局工作线程，避免 ETW 服务响应慢时阻塞 GUI。
-    const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreService =
-        m_cpuCoreUsageService;
-    const std::shared_ptr<std::atomic_bool> captureDesired =
-        m_cpuCoreUsageCaptureDesired;
-    QRunnable* startTask = QRunnable::create([cpuCoreService, captureDesired]()
-    {
-        const bool started = cpuCoreService->Start();
-        if (started && !captureDesired->load(std::memory_order_acquire))
+    requestProcessEtwCapture(
+        m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService, true,
+        [](const bool started, const ks::process::ProcessCpuCoreEtwMonitor& service)
         {
-            // 用户在启动完成前已暂停时立即后台回收，避免短暂遗留无人消费的高频会话。
-            cpuCoreService->Stop();
-        }
-        // 整句写成单条源文本（失败分支带 %1）：
-        // - 通知卡片与日志面板按整行查 source_translations，分段拼接的内容永远配不上词条；
-        // - %1 交给模板匹配捕获，detail 原样带出，不参与翻译。
-        kLogEvent logEvent;
-        if (started)
-        {
-            info << logEvent
-                << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功"
-                << eol;
-        }
-        else
-        {
-            warn << logEvent
-                << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
-                    .arg(QString::fromStdString(cpuCoreService->LastErrorText()))
-                    .toStdString()
-                << eol;
-        }
-    });
-    startTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(startTask);
+            kLogEvent logEvent;
+            if (started)
+            {
+                info << logEvent
+                    << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::stopCpuCoreUsageCapture()
 {
-    // UI 立即释放最新矩阵；StopTrace + consumer join 交给后台执行，暂停按钮不会卡住界面。
     m_latestCpuCoreUsageSnapshot.reset();
     m_lastCpuCoreUsageSnapshotTime = {};
     m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
     if (m_processTable != nullptr && m_processTable->viewport() != nullptr)
     {
-        // 暂停后立即清掉 CPU 列上一帧扇形，不等待滚动、曝光或下一次整表刷新。
         const int cpuColumn = toColumnIndex(TableColumn::CpuCore);
         const QRect cpuViewportRect(
-            m_processTable->columnViewportPosition(cpuColumn),
-            0,
-            m_processTable->columnWidth(cpuColumn),
-            m_processTable->viewport()->height());
+            m_processTable->columnViewportPosition(cpuColumn), 0,
+            m_processTable->columnWidth(cpuColumn), m_processTable->viewport()->height());
         m_processTable->viewport()->update(
             cpuViewportRect.intersected(m_processTable->viewport()->rect()));
     }
     m_cpuCoreUsageCaptureStarted = false;
-    if (m_cpuCoreUsageService == nullptr || m_cpuCoreUsageStopInProgress)
-    {
-        return;
-    }
-
-    m_cpuCoreUsageStopInProgress = true;
-    // 始终保留并复用同一个 service 对象；Stop 完成后的恢复仍调用同一实例，绝不创建第二个会话。
-    const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreService =
-        m_cpuCoreUsageService;
-    const QPointer<ProcessDock> safeThis(this);
-    QRunnable* stopTask = QRunnable::create([safeThis, cpuCoreService]()
-    {
-        cpuCoreService->Stop();
-        if (safeThis.isNull())
+    requestProcessEtwCapture(
+        m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService, false,
+        [](const bool started, const ks::process::ProcessCpuCoreEtwMonitor& service)
         {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            safeThis,
-            [safeThis]()
+            kLogEvent logEvent;
+            if (started)
             {
-                if (safeThis.isNull())
-                {
-                    return;
-                }
-                safeThis->m_cpuCoreUsageStopInProgress = false;
-                if (safeThis->m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire))
-                {
-                    // 用户在 Stop 完成前已重新进入允许刷新状态时，此处恢复唯一系统级会话。
-                    safeThis->ensureCpuCoreUsageCaptureStarted();
-                }
-            },
-            Qt::QueuedConnection);
-    });
-    stopTask->setAutoDelete(true);
-    QThreadPool::globalInstance()->start(stopTask);
+                info << logEvent
+                    << "[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动成功" << eol;
+            }
+            else
+            {
+                warn << logEvent
+                    << QStringLiteral("[ProcessDock] 单系统会话 CSwitch 逐核心 CPU 采集器启动失败, detail=%1")
+                        .arg(QString::fromStdString(service.LastErrorText())).toStdString()
+                    << eol;
+            }
+        });
 }
 
 void ProcessDock::syncCpuCoreUsageToDetailWindow(
