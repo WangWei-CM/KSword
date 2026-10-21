@@ -445,6 +445,7 @@ private:
     bool ensureNetworkToolPage(QWidget* page);
     void ensureVisibleNetworkToolPage();
     void initializeNidsConnections();
+    void initializeHttpsAnalyzeConnections();
     void initializeManualRequestConnections();
     void initializeArpCacheConnections();
     void initializeDnsCacheConnections();

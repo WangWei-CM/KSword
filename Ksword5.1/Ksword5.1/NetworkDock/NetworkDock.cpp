@@ -279,7 +279,9 @@ void NetworkDock::showEvent(QShowEvent* event)
             {
                 QMetaObject::invokeMethod(this, [this, statusText]()
                     {
+                        const QPointer<NetworkDock> owner(this);
                         appendHttpsProxyLogLine(statusText);
+                        if (!owner) return;
                         if (!statusText.isEmpty())
                         {
                             updateHttpsProxyStatusLabel(statusText);

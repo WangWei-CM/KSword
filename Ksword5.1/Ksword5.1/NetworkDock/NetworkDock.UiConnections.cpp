@@ -219,6 +219,31 @@ void NetworkDock::initializeNidsConnections()
     // - 现统一由 NetworkDock.Nids.cpp 的 initializeNidsTab() 注册唯一一份合并后的菜单，此处不再注册。
 }
 
+void NetworkDock::initializeHttpsAnalyzeConnections()
+{
+    // HTTPS 解析控制连接。
+    connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            startHttpsProxyService();
+        });
+    connect(m_httpsStopProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            stopHttpsProxyService();
+        });
+    connect(m_httpsTrustCertButton, &QPushButton::clicked, this, [this]()
+        {
+            ensureHttpsRootCertificateTrusted();
+        });
+    connect(m_httpsApplyProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            applyHttpsSystemProxy();
+        });
+    connect(m_httpsClearProxyButton, &QPushButton::clicked, this, [this]()
+        {
+            clearHttpsSystemProxy();
+        });
+}
+
 void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
@@ -397,28 +422,6 @@ void NetworkDock::initializeConnections()
             refreshConnectionTables();
         });
     }
-
-    // HTTPS 解析控制连接。
-    connect(m_httpsStartProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            startHttpsProxyService();
-        });
-    connect(m_httpsStopProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            stopHttpsProxyService();
-        });
-    connect(m_httpsTrustCertButton, &QPushButton::clicked, this, [this]()
-        {
-            ensureHttpsRootCertificateTrusted();
-        });
-    connect(m_httpsApplyProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            applyHttpsSystemProxy();
-        });
-    connect(m_httpsClearProxyButton, &QPushButton::clicked, this, [this]()
-        {
-            clearHttpsSystemProxy();
-        });
 
     // 连接表 PID 解析辅助：
     // - 从任意连接表（TCP/UDP）指定列提取 PID；

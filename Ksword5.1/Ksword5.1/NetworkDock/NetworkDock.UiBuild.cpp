@@ -72,7 +72,8 @@ void NetworkDock::initializeUi()
     cold(m_manualRequestPage, QStringLiteral("manual-request"), QIcon(QStringLiteral(":/Icon/process_main.svg")),
         [this]() { initializeManualRequestTab(); initializeManualRequestConnections(); });
     initializeMultiThreadDownloadTab();
-    initializeHttpsAnalyzeTab();
+    cold(m_httpsAnalyzePage, QStringLiteral("https"), QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        [this]() { initializeHttpsAnalyzeTab(); initializeHttpsAnalyzeConnections(); });
     cold(m_routeTablePage, QStringLiteral("route"), QIcon(QStringLiteral(":/Icon/process_tree.svg")), [this]() { initializeRouteTableTab(); });
     cold(m_arpCachePage, QStringLiteral("arp"), QIcon(QStringLiteral(":/Icon/process_tree.svg")), [this]() { initializeArpCacheTab(); initializeArpCacheConnections(); });
     cold(m_dnsCachePage, QStringLiteral("dns"), QIcon(QStringLiteral(":/Icon/process_list.svg")), [this]() { initializeDnsCacheTab(); initializeDnsCacheConnections(); });

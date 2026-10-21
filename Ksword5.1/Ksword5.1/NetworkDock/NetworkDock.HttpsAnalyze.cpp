@@ -529,7 +529,7 @@ private:
 
 void NetworkDock::initializeHttpsAnalyzeTab()
 {
-    m_httpsAnalyzePage = new QWidget(this);
+    if (m_httpsAnalyzePage == nullptr) m_httpsAnalyzePage = new QWidget(this);
     m_httpsAnalyzeLayout = new QVBoxLayout(m_httpsAnalyzePage);
     m_httpsAnalyzeLayout->setContentsMargins(6, 6, 6, 6);
     m_httpsAnalyzeLayout->setSpacing(6);
@@ -1345,6 +1345,11 @@ void NetworkDock::openHttpsParsedDetailByRow(const int row)
 
 void NetworkDock::appendHttpsProxyLogLine(const QString& logLine)
 {
+    // Recovery/status messages must remain visible even before this tab is opened.
+    // Only such an actual message prepares the cold page; ordinary Dock open does not.
+    const QPointer<NetworkDock> owner(this);
+    if (m_httpsProxyLogOutput == nullptr && !ensureNetworkToolPage(m_httpsAnalyzePage)) return;
+    if (!owner) return;
     if (m_httpsProxyLogOutput == nullptr)
     {
         return;
