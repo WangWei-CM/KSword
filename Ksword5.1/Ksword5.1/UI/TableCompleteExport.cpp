@@ -12,6 +12,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
+#include <QHash>
 #include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QMessageBox>
@@ -41,6 +42,53 @@ namespace ks::ui
             if (owner) for (auto* child : owner->children())
                 if (child->objectName() == QLatin1String(name)) return static_cast<Object*>(child);
             return nullptr;
+        }
+
+        QVector<QPersistentModelIndex> selectedTreeRowsInVisualOrder(QTreeView* tree)
+        {
+            struct Row { QPersistentModelIndex index; QVector<int> path; };
+            QVector<Row> rows;
+            if (!tree || !tree->model() || !tree->selectionModel()) return {};
+            const QModelIndex root = tree->rootIndex();
+            QHash<QPersistentModelIndex, QVector<std::pair<int, int>>> rangesByParent;
+            for (const auto& range : tree->selectionModel()->selection())
+                if (range.isValid()) rangesByParent[QPersistentModelIndex(range.parent())].push_back({range.top(), range.bottom()});
+            for (auto it = rangesByParent.begin(); it != rangesByParent.end(); ++it)
+            {
+                auto& intervals = it.value();
+                std::sort(intervals.begin(), intervals.end());
+                int emittedThrough = -1;
+                for (const auto& interval : intervals)
+                {
+                    for (int row = std::max(interval.first, emittedThrough + 1); row <= interval.second; ++row)
+                    {
+                        const QModelIndex index = tree->model()->index(row, 0, it.key());
+                        QModelIndex current = index;
+                        QVector<int> path;
+                        bool visible = index.isValid();
+                        while (visible && current != root)
+                        {
+                            if (!current.isValid() || tree->isRowHidden(current.row(), current.parent())) { visible = false; break; }
+                            path.push_back(current.row());
+                            const auto parent = current.parent();
+                            if (parent != root && (!parent.isValid() || !tree->isExpanded(parent))) { visible = false; break; }
+                            current = parent;
+                        }
+                        if (visible && current == root)
+                        {
+                            std::reverse(path.begin(), path.end());
+                            rows.push_back({QPersistentModelIndex(index), std::move(path)});
+                        }
+                    }
+                    emittedThrough = std::max(emittedThrough, interval.second);
+                }
+            }
+            std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b)
+            { return std::lexicographical_compare(a.path.cbegin(), a.path.cend(), b.path.cbegin(), b.path.cend()); });
+            QVector<QPersistentModelIndex> result;
+            result.reserve(rows.size());
+            for (auto& row : rows) result.push_back(std::move(row.index));
+            return result;
         }
 
         struct ExportValues
@@ -253,28 +301,18 @@ namespace ks::ui
                 port.rowCaptured = m_published.prepareRow;
                 if (tree)
                 {
-                    struct Cursor { QPersistentModelIndex index; std::uint64_t ordinal = 0; bool started = false; };
+                    struct Cursor { QPersistentModelIndex index; };
                     const auto cursor = std::make_shared<Cursor>();
-                    port.rowAvailable = [tree, cursor, fallback, current](std::uint64_t ordinal)
+                    const auto selectedRows = std::make_shared<const QVector<QPersistentModelIndex>>(
+                        selectedTreeRowsInVisualOrder(tree));
+                    port.rowAvailable = [cursor, selectedRows, fallback, current](std::uint64_t ordinal)
                     {
-                        if (fallback)
-                        {
-                            cursor->index = current;
-                            return ordinal == 0 && cursor->index.isValid();
-                        }
-                        if (!cursor->started)
-                        {
-                            cursor->index = tree->model()->index(0, 0, tree->rootIndex());
-                            cursor->started = true; cursor->ordinal = ordinal;
-                        }
-                        else if (ordinal != cursor->ordinal)
-                        {
-                            cursor->index = tree->indexBelow(cursor->index); cursor->ordinal = ordinal;
-                        }
+                        if (fallback) { cursor->index = current; return ordinal == 0 && current.isValid(); }
+                        if (ordinal >= static_cast<std::uint64_t>(selectedRows->size())) return false;
+                        cursor->index = selectedRows->at(static_cast<qsizetype>(ordinal));
                         return cursor->index.isValid();
                     };
-                    port.rowIncluded = [tree, cursor, fallback](int)
-                    { return fallback || (tree->selectionModel() && tree->selectionModel()->isSelected(cursor->index)); };
+                    port.rowIncluded = [](int) { return true; };
                     port.columnIncluded = [tree](int position)
                     { const int column = tree->header() ? tree->header()->logicalIndex(position) : position;
                       return column >= 0 && !tree->isColumnHidden(column); };

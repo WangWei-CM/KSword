@@ -200,14 +200,22 @@ namespace
 
         // This helper belongs only to the explicit freeze-selected action.
         // Copy/export and menu eligibility never materialize a selected cell list.
+        QVector<std::pair<int, int>> intervals;
         const auto ranges = tableView->selectionModel()->selection();
         for (const auto& range : ranges)
             if (range.isValid() && range.parent() == tableView->rootIndex())
-                for (int row = range.top(); row <= range.bottom(); ++row)
-                    if (!isRowHiddenByFilter(tableView, row)) rowList.push_back(row);
-
-        std::sort(rowList.begin(), rowList.end());
-        rowList.erase(std::unique(rowList.begin(), rowList.end()), rowList.end());
+                intervals.push_back({range.top(), range.bottom()});
+        std::sort(intervals.begin(), intervals.end());
+        int emittedThrough = -1;
+        for (const auto& interval : intervals)
+        {
+            // Merge row ranges before visiting rows. Disjoint column ranges can
+            // select the same rows many times without multiplying row work.
+            const int first = std::max(interval.first, emittedThrough + 1);
+            for (int row = first; row <= interval.second; ++row)
+                if (!isRowHiddenByFilter(tableView, row)) rowList.push_back(row);
+            emittedThrough = std::max(emittedThrough, interval.second);
+        }
 
         if (rowList.isEmpty() && includeCurrentFallback)
         {
