@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <condition_variable>
+#include <deque>
 #include <cwctype>
 #include <memory>
 #include <optional>
@@ -24,7 +25,9 @@ namespace {
 constexpr wchar_t kClassName[] = L"KswordARKLight.CallbackMonitor";
 constexpr UINT kPollMessage = WM_APP + 733;
 constexpr UINT kControlMessage = WM_APP + 734;
+constexpr UINT kFilterMessage = WM_APP + 735;
 constexpr UINT_PTR kPollTimer = 1;
+constexpr UINT_PTR kFilterTimer = 2;
 constexpr int kStart = 68101;
 constexpr int kStop = 68102;
 constexpr int kPause = 68103;
@@ -37,9 +40,28 @@ constexpr int kStatus = 68109;
 constexpr int kCategoryBase = 68120;
 constexpr std::size_t kMaxLocalRecords = 10000;
 
+struct CachedRecord {
+    std::uint64_t localSequence = 0;
+    ksword::ark::CallbackMonitorEventRow row;
+    std::array<std::wstring, 8> cells;
+};
+using RecordRef = std::shared_ptr<const CachedRecord>;
+
+struct ViewAnchor {
+    std::uint64_t selected = 0;
+    std::uint64_t top = 0;
+};
+
+struct FilterSnapshot {
+    std::uint64_t generation = 0;
+    std::uint64_t through = 0;
+    std::vector<RecordRef> matches;
+};
+
 struct PollSnapshot {
     std::uint64_t generation = 0;
     ksword::ark::CallbackMonitorReadResult read;
+    std::vector<RecordRef> rows;
 };
 
 enum class MonitorCommand { Query, Start, Stop, Clear };
@@ -68,9 +90,18 @@ struct State {
     HWND detail = nullptr;
     HWND status = nullptr;
     std::array<HWND, 6> categories{};
-    std::vector<ksword::ark::CallbackMonitorEventRow> records;
-    std::vector<std::size_t> visible;
-    std::wstring displayScratch;
+    std::deque<RecordRef> records;
+    std::vector<RecordRef> visible;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FilterSnapshot>> filterTask;
+    std::wstring filterQuery;
+    std::uint64_t filterGeneration = 1;
+    std::uint64_t appliedFilterGeneration = 1;
+    std::uint64_t filteredThrough = 0;
+    std::uint64_t nextLocalSequence = 1;
+    bool projectionDirty = false;
+    bool projecting = false;
+    std::uint64_t detailSequence = 0;
+    ViewAnchor deferredAnchor;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<PollSnapshot>> pollTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MonitorControlResult>> controlTask;
     std::shared_ptr<MonitorControlLifetime> controlLifetime = std::make_shared<MonitorControlLifetime>();
@@ -147,37 +178,148 @@ void SetStatus(State& state) {
     ::SetWindowTextW(state.pause, state.paused ? L"继续" : L"暂停");
 }
 
-void RebuildList(State& state) {
-    const std::wstring query = WindowText(state.filter);
-    state.visible.clear();
-    for (std::size_t index = 0; index < state.records.size(); ++index) {
-        if (query.empty()) { state.visible.push_back(index); continue; }
-        const auto cells = Cells(state.records[index]);
-        bool found = false;
-        for (const auto& cell : cells) {
-            if (std::search(cell.begin(), cell.end(), query.begin(), query.end(),
-                    [](wchar_t left, wchar_t right) {
-                        return std::towlower(left) == std::towlower(right);
-                    }) != cell.end()) { found = true; break; }
-        }
-        if (!found) { continue; }
-        state.visible.push_back(index);
+void ShowDetail(State& state);
+
+ViewAnchor CaptureAnchor(const State& state) {
+    if (state.projectionDirty) return state.deferredAnchor;
+    ViewAnchor anchor;
+    const int selected = ListView_GetNextItem(state.list, -1, LVNI_SELECTED);
+    const int top = ListView_GetTopIndex(state.list);
+    if (selected >= 0 && static_cast<std::size_t>(selected) < state.visible.size()) {
+        anchor.selected = state.visible[static_cast<std::size_t>(selected)]->localSequence;
     }
+    if (top >= 0 && static_cast<std::size_t>(top) < state.visible.size()) {
+        anchor.top = state.visible[static_cast<std::size_t>(top)]->localSequence;
+    }
+    return anchor;
+}
+
+int FindVisible(const State& state, const std::uint64_t sequence) {
+    if (!sequence) return -1;
+    const auto found = std::lower_bound(state.visible.begin(), state.visible.end(), sequence,
+        [](const auto& row, const auto key) { return row->localSequence < key; });
+    return found != state.visible.end() && (*found)->localSequence == sequence
+        ? static_cast<int>(found - state.visible.begin()) : -1;
+}
+
+void CommitVisible(State& state, const ViewAnchor anchor) {
+    if (!::IsWindowVisible(state.hwnd)) {
+        if (!state.projectionDirty) state.deferredAnchor = anchor;
+        state.projectionDirty = true;
+        return;
+    }
+    state.projectionDirty = false;
+    state.projecting = true;
     ListView_SetItemCountEx(state.list, static_cast<int>(state.visible.size()),
         LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    ListView_SetItemState(state.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    const int selected = FindVisible(state, anchor.selected);
+    if (selected >= 0) ListView_SetItemState(state.list, selected,
+        LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    const int top = FindVisible(state, anchor.top);
+    if (top >= 0) {
+        ListView_EnsureVisible(state.list, top, FALSE);
+        RECT item{};
+        if (ListView_GetItemRect(state.list, top, &item, LVIR_BOUNDS)) {
+            ListView_Scroll(state.list, 0, (top - ListView_GetTopIndex(state.list)) *
+                static_cast<int>(item.bottom - item.top));
+        }
+    }
+    state.projecting = false;
     ::InvalidateRect(state.list, nullptr, FALSE);
-    SetStatus(state);
+    ShowDetail(state);
+}
+
+bool MatchesRecord(const CachedRecord& record, const std::wstring& query) {
+    if (query.empty()) return true;
+    for (const auto& cell : record.cells) {
+        if (std::search(cell.begin(), cell.end(), query.begin(), query.end(),
+                [](wchar_t left, wchar_t right) {
+                    return std::towlower(left) == std::towlower(right);
+                }) != cell.end()) return true;
+    }
+    return false;
+}
+
+void RequestFilter(State& state, const bool replacePending = false) {
+    if (!state.filterTask || (!replacePending && state.filterTask->running())) return;
+    const auto first = std::upper_bound(state.records.begin(), state.records.end(), state.filteredThrough,
+        [](const auto key, const auto& row) { return key < row->localSequence; });
+    auto rows = std::make_shared<std::vector<RecordRef>>(first, state.records.end());
+    if (rows->empty()) {
+        if (state.appliedFilterGeneration != state.filterGeneration) {
+            const auto anchor = CaptureAnchor(state);
+            state.visible.clear();
+            state.appliedFilterGeneration = state.filterGeneration;
+            CommitVisible(state, anchor);
+            SetStatus(state);
+        }
+        return;
+    }
+    const auto generation = state.filterGeneration;
+    state.filterTask->request(
+        [rows, generation, query = state.filterQuery] {
+            FilterSnapshot result;
+            result.generation = generation;
+            result.through = rows->back()->localSequence;
+            for (const auto& row : *rows) {
+                if (MatchesRecord(*row, query)) result.matches.push_back(row);
+            }
+            return result;
+        },
+        [&state](std::uint64_t, std::optional<FilterSnapshot>&& result, std::exception_ptr error) {
+            if (error || !result) return;
+            if (result->generation != state.filterGeneration) {
+                RequestFilter(state);
+                return;
+            }
+            const auto anchor = CaptureAnchor(state);
+            if (state.appliedFilterGeneration != result->generation) {
+                state.visible.clear();
+                state.appliedFilterGeneration = result->generation;
+            }
+            const auto firstSequence = state.records.empty() ? state.nextLocalSequence :
+                state.records.front()->localSequence;
+            for (auto& row : result->matches) {
+                if (row->localSequence >= firstSequence) state.visible.push_back(std::move(row));
+            }
+            state.filteredThrough = (std::max)(state.filteredThrough, result->through);
+            CommitVisible(state, anchor);
+            SetStatus(state);
+            RequestFilter(state);
+        });
+}
+
+void RebuildList(State& state) {
+    state.filterQuery = WindowText(state.filter);
+    ++state.filterGeneration;
+    state.filteredThrough = 0;
+    // Query changes replace read-only projection work; arrivals never do.
+    RequestFilter(state, true);
+}
+
+void ClearRows(State& state) {
+    state.records.clear();
+    state.visible.clear();
+    ++state.filterGeneration;
+    state.filteredThrough = 0;
+    state.appliedFilterGeneration = state.filterGeneration;
+    CommitVisible(state, {});
 }
 
 void ShowDetail(State& state) {
     const int selected = ListView_GetNextItem(state.list, -1, LVNI_SELECTED);
     if (selected < 0 || static_cast<std::size_t>(selected) >= state.visible.size()) {
-        ::SetWindowTextW(state.detail, L"选择事件查看完整字段。");
+        if (state.detailSequence != 0) ::SetWindowTextW(state.detail, L"选择事件查看完整字段。");
+        state.detailSequence = 0;
         return;
     }
-    const auto& row = state.records[state.visible[static_cast<std::size_t>(selected)]];
+    const auto& cached = *state.visible[static_cast<std::size_t>(selected)];
+    if (state.detailSequence == cached.localSequence) return;
+    state.detailSequence = cached.localSequence;
+    const auto& row = cached.row;
     std::wostringstream text;
-    text << L"序号: " << row.sequence << L"\r\n时间: " << TimeText(row.timeUtc100ns)
+    text << L"序号: " << row.sequence << L"\r\n时间: " << cached.cells[1]
          << L"\r\n类别: " << CategoryName(row.category) << L"\r\n操作: " << row.operation
          << L"\r\n来源 PID/TID: " << row.originatingProcessId << L" / " << row.originatingThreadId
          << L"\r\n目标 PID/TID: " << row.targetProcessId << L" / " << row.targetThreadId
@@ -350,7 +492,7 @@ void Start(State& state) {
         state.cursor = status.latestSequence;
         state.dropped = status.droppedCount;
         state.lost = 0;
-        state.records.clear();
+        ClearRows(state);
         state.ownsCapture = true;
         state.capturing = true;
         state.paused = false;
@@ -390,10 +532,23 @@ void Poll(State& state) {
         (state.controlTask && state.controlTask->running())) { return; }
     const auto cursor = state.cursor;
     const auto generation = state.generation;
+    const auto firstLocalSequence = state.nextLocalSequence;
     state.pollTask->request(
-        [cursor, generation] {
-            return PollSnapshot{ generation, ksword::ark::DriverClient().readCallbackMonitor(
-                cursor, KSWORD_ARK_CALLBACK_MONITOR_MAX_READ_RECORDS) };
+        [cursor, generation, firstLocalSequence] {
+            PollSnapshot snapshot;
+            snapshot.generation = generation;
+            snapshot.read = ksword::ark::DriverClient().readCallbackMonitor(
+                cursor, KSWORD_ARK_CALLBACK_MONITOR_MAX_READ_RECORDS);
+            auto sequence = firstLocalSequence;
+            for (auto& record : snapshot.read.records) {
+                auto cached = std::make_shared<CachedRecord>();
+                cached->localSequence = sequence++;
+                cached->row = std::move(record);
+                cached->cells = Cells(cached->row);
+                snapshot.rows.push_back(std::move(cached));
+            }
+            snapshot.read.records.clear();
+            return snapshot;
         },
         [&state](std::uint64_t, std::optional<PollSnapshot>&& snapshot, std::exception_ptr error) {
             if (error || !snapshot || snapshot->generation != state.generation) { return; }
@@ -409,22 +564,30 @@ void Poll(State& state) {
             state.cursor = read.nextSequence;
             state.dropped = read.droppedCount;
             state.lost += read.lostBeforeFirst;
-            for (auto& record : read.records) {
+            const auto anchor = CaptureAnchor(state);
+            const bool arrived = !snapshot->rows.empty();
+            for (auto& record : snapshot->rows) {
+                state.nextLocalSequence = record->localSequence + 1;
                 state.records.push_back(std::move(record));
             }
-            if (state.records.size() > kMaxLocalRecords) {
-                state.records.erase(state.records.begin(),
-                    state.records.begin() + static_cast<std::ptrdiff_t>(state.records.size() - kMaxLocalRecords));
+            while (state.records.size() > kMaxLocalRecords) state.records.pop_front();
+            const auto firstSequence = state.records.empty() ? state.nextLocalSequence :
+                state.records.front()->localSequence;
+            const auto firstVisible = std::lower_bound(state.visible.begin(), state.visible.end(), firstSequence,
+                [](const auto& row, const auto key) { return row->localSequence < key; });
+            if (firstVisible != state.visible.begin()) {
+                state.visible.erase(state.visible.begin(), firstVisible);
+                CommitVisible(state, anchor);
             }
-            if (!read.records.empty()) { RebuildList(state); }
-            else { SetStatus(state); }
+            if (arrived) RequestFilter(state);
+            SetStatus(state);
         });
 }
 
 std::wstring ExportText(const State& state) {
     std::wstring text = L"序号\t时间\t类别\t操作\t来源PID\t目标PID\t结果\t路径\r\n";
-    for (const std::size_t index : state.visible) {
-        const auto cells = Cells(state.records[index]);
+    for (const auto& record : state.visible) {
+        const auto& cells = record->cells;
         for (std::size_t column = 0; column < cells.size(); ++column) {
             if (column) { text += L'\t'; }
             std::wstring cell = cells[column];
@@ -524,8 +687,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (!state || !CreateControls(*state)) { return -1; }
         state->pollTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<PollSnapshot>>(hwnd, kPollMessage);
         state->controlTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MonitorControlResult>>(hwnd, kControlMessage);
+        state->filterTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FilterSnapshot>>(hwnd, kFilterMessage);
         Layout(*state);
         QueryStatus(*state);
+        return 0;
+    case WM_SHOWWINDOW:
+        if (state && wParam && state->projectionDirty) CommitVisible(*state, state->deferredAnchor);
         return 0;
     case WM_SIZE:
         if (state) { Layout(*state); }
@@ -536,16 +703,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case Ksword::Ui::kPollNativeRetirementMessage:
         return state && !PollRetirement(*state) ? 1 : 0;
     case Ksword::Ui::kCancelNativeRetirementMessage:
-        if (state) { state->retirementCancelled = true; PollRetirement(*state); if (state->retirementCancelled) ::SetTimer(hwnd, kPollTimer, 500, nullptr); }
+        if (state) { state->retirementCancelled = true; PollRetirement(*state); if (state->retirementCancelled) ::SetTimer(hwnd, kPollTimer, 500, nullptr);
+            ::SetTimer(hwnd, kFilterTimer, 180, nullptr); }
         return 0;
     case WM_TIMER:
+        if (state && wParam == kFilterTimer) {
+            ::KillTimer(hwnd, kFilterTimer);
+            RebuildList(*state);
+            return 0;
+        }
         if (state && state->retirementCancelled) { PollRetirement(*state); return 0; }
         if (state && wParam == kPollTimer) { Poll(*state); return 0; }
         break;
     case WM_COMMAND:
         if (!state) { break; }
         if (LOWORD(wParam) == kFilter && HIWORD(wParam) == EN_CHANGE) {
-            RebuildList(*state);
+            ::SetTimer(hwnd, kFilterTimer, 180, nullptr);
             return 0;
         }
         if (HIWORD(wParam) != BN_CLICKED) { break; }
@@ -563,7 +736,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
             RequestMonitorControl(*state, MonitorCommand::Clear, 0, [state](const auto& status) {
                 if (status.io.ok) { state->cursor = status.latestSequence; state->dropped = status.droppedCount; }
                 state->lost = 0;
-                state->records.clear();
+                ClearRows(*state);
                 ::SetWindowTextW(state->detail, L"选择事件查看完整字段。");
                 state->message = L"已清空本页记录，驱动环形缓冲未清空。";
                 RebuildList(*state);
@@ -592,15 +765,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if ((info->item.mask & LVIF_TEXT) != 0 && info->item.iItem >= 0 &&
                     static_cast<std::size_t>(info->item.iItem) < state->visible.size() &&
                     info->item.iSubItem >= 0 && info->item.iSubItem < 8) {
-                    const auto cells = Cells(state->records[state->visible[
-                        static_cast<std::size_t>(info->item.iItem)]]);
-                    state->displayScratch = cells[static_cast<std::size_t>(info->item.iSubItem)];
-                    info->item.pszText = const_cast<LPWSTR>(state->displayScratch.c_str());
+                    const auto& cells = state->visible[static_cast<std::size_t>(info->item.iItem)]->cells;
+                    info->item.pszText = const_cast<LPWSTR>(cells[static_cast<std::size_t>(info->item.iSubItem)].c_str());
                 }
                 return 0;
             }
             if (reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED) {
-                ShowDetail(*state);
+                if (!state->projecting) ShowDetail(*state);
                 return 0;
             }
         }
@@ -620,6 +791,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_NCDESTROY:
         if (state) {
             ::KillTimer(hwnd, kPollTimer);
+            ::KillTimer(hwnd, kFilterTimer);
+            if (state->filterTask) state->filterTask->cancel();
             if (state->pollTask) { state->pollTask->cancel(); }
             if (state->controlTask) state->controlTask->cancel();
             BeginRetirement(*state);
@@ -628,6 +801,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
     default:
+        if (state && message == kFilterMessage && state->filterTask &&
+            state->filterTask->consume(hwnd, wParam, lParam)) return 0;
         if (state && message == kControlMessage && state->controlTask &&
             state->controlTask->consume(hwnd, wParam, lParam)) return 0;
         if (state && message == kPollMessage && state->pollTask &&
