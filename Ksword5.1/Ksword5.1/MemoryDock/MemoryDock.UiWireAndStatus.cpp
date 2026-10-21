@@ -1174,15 +1174,13 @@ void MemoryDock::initializeKernelExecutableConnections()
 
     connect(m_kernelExecutableRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
         rebuildKernelExecutableMemoryScanTable();
-        showKernelExecutableMemoryDetailByCurrentRow();
         });
 
     connect(m_kernelExecutableModuleFilterEdit, &QLineEdit::textChanged, this, [this]() {
         rebuildKernelExecutableMemoryScanTable();
-        showKernelExecutableMemoryDetailByCurrentRow();
         });
 
-    connect(m_kernelExecutableTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_kernelExecutableTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) {
         showKernelExecutableMemoryDetailByCurrentRow();
         });
 
@@ -1205,7 +1203,6 @@ void MemoryDock::initializeKernelEvidenceConnections()
 
     connect(m_kernelMemoryEvidenceRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
         rebuildKernelMemoryEvidenceTable();
-        showKernelMemoryEvidenceDetailByCurrentRow();
         });
 
     connect(m_kernelMemoryEvidenceIncludeNonModuleCheck, &QCheckBox::toggled, this, [this]() {
@@ -1218,10 +1215,9 @@ void MemoryDock::initializeKernelEvidenceConnections()
 
     connect(m_kernelMemoryEvidenceFilterEdit, &QLineEdit::textChanged, this, [this]() {
         rebuildKernelMemoryEvidenceTable();
-        showKernelMemoryEvidenceDetailByCurrentRow();
         });
 
-    connect(m_kernelMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_kernelMemoryEvidenceTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) {
         showKernelMemoryEvidenceDetailByCurrentRow();
         });
 
@@ -1244,12 +1240,11 @@ void MemoryDock::initializePteConnections()
 
     connect(m_processPteTranslateRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
         rebuildProcessPteTranslateTable();
-        showProcessPteTranslateDetailByCurrentRow();
         });
 
 
 
-    connect(m_processPteTranslateTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_processPteTranslateTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) {
         showProcessPteTranslateDetailByCurrentRow();
         });
 
@@ -1272,7 +1267,6 @@ void MemoryDock::initializeProcessEvidenceConnections()
 
     connect(m_processMemoryEvidenceRiskOnlyCheck, &QCheckBox::toggled, this, [this]() {
         rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
         });
 
 
@@ -1280,11 +1274,10 @@ void MemoryDock::initializeProcessEvidenceConnections()
 
     connect(m_processMemoryEvidenceFilterEdit, &QLineEdit::textChanged, this, [this]() {
         rebuildProcessMemoryEvidenceTable();
-        showProcessMemoryEvidenceDetailByCurrentRow();
         });
 
 
-    connect(m_processMemoryEvidenceTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_processMemoryEvidenceTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex&, const QModelIndex&) {
         showProcessMemoryEvidenceDetailByCurrentRow();
         });
 }

@@ -12,6 +12,8 @@
 #include "../UI/TableColumnAutoFit.h"
 
 #include <memory>
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 
 using namespace ksword::memory_dock_internal;
 
@@ -179,7 +181,7 @@ namespace
         return KswordTheme::ContextMenuStyle();
     }
 
-    void copyEvidenceCurrentRow(QTableWidget* table)
+    void copyEvidenceCurrentRow(MemoryTableView* table)
     {
         // copyEvidenceCurrentRow：
         // - 输入：当前内存证据表；
@@ -200,13 +202,13 @@ namespace
         fields.reserve(table->columnCount());
         for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            const QModelIndex item = table->model()->index(rowIndex, columnIndex);
+            fields.push_back(item.isValid() ? item.data(Qt::DisplayRole).toString() : QString());
         }
         QApplication::clipboard()->setText(fields.join('\t'));
     }
 
-    void installEvidenceCopyMenu(QTableWidget* table)
+    void installEvidenceCopyMenu(MemoryTableView* table)
     {
         // installEvidenceCopyMenu：
         // - 输入：进程内存证据表；
@@ -218,7 +220,7 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition) {
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition) {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
@@ -242,7 +244,7 @@ namespace
         });
     }
 
-    int visibleEvidenceColumnCount(const QTableWidget* table)
+    int visibleEvidenceColumnCount(const MemoryTableView* table)
     {
         // visibleEvidenceColumnCount：
         // - 输入：进程内存证据表；
@@ -264,7 +266,7 @@ namespace
         return visibleCount;
     }
 
-    void installEvidenceColumnMenu(QTableWidget* table)
+    void installEvidenceColumnMenu(MemoryTableView* table)
     {
         // installEvidenceColumnMenu：
         // - 输入：进程内存证据表；
@@ -326,40 +328,7 @@ namespace
             });
     }
 
-    void setProcessEvidenceDiagnosticRow(
-        QTableWidget* table,
-        const QString& detailText)
-    {
-        // setProcessEvidenceDiagnosticRow：
-        // - 输入：目标进程内存证据表和诊断说明；
-        // - 处理：写入一行可复制诊断，UserRole+2 保存完整文本；
-        // - 返回：无。用于附加失败、空缓存或过滤空结果时避免空表。
-        if (table == nullptr)
-        {
-            return;
-        }
 
-        table->setRowCount(1);
-        QTableWidgetItem* vaItem = makeItem(QStringLiteral("<无进程内存证据>"));
-        vaItem->setData(Qt::UserRole + 2, detailText);
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress), vaItem);
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::RegionBase), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::RegionSize), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Protect), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::State), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Type), makeItem(QStringLiteral("诊断")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Valid), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Shared), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Locked), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::LargePage), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Bad), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::ShareCount), makeItem(QStringLiteral("0")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Node), makeItem(QStringLiteral("-")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Win32Protection), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::MappedFile), makeItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Risk), makeItem(detailText));
-        table->setCurrentCell(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress));
-    }
 }
 
 void MemoryDock::initializeProcessMemoryEvidenceTab()
@@ -465,10 +434,9 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabProcessMemoryEvidence);
     workspace->results()->addWidget(splitter, 1);
 
-    m_processMemoryEvidenceTable = new ks::ui::VisibleTableWidget(splitter);
+    m_processMemoryEvidenceTable = new MemoryTableView(splitter);
     // 进程页级证据可重复采样，保留独立现场对比。
     ks::ui::SetTableActionBarMode(m_processMemoryEvidenceTable, ks::ui::TableActionBarMode::Full);
-    m_processMemoryEvidenceTable->setColumnCount(evidenceColumnIndex(ProcessMemoryEvidenceColumn::Count));
     m_processMemoryEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("虚拟地址"),
         QStringLiteral("区域基址"),
@@ -499,6 +467,9 @@ void MemoryDock::initializeProcessMemoryEvidenceTab()
     // 十六列表格必须给收列入口，否则用户只能靠横向滚动条找自己关心的列。
     installEvidenceColumnMenu(m_processMemoryEvidenceTable);
     splitter->addWidget(m_processMemoryEvidenceTable);
+    ks::ui::SetTableColumnAutoFitEnabled(m_processMemoryEvidenceTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_processMemoryEvidenceTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    initializeCoreProjection(CoreKind::ProcessEvidence);
 
     m_processMemoryEvidenceDetailEditor = new ks::ui::StructuredFieldView(splitter);
     m_processMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择一条进程内存证据记录查看详情。")));
@@ -695,12 +666,11 @@ void MemoryDock::refreshProcessMemoryEvidenceAsync()
             currentAddress = nextAddress;
         }
 
+        const auto entriesSnapshot = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>(std::move(entries));
         QMetaObject::invokeMethod(
             qApp,
-            [guardThis, ticket, attachmentGeneration, entries = std::move(entries)]() mutable {
+            [guardThis, ticket, attachmentGeneration, entriesSnapshot]() {
                 if (guardThis == nullptr || ticket != guardThis->m_processMemoryEvidenceRefreshTicket.load() || attachmentGeneration != guardThis->m_processAttachmentGeneration.load()) return;
-                auto entriesSnapshot =
-                    std::make_shared<std::vector<ProcessMemoryEvidenceEntry>>(std::move(entries));
                 auto commitSnapshot = [guardThis, ticket, attachmentGeneration, entriesSnapshot]() mutable
                 {
                     if (guardThis == nullptr ||
@@ -716,22 +686,22 @@ void MemoryDock::refreshProcessMemoryEvidenceAsync()
                         guardThis->m_processMemoryEvidenceRefreshButton->setEnabled(true);
                     }
 
-                    guardThis->m_processMemoryEvidenceCache = std::move(*entriesSnapshot);
+                    guardThis->m_processMemoryEvidenceCache = entriesSnapshot;
                     guardThis->rebuildProcessMemoryEvidenceTable();
                     guardThis->showProcessMemoryEvidenceDetailByCurrentRow();
                     if (guardThis->m_processMemoryEvidenceStatusLabel != nullptr)
                     {
                         guardThis->m_processMemoryEvidenceStatusLabel->setText(
-                            QStringLiteral("状态：采样 %1 行").arg(guardThis->m_processMemoryEvidenceCache.size()));
+                            QStringLiteral("状态：采样 %1 行").arg(guardThis->m_processMemoryEvidenceCache->size()));
                         guardThis->m_processMemoryEvidenceStatusLabel->setStyleSheet(QStringLiteral(
                             "color:%1; font-weight:600;")
-                            .arg(guardThis->m_processMemoryEvidenceCache.empty()
+                            .arg(guardThis->m_processMemoryEvidenceCache->empty()
                                 ? KswordTheme::ErrorColor().name(QColor::HexRgb)
                                 : KswordTheme::SuccessColor().name(QColor::HexRgb)));
                     }
                 };
 
-                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
                     guardThis.data(),
                     QStringLiteral("memory-process-evidence-snapshot"),
                     { guardThis->m_processMemoryEvidenceTable },
@@ -747,86 +717,12 @@ void MemoryDock::refreshProcessMemoryEvidenceAsync()
 
 void MemoryDock::rebuildProcessMemoryEvidenceTable()
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_processMemoryEvidenceDetailEditor);
-    // 输入：读取当前缓存和过滤选项。
-    // 处理：把进程内存证据投影到只读表格。
-    // 返回：无。
-    if (m_processMemoryEvidenceTable == nullptr)
-    {
-        return;
-    }
-
-    const bool riskOnly = m_processMemoryEvidenceRiskOnlyCheck != nullptr && m_processMemoryEvidenceRiskOnlyCheck->isChecked();
-    const QString filterText = m_processMemoryEvidenceFilterEdit != nullptr
-        ? m_processMemoryEvidenceFilterEdit->text().trimmed()
-        : QString();
-
-    std::vector<const ProcessMemoryEvidenceEntry*> visibleEntries;
-    visibleEntries.reserve(m_processMemoryEvidenceCache.size());
-    for (const ProcessMemoryEvidenceEntry& entry : m_processMemoryEvidenceCache)
-    {
-        if (riskOnly && entry.riskText == QStringLiteral("正常"))
-        {
-            continue;
-        }
-        if (!filterText.isEmpty())
-        {
-            const QString detailText = entry.detailText;
-            const QString mappedText = entry.mappedFilePath;
-            if (!detailText.contains(filterText, Qt::CaseInsensitive) &&
-                !mappedText.contains(filterText, Qt::CaseInsensitive) &&
-                !entry.riskText.contains(filterText, Qt::CaseInsensitive))
-            {
-                continue;
-            }
-        }
-        visibleEntries.push_back(&entry);
-    }
-
-    m_processMemoryEvidenceVisibleCount = visibleEntries.size();
-    const QSignalBlocker blocker(m_processMemoryEvidenceTable);
-    m_processMemoryEvidenceTable->setSortingEnabled(false);
-    m_processMemoryEvidenceTable->setRowCount(static_cast<int>(visibleEntries.size()));
-    for (int row = 0; row < static_cast<int>(visibleEntries.size()); ++row)
-    {
-        const ProcessMemoryEvidenceEntry& entry = *visibleEntries[static_cast<std::size_t>(row)];
-        // 地址、大小、计数、节点号一律走数值排序单元格，否则按显示文本排会退化成字符串序。
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress), makeNumericItem(hex64(entry.virtualAddress), entry.virtualAddress));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::RegionBase), makeNumericItem(hex64(entry.regionBaseAddress), entry.regionBaseAddress));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::RegionSize), makeNumericItem(hex64(entry.regionSize), entry.regionSize));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Protect), makeItem(protectText(entry.protect)));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::State), makeItem(stateText(entry.state)));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Type), makeItem(typeText(entry.type)));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Valid), makeItem(entry.valid ? QStringLiteral("Yes") : QStringLiteral("No")));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Shared), makeItem(entry.shared ? QStringLiteral("Yes") : QStringLiteral("No")));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Locked), makeItem(entry.locked ? QStringLiteral("Yes") : QStringLiteral("No")));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::LargePage), makeItem(entry.largePage ? QStringLiteral("Yes") : QStringLiteral("No")));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Bad), makeItem(entry.bad ? QStringLiteral("Yes") : QStringLiteral("No")));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::ShareCount), makeNumericItem(QString::number(entry.shareCount), entry.shareCount));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Node), makeNumericItem(QString::number(entry.node), entry.node));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Win32Protection), makeNumericItem(QStringLiteral("0x%1").arg(entry.win32Protection, 8, 16, QChar('0')).toUpper(), entry.win32Protection));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::MappedFile), makeItem(entry.mappedFilePath.isEmpty() ? QStringLiteral("—") : entry.mappedFilePath));
-        m_processMemoryEvidenceTable->setItem(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::Risk), makeItem(entry.riskText));
-    }
-    if (visibleEntries.empty())
-    {
-        const QString detailText = m_processMemoryEvidenceCache.empty()
-            ? QStringLiteral("进程内存证据当前没有缓存行；请先附加进程并刷新，或检查采样范围。")
-            : QStringLiteral("当前过滤条件隐藏了全部 %1 条进程内存证据；请清空文本过滤或取消勾选仅显示风险项/仅映像区域。")
-                .arg(static_cast<qulonglong>(m_processMemoryEvidenceCache.size()));
-        setProcessEvidenceDiagnosticRow(m_processMemoryEvidenceTable, detailText);
-    }
-
-    if (m_processMemoryEvidenceTable->rowCount() > 0 && m_processMemoryEvidenceTable->currentRow() < 0)
-    {
-        m_processMemoryEvidenceTable->setCurrentCell(0, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress));
-    }
-    m_processMemoryEvidenceTable->setSortingEnabled(true);
-    ks::ui::RequestTableColumnAutoFit(m_processMemoryEvidenceTable);
+    requestCoreProjection(CoreKind::ProcessEvidence, true);
 }
 
 void MemoryDock::showProcessMemoryEvidenceDetailByCurrentRow()
 {
+    if (!m_processMemoryEvidenceTable || !m_processMemoryEvidenceTable->isVisible() || !coreProjectionIsCurrent(CoreKind::ProcessEvidence)) { return; }
     // 输入：无，读取当前表格选中行。
     // 处理：从缓存中展开当前证据记录到详情编辑器。
     // 返回：无。
@@ -842,13 +738,13 @@ void MemoryDock::showProcessMemoryEvidenceDetailByCurrentRow()
         return;
     }
 
-    const QTableWidgetItem* addressItem = m_processMemoryEvidenceTable->item(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress));
-    if (addressItem == nullptr)
+    const QModelIndex addressItem = m_processMemoryEvidenceTable->model()->index(row, evidenceColumnIndex(ProcessMemoryEvidenceColumn::VirtualAddress));
+    if (!addressItem.isValid())
     {
         m_processMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
-    const QString diagnosticText = addressItem->data(Qt::UserRole + 2).toString();
+    const QString diagnosticText = addressItem.data(Qt::UserRole + 2).toString();
     if (!diagnosticText.isEmpty())
     {
         m_processMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("进程内存证据诊断\n%1").arg(diagnosticText)));
@@ -856,20 +752,64 @@ void MemoryDock::showProcessMemoryEvidenceDetailByCurrentRow()
     }
 
     bool ok = false;
-    const qulonglong addressValue = addressItem->data(Qt::UserRole).toULongLong(&ok);
+    const qulonglong addressValue = addressItem.data(Qt::UserRole).toULongLong(&ok);
     if (!ok)
     {
         m_processMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
 
-    for (const ProcessMemoryEvidenceEntry& entry : m_processMemoryEvidenceCache)
-    {
-        if (entry.virtualAddress == static_cast<std::uint64_t>(addressValue))
-        {
+    const auto sourceIndex = addressItem.data(ks::memory_detail::CoreSourceIndexRole).toULongLong();
+    if (sourceIndex < m_processMemoryEvidenceCache->size()) {
+        const auto& entry = (*m_processMemoryEvidenceCache)[static_cast<std::size_t>(sourceIndex)];
+        if (entry.virtualAddress == static_cast<std::uint64_t>(addressValue)) {
             m_processMemoryEvidenceDetailEditor->setDocument(buildDetailDocument(entry));
             return;
         }
     }
     m_processMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
+}
+
+void MemoryDock::captureProcessEvidenceProjection(CoreProjectionData& data) const
+{
+    const auto source = m_processMemoryEvidenceCache;
+    data.extraSource = source; data.extraCount = source->size();
+    data.statusTemplate = m_extraStatusTemplates[3];
+    data.filter = m_processMemoryEvidenceFilterEdit ? m_processMemoryEvidenceFilterEdit->text().trimmed() : QString();
+    data.extraRisk = m_processMemoryEvidenceRiskOnlyCheck && m_processMemoryEvidenceRiskOnlyCheck->isChecked();
+    data.extraDiagnostic = source->empty() ? QStringLiteral("进程内存证据当前没有缓存行；请先附加进程并刷新，或检查采样范围。") : QStringLiteral("当前过滤条件隐藏了全部 %1 条进程内存证据；请清空文本过滤或取消勾选仅显示风险项/仅映像区域。").arg(source->size());
+    data.extraMatches = [source, filter = data.filter, risk = data.extraRisk](std::size_t row) { const auto& entry = (*source)[row]; return (!risk || (entry.riskText != QStringLiteral("正常"))) && (filter.isEmpty() || entry.detailText.contains(filter, Qt::CaseInsensitive) || entry.mappedFilePath.contains(filter, Qt::CaseInsensitive) || entry.riskText.contains(filter, Qt::CaseInsensitive)); };
+    data.extraKey = [source](std::size_t row) { const auto& entry = (*source)[row]; return QString::number(entry.virtualAddress); };
+    data.extraCell = [source, language = data.language, diagnostic = data.extraDiagnostic](std::size_t row, int column, int role) -> QVariant {
+        if (row == SIZE_MAX) {
+            if (role == Qt::UserRole + 2) { return diagnostic; }
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) { return {}; }
+            const auto columns = QStringList{QStringLiteral("<无进程内存证据>"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("诊断"),QStringLiteral("-"),QStringLiteral("-"),QStringLiteral("-"),QStringLiteral("-"),QStringLiteral("-"),QStringLiteral("0"),QStringLiteral("-"),QStringLiteral("N/A"),QStringLiteral("N/A"),diagnostic};
+            return column >= 0 && column < columns.size() ? QVariant(language.sourceText(columns[column])) : QVariant();
+        }
+        const auto& entry = (*source)[row];
+        if (role == Qt::UserRole + 1 && column == 0) { return QVariant::fromValue<qulonglong>(row); }
+        if (role == Qt::UserRole && column == 0) { return QVariant::fromValue<qulonglong>(entry.virtualAddress); }
+        const bool numeric = role == ks::ui::NumericSortRole;
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return numeric ? QVariant::fromValue<qulonglong>(entry.virtualAddress) : QVariant(language.sourceText(hex64(entry.virtualAddress)));
+        case 1: return numeric ? QVariant::fromValue<qulonglong>(entry.regionBaseAddress) : QVariant(language.sourceText(hex64(entry.regionBaseAddress)));
+        case 2: return numeric ? QVariant::fromValue<qulonglong>(entry.regionSize) : QVariant(language.sourceText(hex64(entry.regionSize)));
+        case 3: return QVariant(language.sourceText(protectText(entry.protect)));
+        case 4: return QVariant(language.sourceText(stateText(entry.state)));
+        case 5: return QVariant(language.sourceText(typeText(entry.type)));
+        case 6: return QVariant(language.sourceText(entry.valid ? QStringLiteral("Yes") : QStringLiteral("No")));
+        case 7: return QVariant(language.sourceText(entry.shared ? QStringLiteral("Yes") : QStringLiteral("No")));
+        case 8: return QVariant(language.sourceText(entry.locked ? QStringLiteral("Yes") : QStringLiteral("No")));
+        case 9: return QVariant(language.sourceText(entry.largePage ? QStringLiteral("Yes") : QStringLiteral("No")));
+        case 10: return QVariant(language.sourceText(entry.bad ? QStringLiteral("Yes") : QStringLiteral("No")));
+        case 11: return numeric ? QVariant::fromValue<qulonglong>(entry.shareCount) : QVariant(language.sourceText(QString::number(entry.shareCount)));
+        case 12: return numeric ? QVariant::fromValue<qulonglong>(entry.node) : QVariant(language.sourceText(QString::number(entry.node)));
+        case 13: return numeric ? QVariant::fromValue<qulonglong>(entry.win32Protection) : QVariant(language.sourceText(QStringLiteral("0x%1").arg(entry.win32Protection, 8, 16, QChar('0')).toUpper()));
+        case 14: return QVariant(language.sourceText(entry.mappedFilePath.isEmpty() ? QStringLiteral("—") : entry.mappedFilePath));
+        case 15: return QVariant(language.sourceText(entry.riskText));
+        default: return {};
+        }
+    };
 }

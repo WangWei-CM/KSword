@@ -97,6 +97,8 @@ public:
     void setHorizontalHeaderLabels(QStringList headers) { readOnlyModel->setHeaders(std::move(headers)); }
     int rowCount() const { return readOnlyModel->rowCount(); }
     int columnCount() const { return readOnlyModel->columnCount(); }
+    int currentRow() const { return currentIndex().row(); }
+    void setCurrentCell(int row, int column) { setCurrentIndex(readOnlyModel->index(row, column)); }
     void clearEntries() { readOnlyModel->clear(); }
 };
 class MemoryTreeView final : public QTreeView {

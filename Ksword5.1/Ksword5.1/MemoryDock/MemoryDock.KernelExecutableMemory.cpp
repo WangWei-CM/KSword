@@ -15,6 +15,8 @@
 #include <QProgressBar> // QProgressBar：扫描进行中的不确定态进度条。
 
 #include <memory>
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 
 using namespace ksword::memory_dock_internal;
 
@@ -252,7 +254,7 @@ namespace
         return KswordTheme::ContextMenuStyle();
     }
 
-    QString kernelExecutableRowText(QTableWidget* table, const int rowIndex)
+    QString kernelExecutableRowText(MemoryTableView* table, const int rowIndex)
     {
         // 输入：内核可执行页表和目标行号。
         // 处理：按当前列顺序读取单元格，拼接为 TSV。
@@ -266,13 +268,13 @@ namespace
         fields.reserve(table->columnCount());
         for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            const QModelIndex item = table->model()->index(rowIndex, columnIndex);
+            fields.push_back(item.isValid() ? item.data(Qt::DisplayRole).toString() : QString());
         }
         return fields.join(QLatin1Char('\t'));
     }
 
-    void installKernelExecutableCopyMenu(QTableWidget* table)
+    void installKernelExecutableCopyMenu(MemoryTableView* table)
     {
         // 输入：内核可执行页扫描表。
         // 处理：安装只读“复制当前行”菜单。
@@ -283,7 +285,7 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
@@ -312,8 +314,8 @@ namespace
              * 读=谁在扫它。把三者折进一个入口，用户就得先想明白自己要问什么
              * 才点得下去，而这一页的读者往往正是还不确定的那个人。
              */
-            const quint64 rowAddress = (rowIndex >= 0 && table->item(rowIndex, 0) != nullptr)
-                ? table->item(rowIndex, 0)->data(Qt::UserRole).toULongLong()
+            const quint64 rowAddress = (rowIndex >= 0 && table->model()->index(rowIndex, 0).isValid())
+                ? table->model()->index(rowIndex, 0).data(Qt::UserRole).toULongLong()
                 : 0ULL;
             menu.addSeparator();
             QMenu* const watchMenu = menu.addMenu(QStringLiteral("HVM 监视这一页的下一次访问"));
@@ -374,33 +376,7 @@ namespace
         });
     }
 
-    void setKernelExecutableDiagnosticRow(
-        QTableWidget* table,
-        const QString& detailText)
-    {
-        // setKernelExecutableDiagnosticRow：
-        // - 输入：目标表格与诊断文本；
-        // - 处理：写入一行可复制诊断，UserRole+2 保存完整说明；
-        // - 返回：无。用于 R0 空结果或过滤空结果时避免页面只剩空表。
-        if (table == nullptr)
-        {
-            return;
-        }
 
-        table->setRowCount(1);
-        QTableWidgetItem* vaItem = createTextItem(QStringLiteral("<无可执行页证据>"));
-        vaItem->setData(Qt::UserRole + 2, detailText);
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va), vaItem);
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::RegionSize), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::PageCount), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::PageSize), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Permissions), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::Owner), createTextItem(QStringLiteral("诊断")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::ModuleBase), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::ModulePath), createTextItem(QStringLiteral("N/A")));
-        table->setItem(0, kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags), createTextItem(detailText));
-        table->setCurrentCell(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
-    }
 
     QTableWidgetItem* createNumericItem(const QString& text, const qulonglong numericValue)
     {
@@ -540,9 +516,8 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabKernelExecutableMemory);
     tabLayout->addWidget(splitter, 1);
 
-    m_kernelExecutableTable = new ks::ui::VisibleTableWidget(splitter);
+    m_kernelExecutableTable = new MemoryTableView(splitter);
     ks::ui::SetTableActionBarMode(m_kernelExecutableTable, ks::ui::TableActionBarMode::Full);
-    m_kernelExecutableTable->setColumnCount(kernelExecutableColumnIndex(KernelExecutableColumn::Count));
     m_kernelExecutableTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("VA"),
         QStringLiteral("区域大小"),
@@ -568,6 +543,9 @@ void MemoryDock::initializeKernelExecutableMemoryScanTab()
     m_kernelExecutableTable->setColumnWidth(kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags), 220);
     installKernelExecutableCopyMenu(m_kernelExecutableTable);
     splitter->addWidget(m_kernelExecutableTable);
+    ks::ui::SetTableColumnAutoFitEnabled(m_kernelExecutableTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_kernelExecutableTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    initializeCoreProjection(CoreKind::KernelExecutable);
 
     QWidget* detailPanel = new QWidget(splitter);
     QHBoxLayout* detailLayout = new QHBoxLayout(detailPanel);
@@ -635,13 +613,11 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
             4096U,
             std::wstring());
 
+        const auto resultSnapshot = ks::memory_detail::ValueStorage<ksword::ark::KernelExecutableMemoryScanResult>(std::move(scanResult));
         QMetaObject::invokeMethod(
             qApp,
-            [guardThis, ticket, scanResult = std::move(scanResult)]() mutable {
+            [guardThis, ticket, resultSnapshot]() {
                 if (guardThis == nullptr || ticket != guardThis->m_kernelExecutableRefreshTicket.load()) return;
-                auto resultSnapshot =
-                    std::make_shared<ksword::ark::KernelExecutableMemoryScanResult>(
-                        std::move(scanResult));
                 auto commitSnapshot = [guardThis, ticket, resultSnapshot]()
                 {
                     if (guardThis == nullptr ||
@@ -669,7 +645,8 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                     const ksword::ark::KernelExecutableMemoryScanResult& snapshot = *resultSnapshot;
                     if (!snapshot.io.ok)
                     {
-                        guardThis->m_kernelExecutableCache.clear();
+                        guardThis->m_extraStatusTemplates[0].clear();
+                        guardThis->m_kernelExecutableCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelExecutableMemoryPageEntry>>();
                         guardThis->m_kernelExecutableVisibleCount = 0U;
                         guardThis->rebuildKernelExecutableMemoryScanTable();
 
@@ -697,30 +674,32 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
                                 diagnostic.field(QStringLiteral("Win32"), QString::number(snapshot.io.win32Error));
                                 diagnostic.field(QStringLiteral("详情"), kernelExecutableIoMessageText(snapshot.io.message));
                             }
-                            guardThis->m_kernelExecutableDetailEditor->setDocument(diagnostic);
+                            guardThis->m_extraDiagnosticDocuments[0] = diagnostic;
+                            if (guardThis->m_kernelExecutableDetailEditor->isVisible()) { guardThis->m_kernelExecutableDetailEditor->setDocument(diagnostic); }
                         }
                         return;
                     }
 
-                    guardThis->m_kernelExecutableCache = snapshot.entries;
-                    guardThis->rebuildKernelExecutableMemoryScanTable();
-                    guardThis->showKernelExecutableMemoryDetailByCurrentRow();
+                    guardThis->m_extraDiagnosticDocuments[0] = {};
+                    guardThis->m_kernelExecutableCache = std::shared_ptr<const std::vector<ksword::ark::KernelExecutableMemoryPageEntry>>(resultSnapshot, &snapshot.entries);
                     if (guardThis->m_kernelExecutableStatusLabel != nullptr)
                     {
-                        guardThis->m_kernelExecutableStatusLabel->setText(
-                            QStringLiteral("状态：总计 %1，显示 %2，模块 %3")
+                        guardThis->m_extraStatusTemplates[0] = (QStringLiteral("状态：总计 %1，显示 %2，模块 %3")
                             .arg(snapshot.totalCount)
-                            .arg(guardThis->m_kernelExecutableVisibleCount)
-                            .arg(snapshot.moduleCount));
+                            .arg(QString::fromLatin1("__KS_VISIBLE__"))
+                            .arg(snapshot.moduleCount)).replace(QString::fromLatin1("__KS_VISIBLE__"), QStringLiteral("%1"));
+                        guardThis->m_kernelExecutableStatusLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Updating memory table...")));
                         guardThis->m_kernelExecutableStatusLabel->setStyleSheet(
                             kernelExecutableStatusStyle(
                                 snapshot.entries.empty()
                                     ? KswordTheme::ErrorColor().name(QColor::HexRgb)
                                     : KswordTheme::SuccessColor().name(QColor::HexRgb)));
                     }
+                    guardThis->rebuildKernelExecutableMemoryScanTable();
+                    guardThis->showKernelExecutableMemoryDetailByCurrentRow();
                 };
 
-                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
                     guardThis.data(),
                     QStringLiteral("memory-kernel-executable-snapshot"),
                     { guardThis->m_kernelExecutableTable },
@@ -736,99 +715,12 @@ void MemoryDock::refreshKernelExecutableMemoryScanAsync()
 
 void MemoryDock::rebuildKernelExecutableMemoryScanTable()
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_kernelExecutableDetailEditor);
-    // 输入：无，依赖 m_kernelExecutableCache 与当前过滤控件。
-    // 处理：只做缓存到表格的投影，不重新调用 DriverClient。
-    // 返回：无。
-    const QString moduleFilter = m_kernelExecutableModuleFilterEdit != nullptr
-        ? m_kernelExecutableModuleFilterEdit->text().trimmed()
-        : QString();
-    const bool riskOnly = m_kernelExecutableRiskOnlyCheck != nullptr
-        ? m_kernelExecutableRiskOnlyCheck->isChecked()
-        : false;
-
-    std::vector<const ksword::ark::KernelExecutableMemoryPageEntry*> visibleEntries;
-    visibleEntries.reserve(m_kernelExecutableCache.size());
-    for (const ksword::ark::KernelExecutableMemoryPageEntry& entry : m_kernelExecutableCache)
-    {
-        if (riskOnly && entry.riskFlags == 0U)
-        {
-            continue;
-        }
-        if (!entryMatchesModuleFilter(entry, moduleFilter))
-        {
-            continue;
-        }
-        visibleEntries.push_back(&entry);
-    }
-
-    m_kernelExecutableVisibleCount = visibleEntries.size();
-    if (m_kernelExecutableTable == nullptr)
-    {
-        return;
-    }
-
-    m_kernelExecutableTable->setSortingEnabled(false);
-    const QSignalBlocker blocker(m_kernelExecutableTable);
-    m_kernelExecutableTable->setRowCount(static_cast<int>(visibleEntries.size()));
-    for (int row = 0; row < static_cast<int>(visibleEntries.size()); ++row)
-    {
-        const ksword::ark::KernelExecutableMemoryPageEntry& entry = *visibleEntries[static_cast<std::size_t>(row)];
-        // 数值列一律走 NumericTableItem：VA/模块基址按十六进制展示但按真实数值排序，
-        // 区域大小按 KB/MB 展示但按字节数排序，页数/页大小按原始计数排序。
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::Va),
-            createNumericItem(hexValue(entry.virtualAddress), entry.virtualAddress));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::RegionSize),
-            createNumericItem(byteSizeText(entry.regionSize), entry.regionSize));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::PageCount),
-            createNumericItem(QString::number(entry.pageCount), entry.pageCount));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::PageSize),
-            createNumericItem(QString::number(entry.pageSize), entry.pageSize));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::Permissions),
-            createTextItem(permissionText(entry.permissionFlags)));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::Owner),
-            createTextItem(ownerKindText(entry.ownerKind)));
-        // 模块基址为 0 表示这段可执行页没有匹配到已加载模块，此时展示 N/A 但排序值仍取 0。
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::ModuleBase),
-            createNumericItem(
-                entry.moduleBase != 0ULL ? hexValue(entry.moduleBase) : QStringLiteral("N/A"),
-                entry.moduleBase));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::ModulePath),
-            createTextItem(wideToQString(entry.modulePath)));
-        m_kernelExecutableTable->setItem(row, kernelExecutableColumnIndex(KernelExecutableColumn::RiskFlags),
-            createTextItem(riskFlagsText(entry.riskFlags)));
-
-        // 风险行整行着色：可写可执行一类判错误色，其余风险位判警告色，无风险行保持默认前景。
-        const QColor riskColor = kernelExecutableRiskColor(entry.riskFlags);
-        if (riskColor.isValid())
-        {
-            for (int column = 0; column < m_kernelExecutableTable->columnCount(); ++column)
-            {
-                QTableWidgetItem* cellItem = m_kernelExecutableTable->item(row, column);
-                if (cellItem != nullptr)
-                {
-                    cellItem->setForeground(riskColor);
-                }
-            }
-        }
-    }
-    if (visibleEntries.empty())
-    {
-        const QString detailText = m_kernelExecutableCache.empty()
-            ? QStringLiteral("内核可执行页扫描当前没有缓存行；可能是驱动未返回结果、扫描失败或尚未刷新。")
-            : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核可执行页记录；请清空模块过滤或关闭“仅风险项”。")
-                .arg(static_cast<qulonglong>(m_kernelExecutableCache.size()));
-        setKernelExecutableDiagnosticRow(m_kernelExecutableTable, detailText);
-    }
-    if (m_kernelExecutableTable->rowCount() > 0 && m_kernelExecutableTable->currentRow() < 0)
-    {
-        m_kernelExecutableTable->setCurrentCell(0, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
-    }
-    m_kernelExecutableTable->setSortingEnabled(true);
+    requestCoreProjection(CoreKind::KernelExecutable, true);
 }
 
 void MemoryDock::showKernelExecutableMemoryDetailByCurrentRow()
 {
+    if (!m_kernelExecutableTable || !m_kernelExecutableTable->isVisible() || !coreProjectionIsCurrent(CoreKind::KernelExecutable)) { return; }
     // 输入：无，依赖当前表格选中行。
     // 处理：把当前行对应的 R3 记录展开到 StructuredFieldView。
     // 返回：无。
@@ -844,34 +736,73 @@ void MemoryDock::showKernelExecutableMemoryDetailByCurrentRow()
         return;
     }
 
-    const QTableWidgetItem* vaItem = m_kernelExecutableTable->item(currentRow, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
-    if (vaItem == nullptr)
+    const QModelIndex vaItem = m_kernelExecutableTable->model()->index(currentRow, kernelExecutableColumnIndex(KernelExecutableColumn::Va));
+    if (!vaItem.isValid())
     {
         m_kernelExecutableDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
-    const QString diagnosticText = vaItem->data(Qt::UserRole + 2).toString();
+    const QString diagnosticText = vaItem.data(Qt::UserRole + 2).toString();
     if (!diagnosticText.isEmpty())
     {
+        if (!m_extraDiagnosticDocuments[0].isEmpty()) { m_kernelExecutableDetailEditor->setDocument(m_extraDiagnosticDocuments[0]); return; }
         m_kernelExecutableDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("内核可执行页诊断\n%1").arg(diagnosticText)));
         return;
     }
 
     bool ok = false;
-    const qulonglong va = vaItem->data(Qt::UserRole).toULongLong(&ok);
+    const qulonglong va = vaItem.data(Qt::UserRole).toULongLong(&ok);
     if (!ok)
     {
         m_kernelExecutableDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
 
-    for (const ksword::ark::KernelExecutableMemoryPageEntry& entry : m_kernelExecutableCache)
-    {
-        if (entry.virtualAddress == va)
-        {
+    const auto sourceIndex = vaItem.data(ks::memory_detail::CoreSourceIndexRole).toULongLong();
+    if (sourceIndex < m_kernelExecutableCache->size()) {
+        const auto& entry = (*m_kernelExecutableCache)[static_cast<std::size_t>(sourceIndex)];
+        if (entry.virtualAddress == va) {
             m_kernelExecutableDetailEditor->setDocument(buildKernelExecutableDetailDocument(entry));
             return;
         }
     }
     m_kernelExecutableDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
+}
+
+void MemoryDock::captureKernelExecutableProjection(CoreProjectionData& data) const
+{
+    const auto source = m_kernelExecutableCache;
+    data.extraSource = source; data.extraCount = source->size();
+    data.statusTemplate = m_extraStatusTemplates[0];
+    data.filter = m_kernelExecutableModuleFilterEdit ? m_kernelExecutableModuleFilterEdit->text().trimmed() : QString();
+    data.extraRisk = m_kernelExecutableRiskOnlyCheck && m_kernelExecutableRiskOnlyCheck->isChecked();
+    data.extraDiagnostic = source->empty() ? QStringLiteral("内核可执行页扫描当前没有缓存行；可能是驱动未返回结果、扫描失败或尚未刷新。") : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核可执行页记录；请清空模块过滤或关闭“仅风险项”。").arg(source->size());
+    data.extraMatches = [source, filter = data.filter, risk = data.extraRisk](std::size_t row) { const auto& entry = (*source)[row]; return (!risk || (entry.riskFlags != 0U)) && (entryMatchesModuleFilter(entry, filter)); };
+    data.extraKey = [source](std::size_t row) { const auto& entry = (*source)[row]; return QString::number(entry.virtualAddress); };
+    data.extraCell = [source, language = data.language, diagnostic = data.extraDiagnostic](std::size_t row, int column, int role) -> QVariant {
+        if (row == SIZE_MAX) {
+            if (role == Qt::UserRole + 2) { return diagnostic; }
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) { return {}; }
+            const auto columns = QStringList{QStringLiteral("<无可执行页证据>"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("诊断"),QStringLiteral("N/A"),QStringLiteral("N/A"),diagnostic};
+            return column >= 0 && column < columns.size() ? QVariant(language.sourceText(columns[column])) : QVariant();
+        }
+        const auto& entry = (*source)[row];
+        if (role == Qt::UserRole + 1 && column == 0) { return QVariant::fromValue<qulonglong>(row); }
+        if (role == Qt::UserRole && column == 0) { return QVariant::fromValue<qulonglong>(entry.virtualAddress); }
+        if (role == Qt::ForegroundRole) { const auto color = kernelExecutableRiskColor(entry.riskFlags); return color.isValid() ? QVariant(QBrush(color)) : QVariant(); }
+        const bool numeric = role == ks::ui::NumericSortRole;
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return numeric ? QVariant::fromValue<qulonglong>(entry.virtualAddress) : QVariant(language.sourceText(hexValue(entry.virtualAddress)));
+        case 1: return numeric ? QVariant::fromValue<qulonglong>(entry.regionSize) : QVariant(language.sourceText(byteSizeText(entry.regionSize)));
+        case 2: return numeric ? QVariant::fromValue<qulonglong>(entry.pageCount) : QVariant(language.sourceText(QString::number(entry.pageCount)));
+        case 3: return numeric ? QVariant::fromValue<qulonglong>(entry.pageSize) : QVariant(language.sourceText(QString::number(entry.pageSize)));
+        case 4: return QVariant(language.sourceText(permissionText(entry.permissionFlags)));
+        case 5: return QVariant(language.sourceText(ownerKindText(entry.ownerKind)));
+        case 6: return numeric ? QVariant::fromValue<qulonglong>(entry.moduleBase) : QVariant(language.sourceText(entry.moduleBase != 0ULL ? hexValue(entry.moduleBase) : QStringLiteral("N/A")));
+        case 7: return QVariant(language.sourceText(wideToQString(entry.modulePath)));
+        case 8: return QVariant(language.sourceText(riskFlagsText(entry.riskFlags)));
+        default: return {};
+        }
+    };
 }

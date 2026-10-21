@@ -1528,9 +1528,9 @@ void MemoryDock::detachProcess()
     m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
     m_searchResultCache.clear();
     m_searchResultVisibleCount = 0;
-    m_processPteTranslateCache.clear();
+    m_processPteTranslateCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>();
     m_processPteTranslateVisibleCount = 0;
-    m_processMemoryEvidenceCache.clear();
+    m_processMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>();
     m_processMemoryEvidenceVisibleCount = 0;
 
     // 清理表格展示，避免用户误操作旧数据。
@@ -1546,11 +1546,11 @@ void MemoryDock::detachProcess()
     if (m_searchResultTable) { m_searchResultTable->setRowCount(0); }
     if (m_processPteTranslateTable != nullptr)
     {
-        m_processPteTranslateTable->setRowCount(0);
+        m_processPteTranslateTable->clearEntries();
     }
     if (m_processMemoryEvidenceTable != nullptr)
     {
-        m_processMemoryEvidenceTable->setRowCount(0);
+        m_processMemoryEvidenceTable->clearEntries();
     }
     if (m_processPteTranslateStatusLabel != nullptr)
     {
@@ -2224,22 +2224,6 @@ bool MemoryDock::enumerateMemoryRegionsByVirtualQuery(
 void MemoryDock::applyRegionFilterAndRebuildTable() { if (m_regionTable) { requestCoreProjection(CoreKind::Regions, false); } }
 
 
-struct MemoryDock::CoreProjectionData {
-    CoreKind kind;
-    std::shared_ptr<const std::vector<ProcessEntry>> processes;
-    std::shared_ptr<const std::vector<ModuleEntry>> modules;
-    std::shared_ptr<const std::vector<RegionEntry>> regions;
-    QString filter, languageId, statusTemplate;
-    ks::i18n::SourceTextSnapshot language;
-    std::uint32_t pid = 0;
-    std::uint64_t target = 0, localeGeneration = 0;
-    bool committed = false, image = false, readable = false;
-    int sortColumn = 0;
-    Qt::SortOrder sortOrder = Qt::AscendingOrder;
-    std::shared_ptr<std::vector<std::size_t>> rows;
-    QString selectedKey;
-    int selectedRow = -1, selectedColumn = 0;
-};
 struct MemoryDock::CoreProjectionJob {
     std::atomic_bool done{false}, cancel{false};
     std::shared_ptr<std::atomic_bool> lifetime;
@@ -2251,7 +2235,9 @@ struct MemoryDock::CoreProjectionJob {
 QString MemoryDock::coreRowKey(const CoreProjectionData& data, const std::size_t row)
 {
     if (data.kind == CoreKind::Processes) { const auto& entry = (*data.processes)[row]; return QString::number(entry.pid) + QLatin1Char(':') + QString::number(entry.creationTime100ns); }
+    if (row == SIZE_MAX) { return {}; }
     const auto target = QString::number(data.pid) + QLatin1Char(':') + QString::number(data.target) + QLatin1Char(':');
+    if (data.extraSource) { return target + data.extraKey(row); }
     if (data.kind == CoreKind::Modules) {
         const auto& entry = (*data.modules)[row];
         return target + QString::number(entry.baseAddress) + QLatin1Char(':') + QString::number(entry.fullPath.size()) + QLatin1Char(':') + entry.fullPath;
@@ -2264,6 +2250,7 @@ QVariant MemoryDock::coreCell(const CoreProjectionData& data, const std::size_t 
 {
     if (role == ks::memory_detail::CoreSourceIndexRole) { return QVariant::fromValue<qulonglong>(row); }
     if (role == ks::memory_detail::CoreIdentityRole) { return coreRowKey(data, row); }
+    if (data.extraSource) { return data.extraCell(row, column, role); }
     const bool numeric = role == ks::ui::NumericSortRole;
     if (data.kind == CoreKind::Processes) {
         const auto& entry = (*data.processes)[row];
@@ -2325,7 +2312,7 @@ QVariant MemoryDock::coreCell(const CoreProjectionData& data, const std::size_t 
 
 bool MemoryDock::sameCoreRequest(const CoreProjectionData& left, const CoreProjectionData& right)
 {
-    return left.kind == right.kind && left.processes == right.processes && left.modules == right.modules && left.regions == right.regions
+    return left.kind == right.kind && left.extraSource == right.extraSource && left.extraRisk == right.extraRisk && left.processes == right.processes && left.modules == right.modules && left.regions == right.regions
         && left.filter == right.filter && left.pid == right.pid && left.target == right.target
         && left.localeGeneration == right.localeGeneration && left.languageId == right.languageId
         && left.committed == right.committed && left.image == right.image && left.readable == right.readable
@@ -2349,7 +2336,7 @@ std::shared_ptr<MemoryDock::CoreProjectionData> MemoryDock::captureCoreRequest(c
             data->selectedKey = m_moduleTable->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString();
             data->selectedColumn = m_moduleTable->currentIndex().column();
         }
-    } else {
+    } else if (kind == CoreKind::Regions) {
         data->regions = m_regionCache; data->filter = m_regionFilterEdit ? m_regionFilterEdit->text().trimmed() : QString();
         data->pid = m_attachedPid; data->target = m_processAttachmentGeneration.load();
         data->committed = m_regionCommittedOnlyCheck && m_regionCommittedOnlyCheck->isChecked();
@@ -2360,6 +2347,18 @@ std::shared_ptr<MemoryDock::CoreProjectionData> MemoryDock::captureCoreRequest(c
             data->selectedColumn = m_regionTable->currentIndex().column();
         }
     }
+    if (static_cast<int>(kind) >= 3) {
+        data->pid = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence ? m_attachedPid : 0;
+        data->target = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence ? m_processAttachmentGeneration.load() : 0;
+        switch (kind) {
+        case CoreKind::KernelExecutable: captureKernelExecutableProjection(*data); break;
+        case CoreKind::KernelEvidence: captureKernelMemoryProjection(*data); break;
+        case CoreKind::PteEvidence: capturePteProjection(*data); break;
+        case CoreKind::ProcessEvidence: captureProcessEvidenceProjection(*data); break;
+        default: break;
+        }
+        if (auto* table = extraCoreTable(kind)) { data->selectedKey = table->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString(); data->selectedColumn = table->currentIndex().column(); }
+    }
     return data;
 }
 
@@ -2368,13 +2367,14 @@ void MemoryDock::buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& j
     try {
         auto& data = *job->data;
         data.rows = ks::memory_detail::ValueStorage<std::vector<std::size_t>>();
-        const std::size_t count = data.kind == CoreKind::Processes ? data.processes->size() : data.kind == CoreKind::Modules ? data.modules->size() : data.regions->size();
+        const std::size_t count = data.extraSource ? data.extraCount : data.kind == CoreKind::Processes ? data.processes->size() : data.kind == CoreKind::Modules ? data.modules->size() : data.regions->size();
         struct SortRow { std::size_t source; QVariant key; };
         std::vector<SortRow> rows; rows.reserve(count);
         auto selected = std::numeric_limits<std::size_t>::max();
         for (std::size_t row = 0; row < count; ++row) {
             if ((row & 63U) == 0 && job->cancelled()) { job->done.store(true); return; }
-            if (data.kind == CoreKind::Processes) {
+            if (data.extraSource) { if (!data.extraMatches(row)) { continue; } }
+            else if (data.kind == CoreKind::Processes) {
                 const auto& entry = (*data.processes)[row];
                 if (!data.filter.isEmpty() && !entry.processName.contains(data.filter, Qt::CaseInsensitive) && !QString::number(entry.pid).contains(data.filter, Qt::CaseInsensitive)) { continue; }
             } else if (data.kind == CoreKind::Modules) {
@@ -2402,6 +2402,7 @@ void MemoryDock::buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& j
                 if (row.source == selected) { data.selectedRow = static_cast<int>(data.rows->size()); }
                 data.rows->push_back(row.source);
             }
+            if (data.extraSource && data.rows->empty()) { data.rows->push_back(SIZE_MAX); }
         }
     } catch (...) { job->failed = true; }
     job->done.store(true);
@@ -2419,8 +2420,8 @@ void MemoryDock::initializeCoreProjection(const CoreKind kind)
         connect(m_coreProjectionDebounce, &QTimer::timeout, this, [this] { pollCoreProjection(); });
         connect(this, &QObject::destroyed, [lifetime = m_coreProjectionLifetime] { lifetime->store(true); });
     }
-    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : m_regionTable;
-    auto* model = kind == CoreKind::Processes ? m_processTable->readOnlyModel : kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : m_regionTable->readOnlyModel;
+    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : kind == CoreKind::Regions ? m_regionTable : extraCoreTable(kind);
+    auto* model = kind == CoreKind::Processes ? m_processTable->readOnlyModel : kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : kind == CoreKind::Regions ? m_regionTable->readOnlyModel : extraCoreTable(kind)->readOnlyModel;
     model->requestSort = [guard = QPointer<MemoryDock>(this), kind, index](int column, Qt::SortOrder order) {
         if (!guard || (guard->m_coreSortColumns[index] == column && guard->m_coreSortOrders[index] == order)) { return; }
         guard->m_coreSortColumns[index] = column; guard->m_coreSortOrders[index] = order;
@@ -2430,13 +2431,13 @@ void MemoryDock::initializeCoreProjection(const CoreKind kind)
         if (!guard) { return; }
         if (language) { ++guard->m_coreLocaleGeneration; }
         guard->requestCoreProjection(kind, false);
-    }, kind != CoreKind::Regions);
+    }, kind == CoreKind::Modules || kind == CoreKind::Processes);
 }
 
 void MemoryDock::requestCoreProjection(const CoreKind kind, const bool debounce)
 {
     const auto index = static_cast<std::size_t>(kind);
-    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : m_regionTable;
+    QAbstractItemView* view = kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : kind == CoreKind::Regions ? m_regionTable : extraCoreTable(kind);
     if (!view) { return; }
     auto request = captureCoreRequest(kind);
     if (m_corePublished[index] && sameCoreRequest(*request, *m_corePublished[index])) {
@@ -2471,19 +2472,30 @@ void MemoryDock::publishCoreProjection(const std::shared_ptr<CoreProjectionData>
     if (!sameCoreRequest(*current, *data)) { return; }
     const auto kind = static_cast<std::size_t>(data->kind);
     const QPointer<MemoryDock> owner(this);
-    const QPointer<QAbstractItemView> view(data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : m_regionTable);
+    const QPointer<QAbstractItemView> view(data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : data->kind == CoreKind::Regions ? m_regionTable : extraCoreTable(data->kind));
     if (!view || !view->isVisible()) { m_coreReady[kind] = data; return; }
-    const QPointer<ks::memory_detail::CoreReadOnlyModel> model(data->kind == CoreKind::Processes ? m_processTable->readOnlyModel : data->kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : m_regionTable->readOnlyModel);
+    const QPointer<ks::memory_detail::CoreReadOnlyModel> model(data->kind == CoreKind::Processes ? m_processTable->readOnlyModel : data->kind == CoreKind::Modules ? m_moduleTable->readOnlyModel : data->kind == CoreKind::Regions ? m_regionTable->readOnlyModel : extraCoreTable(data->kind)->readOnlyModel);
     const int scroll = view->verticalScrollBar()->value();
     model->publish(data->rows, [data](std::size_t row, int column, int role) { return coreCell(*data, row, column, role); });
     if (!owner || !view || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
     m_corePublished[kind] = data;
     view->setEnabled(true);
     if (!owner || !view || !model || view->model() != model || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
-    if (data->selectedRow >= 0) { view->setCurrentIndex(model->index(data->selectedRow, qMax(0, data->selectedColumn))); }
+    if (data->selectedRow >= 0 || (data->extraSource && model->rowCount() > 0)) { view->setCurrentIndex(model->index(data->selectedRow >= 0 ? data->selectedRow : 0, qMax(0, data->selectedColumn))); }
     if (!owner || !view || !model || view->model() != model || !sameCoreRequest(*captureCoreRequest(data->kind), *data)) { return; }
     view->verticalScrollBar()->setValue(scroll);
     if (!owner) { return; }
+    if (data->extraSource) {
+        const auto count = data->rows->size() == 1 && data->rows->front() == SIZE_MAX ? 0U : data->rows->size();
+        switch (data->kind) {
+        case CoreKind::KernelExecutable: m_kernelExecutableVisibleCount = count; if (!data->statusTemplate.isEmpty() && m_kernelExecutableStatusLabel) { m_kernelExecutableStatusLabel->setText(data->statusTemplate.arg(count)); } break;
+        case CoreKind::KernelEvidence: m_kernelMemoryEvidenceVisibleCount = count; if (!data->statusTemplate.isEmpty() && m_kernelMemoryEvidenceStatusLabel) { m_kernelMemoryEvidenceStatusLabel->setText(data->statusTemplate.arg(count)); } break;
+        case CoreKind::PteEvidence: m_processPteTranslateVisibleCount = count; break;
+        case CoreKind::ProcessEvidence: m_processMemoryEvidenceVisibleCount = count; break;
+        default: break;
+        }
+        if (!owner) { return; }
+    }
     if (data->kind == CoreKind::Processes) {
         const auto pending = static_cast<std::uint32_t>(property(kProcessFocusPendingPidProperty).toUInt());
         if (pending != 0) { if (selectProcessRowByPid(m_processTable, m_processCombo, pending)) { setProperty(kProcessFocusPendingPidProperty, 0U); } }
@@ -2491,7 +2503,7 @@ void MemoryDock::publishCoreProjection(const std::shared_ptr<CoreProjectionData>
         if (m_processCountLabel) { m_processCountLabel->setText(data->filter.isEmpty() ? QString("共 %1 个进程").arg(data->processes->size()) : QString("显示 %1 / 共 %2").arg(data->rows->size()).arg(data->processes->size())); }
     } else if (data->kind == CoreKind::Modules && m_moduleStatusLabel) {
         if (!data->statusTemplate.isEmpty()) { m_moduleStatusLabel->setText(data->statusTemplate.arg(data->rows->size())); }
-    } else if (m_regionStatusLabel) {
+    } else if (data->kind == CoreKind::Regions && m_regionStatusLabel) {
         QString status = m_attachedPid ? QStringLiteral("显示 %1 / 共 %2 个区域").arg(data->rows->size()).arg(data->regions->size()) : QStringLiteral("未附加进程。");
         if (m_regionCachePartial) { status += QStringLiteral(" | ") + ks::i18n::packedSourceText(QStringLiteral("Region enumeration is partial (Win32: %1)")).arg(m_regionCacheError); }
         m_regionStatusLabel->setText(status);
@@ -2511,10 +2523,10 @@ void MemoryDock::pollCoreProjection()
         if (!job->cancelled() && sameCoreRequest(*captureCoreRequest(job->data->kind), *job->data)) {
             if (job->failed) {
                 m_coreFailed[kind] = job->data;
-                QAbstractItemView* view = job->data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : job->data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : m_regionTable;
+                QAbstractItemView* view = job->data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : job->data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : job->data->kind == CoreKind::Regions ? m_regionTable : extraCoreTable(job->data->kind);
                 if (view) { view->setEnabled(true); }
                 if (!owner) { return; }
-                QLabel* label = job->data->kind == CoreKind::Processes ? m_processCountLabel : job->data->kind == CoreKind::Modules ? m_moduleStatusLabel : m_regionStatusLabel;
+                QLabel* label = job->data->kind == CoreKind::Processes ? m_processCountLabel : job->data->kind == CoreKind::Modules ? m_moduleStatusLabel : job->data->kind == CoreKind::Regions ? m_regionStatusLabel : job->data->kind == CoreKind::KernelExecutable ? m_kernelExecutableStatusLabel : job->data->kind == CoreKind::KernelEvidence ? m_kernelMemoryEvidenceStatusLabel : job->data->kind == CoreKind::PteEvidence ? m_processPteTranslateStatusLabel : job->data->kind == CoreKind::ProcessEvidence ? m_processMemoryEvidenceStatusLabel : nullptr;
                 if (label) { label->setText(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); }
             } else { m_coreReady[kind] = job->data; }
         }
@@ -2524,6 +2536,14 @@ void MemoryDock::pollCoreProjection()
     if (m_moduleTable && m_moduleTable->isVisible()) { requestCoreProjection(CoreKind::Modules, false); }
     if (!owner) { return; }
     if (m_regionTable && m_regionTable->isVisible()) { requestCoreProjection(CoreKind::Regions, false); }
+    if (auto* table = extraCoreTable(CoreKind::KernelExecutable); table && table->isVisible()) { requestCoreProjection(CoreKind::KernelExecutable, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::KernelEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::KernelEvidence, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::PteEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::PteEvidence, false); }
+    if (!owner) { return; }
+    if (auto* table = extraCoreTable(CoreKind::ProcessEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::ProcessEvidence, false); }
+    if (!owner) { return; }
     if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation) { m_coreProjectionPoll->stop(); }
 }
 
@@ -2644,4 +2664,15 @@ void MemoryDock::cancelCoreProjection(const bool closing)
     for (auto& data : m_coreReady) { data.reset(); }
     for (auto& data : m_corePublished) { data.reset(); }
     for (auto& data : m_coreFailed) { data.reset(); }
+}
+
+MemoryTableView* MemoryDock::extraCoreTable(const CoreKind kind) const
+{
+    switch (kind) {
+    case CoreKind::KernelExecutable: return m_kernelExecutableTable;
+    case CoreKind::KernelEvidence: return m_kernelMemoryEvidenceTable;
+    case CoreKind::PteEvidence: return m_processPteTranslateTable;
+    case CoreKind::ProcessEvidence: return m_processMemoryEvidenceTable;
+    default: return nullptr;
+    }
 }

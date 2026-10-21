@@ -12,6 +12,8 @@
 #include "../UI/TableColumnAutoFit.h"
 
 #include <memory>
+#include "../UI/TableColumnAutoFit.h"
+#include "../UI/TableRowFilterSupport.h"
 
 using namespace ksword::memory_dock_internal;
 
@@ -237,7 +239,7 @@ namespace
         return KswordTheme::ContextMenuStyle();
     }
 
-    QString evidenceRowText(QTableWidget* table, const int rowIndex)
+    QString evidenceRowText(MemoryTableView* table, const int rowIndex)
     {
         // 输入：内核内存证据表和目标行号。
         // 处理：读取当前行所有列并以 Tab 分隔。
@@ -251,13 +253,13 @@ namespace
         fields.reserve(table->columnCount());
         for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            const QModelIndex item = table->model()->index(rowIndex, columnIndex);
+            fields.push_back(item.isValid() ? item.data(Qt::DisplayRole).toString() : QString());
         }
         return fields.join(QLatin1Char('\t'));
     }
 
-    void installEvidenceCopyMenu(QTableWidget* table)
+    void installEvidenceCopyMenu(MemoryTableView* table)
     {
         // 输入：内核内存证据表。
         // 处理：安装“复制当前行”右键菜单。
@@ -268,7 +270,7 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table](const QPoint& localPosition)
+        QObject::connect(table, &QTableView::customContextMenuRequested, table, [table](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             const int rowIndex = clickedIndex.isValid() ? clickedIndex.row() : table->currentRow();
@@ -300,33 +302,7 @@ namespace
         });
     }
 
-    void setEvidenceDiagnosticRow(
-        QTableWidget* table,
-        const QString& addressText,
-        const QString& detailText)
-    {
-        // setEvidenceDiagnosticRow：
-        // - 输入：目标表格、首列提示和详情文本；
-        // - 处理：补一行可复制诊断，避免空缓存/过滤条件导致表格完全空白；
-        // - 返回：无，完整诊断保存到 UserRole+2 供详情区读取。
-        if (table == nullptr)
-        {
-            return;
-        }
 
-        table->setRowCount(1);
-        QTableWidgetItem* addressItem = textItem(addressText);
-        addressItem->setData(Qt::UserRole + 2, detailText);
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Address), addressItem);
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Size), textItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Kind), textItem(QStringLiteral("诊断")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Owner), textItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Permissions), textItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Risk), textItem(QStringLiteral("提示")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::TextHash), textItem(QStringLiteral("N/A")));
-        table->setItem(0, evidenceColumnIndex(EvidenceColumn::Detail), textItem(detailText));
-        table->setCurrentCell(0, evidenceColumnIndex(EvidenceColumn::Address));
-    }
 
     QTableWidgetItem* numericItem(const QString& text, const qulonglong value)
     {
@@ -513,10 +489,9 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_tabKernelMemoryEvidence);
     workspace->results()->addWidget(splitter, 1);
 
-    m_kernelMemoryEvidenceTable = new ks::ui::VisibleTableWidget(splitter);
+    m_kernelMemoryEvidenceTable = new MemoryTableView(splitter);
     // Hash/权限与风险变更有前后对比价值，保留完整操作栏。
     ks::ui::SetTableActionBarMode(m_kernelMemoryEvidenceTable, ks::ui::TableActionBarMode::Full);
-    m_kernelMemoryEvidenceTable->setColumnCount(evidenceColumnIndex(EvidenceColumn::Count));
     m_kernelMemoryEvidenceTable->setHorizontalHeaderLabels(QStringList{
         QStringLiteral("VA"),
         QStringLiteral("大小"),
@@ -535,6 +510,9 @@ void MemoryDock::initializeKernelMemoryEvidenceTab()
     m_kernelMemoryEvidenceTable->verticalHeader()->setVisible(false);
     installEvidenceCopyMenu(m_kernelMemoryEvidenceTable);
     splitter->addWidget(m_kernelMemoryEvidenceTable);
+    ks::ui::SetTableColumnAutoFitEnabled(m_kernelMemoryEvidenceTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_kernelMemoryEvidenceTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    initializeCoreProjection(CoreKind::KernelEvidence);
 
     m_kernelMemoryEvidenceDetailEditor = new ks::ui::StructuredFieldView(splitter);
     m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral(
@@ -627,12 +605,11 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
             KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_BIGPOOL_ROWS,
             KSWORD_ARK_MEMORY_EVIDENCE_DEFAULT_SAMPLE_BYTES);
 
+        const auto resultSnapshot = ks::memory_detail::ValueStorage<ksword::ark::KernelMemoryEvidenceResult>(std::move(result));
         QMetaObject::invokeMethod(
             qApp,
-            [guardThis, ticket, result = std::move(result)]() mutable {
+            [guardThis, ticket, resultSnapshot]() {
                 if (guardThis == nullptr || ticket != guardThis->m_kernelMemoryEvidenceRefreshTicket.load()) return;
-                auto resultSnapshot =
-                    std::make_shared<ksword::ark::KernelMemoryEvidenceResult>(std::move(result));
                 auto commitSnapshot = [guardThis, ticket, resultSnapshot]()
                 {
                     if (guardThis == nullptr ||
@@ -653,7 +630,8 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
                     const ksword::ark::KernelMemoryEvidenceResult& snapshot = *resultSnapshot;
                     if (!snapshot.io.ok)
                     {
-                        guardThis->m_kernelMemoryEvidenceCache.clear();
+                        guardThis->m_extraStatusTemplates[1].clear();
+                        guardThis->m_kernelMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelMemoryEvidenceEntry>>();
                         guardThis->m_kernelMemoryEvidenceVisibleCount = 0U;
                         guardThis->rebuildKernelMemoryEvidenceTable();
                         const QString message = snapshot.unsupported
@@ -669,29 +647,31 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
                         }
                         if (guardThis->m_kernelMemoryEvidenceDetailEditor != nullptr)
                         {
-                            guardThis->m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(message));
+                            guardThis->m_extraDiagnosticDocuments[1] = ks::ui::FieldDocument{}.note(message);
+                            if (guardThis->m_kernelMemoryEvidenceDetailEditor->isVisible()) { guardThis->m_kernelMemoryEvidenceDetailEditor->setDocument(guardThis->m_extraDiagnosticDocuments[1]); }
                         }
                         return;
                     }
 
-                    guardThis->m_kernelMemoryEvidenceCache = snapshot.entries;
-                    guardThis->rebuildKernelMemoryEvidenceTable();
-                    guardThis->showKernelMemoryEvidenceDetailByCurrentRow();
+                    guardThis->m_extraDiagnosticDocuments[1] = {};
+                    guardThis->m_kernelMemoryEvidenceCache = std::shared_ptr<const std::vector<ksword::ark::KernelMemoryEvidenceEntry>>(resultSnapshot, &snapshot.entries);
                     if (guardThis->m_kernelMemoryEvidenceStatusLabel != nullptr)
                     {
-                        guardThis->m_kernelMemoryEvidenceStatusLabel->setText(
-                            QStringLiteral("状态：总计 %1，返回 %2，显示 %3，模块 %4，BigPool seen %5")
+                        guardThis->m_extraStatusTemplates[1] = (QStringLiteral("状态：总计 %1，返回 %2，显示 %3，模块 %4，BigPool seen %5")
                             .arg(snapshot.totalRows)
                             .arg(snapshot.returnedRows)
-                            .arg(guardThis->m_kernelMemoryEvidenceVisibleCount)
+                            .arg(QString::fromLatin1("__KS_VISIBLE__"))
                             .arg(snapshot.moduleCount)
-                            .arg(snapshot.bigPoolRowsSeen));
+                            .arg(snapshot.bigPoolRowsSeen)).replace(QString::fromLatin1("__KS_VISIBLE__"), QStringLiteral("%1"));
+                        guardThis->m_kernelMemoryEvidenceStatusLabel->setText(ks::i18n::packedSourceText(QStringLiteral("Updating memory table...")));
                         guardThis->m_kernelMemoryEvidenceStatusLabel->setStyleSheet(
                             statusStyle(KswordTheme::SuccessColor().name(QColor::HexRgb)));
                     }
+                    guardThis->rebuildKernelMemoryEvidenceTable();
+                    guardThis->showKernelMemoryEvidenceDetailByCurrentRow();
                 };
 
-                if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
                     guardThis.data(),
                     QStringLiteral("memory-kernel-evidence-snapshot"),
                     { guardThis->m_kernelMemoryEvidenceTable },
@@ -707,79 +687,12 @@ void MemoryDock::refreshKernelMemoryEvidenceAsync()
 
 void MemoryDock::rebuildKernelMemoryEvidenceTable()
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_kernelMemoryEvidenceDetailEditor);
-    // 输入：无，读取 m_kernelMemoryEvidenceCache 和过滤控件。
-    // 处理：把缓存投影为表格，风险过滤仅在 R3 本地执行。
-    // 返回：无。
-    if (m_kernelMemoryEvidenceTable == nullptr)
-    {
-        return;
-    }
-
-    const QString filter = m_kernelMemoryEvidenceFilterEdit != nullptr
-        ? m_kernelMemoryEvidenceFilterEdit->text().trimmed()
-        : QString();
-    const bool riskOnly = m_kernelMemoryEvidenceRiskOnlyCheck != nullptr && m_kernelMemoryEvidenceRiskOnlyCheck->isChecked();
-
-    std::vector<std::size_t> visibleIndexes;
-    visibleIndexes.reserve(m_kernelMemoryEvidenceCache.size());
-    for (std::size_t index = 0; index < m_kernelMemoryEvidenceCache.size(); ++index)
-    {
-        const auto& entry = m_kernelMemoryEvidenceCache[index];
-        if (riskOnly && entry.riskFlags == 0U)
-        {
-            continue;
-        }
-        if (!entryMatchesFilter(entry, filter))
-        {
-            continue;
-        }
-        visibleIndexes.push_back(index);
-    }
-
-    m_kernelMemoryEvidenceVisibleCount = visibleIndexes.size();
-    const QSignalBlocker blocker(m_kernelMemoryEvidenceTable);
-    m_kernelMemoryEvidenceTable->setSortingEnabled(false);
-    m_kernelMemoryEvidenceTable->setRowCount(static_cast<int>(visibleIndexes.size()));
-    for (int row = 0; row < static_cast<int>(visibleIndexes.size()); ++row)
-    {
-        const std::size_t cacheIndex = visibleIndexes[static_cast<std::size_t>(row)];
-        const auto& entry = m_kernelMemoryEvidenceCache[cacheIndex];
-        // 虚拟地址列：显示 0x 十六进制，排序用 64 位原值，否则点表头会退化成字符串序。
-        QTableWidgetItem* addressItem = numericItem(hex64(entry.virtualAddress), static_cast<qulonglong>(entry.virtualAddress));
-        addressItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Address), addressItem);
-        // 区域大小列：显示 KB/MB/GB，排序用字节数，避免 512 KB 排到 2.50 MB 后面。
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Size), numericItem(sizeText(entry.regionSize), static_cast<qulonglong>(entry.regionSize)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Kind), textItem(evidenceKindText(entry.evidenceKind)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Owner),
-            textItem(QStringLiteral("%1 %2").arg(ownerKindText(entry.ownerKind), wideToQString(entry.ownerName))));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Permissions), textItem(permissionText(entry.permissionFlags)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Risk), textItem(riskText(entry.riskFlags)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::TextHash), textItem(hashText(entry)));
-        m_kernelMemoryEvidenceTable->setItem(row, evidenceColumnIndex(EvidenceColumn::Detail), textItem(evidenceTableDetailText(entry)));
-    }
-    if (visibleIndexes.empty())
-    {
-        const QString detailText = m_kernelMemoryEvidenceCache.empty()
-            ? QStringLiteral("内核内存证据当前没有缓存行；可能是驱动未返回结果、查询失败或尚未刷新。")
-            : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核内存证据；请清空过滤或关闭“仅显示风险项”。")
-                .arg(static_cast<qulonglong>(m_kernelMemoryEvidenceCache.size()));
-        setEvidenceDiagnosticRow(
-            m_kernelMemoryEvidenceTable,
-            QStringLiteral("<无内核内存证据>"),
-            detailText);
-    }
-    if (m_kernelMemoryEvidenceTable->rowCount() > 0 && m_kernelMemoryEvidenceTable->currentRow() < 0)
-    {
-        m_kernelMemoryEvidenceTable->setCurrentCell(0, evidenceColumnIndex(EvidenceColumn::Address));
-    }
-    m_kernelMemoryEvidenceTable->setSortingEnabled(true);
-    ks::ui::RequestTableColumnAutoFit(m_kernelMemoryEvidenceTable);
+    requestCoreProjection(CoreKind::KernelEvidence, true);
 }
 
 void MemoryDock::showKernelMemoryEvidenceDetailByCurrentRow()
 {
+    if (!m_kernelMemoryEvidenceTable || !m_kernelMemoryEvidenceTable->isVisible() || !coreProjectionIsCurrent(CoreKind::KernelEvidence)) { return; }
     // 输入：无，读取当前表格行。
     // 处理：通过缓存索引写入详情编辑器。
     // 返回：无。
@@ -793,25 +706,62 @@ void MemoryDock::showKernelMemoryEvidenceDetailByCurrentRow()
         m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择一条内核内存证据记录查看详情。")));
         return;
     }
-    const QTableWidgetItem* addressItem = m_kernelMemoryEvidenceTable->item(row, evidenceColumnIndex(EvidenceColumn::Address));
-    if (addressItem == nullptr)
+    const QModelIndex addressItem = m_kernelMemoryEvidenceTable->model()->index(row, evidenceColumnIndex(EvidenceColumn::Address));
+    if (!addressItem.isValid())
     {
         m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
-    const QString diagnosticText = addressItem->data(Qt::UserRole + 2).toString();
+    const QString diagnosticText = addressItem.data(Qt::UserRole + 2).toString();
     if (!diagnosticText.isEmpty())
     {
+        if (!m_extraDiagnosticDocuments[1].isEmpty()) { m_kernelMemoryEvidenceDetailEditor->setDocument(m_extraDiagnosticDocuments[1]); return; }
         m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("内核内存证据诊断\n%1").arg(diagnosticText)));
         return;
     }
 
     bool ok = false;
-    const qulonglong cacheIndex = addressItem->data(Qt::UserRole + 1).toULongLong(&ok);
-    if (!ok || cacheIndex >= static_cast<qulonglong>(m_kernelMemoryEvidenceCache.size()))
+    const qulonglong cacheIndex = addressItem.data(Qt::UserRole + 1).toULongLong(&ok);
+    if (!ok || cacheIndex >= static_cast<qulonglong>(m_kernelMemoryEvidenceCache->size()))
     {
         m_kernelMemoryEvidenceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前记录的缓存已失效，请刷新后重试。")));
         return;
     }
-    m_kernelMemoryEvidenceDetailEditor->setDocument(detailDocument(m_kernelMemoryEvidenceCache[static_cast<std::size_t>(cacheIndex)]));
+    m_kernelMemoryEvidenceDetailEditor->setDocument(detailDocument((*m_kernelMemoryEvidenceCache)[static_cast<std::size_t>(cacheIndex)]));
+}
+
+void MemoryDock::captureKernelMemoryProjection(CoreProjectionData& data) const
+{
+    const auto source = m_kernelMemoryEvidenceCache;
+    data.extraSource = source; data.extraCount = source->size();
+    data.statusTemplate = m_extraStatusTemplates[1];
+    data.filter = m_kernelMemoryEvidenceFilterEdit ? m_kernelMemoryEvidenceFilterEdit->text().trimmed() : QString();
+    data.extraRisk = m_kernelMemoryEvidenceRiskOnlyCheck && m_kernelMemoryEvidenceRiskOnlyCheck->isChecked();
+    data.extraDiagnostic = source->empty() ? QStringLiteral("内核内存证据当前没有缓存行；可能是驱动未返回结果、查询失败或尚未刷新。") : QStringLiteral("当前过滤条件隐藏了全部 %1 条内核内存证据；请清空过滤或关闭“仅显示风险项”。").arg(source->size());
+    data.extraMatches = [source, filter = data.filter, risk = data.extraRisk](std::size_t row) { const auto& entry = (*source)[row]; return (!risk || (entry.riskFlags != 0U)) && (entryMatchesFilter(entry, filter)); };
+    data.extraKey = [source](std::size_t row) { const auto& entry = (*source)[row]; return QString::number(entry.virtualAddress); };
+    data.extraCell = [source, language = data.language, diagnostic = data.extraDiagnostic](std::size_t row, int column, int role) -> QVariant {
+        if (row == SIZE_MAX) {
+            if (role == Qt::UserRole + 2) { return diagnostic; }
+            if (role != Qt::DisplayRole && role != Qt::ToolTipRole) { return {}; }
+            const auto columns = QStringList{QStringLiteral("<无内核内存证据>"),QStringLiteral("N/A"),QStringLiteral("诊断"),QStringLiteral("N/A"),QStringLiteral("N/A"),QStringLiteral("提示"),QStringLiteral("N/A"),diagnostic};
+            return column >= 0 && column < columns.size() ? QVariant(language.sourceText(columns[column])) : QVariant();
+        }
+        const auto& entry = (*source)[row];
+        if (role == Qt::UserRole + 1 && column == 0) { return QVariant::fromValue<qulonglong>(row); }
+        if (role == Qt::UserRole && column == 0) { return QVariant::fromValue<qulonglong>(entry.virtualAddress); }
+        const bool numeric = role == ks::ui::NumericSortRole;
+        if (role != Qt::DisplayRole && role != Qt::ToolTipRole && !numeric) { return {}; }
+        switch (column) {
+        case 0: return numeric ? QVariant::fromValue<qulonglong>(entry.virtualAddress) : QVariant(language.sourceText(hex64(entry.virtualAddress)));
+        case 1: return numeric ? QVariant::fromValue<qulonglong>(entry.regionSize) : QVariant(language.sourceText(sizeText(entry.regionSize)));
+        case 2: return QVariant(language.sourceText(evidenceKindText(entry.evidenceKind)));
+        case 3: return QVariant(language.sourceText(QStringLiteral("%1 %2").arg(ownerKindText(entry.ownerKind), wideToQString(entry.ownerName))));
+        case 4: return QVariant(language.sourceText(permissionText(entry.permissionFlags)));
+        case 5: return QVariant(language.sourceText(riskText(entry.riskFlags)));
+        case 6: return QVariant(language.sourceText(hashText(entry)));
+        case 7: return QVariant(language.sourceText(evidenceTableDetailText(entry)));
+        default: return {};
+        }
+    };
 }

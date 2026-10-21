@@ -10,6 +10,7 @@
 
 #include "../Framework.h"
 #include "MemoryDock.ReadOnlyModels.h"
+#include "../UI/StructuredFieldView.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../UI/KernelDisassemblyDialog.h" // ks::ui::DisassemblyRow：驱动读写页反汇编视图的行缓存需要完整类型。
 #include "../UI/WindowPickerButton.h" // ks::ui::WindowPickerButton：十字准星拾取按钮，按值出现在成员指针里。
@@ -489,11 +490,39 @@ private:
     // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
     // - 返回：无。
     void rebuildModuleTableFromCache();
-    enum class CoreKind { Modules, Regions, Processes };
+    enum class CoreKind { Modules, Regions, Processes, KernelExecutable, KernelEvidence, PteEvidence, ProcessEvidence };
     struct PreparedProcessSnapshot;
     static void prepareProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared);
     void commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared, std::uint64_t generation, std::uint32_t previousPid);
-    struct CoreProjectionData;
+    struct CoreProjectionData {
+        CoreKind kind;
+        std::shared_ptr<const std::vector<ProcessEntry>> processes;
+        std::shared_ptr<const std::vector<ModuleEntry>> modules;
+        std::shared_ptr<const std::vector<RegionEntry>> regions;
+        QString filter, languageId, statusTemplate;
+        ks::i18n::SourceTextSnapshot language;
+        std::uint32_t pid = 0;
+        std::uint64_t target = 0, localeGeneration = 0;
+        bool committed = false, image = false, readable = false;
+        int sortColumn = 0;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+        std::shared_ptr<std::vector<std::size_t>> rows;
+        std::shared_ptr<const void> extraSource;
+        std::size_t extraCount = 0;
+        bool extraRisk = false;
+        QString extraDiagnostic;
+        std::function<bool(std::size_t)> extraMatches;
+        std::function<QString(std::size_t)> extraKey;
+        std::function<QVariant(std::size_t, int, int)> extraCell;
+        QString selectedKey;
+        int selectedRow = -1, selectedColumn = 0;
+    };
+    MemoryTableView* extraCoreTable(CoreKind kind) const;
+    void captureKernelExecutableProjection(CoreProjectionData& data) const;
+    void captureKernelMemoryProjection(CoreProjectionData& data) const;
+    void capturePteProjection(CoreProjectionData& data) const;
+    void captureProcessEvidenceProjection(CoreProjectionData& data) const;
+
     struct CoreProjectionJob;
     struct RegionRefreshJob;
     void initializeCoreProjection(CoreKind kind);
@@ -969,7 +998,7 @@ private:
     QCheckBox* m_kernelExecutableRiskOnlyCheck = nullptr;   // 仅风险项过滤。
     QLineEdit* m_kernelExecutableModuleFilterEdit = nullptr; // 模块路径过滤输入框。
     QLabel* m_kernelExecutableStatusLabel = nullptr;         // 刷新状态标签。
-    QTableWidget* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
+    MemoryTableView* m_kernelExecutableTable = nullptr;         // 可执行页扫描表。
     ks::ui::StructuredFieldView* m_kernelExecutableDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -985,7 +1014,7 @@ private:
     QLineEdit* m_kernelMemoryEvidenceEndEdit = nullptr;      // 非模块扫描结束地址。
     QSpinBox* m_kernelMemoryEvidenceMaxRowsSpin = nullptr;   // 单次最大返回行数。
     QLabel* m_kernelMemoryEvidenceStatusLabel = nullptr;     // 查询状态标签。
-    QTableWidget* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
+    MemoryTableView* m_kernelMemoryEvidenceTable = nullptr;     // 证据结果表格。
     ks::ui::StructuredFieldView* m_kernelMemoryEvidenceDetailEditor = nullptr; // 证据详情编辑器。
 
     // ========================================================
@@ -998,7 +1027,7 @@ private:
     QLineEdit* m_processPteTranslateAddressEdit = nullptr;      // VA 输入框。
     QSpinBox* m_processPteTranslatePageCountSpin = nullptr;     // 采样页数。
     QLabel* m_processPteTranslateStatusLabel = nullptr;         // 状态标签。
-    QTableWidget* m_processPteTranslateTable = nullptr;         // 翻译结果表。
+    MemoryTableView* m_processPteTranslateTable = nullptr;         // 翻译结果表。
     ks::ui::StructuredFieldView* m_processPteTranslateDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -1014,7 +1043,7 @@ private:
     QLineEdit* m_processMemoryEvidenceFilterEdit = nullptr;       // 文本过滤。
     QSpinBox* m_processMemoryEvidenceMaxRowsSpin = nullptr;       // 最大行数。
     QLabel* m_processMemoryEvidenceStatusLabel = nullptr;         // 状态标签。
-    QTableWidget* m_processMemoryEvidenceTable = nullptr;         // 证据结果表。
+    MemoryTableView* m_processMemoryEvidenceTable = nullptr;         // 证据结果表。
     ks::ui::StructuredFieldView* m_processMemoryEvidenceDetailEditor = nullptr; // 详情编辑器。
 
     // ========================================================
@@ -1083,22 +1112,22 @@ private:
     std::uint32_t m_scanThreadCount = 4;               // 扫描线程数（设置可调）。
     std::uint32_t m_scanChunkSizeKB = 1024;            // 单次读取块大小（KB，设置可调）。
 
-    std::vector<ksword::ark::KernelExecutableMemoryPageEntry> m_kernelExecutableCache; // Tab7 扫描缓存。
+    std::shared_ptr<const std::vector<ksword::ark::KernelExecutableMemoryPageEntry>> m_kernelExecutableCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelExecutableMemoryPageEntry>>(); // Tab7 扫描缓存。
     std::atomic<bool> m_kernelExecutableRefreshInProgress{ false }; // Tab7 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelExecutableRefreshTicket{ 0 }; // Tab7 刷新票据。
     std::size_t m_kernelExecutableVisibleCount = 0; // Tab7 当前可见行数。
 
-    std::vector<ksword::ark::KernelMemoryEvidenceEntry> m_kernelMemoryEvidenceCache; // Tab8 证据缓存。
+    std::shared_ptr<const std::vector<ksword::ark::KernelMemoryEvidenceEntry>> m_kernelMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ksword::ark::KernelMemoryEvidenceEntry>>(); // Tab8 证据缓存。
     std::atomic<bool> m_kernelMemoryEvidenceRefreshInProgress{ false }; // Tab8 是否正在刷新。
     std::atomic<std::uint64_t> m_kernelMemoryEvidenceRefreshTicket{ 0 }; // Tab8 刷新票据。
     std::size_t m_kernelMemoryEvidenceVisibleCount = 0; // Tab8 当前可见行数。
 
-    std::vector<ProcessMemoryEvidenceEntry> m_processPteTranslateCache; // Tab9 证据缓存。
+    std::shared_ptr<const std::vector<ProcessMemoryEvidenceEntry>> m_processPteTranslateCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>(); // Tab9 证据缓存。
     std::atomic<bool> m_processPteTranslateRefreshInProgress{ false }; // Tab9 是否正在刷新。
     std::atomic<std::uint64_t> m_processPteTranslateRefreshTicket{ 0 }; // Tab9 刷新票据。
     std::size_t m_processPteTranslateVisibleCount = 0; // Tab9 当前可见行数。
 
-    std::vector<ProcessMemoryEvidenceEntry> m_processMemoryEvidenceCache; // Tab10 证据缓存。
+    std::shared_ptr<const std::vector<ProcessMemoryEvidenceEntry>> m_processMemoryEvidenceCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>(); // Tab10 证据缓存。
     std::atomic<bool> m_processMemoryEvidenceRefreshInProgress{ false }; // Tab10 是否正在刷新。
     std::atomic<std::uint64_t> m_processMemoryEvidenceRefreshTicket{ 0 }; // Tab10 刷新票据。
     std::size_t m_processMemoryEvidenceVisibleCount = 0; // Tab10 当前可见行数。
@@ -1149,10 +1178,12 @@ private:
     // 它所属的进程去看（见 jumpToModuleBase）。0 表示缓存为空。
     QTimer* m_coreProjectionPoll = nullptr;
     QTimer* m_coreProjectionDebounce = nullptr;
-    std::array<bool, 3> m_coreInitialized{};
-    std::array<int, 3> m_coreSortColumns{0, 0, 0};
-    std::array<Qt::SortOrder, 3> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder};
-    std::array<std::shared_ptr<CoreProjectionData>, 3> m_corePublished, m_coreReady, m_coreFailed;
+    std::array<QString, 4> m_extraStatusTemplates;
+    std::array<ks::ui::FieldDocument, 4> m_extraDiagnosticDocuments;
+    std::array<bool, 7> m_coreInitialized{};
+    std::array<int, 7> m_coreSortColumns{0, 0, 0, 0, 0, 0, 0};
+    std::array<Qt::SortOrder, 7> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder};
+    std::array<std::shared_ptr<CoreProjectionData>, 7> m_corePublished, m_coreReady, m_coreFailed;
     std::shared_ptr<CoreProjectionJob> m_coreProjectionJob;
     std::shared_ptr<RegionRefreshJob> m_regionRefreshJob, m_regionRefreshPendingJob;
     std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);
