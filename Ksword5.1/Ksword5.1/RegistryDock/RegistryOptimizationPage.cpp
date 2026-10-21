@@ -4,6 +4,8 @@
 #include "RegistryOptimizationPage.h"
 #include "../UI/AsyncOperation.h"
 #include <QShowEvent>
+#include <QEvent>
+#include <QScrollBar>
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -944,6 +946,7 @@ RegistryOptimizationPage::~RegistryOptimizationPage()
 {
     if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
     m_ordinaryOperation->close();
+    if (m_scopeOperation) m_scopeOperation->close();
     m_profileOperation->close();
     cancelStateApply();
 }
@@ -952,6 +955,8 @@ void RegistryOptimizationPage::showEvent(QShowEvent* event)
 {
     if (!m_profileRequested) loadOptimizationProfile();
     else if (m_profilePresentationDirty) presentOptimizationProfile();
+    if (m_scopeProjection && m_scopeProjectionTimer) m_scopeProjectionTimer->start(0);
+    scheduleVisibleRowWidgets();
     QWidget::showEvent(event);
 }
 
@@ -1124,11 +1129,19 @@ void RegistryOptimizationPage::loadOptimizationProfile()
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为优化配置已重新加载。"));
     if (m_stateApplyInProgress) { m_deferredProfileReload = true; return; }
+    ++m_scopeProjectionRevision;
+    if (m_scopeOperation) m_scopeOperation->cancel();
+    if (m_scopeProjectionTimer) m_scopeProjectionTimer->stop();
+    if (m_rowWidgetTimer) m_rowWidgetTimer->stop();
+    m_rebuildingTable = true;
+    m_itemTable->setEnabled(false);
+    m_refreshStateButton->setEnabled(false);
+    auto oldProjection = std::move(m_scopeProjection);
+    auto oldItems = std::move(m_itemList);
+    auto oldRows = std::move(m_visibleRows);
+    QThreadPool::globalInstance()->start([projection = std::move(oldProjection), items = std::move(oldItems), rows = std::move(oldRows)]() {});
     if (m_filterDebounceTimer != nullptr) m_filterDebounceTimer->stop();
-    m_itemList.clear();
-    m_visibleRows.clear();
     m_loadedProfilePath.clear();
-    m_itemTable->setRowCount(0);
     m_groupTree->clear();
     m_detailText->setDocument({});
     m_profilePresentationDirty = false;
@@ -1285,124 +1298,205 @@ void RegistryOptimizationPage::rebuildItemTable()
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为筛选结果已改变。"));
     if (m_stateApplyInProgress) { m_deferredItemRebuild = true; return; }
+    const quint64 revision = ++m_scopeProjectionRevision;
     m_rebuildingTable = true;
-    QSignalBlocker blocker(m_itemTable);
-    const bool updatesEnabled = m_itemTable->updatesEnabled();
-    m_itemTable->setUpdatesEnabled(false);
-    m_visibleRows.clear();
-    m_itemTable->setRowCount(0);
-
+    m_itemTable->setEnabled(false);
+    m_refreshStateButton->setEnabled(false);
+    if (m_scopeProjectionTimer) m_scopeProjectionTimer->stop();
+    auto retiredProjection = std::move(m_scopeProjection);
+    QThreadPool::globalInstance()->start([retiredProjection = std::move(retiredProjection)]() {});
     const QTreeWidgetItem* selectedGroupItem = m_groupTree->currentItem();
-    const QString selectedGroup = selectedGroupItem == nullptr ? QString() : selectedGroupItem->data(0, kRoleGroupName).toString();
+    const QString selectedGroup = selectedGroupItem ? selectedGroupItem->data(0, kRoleGroupName).toString() : QString();
     const QString filterText = m_filterEdit->text().trimmed();
-
-    for (int itemIndex = 0; itemIndex < m_itemList.size(); ++itemIndex)
-    {
-        const OptimizationItem& item = m_itemList.at(itemIndex);
-        if (!selectedGroup.isEmpty() && item.groupNameText.compare(selectedGroup, Qt::CaseInsensitive) != 0)
-        {
-            continue;
-        }
-
-        for (int scopeIndex = 0; scopeIndex < item.scopeList.size(); ++scopeIndex)
-        {
-            const OptimizationScope& scope = item.scopeList.at(scopeIndex);
-            const QString haystack = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
-                .arg(item.groupNameText, item.itemNameText, item.itemTypeText, scope.scopeText, item.itemConditionText, item.warningText);
-            if (!filterText.isEmpty() && !haystack.contains(filterText, Qt::CaseInsensitive))
-            {
-                continue;
-            }
-
-            const int tableRow = m_itemTable->rowCount();
-            m_itemTable->insertRow(tableRow);
-            m_itemTable->setRowHeight(tableRow, kDefaultRowHeight);
-            m_visibleRows.push_back(VisibleRow{ itemIndex, scopeIndex });
-
-            m_itemTable->setItem(tableRow, 0, new QTableWidgetItem(item.itemNameText));
-            m_itemTable->setItem(tableRow, 1, new QTableWidgetItem(scopeDisplayText(scope.scopeText)));
-            m_itemTable->setItem(tableRow, 2, new QTableWidgetItem(item.itemTypeText));
-            m_itemTable->setItem(
-                tableRow,
-                3,
-                new QTableWidgetItem(ks::i18n::sourceText(QStringLiteral("未检测"))));
-            QTableWidgetItem* targetPlaceholderItem = new QTableWidgetItem();
-            targetPlaceholderItem->setSizeHint(QSize(kTargetColumnWidth, kDefaultRowHeight));
-            targetPlaceholderItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            m_itemTable->setItem(tableRow, kTargetControlColumn, targetPlaceholderItem);
-            QTableWidgetItem* actionPlaceholderItem = new QTableWidgetItem();
-            actionPlaceholderItem->setSizeHint(QSize(kActionColumnWidth, kDefaultRowHeight));
-            actionPlaceholderItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            m_itemTable->setItem(tableRow, kActionButtonColumn, actionPlaceholderItem);
-
-            if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
-            {
-                QComboBox* comboBox = new QComboBox(m_itemTable);
-                // 行内目标选择器同样保留实底；行高仍由表格既有密度控制。
-                ks::ui::StylePrimaryCombo(comboBox);
-                comboBox->setObjectName(QStringLiteral("optimizationTargetCombo"));
-                comboBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-                comboBox->setMinimumWidth(kTargetColumnWidth - 16);
-                for (const OptimizationState& state : scope.stateList)
-                {
-                    if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0)
-                    {
-                        comboBox->addItem(state.labelText, state.labelText);
-                    }
+    if (!m_scopeOperation) {
+        m_scopeOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+        m_scopeOperation->setStateChangedCallback([this]() {
+            if (m_rebuildingTable && !m_scopeProjection && !m_scopeOperation->isInFlight())
+                updateStatusText(ks::i18n::sourceText(QStringLiteral("系统优化：列表准备失败，请重新筛选或加载。")));
+        });
+    }
+    struct Request { QVector<OptimizationItem> items; QString group; QString filter; QString undetected; quint64 revision; };
+    m_scopeOperation->submit<Request, ScopeProjection>(
+        {m_itemList, selectedGroup, filterText, ks::i18n::sourceText(QStringLiteral("未检测")), revision},
+        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
+            ScopeProjection result;
+            result.revision = request.revision;
+            for (qsizetype itemIndex = 0; itemIndex < request.items.size(); ++itemIndex) {
+                if (token.isCanceled()) return result;
+                const auto& item = request.items.at(itemIndex);
+                if (!request.group.isEmpty() && item.groupNameText.compare(request.group, Qt::CaseInsensitive) != 0) continue;
+                for (qsizetype scopeIndex = 0; scopeIndex < item.scopeList.size(); ++scopeIndex) {
+                    const auto& scope = item.scopeList.at(scopeIndex);
+                    const QString haystack = QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
+                        .arg(item.groupNameText, item.itemNameText, item.itemTypeText, scope.scopeText, item.itemConditionText, item.warningText);
+                    if (!request.filter.isEmpty() && !haystack.contains(request.filter, Qt::CaseInsensitive)) continue;
+                    PreparedScopeRow row;
+                    row.source.itemIndex = static_cast<int>(itemIndex);
+                    row.source.scopeIndex = static_cast<int>(scopeIndex);
+                    if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
+                        for (const auto& state : scope.stateList)
+                            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0) { row.source.targetLabel = state.labelText; break; }
+                    QStringList conditions;
+                    if (!item.groupConditionText.isEmpty()) conditions << QStringLiteral("组条件: %1").arg(item.groupConditionText);
+                    if (!item.itemConditionText.isEmpty()) conditions << QStringLiteral("项目条件: %1").arg(item.itemConditionText);
+                    if (!scope.conditionText.isEmpty()) conditions << QStringLiteral("作用域条件: %1").arg(scope.conditionText);
+                    if (!item.warningText.isEmpty()) conditions << QStringLiteral("警告: %1").arg(item.warningText);
+                    row.columns = {item.itemNameText, scopeDisplayText(scope.scopeText), item.itemTypeText, request.undetected,
+                        QString(), QString(), conditions.join(QStringLiteral(" | "))};
+                    result.rows.push_back(std::move(row));
                 }
-                comboBox->setProperty("row", tableRow);
-                m_itemTable->setCellWidget(tableRow, kTargetControlColumn, buildCenteredCellWidget(comboBox, m_itemTable));
             }
-            else
-            {
-                QCheckBox* checkBox = new QCheckBox(QStringLiteral("启用"), m_itemTable);
-                checkBox->setObjectName(QStringLiteral("optimizationTargetCheck"));
-                checkBox->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-                checkBox->setProperty("row", tableRow);
-                m_itemTable->setCellWidget(tableRow, kTargetControlColumn, buildCenteredCellWidget(checkBox, m_itemTable));
+            return result;
+        }, [this](const ScopeProjection& result, std::uint64_t) {
+            if (result.revision != m_scopeProjectionRevision) return;
+            m_scopeProjection = std::make_shared<ScopeProjection>(result);
+            m_nextScopeProjectionRow = 0;
+            m_scopeProjectionClearing = true;
+            if (!m_scopeProjectionTimer) {
+                m_scopeProjectionTimer = new QTimer(this);
+                m_scopeProjectionTimer->setSingleShot(true);
+                connect(m_scopeProjectionTimer, &QTimer::timeout, this, [this]() { continueItemProjection(); });
             }
+            m_scopeProjectionTimer->start(0);
+        }, [this, revision](std::exception_ptr) {
+            if (revision != m_scopeProjectionRevision) return;
+            updateStatusText(ks::i18n::sourceText(QStringLiteral("系统优化：列表准备失败，请重新筛选或加载。")));
+        });
+}
 
-            QPushButton* applyButton = new QPushButton(QStringLiteral("应用"), m_itemTable);
-            applyButton->setObjectName(QStringLiteral("registryOptimizationApplyButton"));
-            applyButton->setToolTip(QStringLiteral("对这一项执行注册表优化设置"));
-            applyButton->setStyleSheet(KswordTheme::ThemedButtonStyle());
-            applyButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            applyButton->setFixedWidth(kActionColumnWidth - 14);
-            applyButton->setProperty("row", tableRow);
-            connect(applyButton, &QPushButton::clicked, this, [this, applyButton]() {
-                const int row = applyButton->property("row").toInt();
-                applyVisibleRow(row);
-            });
-            m_itemTable->setCellWidget(tableRow, kActionButtonColumn, buildCenteredCellWidget(applyButton, m_itemTable));
-
-            QStringList conditionLines;
-            if (!item.groupConditionText.isEmpty()) conditionLines << QStringLiteral("组条件: %1").arg(item.groupConditionText);
-            if (!item.itemConditionText.isEmpty()) conditionLines << QStringLiteral("项目条件: %1").arg(item.itemConditionText);
-            if (!scope.conditionText.isEmpty()) conditionLines << QStringLiteral("作用域条件: %1").arg(scope.conditionText);
-            if (!item.warningText.isEmpty()) conditionLines << QStringLiteral("警告: %1").arg(item.warningText);
-            m_itemTable->setItem(tableRow, 6, new QTableWidgetItem(conditionLines.join(QStringLiteral(" | "))));
+void RegistryOptimizationPage::continueItemProjection()
+{
+    if (!isVisible() || !m_scopeProjection || m_scopeProjection->revision != m_scopeProjectionRevision) return;
+    const QPointer<RegistryOptimizationPage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-optimization-scope-projection"), {m_itemTable},
+        [guard]() { if (guard) guard->continueItemProjection(); })) return;
+    QSignalBlocker blocker(m_itemTable);
+    for (int unit = 0; unit < 24; ++unit) {
+        if (m_scopeProjectionClearing) {
+            if (m_itemTable->rowCount() > 0) { m_itemTable->removeRow(m_itemTable->rowCount() - 1); continue; }
+            auto retiredRows = std::move(m_visibleRows);
+            QThreadPool::globalInstance()->start([retiredRows = std::move(retiredRows)]() {});
+            m_rowsWithWidgets.clear();
+            m_scopeProjectionClearing = false;
+        }
+        if (m_nextScopeProjectionRow >= m_scopeProjection->rows.size()) {
+            m_rebuildingTable = false;
+            m_itemTable->setEnabled(true);
+            m_refreshStateButton->setEnabled(true);
+            if (m_itemTable->rowCount() > 0) { m_itemTable->setCurrentCell(0, 0); updateDetailPanel(0); }
+            else m_detailText->setDocument({});
+            updateStatusText(QStringLiteral("系统优化：当前显示 %1 行；来源 %2。").arg(m_itemTable->rowCount()).arg(m_loadedProfilePath));
+            applyColumnPreset(m_columnPreset);
+            auto retiredProjection = std::move(m_scopeProjection);
+            QThreadPool::globalInstance()->start([retiredProjection = std::move(retiredProjection)]() {});
+            scheduleVisibleRowWidgets();
+            return;
+        }
+        const auto& prepared = m_scopeProjection->rows.at(m_nextScopeProjectionRow++);
+        const int row = m_itemTable->rowCount();
+        m_itemTable->insertRow(row);
+        m_itemTable->setRowHeight(row, kDefaultRowHeight);
+        m_visibleRows.push_back(prepared.source);
+        for (int column = 0; column < prepared.columns.size(); ++column) {
+            auto* item = new QTableWidgetItem(prepared.columns.at(column));
+            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+            if (column == kTargetControlColumn) item->setSizeHint(QSize(kTargetColumnWidth, kDefaultRowHeight));
+            if (column == kActionButtonColumn) item->setSizeHint(QSize(kActionColumnWidth, kDefaultRowHeight));
+            m_itemTable->setItem(row, column, item);
         }
     }
+    m_scopeProjectionTimer->start(0);
+}
 
-    m_rebuildingTable = false;
-    if (m_itemTable->rowCount() > 0)
-    {
-        m_itemTable->setCurrentCell(0, 0);
-        updateDetailPanel(0);
+bool RegistryOptimizationPage::eventFilter(QObject* watched, QEvent* event)
+{
+    if (m_itemTable && watched == m_itemTable->viewport()
+        && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) scheduleVisibleRowWidgets();
+    return QWidget::eventFilter(watched, event);
+}
+
+void RegistryOptimizationPage::scheduleVisibleRowWidgets()
+{
+    if (!m_rowWidgetTimer) {
+        m_rowWidgetTimer = new QTimer(this);
+        m_rowWidgetTimer->setSingleShot(true);
+        connect(m_rowWidgetTimer, &QTimer::timeout, this, [this]() { materializeVisibleRowWidgets(); });
+        m_itemTable->viewport()->installEventFilter(this);
+        connect(m_itemTable->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() { scheduleVisibleRowWidgets(); });
     }
-    else
-    {
-        m_detailText->setDocument({});
+    m_rowWidgetTimer->start(0);
+}
+
+void RegistryOptimizationPage::materializeVisibleRowWidgets()
+{
+    if (m_rebuildingTable || !m_itemTable->isVisible() || m_itemTable->rowCount() == 0) return;
+    const QPointer<RegistryOptimizationPage> guard(this);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this, QStringLiteral("registry-optimization-visible-editors"), {m_itemTable},
+        [guard]() { if (guard) guard->materializeVisibleRowWidgets(); })) return;
+    const quint64 revision = m_scopeProjectionRevision;
+    const int first = std::max(0, m_itemTable->rowAt(0));
+    const int bottom = m_itemTable->rowAt(m_itemTable->viewport()->height() - 1);
+    const int last = bottom >= 0 ? bottom : m_itemTable->rowCount() - 1;
+    for (const int row : QSet<int>(m_rowsWithWidgets)) {
+        if (row >= first && row <= last) continue;
+        m_itemTable->removeCellWidget(row, kTargetControlColumn);
+        m_itemTable->removeCellWidget(row, kActionButtonColumn);
+        m_rowsWithWidgets.remove(row);
     }
-    updateStatusText(QStringLiteral("系统优化：当前显示 %1 行；来源 %2。").arg(m_itemTable->rowCount()).arg(m_loadedProfilePath));
-    applyColumnPreset(m_columnPreset);
-    m_itemTable->setUpdatesEnabled(updatesEnabled);
-    if (updatesEnabled) m_itemTable->viewport()->update();
+    for (int row = first; row <= last; ++row) {
+        if (m_rowsWithWidgets.contains(row) || row >= m_visibleRows.size()) continue;
+        const auto& source = m_visibleRows.at(row);
+        const auto& item = m_itemList.at(source.itemIndex);
+        const auto& scope = item.scopeList.at(source.scopeIndex);
+        if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0) {
+            auto* combo = new QComboBox(m_itemTable);
+            ks::ui::StylePrimaryCombo(combo);
+            combo->setObjectName(QStringLiteral("optimizationTargetCombo"));
+            combo->setMinimumWidth(kTargetColumnWidth - 16);
+            for (const auto& state : scope.stateList)
+                if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0) combo->addItem(state.labelText, state.labelText);
+            const int index = combo->findData(source.targetLabel);
+            if (index >= 0) combo->setCurrentIndex(index);
+            connect(combo, &QComboBox::currentIndexChanged, this, [this, combo, row, revision]() {
+                if (revision == m_scopeProjectionRevision && !m_rebuildingTable && row < m_visibleRows.size()) m_visibleRows[row].targetLabel = combo->currentData().toString();
+            });
+            m_itemTable->setCellWidget(row, kTargetControlColumn, buildCenteredCellWidget(combo, m_itemTable));
+        } else {
+            auto* check = new QCheckBox(QStringLiteral("启用"), m_itemTable);
+            check->setObjectName(QStringLiteral("optimizationTargetCheck"));
+            check->setChecked(source.targetEnabled);
+            connect(check, &QCheckBox::toggled, this, [this, row, revision](bool checked) {
+                if (revision == m_scopeProjectionRevision && !m_rebuildingTable && row < m_visibleRows.size()) m_visibleRows[row].targetEnabled = checked;
+            });
+            m_itemTable->setCellWidget(row, kTargetControlColumn, buildCenteredCellWidget(check, m_itemTable));
+        }
+        auto* apply = new QPushButton(QStringLiteral("应用"), m_itemTable);
+        apply->setObjectName(QStringLiteral("registryOptimizationApplyButton"));
+        apply->setToolTip(QStringLiteral("对这一项执行注册表优化设置"));
+        apply->setStyleSheet(KswordTheme::ThemedButtonStyle());
+        apply->setFixedWidth(kActionColumnWidth - 14);
+        apply->setEnabled(!m_stateApplyInProgress);
+        connect(apply, &QPushButton::clicked, this, [this, row, revision]() { if (revision == m_scopeProjectionRevision && !m_rebuildingTable) applyVisibleRow(row); });
+        m_itemTable->setCellWidget(row, kActionButtonColumn, buildCenteredCellWidget(apply, m_itemTable));
+        m_rowsWithWidgets.insert(row);
+    }
+}
+
+void RegistryOptimizationPage::setTargetForRow(const int row, const QString& label, const bool enabled)
+{
+    if (row < 0 || row >= m_visibleRows.size()) return;
+    m_visibleRows[row].targetLabel = label;
+    m_visibleRows[row].targetEnabled = enabled;
+    QWidget* target = m_itemTable->cellWidget(row, kTargetControlColumn);
+    if (auto* combo = findTargetComboBox(target)) {
+        const int index = combo->findData(label);
+        if (index >= 0) combo->setCurrentIndex(index);
+    } else if (auto* check = findTargetCheckBox(target)) check->setChecked(enabled);
 }
 
 void RegistryOptimizationPage::refreshVisibleStates()
 {
-    if (m_stateRefreshInProgress) return;
+    if (m_rebuildingTable || m_stateRefreshInProgress) return;
 
     const QVector<OptimizationItem> itemSnapshot = m_itemList;
     const QVector<VisibleRow> visibleRowsSnapshot = m_visibleRows;
@@ -1457,6 +1551,7 @@ void RegistryOptimizationPage::refreshVisibleStates()
                     statusItem->setText(result.stateText);
                 }
 
+                guardThis->setTargetForRow(result.tableRow, result.targetLabel, result.targetEnabled);
                 QWidget* targetWidget = guardThis->m_itemTable->cellWidget(result.tableRow, kTargetControlColumn);
                 if (QComboBox* comboBox = findTargetComboBox(targetWidget))
                 {
@@ -1502,6 +1597,8 @@ void RegistryOptimizationPage::refreshVisibleRowState(const int tableRow)
         statusItem->setText(stateText);
     }
 
+    setTargetForRow(tableRow, detectedState ? detectedState->labelText : QString(),
+        detectedState && detectedState->tagText.compare(QStringLiteral("State"), Qt::CaseInsensitive) == 0);
     QWidget* targetWidget = m_itemTable->cellWidget(tableRow, kTargetControlColumn);
     if (QComboBox* comboBox = findTargetComboBox(targetWidget))
     {
@@ -1665,25 +1762,13 @@ const RegistryOptimizationPage::OptimizationState* RegistryOptimizationPage::sel
     if (rowRef.scopeIndex < 0 || rowRef.scopeIndex >= item.scopeList.size()) return nullptr;
     const OptimizationScope& scope = item.scopeList.at(rowRef.scopeIndex);
 
-    QWidget* targetWidget = m_itemTable->cellWidget(tableRow, kTargetControlColumn);
-    if (const QComboBox* comboBox = findTargetComboBox(targetWidget))
+    if (item.itemTypeText.compare(QStringLiteral("Combo"), Qt::CaseInsensitive) == 0)
     {
-        const QString targetLabel = comboBox->currentData().toString();
-        for (const OptimizationState& state : scope.stateList)
-        {
-            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0 &&
-                state.labelText == targetLabel)
-            {
-                return &state;
-            }
-        }
+        for (const auto& state : scope.stateList)
+            if (state.tagText.compare(QStringLiteral("Dropdown"), Qt::CaseInsensitive) == 0 && state.labelText == rowRef.targetLabel) return &state;
         return nullptr;
     }
-
-    const QCheckBox* targetCheckBox = findTargetCheckBox(targetWidget);
-    const bool targetEnabled = targetCheckBox == nullptr
-        ? false
-        : targetCheckBox->isChecked();
+    const bool targetEnabled = rowRef.targetEnabled;
     const QString desiredTag = targetEnabled ? QStringLiteral("True") : QStringLiteral("False");
     for (const OptimizationState& state : scope.stateList)
     {
@@ -1716,7 +1801,7 @@ bool RegistryOptimizationPage::applyVisibleRow(const int tableRow)
     }
 
     cancelStateRefresh();
-    if (tableRow < 0 || tableRow >= m_visibleRows.size()) return false;
+    if (m_rebuildingTable || tableRow < 0 || tableRow >= m_visibleRows.size()) return false;
     const VisibleRow rowRef = m_visibleRows.at(tableRow);
     const OptimizationItem& item = m_itemList.at(rowRef.itemIndex);
     const OptimizationScope& scope = item.scopeList.at(rowRef.scopeIndex);

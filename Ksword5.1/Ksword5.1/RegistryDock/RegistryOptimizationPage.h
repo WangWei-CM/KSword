@@ -15,6 +15,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QSet>
 #include <QWidget>
 
 #include <cstdint>
@@ -29,6 +30,7 @@ class QTreeWidget;
 class QTimer;
 class CodeEditorWidget;
 class QShowEvent;
+class QEvent;
 namespace ks::ui { class AsyncOperation; }
 
 // RegistryOptimizationPage:
@@ -47,6 +49,7 @@ public:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // OptimizationState:
@@ -98,6 +101,19 @@ private:
     {
         int itemIndex = -1;
         int scopeIndex = -1;
+        QString targetLabel;
+        bool targetEnabled = false;
+    };
+
+    struct PreparedScopeRow
+    {
+        VisibleRow source;
+        QStringList columns;
+    };
+    struct ScopeProjection
+    {
+        QVector<PreparedScopeRow> rows;
+        quint64 revision = 0;
     };
 
     struct ProfileLoadResult
@@ -128,6 +144,10 @@ private:
     QStringList profileCandidatePaths() const;
     void rebuildGroupTree();
     void rebuildItemTable();
+    void continueItemProjection();
+    void scheduleVisibleRowWidgets();
+    void materializeVisibleRowWidgets();
+    void setTargetForRow(int row, const QString& label, bool enabled);
     void refreshVisibleStates();
     void refreshVisibleRowState(int tableRow);
     void cancelStateRefresh();
@@ -203,6 +223,14 @@ private:
     QVector<OptimizationItem> m_itemList;        // Parsed top-level optimization items.
     QVector<VisibleRow> m_visibleRows;           // Current table row to model mapping.
     ColumnPreset m_columnPreset = ColumnPreset::A; // 当前列组预设。
+    std::unique_ptr<ks::ui::AsyncOperation> m_scopeOperation;
+    std::shared_ptr<ScopeProjection> m_scopeProjection;
+    QTimer* m_scopeProjectionTimer = nullptr;
+    QTimer* m_rowWidgetTimer = nullptr;
+    QSet<int> m_rowsWithWidgets;
+    quint64 m_scopeProjectionRevision = 0;
+    qsizetype m_nextScopeProjectionRow = 0;
+    bool m_scopeProjectionClearing = false;
     bool m_rebuildingTable = false;              // Guards refresh signals during table rebuild.
     bool m_stateRefreshInProgress = false;       // 可见状态后台刷新是否仍在执行。
     std::uint64_t m_stateRefreshGeneration = 0;  // 忽略过期后台状态结果。
