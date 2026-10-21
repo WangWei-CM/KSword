@@ -2,6 +2,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../../../shared/ui/KsPainterChart.h"
 #include "../../../shared/ui/MetricChartBinding.h"
+#include "../UI/AsyncUiDispatcher.h"
+#include "../UI/AsyncCleanupRegistry.h"
 
 // ============================================================
 // MonitorPanelWidget.cpp
@@ -19,23 +21,31 @@
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHideEvent>
 #include <QFont>
 #include <QLabel>
 #include <QList>
-#include <QMetaObject>
 #include <QPainter>
 #include <QPointer>
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QSizePolicy>
-#include <QThreadPool>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cmath>
+#include <condition_variable>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <unordered_map>
 #include <vector>
+#include <utility>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -121,7 +131,7 @@ namespace
 
     // MonitorPanelPdhCounterBundle 作用：
     // - 承载后台线程创建好的 PDH 查询与计数器句柄；
-    // - 只保存 void* 值类型，便于整体回投 UI 线程接管，不牵扯任何 QWidget。
+    // - 仅在采样线程内部转交句柄，GUI 从不接管原生查询。
     struct MonitorPanelPdhCounterBundle
     {
         void* cpuQueryHandle = nullptr;         // cpuQueryHandle：CPU 查询句柄。
@@ -130,11 +140,6 @@ namespace
         void* diskReadCounterHandle = nullptr;  // diskReadCounterHandle：磁盘读取速率计数器句柄。
         void* diskWriteCounterHandle = nullptr; // diskWriteCounterHandle：磁盘写入速率计数器句柄。
     };
-
-    // monitorPanelCounterInitializing 作用：
-    // - 标记当前是否已有一轮后台 PDH 初始化在执行；
-    // - 防止初始化未完成期间每秒刷新重复投递任务。
-    std::atomic_bool monitorPanelCounterInitializing{ false };
 
     // createMonitorPanelPdhCounters 作用：
     // - 入参 coreCount：逻辑核心数量，决定注册多少个 \Processor(n) 计数器；
@@ -145,20 +150,23 @@ namespace
     MonitorPanelPdhCounterBundle createMonitorPanelPdhCounters(
         const int coreCount,
         const bool needCpuCounters,
-        const bool needDiskCounters)
+        const bool needDiskCounters,
+        const std::atomic_bool& stopping)
     {
         MonitorPanelPdhCounterBundle counterBundle;
 
         // CPU 每核计数器：为每一个核心添加 \Processor(n)\% Processor Time。
         PDH_HQUERY cpuQueryHandle = nullptr;
-        if (needCpuCounters
+        if (needCpuCounters && !stopping.load()
             && ::PdhOpenQueryW(nullptr, 0, &cpuQueryHandle) == ERROR_SUCCESS
             && cpuQueryHandle != nullptr)
         {
+            std::unique_ptr<void, decltype(&::PdhCloseQuery)> queryOwner(cpuQueryHandle, &::PdhCloseQuery);
             const int safeCoreCount = std::max(0, coreCount);
             counterBundle.coreCounterHandles.reserve(static_cast<std::size_t>(safeCoreCount));
             for (int coreIndex = 0; coreIndex < safeCoreCount; ++coreIndex)
             {
+                if (stopping.load()) return counterBundle;
                 const QString counterPath = QStringLiteral("\\Processor(%1)\\% Processor Time").arg(coreIndex);
                 PDH_HCOUNTER cpuCounterHandle = nullptr;
                 const PDH_STATUS addCounterStatus = ::PdhAddEnglishCounterW(
@@ -176,16 +184,18 @@ namespace
             }
 
             // 首次 collect 先建立基线，下一次采样得到稳定数据。
+            if (stopping.load()) return counterBundle;
             ::PdhCollectQueryData(cpuQueryHandle);
-            counterBundle.cpuQueryHandle = cpuQueryHandle;
+            counterBundle.cpuQueryHandle = queryOwner.release();
         }
 
         // 磁盘计数器：读取系统总磁盘读写字节每秒速率，失败时整体丢弃。
         PDH_HQUERY diskQueryHandle = nullptr;
-        if (needDiskCounters
+        if (needDiskCounters && !stopping.load()
             && ::PdhOpenQueryW(nullptr, 0, &diskQueryHandle) == ERROR_SUCCESS
             && diskQueryHandle != nullptr)
         {
+            std::unique_ptr<void, decltype(&::PdhCloseQuery)> queryOwner(diskQueryHandle, &::PdhCloseQuery);
             PDH_HCOUNTER readCounterHandle = nullptr;
             PDH_HCOUNTER writeCounterHandle = nullptr;
 
@@ -194,6 +204,7 @@ namespace
                 L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec",
                 0,
                 &readCounterHandle);
+            if (stopping.load()) return counterBundle;
             const PDH_STATUS addWriteStatus = ::PdhAddEnglishCounterW(
                 diskQueryHandle,
                 L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",
@@ -205,35 +216,335 @@ namespace
                 && readCounterHandle != nullptr
                 && writeCounterHandle != nullptr)
             {
+                if (stopping.load()) return counterBundle;
                 ::PdhCollectQueryData(diskQueryHandle);
-                counterBundle.diskQueryHandle = diskQueryHandle;
+                counterBundle.diskQueryHandle = queryOwner.release();
                 counterBundle.diskReadCounterHandle = readCounterHandle;
                 counterBundle.diskWriteCounterHandle = writeCounterHandle;
-            }
-            else
-            {
-                ::PdhCloseQuery(diskQueryHandle);
             }
         }
 
         return counterBundle;
     }
 
-    // closeMonitorPanelPdhCounters 作用：
-    // - 入参 counterBundle：待释放的句柄集合；
-    // - 处理：关闭 PDH 查询，供控件已销毁或句柄已由更早一轮接管时丢弃结果；
-    // - 返回：无返回值。
-    void closeMonitorPanelPdhCounters(const MonitorPanelPdhCounterBundle& counterBundle)
+
+}
+
+// Native state and receipts contain values only. The worker never borrows a QObject.
+struct MonitorPanelWidget::SamplingReceipt final
+{
+    MetricPresentationSample sample;
+    bool hasSample = false;
+    std::atomic_bool finished{false};
+};
+
+struct MonitorPanelWidget::SamplingState final
+{
+    struct Request
     {
-        if (counterBundle.cpuQueryHandle != nullptr)
+        std::shared_ptr<SamplingReceipt> receipt;
+        std::function<void()> completion; // Constructed on GUI; only handed to the existing dispatcher.
+    };
+    struct NetworkBaseline { std::uint64_t rx = 0, tx = 0, timeMs = 0; };
+    SamplingState(int count, std::shared_ptr<ks::ui::AsyncUiDispatcher> target)
+        : coreCount(count), dispatcher(std::move(target)) {}
+
+    const int coreCount;
+    const std::shared_ptr<ks::ui::AsyncUiDispatcher> dispatcher;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::optional<Request> pending;
+    std::atomic_bool stopping{false}, finished{false};
+    void* m_cpuPerfQueryHandle = nullptr;
+    std::vector<void*> m_coreCounterHandles;
+    void* m_diskPerfQueryHandle = nullptr;
+    void* m_diskReadCounterHandle = nullptr;
+    void* m_diskWriteCounterHandle = nullptr;
+    std::unordered_map<std::uint64_t, NetworkBaseline> networkBaselines;
+
+    void requestStop()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); stopping.store(true); }
+        wake.notify_one();
+    }
+    bool request(Request value)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (stopping.load() || pending) return false;
+        pending = std::move(value);
+        wake.notify_one();
+        return true;
+    }
+    void retireCpuQuery()
+    {
+        if (m_cpuPerfQueryHandle) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
+        m_cpuPerfQueryHandle = nullptr;
+        m_coreCounterHandles.clear();
+    }
+    void retireDiskQuery()
+    {
+        if (m_diskPerfQueryHandle) ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
+        m_diskPerfQueryHandle = nullptr;
+        m_diskReadCounterHandle = nullptr;
+        m_diskWriteCounterHandle = nullptr;
+    }
+    void initializeCounters()
+    {
+        if (m_cpuPerfQueryHandle && m_diskPerfQueryHandle) return;
+        auto counters = createMonitorPanelPdhCounters(coreCount,
+            m_cpuPerfQueryHandle == nullptr, m_diskPerfQueryHandle == nullptr, stopping);
+        if (counters.cpuQueryHandle)
         {
-            ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.cpuQueryHandle));
+            m_cpuPerfQueryHandle = counters.cpuQueryHandle;
+            m_coreCounterHandles = std::move(counters.coreCounterHandles);
         }
-        if (counterBundle.diskQueryHandle != nullptr)
+        if (counters.diskQueryHandle)
         {
-            ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.diskQueryHandle));
+            m_diskPerfQueryHandle = counters.diskQueryHandle;
+            m_diskReadCounterHandle = counters.diskReadCounterHandle;
+            m_diskWriteCounterHandle = counters.diskWriteCounterHandle;
         }
     }
+    bool samplePerCoreCpuUsage(std::vector<double>*, double*);
+    bool sampleMemoryUsage(MemoryCompositionSample*) const;
+    bool sampleDiskRate(double*, double*);
+    bool sampleNetworkRate(double*, double*);
+    void collect(MetricPresentationSample& sample)
+    {
+        initializeCounters();
+        if (stopping.load()) return;
+        if (!samplePerCoreCpuUsage(&sample.coreUsages, &sample.totalCpuUsage))
+        {
+            sample.coreUsages.assign(static_cast<std::size_t>(coreCount), 0.0);
+            sample.totalCpuUsage = 0.0;
+        }
+        if (stopping.load()) return;
+        sample.memoryValid = sampleMemoryUsage(&sample.memory);
+        if (stopping.load()) return;
+        sample.diskValid = sampleDiskRate(&sample.diskReadBytesPerSec, &sample.diskWriteBytesPerSec);
+        if (stopping.load()) return;
+        sample.networkValid = sampleNetworkRate(&sample.networkRxBytesPerSec, &sample.networkTxBytesPerSec);
+    }
+    void run() noexcept
+    {
+        try
+        {
+            for (;;)
+            {
+                Request value;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    wake.wait(lock, [this] { return stopping.load() || pending.has_value(); });
+                    if (stopping.load()) break;
+                    value = std::move(*pending);
+                    pending.reset();
+                }
+                try { collect(value.receipt->sample); }
+                catch (...) { value.receipt->sample = {}; } // A failed round is a gap, never a stuck gate.
+                value.receipt->sample.sampleTimeMs = QDateTime::currentMSecsSinceEpoch();
+                value.receipt->hasSample = !stopping.load();
+                value.receipt->finished.store(true, std::memory_order_release);
+                if (!stopping.load())
+                {
+                    try { dispatcher->post(std::move(value.completion)); }
+                    catch (...) {} // Receipt is already physically finished; the GUI tick recovers it.
+                }
+            }
+        }
+        catch (...) { stopping.store(true); }
+        // Retire every pending receipt and native resource on this same worker, before its exit lease returns.
+        std::optional<Request> unstarted;
+        { std::lock_guard<std::mutex> lock(mutex); stopping.store(true); unstarted = std::move(pending); pending.reset(); }
+        if (unstarted) unstarted->receipt->finished.store(true, std::memory_order_release);
+        retireCpuQuery();
+        retireDiskQuery();
+        networkBaselines.clear();
+        finished.store(true, std::memory_order_release);
+    }
+};
+
+bool MonitorPanelWidget::SamplingState::samplePerCoreCpuUsage(
+    std::vector<double>* coreUsagesOut,
+    double* totalUsageOut)
+{
+    if (coreUsagesOut == nullptr || totalUsageOut == nullptr)
+    {
+        return false;
+    }
+
+    if (m_cpuPerfQueryHandle == nullptr)
+    {
+        return false;
+    }
+
+    const PDH_STATUS collectStatus = ::PdhCollectQueryData(
+        reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
+    if (collectStatus != ERROR_SUCCESS)
+    {
+        retireCpuQuery();
+        return false;
+    }
+
+    coreUsagesOut->clear();
+    coreUsagesOut->reserve(m_coreCounterHandles.size());
+
+    double usageSum = 0.0;
+    int validCoreCount = 0;
+    for (void* counterHandleVoid : m_coreCounterHandles)
+    {
+        if (counterHandleVoid == nullptr)
+        {
+            coreUsagesOut->push_back(0.0);
+            continue;
+        }
+
+        PDH_FMT_COUNTERVALUE counterValue{};
+        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
+            PDH_FMT_DOUBLE,
+            nullptr,
+            &counterValue);
+        if (readStatus != ERROR_SUCCESS
+            || (counterValue.CStatus != PDH_CSTATUS_VALID_DATA && counterValue.CStatus != PDH_CSTATUS_NEW_DATA)
+            || !std::isfinite(counterValue.doubleValue))
+        {
+            coreUsagesOut->push_back(0.0);
+            continue;
+        }
+
+        const double usageValue = std::clamp(counterValue.doubleValue, 0.0, 100.0);
+        coreUsagesOut->push_back(usageValue);
+        usageSum += usageValue;
+        ++validCoreCount;
+    }
+
+    *totalUsageOut = validCoreCount > 0
+        ? usageSum / static_cast<double>(validCoreCount)
+        : 0.0;
+    return true;
+}
+
+bool MonitorPanelWidget::SamplingState::sampleMemoryUsage(MemoryCompositionSample* memorySampleOut) const
+{
+    if (memorySampleOut == nullptr)
+    {
+        return false;
+    }
+
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
+    {
+        *memorySampleOut = MemoryCompositionSample{};
+        return false;
+    }
+
+    const double totalPhysBytes = static_cast<double>(memoryStatus.ullTotalPhys);
+    const double availablePhysBytes = static_cast<double>(memoryStatus.ullAvailPhys);
+    const double usedPhysBytes = std::max(0.0, totalPhysBytes - availablePhysBytes);
+    const double totalCommitBytes = static_cast<double>(memoryStatus.ullTotalPageFile);
+    const double availableCommitBytes = static_cast<double>(memoryStatus.ullAvailPageFile);
+    const double usedCommitBytes = std::max(0.0, totalCommitBytes - availableCommitBytes);
+
+    MemoryCompositionSample sample{};
+    if (totalPhysBytes > 0.0)
+    {
+        sample.usedPercent = std::clamp(usedPhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
+        sample.availablePercent = std::clamp(availablePhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
+    }
+    sample.commitPercent = totalCommitBytes > 0.0
+        ? std::clamp(usedCommitBytes * 100.0 / totalCommitBytes, 0.0, 100.0)
+        : sample.usedPercent;
+    sample.standbyPercent = std::clamp(sample.commitPercent - sample.usedPercent, 0.0, 100.0);
+    const double totalStackPercent = sample.usedPercent + sample.standbyPercent + sample.availablePercent;
+    if (totalStackPercent > 100.0 && totalStackPercent > 0.0)
+    {
+        sample.availablePercent = std::max(0.0, 100.0 - sample.usedPercent - sample.standbyPercent);
+    }
+
+    *memorySampleOut = sample;
+    return true;
+}
+
+bool MonitorPanelWidget::SamplingState::sampleDiskRate(
+    double* readBytesPerSecOut,
+    double* writeBytesPerSecOut)
+{
+    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
+    {
+        return false;
+    }
+
+    if (m_diskPerfQueryHandle == nullptr
+        || m_diskReadCounterHandle == nullptr
+        || m_diskWriteCounterHandle == nullptr)
+    {
+        return false;
+    }
+
+    const PDH_HQUERY diskQueryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
+    const PDH_STATUS collectStatus = ::PdhCollectQueryData(diskQueryHandle);
+    if (collectStatus != ERROR_SUCCESS)
+    {
+        retireDiskQuery();
+        return false;
+    }
+
+    PDH_FMT_COUNTERVALUE readCounterValue{};
+    PDH_FMT_COUNTERVALUE writeCounterValue{};
+    const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
+        PDH_FMT_DOUBLE,
+        nullptr,
+        &readCounterValue);
+    const PDH_STATUS writeStatus = ::PdhGetFormattedCounterValue(
+        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
+        PDH_FMT_DOUBLE,
+        nullptr,
+        &writeCounterValue);
+    if (readStatus != ERROR_SUCCESS || writeStatus != ERROR_SUCCESS
+        || (readCounterValue.CStatus != PDH_CSTATUS_VALID_DATA && readCounterValue.CStatus != PDH_CSTATUS_NEW_DATA)
+        || (writeCounterValue.CStatus != PDH_CSTATUS_VALID_DATA && writeCounterValue.CStatus != PDH_CSTATUS_NEW_DATA)
+        || !std::isfinite(readCounterValue.doubleValue) || !std::isfinite(writeCounterValue.doubleValue))
+    {
+        return false;
+    }
+
+    *readBytesPerSecOut = std::max(0.0, readCounterValue.doubleValue);
+    *writeBytesPerSecOut = std::max(0.0, writeCounterValue.doubleValue);
+    return true;
+}
+
+bool MonitorPanelWidget::SamplingState::sampleNetworkRate(double* rxBytesPerSecOut, double* txBytesPerSecOut)
+{
+    *rxBytesPerSecOut = 0.0;
+    *txBytesPerSecOut = 0.0;
+    MIB_IF_TABLE2* table = nullptr;
+    if (::GetIfTable2(&table) != NO_ERROR || table == nullptr) return false;
+    const std::unique_ptr<MIB_IF_TABLE2, decltype(&::FreeMibTable)> tableOwner(table, &::FreeMibTable);
+    const auto now = static_cast<std::uint64_t>(::GetTickCount64());
+    std::unordered_map<std::uint64_t, NetworkBaseline> next;
+    next.reserve(table->NumEntries);
+    for (ULONG index = 0; index < table->NumEntries; ++index)
+    {
+        const auto& row = table->Table[index];
+        // Keep the original up/non-loopback scope; only the baseline is per identity.
+        if (row.OperStatus != IfOperStatusUp || row.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        const std::uint64_t identity = row.InterfaceLuid.Value;
+        const NetworkBaseline current{row.InOctets, row.OutOctets, now};
+        const auto previous = networkBaselines.find(identity);
+        if (previous != networkBaselines.end() && now > previous->second.timeMs)
+        {
+            const double elapsed = static_cast<double>(now - previous->second.timeMs);
+            if (current.rx >= previous->second.rx)
+                *rxBytesPerSecOut += static_cast<double>(current.rx - previous->second.rx) * 1000.0 / elapsed;
+            if (current.tx >= previous->second.tx)
+                *txBytesPerSecOut += static_cast<double>(current.tx - previous->second.tx) * 1000.0 / elapsed;
+        }
+        next.emplace(identity, current);
+    }
+    networkBaselines.swap(next); // Removed/down devices must establish a new baseline on return.
+    return true;
 }
 
 MonitorPanelWidget::MonitorPanelWidget(QWidget* parent)
@@ -244,45 +555,28 @@ MonitorPanelWidget::MonitorPanelWidget(QWidget* parent)
     info << event << "[MonitorPanelWidget] 构造开始。" << eol;
 
     initializeUi();
-    // 计数器初始化和首帧采样都在后台线程完成，构造阶段只搭图表骨架，主窗口可以先出画面。
-    initializeCounters();
+    m_samplingDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
 
     // 采样定时器：
-    // - 每秒更新一次性能图；
-    // - 使用 UI 线程定时器，避免与图表对象跨线程访问。
+    // - 每秒最多接纳一轮后台采样；
+    // - UI 只消费完成值和投影，不执行原生查询。
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(1000);
     connect(m_refreshTimer, &QTimer::timeout, this, [this]() {
         refreshMetrics();
     });
     m_refreshTimer->start();
+    refreshMetrics();
 
     info << event << "[MonitorPanelWidget] 构造完成。" << eol;
 }
 
 MonitorPanelWidget::~MonitorPanelWidget()
 {
-    if (m_refreshTimer != nullptr)
-    {
-        m_refreshTimer->stop();
-    }
-
-    // 释放 CPU 查询句柄与每核计数器句柄。
-    if (m_cpuPerfQueryHandle != nullptr)
-    {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
-        m_cpuPerfQueryHandle = nullptr;
-        m_coreCounterHandles.clear();
-    }
-
-    // 释放磁盘查询句柄与读写计数器句柄。
-    if (m_diskPerfQueryHandle != nullptr)
-    {
-        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle));
-        m_diskPerfQueryHandle = nullptr;
-        m_diskReadCounterHandle = nullptr;
-        m_diskWriteCounterHandle = nullptr;
-    }
+    if (m_samplingDispatcher) m_samplingDispatcher->close();
+    if (m_refreshTimer) m_refreshTimer->stop();
+    if (m_samplingState) m_samplingState->requestStop();
+    m_samplingState.reset(); // The worker/cleanup lease, never QWidget, owns native cleanup.
 }
 
 void MonitorPanelWidget::resizeEvent(QResizeEvent* resizeEventPointer)
@@ -294,9 +588,18 @@ void MonitorPanelWidget::resizeEvent(QResizeEvent* resizeEventPointer)
 
 void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
 {
+    // 映射事件先于 windowState 的平台路径也可正确恢复，不能只查 isMinimized。
+    const QPointer<MonitorPanelWidget> owner(this);
+    m_presentationExposed = true;
     QWidget::showEvent(showEventPointer);
-    applyChartTextTheme();
+    if (!owner) return;
     updateCompactVisibility();
+    applyChartTextTheme();
+    reconcileMetrics();
+    if (!owner) return;
+    refreshVisiblePresentation(true);
+    if (!owner) return;
+    adjustChartCellHeights();
     // 延迟到事件循环末尾再重排，保证首帧也能拿到稳定几何尺寸。
     QTimer::singleShot(0, this, [this]()
     {
@@ -309,6 +612,12 @@ void MonitorPanelWidget::showEvent(QShowEvent* showEventPointer)
     });
 }
 
+void MonitorPanelWidget::hideEvent(QHideEvent* hideEventPointer)
+{
+    m_presentationExposed = false;
+    QWidget::hideEvent(hideEventPointer);
+}
+
 void MonitorPanelWidget::changeEvent(QEvent* eventPointer)
 {
     QWidget::changeEvent(eventPointer);
@@ -318,11 +627,17 @@ void MonitorPanelWidget::changeEvent(QEvent* eventPointer)
     }
 
     const QEvent::Type eventType = eventPointer->type();
-    if (eventType == QEvent::PaletteChange ||
-        eventType == QEvent::ApplicationPaletteChange ||
-        eventType == QEvent::StyleChange)
+    if (eventType == QEvent::PaletteChange || eventType == QEvent::ApplicationPaletteChange
+        || eventType == QEvent::StyleChange || eventType == QEvent::LanguageChange)
     {
-        applyChartTextTheme();
+        m_chartThemeDirty = true;
+        m_chartPresentationDirty = true;
+        if (m_presentationExposed && isVisible())
+        {
+            updateCompactVisibility();
+            applyChartTextTheme();
+            refreshVisiblePresentation(true);
+        }
     }
 }
 
@@ -634,153 +949,71 @@ void MonitorPanelWidget::initializeUi()
     adjustChartCellHeights();
 }
 
-void MonitorPanelWidget::initializeCounters()
-{
-    // 计数器初始化整体异步化：
-    // - 进程内第一次 PdhAddEnglishCounterW 需要加载并解析 perflib 计数器名索引，
-    //   在主窗口构造链路里同步执行会让启动阶段整个界面卡住；
-    // - UI 线程这里只读取核心数量，PDH 调用全部交给线程池，完成后回投接管句柄。
-    if (m_cpuPerfQueryHandle != nullptr && m_diskPerfQueryHandle != nullptr)
-    {
-        return;
-    }
-
-    // expectedInitializingValue 用途：CAS 期望值（false=当前没有初始化任务在跑）。
-    bool expectedInitializingValue = false;
-    if (!monitorPanelCounterInitializing.compare_exchange_strong(expectedInitializingValue, true))
-    {
-        return;
-    }
-
-    // coreCount 必须在 UI 线程读取：QBarSet 属于图表控件，后台线程不允许访问。
-    const int coreCount = m_cpuCoreBarSet != nullptr ? std::max(0, m_cpuCoreBarSet->count()) : 0;
-    const bool needCpuCounters = m_cpuPerfQueryHandle == nullptr;
-    const bool needDiskCounters = m_diskPerfQueryHandle == nullptr;
-
-    // guardedSelf 用途：后台任务可能晚于控件销毁，回投前必须验证生命周期。
-    const QPointer<MonitorPanelWidget> guardedSelf(this);
-    QThreadPool::globalInstance()->start(
-        [guardedSelf, coreCount, needCpuCounters, needDiskCounters]()
-        {
-            // 后台线程只做纯数据采集，产出的是可跨线程搬运的句柄值类型。
-            const MonitorPanelPdhCounterBundle counterBundle = createMonitorPanelPdhCounters(
-                coreCount,
-                needCpuCounters,
-                needDiskCounters);
-
-            // applicationInstance 与事件循环同寿命；工作线程不解引用控件指针。
-            QCoreApplication* const applicationInstance = QCoreApplication::instance();
-            if (applicationInstance == nullptr)
-            {
-                closeMonitorPanelPdhCounters(counterBundle);
-                monitorPanelCounterInitializing.store(false);
-                return;
-            }
-
-            const bool invokeOk = QMetaObject::invokeMethod(
-                applicationInstance,
-                [guardedSelf, counterBundle]()
-                {
-                    if (guardedSelf.isNull())
-                    {
-                        closeMonitorPanelPdhCounters(counterBundle);
-                        monitorPanelCounterInitializing.store(false);
-                        return;
-                    }
-
-                    // 控件已持有句柄说明更早一轮初始化已完成，本轮结果直接丢弃避免泄漏。
-                    if (guardedSelf->m_cpuPerfQueryHandle == nullptr)
-                    {
-                        guardedSelf->m_cpuPerfQueryHandle = counterBundle.cpuQueryHandle;
-                        guardedSelf->m_coreCounterHandles = counterBundle.coreCounterHandles;
-                    }
-                    else if (counterBundle.cpuQueryHandle != nullptr)
-                    {
-                        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.cpuQueryHandle));
-                    }
-
-                    if (guardedSelf->m_diskPerfQueryHandle == nullptr)
-                    {
-                        guardedSelf->m_diskPerfQueryHandle = counterBundle.diskQueryHandle;
-                        guardedSelf->m_diskReadCounterHandle = counterBundle.diskReadCounterHandle;
-                        guardedSelf->m_diskWriteCounterHandle = counterBundle.diskWriteCounterHandle;
-                    }
-                    else if (counterBundle.diskQueryHandle != nullptr)
-                    {
-                        ::PdhCloseQuery(reinterpret_cast<PDH_HQUERY>(counterBundle.diskQueryHandle));
-                    }
-
-                    // 句柄就绪后立即补一帧，避免初始化窗口期图表长时间停在 0；
-                    // 标记放在刷新之后清除，防止刷新内部又立刻投递一轮初始化任务。
-                    guardedSelf->refreshMetrics();
-                    monitorPanelCounterInitializing.store(false);
-                },
-                Qt::QueuedConnection);
-
-            if (!invokeOk)
-            {
-                closeMonitorPanelPdhCounters(counterBundle);
-                monitorPanelCounterInitializing.store(false);
-            }
-        });
-}
-
 void MonitorPanelWidget::refreshMetrics()
 {
-    // 采样 CPU 每核占用与总占用平均值。
-    std::vector<double> perCoreUsageList;
-    double totalCpuUsage = 0.0;
-    if (!samplePerCoreCpuUsage(&perCoreUsageList, &totalCpuUsage))
+    const QPointer<MonitorPanelWidget> owner(this);
+    reconcileMetrics();
+    if (!owner) return;
+    if (m_samplingReceipt) return;
+    if (m_samplingState && m_samplingState->finished.load(std::memory_order_acquire)) m_samplingState.reset();
+    try
     {
-        perCoreUsageList.assign(static_cast<std::size_t>(
-            m_cpuCoreBarSet != nullptr ? std::max(0, m_cpuCoreBarSet->count()) : 0), 0.0);
-        totalCpuUsage = 0.0;
-    }
-
-    // 更新 CPU 每核柱条数据。
-    if (m_cpuCoreBarSet != nullptr)
-    {
-        const int coreBarCount = m_cpuCoreBarSet->count();
-        for (int indexValue = 0; indexValue < coreBarCount; ++indexValue)
+        if (!m_samplingState)
         {
-            const double usageValue =
-                indexValue < static_cast<int>(perCoreUsageList.size())
-                ? perCoreUsageList[static_cast<std::size_t>(indexValue)]
-                : 0.0;
-            const double previousHistoryValue =
-                indexValue < static_cast<int>(m_cpuCoreHistoryPercentList.size())
-                ? m_cpuCoreHistoryPercentList[static_cast<std::size_t>(indexValue)]
-                : 0.0;
-            const double historyValue = previousHistoryValue <= 0.0
-                ? usageValue
-                : previousHistoryValue * 0.88 + usageValue * 0.12;
-            if (indexValue < static_cast<int>(m_cpuCoreHistoryPercentList.size()))
-            {
-                m_cpuCoreHistoryPercentList[static_cast<std::size_t>(indexValue)] = historyValue;
-            }
-            if (m_cpuCoreHistoryBarSet != nullptr && indexValue < m_cpuCoreHistoryBarSet->count())
-            {
-                m_cpuCoreHistoryBarSet->replace(indexValue, historyValue);
-            }
-            m_cpuCoreBarSet->replace(indexValue, usageValue);
+            auto state = std::make_shared<SamplingState>(static_cast<int>(m_cpuCoreHistoryPercentList.size()), m_samplingDispatcher);
+            const std::weak_ptr<SamplingState> weak(state);
+            auto lease = ks::ui::AsyncCleanupRegistry::global().acquire([weak] {
+                if (const auto owner = weak.lock()) owner->requestStop();
+            });
+            if (!lease) return;
+            std::thread([state, lease = std::move(lease)]() mutable {
+                state->run();
+                state.reset();
+                lease.reset(); // Native state/callback captures have finished before returning admission.
+            }).detach();
+            m_samplingState = std::move(state);
+        }
+        auto receipt = std::make_shared<SamplingReceipt>();
+        m_samplingReceipt = receipt;
+        const bool accepted = m_samplingState->request({receipt, [this, receipt] {
+            if (m_samplingReceipt == receipt) reconcileMetrics();
+        }});
+        if (!accepted)
+        {
+            receipt->finished.store(true, std::memory_order_release);
+            reconcileMetrics();
         }
     }
-    if (m_cpuChartView != nullptr && m_cpuChartView->chart() != nullptr)
+    catch (...)
     {
-        m_cpuChartView->chart()->setTitle(
-            ks::i18n::contextText(
-                QStringLiteral("monitor.panel.cpu.title.dynamic"),
-                QStringLiteral("CPU 每核心利用率（总体 %1%）"))
-            .arg(totalCpuUsage, 0, 'f', 1));
+        m_samplingReceipt.reset(); // No physical round was accepted; a later tick retries admission.
+    }
+}
+
+void MonitorPanelWidget::reconcileMetrics()
+{
+    const auto receipt = m_samplingReceipt;
+    if (!receipt || !receipt->finished.load(std::memory_order_acquire)) return;
+    m_samplingReceipt.reset(); // Exactly one consumer; a late posted callback cannot consume a new receipt.
+    if (receipt->hasSample) applyMetricSample(std::move(receipt->sample));
+}
+
+void MonitorPanelWidget::applyMetricSample(MetricPresentationSample sample)
+{
+    m_latestPresentation = std::move(sample);
+    const auto& perCoreUsageList = m_latestPresentation.coreUsages;
+    // 每核历史均值是规范状态，隐藏/仅摘要时也必须逐样本推进。
+    for (std::size_t index = 0; index < m_cpuCoreHistoryPercentList.size(); ++index)
+    {
+        const double usage = index < perCoreUsageList.size() ? perCoreUsageList[index] : 0.0;
+        const double previous = m_cpuCoreHistoryPercentList[index];
+        m_cpuCoreHistoryPercentList[index] = previous <= 0.0
+            ? usage : previous * 0.88 + usage * 0.12;
     }
 
     // 采样并更新内存合并图：折线表示总占用，面积颜色表示当前时刻组成比例。
-    MemoryCompositionSample memorySample{};
-    m_metricMemoryValid = sampleMemoryUsage(&memorySample);
-    if (!m_metricMemoryValid)
-    {
-        memorySample = MemoryCompositionSample{};
-    }
+    const auto& memorySample = m_latestPresentation.memory;
+    m_metricMemoryValid = m_latestPresentation.memoryValid;
     const double memoryUsedTopPercent = memorySample.usedPercent;
     const double memoryStandbyTopPercent = std::clamp(
         memorySample.usedPercent + memorySample.standbyPercent,
@@ -790,37 +1023,14 @@ void MonitorPanelWidget::refreshMetrics()
         memoryStandbyTopPercent + memorySample.availablePercent,
         0.0,
         100.0);
-    if (m_memoryTrendChartView != nullptr && m_memoryTrendChartView->chart() != nullptr)
-    {
-        m_memoryTrendChartView->chart()->setTitle(
-            ks::i18n::contextText(
-                QStringLiteral("monitor.panel.memory.title.dynamic"),
-                QStringLiteral("内存占用/组成  占用:%1%  缓存:%2%  可用:%3%"))
-            .arg(memorySample.usedPercent, 0, 'f', 1)
-            .arg(memorySample.standbyPercent, 0, 'f', 1)
-            .arg(memorySample.availablePercent, 0, 'f', 1));
-    }
 
-    // 采样并更新磁盘/网络折线图。
-    double diskReadBytesPerSec = 0.0;
-    double diskWriteBytesPerSec = 0.0;
-    m_metricDiskValid = sampleDiskRate(&diskReadBytesPerSec, &diskWriteBytesPerSec);
-    if (!m_metricDiskValid)
-    {
-        diskReadBytesPerSec = 0.0;
-        diskWriteBytesPerSec = 0.0;
-    }
-
-    double networkRxBytesPerSec = 0.0;
-    double networkTxBytesPerSec = 0.0;
-    m_metricNetworkValid = sampleNetworkRate(&networkRxBytesPerSec, &networkTxBytesPerSec);
-    if (!m_metricNetworkValid)
-    {
-        networkRxBytesPerSec = 0.0;
-        networkTxBytesPerSec = 0.0;
-    }
-
-    m_metricSampleTimeMs = QDateTime::currentMSecsSinceEpoch(); // 本帧各指标时间一致。
+    const double diskReadBytesPerSec = m_latestPresentation.diskReadBytesPerSec;
+    const double diskWriteBytesPerSec = m_latestPresentation.diskWriteBytesPerSec;
+    const double networkRxBytesPerSec = m_latestPresentation.networkRxBytesPerSec;
+    const double networkTxBytesPerSec = m_latestPresentation.networkTxBytesPerSec;
+    m_metricDiskValid = m_latestPresentation.diskValid;
+    m_metricNetworkValid = m_latestPresentation.networkValid;
+    m_metricSampleTimeMs = m_latestPresentation.sampleTimeMs;
     ++m_sampleCounter;
     appendLineSample(m_memoryUsedSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memoryUsedTopPercent);
     appendLineSample(m_memoryStandbyTopSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memoryStandbyTopPercent);
@@ -828,31 +1038,94 @@ void MonitorPanelWidget::refreshMetrics()
     appendLineSample(m_memoryAvailableTopSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memoryAvailableTopPercent);
     appendLineSample(m_memoryAvailableBaseSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memoryStandbyTopPercent);
     appendLineSample(m_memoryUsageSeries, m_memoryTrendAxisX, m_memoryTrendAxisY, memorySample.usedPercent);
-    if (m_memoryTrendAxisY != nullptr)
-    {
-        m_memoryTrendAxisY->setRange(0.0, 100.0);
-    }
     appendLineSample(m_diskReadSeries, m_diskAxisX, m_diskAxisY, diskReadBytesPerSec);
     appendLineSample(m_diskWriteSeries, m_diskAxisX, m_diskAxisY, diskWriteBytesPerSec);
     appendLineSample(m_networkRxSeries, m_networkAxisX, m_networkAxisY, networkRxBytesPerSec);
     appendLineSample(m_networkTxSeries, m_networkAxisX, m_networkAxisY, networkTxBytesPerSec);
 
-    // 双序列共享 Y 轴，需要按两条线共同最大值修正 Y 范围。
-    auto updateAxisRangeByPair = [](
-        QLineSeries* firstSeries,
-        QLineSeries* secondSeries,
-        QValueAxis* axisY) {
-        if (firstSeries == nullptr || secondSeries == nullptr || axisY == nullptr)
-        {
-            return;
-        }
+    m_hasMetricSample = true;
+    m_chartPresentationDirty = true;
+    if (isVisible() && m_presentationExposed)
+    {
+        updateCompactVisibility();
+        refreshVisiblePresentation();
+    }
+}
 
-        const auto range = ks::ui::MetricChartBinding::SharedRange({ firstSeries, secondSeries },
+void MonitorPanelWidget::refreshVisiblePresentation(const bool snapToLatest)
+{
+    if (!isVisible() || !m_presentationExposed || m_compactTextOnly || !m_hasMetricSample
+        || (!m_chartPresentationDirty && !snapToLatest))
+    {
+        return;
+    }
+
+    if (m_chartThemeDirty) applyChartTextTheme();
+    // 全部规范历史先投影，再统一更新共轴与标题，避免首帧混用不同采样。
+    const QList<QLineSeries*> lines{
+        m_memoryUsedSeries, m_memoryStandbyTopSeries, m_memoryStandbyBaseSeries,
+        m_memoryAvailableTopSeries, m_memoryAvailableBaseSeries, m_memoryUsageSeries,
+        m_diskReadSeries, m_diskWriteSeries, m_networkRxSeries, m_networkTxSeries
+    };
+    for (QLineSeries* series : lines)
+    {
+        if (auto* binding = ks::ui::MetricChartBinding::Find(series); binding && binding->projectionPending())
+        {
+            binding->refreshSeries();
+        }
+    }
+
+    if (const auto* binding = ks::ui::MetricChartBinding::Find(m_memoryUsageSeries))
+    {
+        const auto range = binding->range({ 0.0, 1.0, 1.2, 100.0 });
+        if (m_memoryTrendAxisX != nullptr) m_memoryTrendAxisX->setRange(range.minimumX, range.maximumX);
+    }
+    if (m_memoryTrendAxisY != nullptr) m_memoryTrendAxisY->setRange(0.0, 100.0);
+    const auto updatePairRange = [](QLineSeries* first, QLineSeries* second,
+        QValueAxis* axisX, QValueAxis* axisY)
+    {
+        if (first == nullptr || second == nullptr || axisX == nullptr || axisY == nullptr) return;
+        const auto range = ks::ui::MetricChartBinding::SharedRange({ first, second },
             ks::ui::MetricXMode::RelativeSlot, { 0.0, 1.0, 1.2, {} });
+        axisX->setRange(range.minimumX, range.maximumX);
         axisY->setRange(range.minimumY, range.maximumY);
     };
-    updateAxisRangeByPair(m_diskReadSeries, m_diskWriteSeries, m_diskAxisY);
-    updateAxisRangeByPair(m_networkRxSeries, m_networkTxSeries, m_networkAxisY);
+    updatePairRange(m_diskReadSeries, m_diskWriteSeries, m_diskAxisX, m_diskAxisY);
+    updatePairRange(m_networkRxSeries, m_networkTxSeries, m_networkAxisX, m_networkAxisY);
+
+    if (m_cpuCoreBarSet != nullptr)
+    {
+        for (int index = 0; index < m_cpuCoreBarSet->count(); ++index)
+        {
+            const auto position = static_cast<std::size_t>(index);
+            const double usage = position < m_latestPresentation.coreUsages.size()
+                ? m_latestPresentation.coreUsages[position] : 0.0;
+            const double history = position < m_cpuCoreHistoryPercentList.size()
+                ? m_cpuCoreHistoryPercentList[position] : 0.0;
+            if (m_cpuCoreHistoryBarSet != nullptr && index < m_cpuCoreHistoryBarSet->count())
+                m_cpuCoreHistoryBarSet->replace(index, history);
+            m_cpuCoreBarSet->replace(index, usage);
+        }
+    }
+    if (m_cpuChartView != nullptr && m_cpuChartView->chart() != nullptr)
+    {
+        m_cpuChartView->chart()->setTitle(
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.cpu.title.dynamic"),
+                QStringLiteral("CPU 每核心利用率（总体 %1%）"))
+            .arg(m_latestPresentation.totalCpuUsage, 0, 'f', 1));
+    }
+
+    if (m_memoryTrendChartView != nullptr && m_memoryTrendChartView->chart() != nullptr)
+    {
+        m_memoryTrendChartView->chart()->setTitle(
+            ks::i18n::contextText(
+                QStringLiteral("monitor.panel.memory.title.dynamic"),
+                QStringLiteral("内存占用/组成  占用:%1%  缓存:%2%  可用:%3%"))
+            .arg(m_latestPresentation.memory.usedPercent, 0, 'f', 1)
+            .arg(m_latestPresentation.memory.standbyPercent, 0, 'f', 1)
+            .arg(m_latestPresentation.memory.availablePercent, 0, 'f', 1));
+    }
 
     if (m_diskChartView != nullptr && m_diskChartView->chart() != nullptr)
     {
@@ -860,8 +1133,8 @@ void MonitorPanelWidget::refreshMetrics()
             ks::i18n::contextText(
                 QStringLiteral("monitor.panel.disk.title.dynamic"),
                 QStringLiteral("磁盘读写速率  读:%1  写:%2"))
-            .arg(bytesPerSecondToText(diskReadBytesPerSec))
-            .arg(bytesPerSecondToText(diskWriteBytesPerSec)));
+            .arg(bytesPerSecondToText(m_latestPresentation.diskReadBytesPerSec))
+            .arg(bytesPerSecondToText(m_latestPresentation.diskWriteBytesPerSec)));
     }
     if (m_networkChartView != nullptr && m_networkChartView->chart() != nullptr)
     {
@@ -869,245 +1142,17 @@ void MonitorPanelWidget::refreshMetrics()
             ks::i18n::contextText(
                 QStringLiteral("monitor.panel.network.title.dynamic"),
                 QStringLiteral("网络收发速率  下:%1  上:%2"))
-            .arg(bytesPerSecondToText(networkRxBytesPerSec))
-            .arg(bytesPerSecondToText(networkTxBytesPerSec)));
+            .arg(bytesPerSecondToText(m_latestPresentation.networkRxBytesPerSec))
+            .arg(bytesPerSecondToText(m_latestPresentation.networkTxBytesPerSec)));
     }
-
-    m_lastCompactSummaryText = ks::i18n::contextText(
-        QStringLiteral("monitor.panel.compact.summary"),
-        QStringLiteral("CPU %1% | 内存 %2% | 磁盘 读 %3 / 写 %4 | 网络 下 %5 / 上 %6"))
-        .arg(totalCpuUsage, 0, 'f', 1)
-        .arg(memorySample.usedPercent, 0, 'f', 1)
-        .arg(bytesPerSecondToText(diskReadBytesPerSec))
-        .arg(bytesPerSecondToText(diskWriteBytesPerSec))
-        .arg(bytesPerSecondToText(networkRxBytesPerSec))
-        .arg(bytesPerSecondToText(networkTxBytesPerSec));
-    if (m_compactSummaryLabel != nullptr)
+    m_chartPresentationDirty = false;
+    if (snapToLatest)
     {
-        m_compactSummaryLabel->setText(m_lastCompactSummaryText);
-    }
-    updateCompactVisibility();
-}
-
-bool MonitorPanelWidget::samplePerCoreCpuUsage(
-    std::vector<double>* coreUsagesOut,
-    double* totalUsageOut)
-{
-    if (coreUsagesOut == nullptr || totalUsageOut == nullptr)
-    {
-        return false;
-    }
-
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        initializeCounters();
-    }
-    if (m_cpuPerfQueryHandle == nullptr)
-    {
-        return false;
-    }
-
-    const PDH_STATUS collectStatus = ::PdhCollectQueryData(
-        reinterpret_cast<PDH_HQUERY>(m_cpuPerfQueryHandle));
-    if (collectStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    coreUsagesOut->clear();
-    coreUsagesOut->reserve(m_coreCounterHandles.size());
-
-    double usageSum = 0.0;
-    int validCoreCount = 0;
-    for (void* counterHandleVoid : m_coreCounterHandles)
-    {
-        if (counterHandleVoid == nullptr)
+        for (QChartView* view : { m_cpuChartView, m_memoryTrendChartView, m_diskChartView, m_networkChartView })
         {
-            coreUsagesOut->push_back(0.0);
-            continue;
+            if (view != nullptr) view->presentLatestWithoutAnimation();
         }
-
-        PDH_FMT_COUNTERVALUE counterValue{};
-        const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
-            reinterpret_cast<PDH_HCOUNTER>(counterHandleVoid),
-            PDH_FMT_DOUBLE,
-            nullptr,
-            &counterValue);
-        if (readStatus != ERROR_SUCCESS)
-        {
-            coreUsagesOut->push_back(0.0);
-            continue;
-        }
-
-        const double usageValue = std::clamp(counterValue.doubleValue, 0.0, 100.0);
-        coreUsagesOut->push_back(usageValue);
-        usageSum += usageValue;
-        ++validCoreCount;
     }
-
-    *totalUsageOut = validCoreCount > 0
-        ? usageSum / static_cast<double>(validCoreCount)
-        : 0.0;
-    return true;
-}
-
-bool MonitorPanelWidget::sampleMemoryUsage(MemoryCompositionSample* memorySampleOut) const
-{
-    if (memorySampleOut == nullptr)
-    {
-        return false;
-    }
-
-    MEMORYSTATUSEX memoryStatus{};
-    memoryStatus.dwLength = sizeof(memoryStatus);
-    if (::GlobalMemoryStatusEx(&memoryStatus) == FALSE)
-    {
-        *memorySampleOut = MemoryCompositionSample{};
-        return false;
-    }
-
-    const double totalPhysBytes = static_cast<double>(memoryStatus.ullTotalPhys);
-    const double availablePhysBytes = static_cast<double>(memoryStatus.ullAvailPhys);
-    const double usedPhysBytes = std::max(0.0, totalPhysBytes - availablePhysBytes);
-    const double totalCommitBytes = static_cast<double>(memoryStatus.ullTotalPageFile);
-    const double availableCommitBytes = static_cast<double>(memoryStatus.ullAvailPageFile);
-    const double usedCommitBytes = std::max(0.0, totalCommitBytes - availableCommitBytes);
-
-    MemoryCompositionSample sample{};
-    if (totalPhysBytes > 0.0)
-    {
-        sample.usedPercent = std::clamp(usedPhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
-        sample.availablePercent = std::clamp(availablePhysBytes * 100.0 / totalPhysBytes, 0.0, 100.0);
-    }
-    sample.commitPercent = totalCommitBytes > 0.0
-        ? std::clamp(usedCommitBytes * 100.0 / totalCommitBytes, 0.0, 100.0)
-        : sample.usedPercent;
-    sample.standbyPercent = std::clamp(sample.commitPercent - sample.usedPercent, 0.0, 100.0);
-    const double totalStackPercent = sample.usedPercent + sample.standbyPercent + sample.availablePercent;
-    if (totalStackPercent > 100.0 && totalStackPercent > 0.0)
-    {
-        sample.availablePercent = std::max(0.0, 100.0 - sample.usedPercent - sample.standbyPercent);
-    }
-
-    *memorySampleOut = sample;
-    return true;
-}
-
-bool MonitorPanelWidget::sampleDiskRate(
-    double* readBytesPerSecOut,
-    double* writeBytesPerSecOut)
-{
-    if (readBytesPerSecOut == nullptr || writeBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    if (m_diskPerfQueryHandle == nullptr)
-    {
-        initializeCounters();
-    }
-    if (m_diskPerfQueryHandle == nullptr
-        || m_diskReadCounterHandle == nullptr
-        || m_diskWriteCounterHandle == nullptr)
-    {
-        return false;
-    }
-
-    const PDH_HQUERY diskQueryHandle = reinterpret_cast<PDH_HQUERY>(m_diskPerfQueryHandle);
-    const PDH_STATUS collectStatus = ::PdhCollectQueryData(diskQueryHandle);
-    if (collectStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    PDH_FMT_COUNTERVALUE readCounterValue{};
-    PDH_FMT_COUNTERVALUE writeCounterValue{};
-    const PDH_STATUS readStatus = ::PdhGetFormattedCounterValue(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskReadCounterHandle),
-        PDH_FMT_DOUBLE,
-        nullptr,
-        &readCounterValue);
-    const PDH_STATUS writeStatus = ::PdhGetFormattedCounterValue(
-        reinterpret_cast<PDH_HCOUNTER>(m_diskWriteCounterHandle),
-        PDH_FMT_DOUBLE,
-        nullptr,
-        &writeCounterValue);
-    if (readStatus != ERROR_SUCCESS || writeStatus != ERROR_SUCCESS)
-    {
-        return false;
-    }
-
-    *readBytesPerSecOut = std::max(0.0, readCounterValue.doubleValue);
-    *writeBytesPerSecOut = std::max(0.0, writeCounterValue.doubleValue);
-    return true;
-}
-
-bool MonitorPanelWidget::sampleNetworkRate(
-    double* rxBytesPerSecOut,
-    double* txBytesPerSecOut)
-{
-    if (rxBytesPerSecOut == nullptr || txBytesPerSecOut == nullptr)
-    {
-        return false;
-    }
-
-    MIB_IF_TABLE2* ifTablePointer = nullptr;
-    const DWORD tableStatus = ::GetIfTable2(&ifTablePointer);
-    if (tableStatus != NO_ERROR || ifTablePointer == nullptr)
-    {
-        return false;
-    }
-
-    std::uint64_t totalRxBytes = 0;
-    std::uint64_t totalTxBytes = 0;
-    for (ULONG rowIndex = 0; rowIndex < ifTablePointer->NumEntries; ++rowIndex)
-    {
-        const MIB_IF_ROW2& rowValue = ifTablePointer->Table[rowIndex];
-        if (rowValue.OperStatus != IfOperStatusUp)
-        {
-            continue;
-        }
-        if (rowValue.Type == IF_TYPE_SOFTWARE_LOOPBACK)
-        {
-            continue;
-        }
-
-        totalRxBytes += static_cast<std::uint64_t>(rowValue.InOctets);
-        totalTxBytes += static_cast<std::uint64_t>(rowValue.OutOctets);
-    }
-    ::FreeMibTable(ifTablePointer);
-
-    const qint64 currentSampleMs = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastNetworkSampleMs <= 0)
-    {
-        m_lastNetworkSampleMs = currentSampleMs;
-        m_lastNetworkRxBytes = totalRxBytes;
-        m_lastNetworkTxBytes = totalTxBytes;
-        *rxBytesPerSecOut = 0.0;
-        *txBytesPerSecOut = 0.0;
-        return true;
-    }
-
-    const qint64 elapsedMs = currentSampleMs - m_lastNetworkSampleMs;
-    if (elapsedMs <= 0)
-    {
-        return false;
-    }
-
-    const std::uint64_t deltaRxBytes = totalRxBytes >= m_lastNetworkRxBytes
-        ? (totalRxBytes - m_lastNetworkRxBytes)
-        : 0;
-    const std::uint64_t deltaTxBytes = totalTxBytes >= m_lastNetworkTxBytes
-        ? (totalTxBytes - m_lastNetworkTxBytes)
-        : 0;
-
-    m_lastNetworkSampleMs = currentSampleMs;
-    m_lastNetworkRxBytes = totalRxBytes;
-    m_lastNetworkTxBytes = totalTxBytes;
-
-    *rxBytesPerSecOut = static_cast<double>(deltaRxBytes) * 1000.0 / static_cast<double>(elapsedMs);
-    *txBytesPerSecOut = static_cast<double>(deltaTxBytes) * 1000.0 / static_cast<double>(elapsedMs);
-    return true;
 }
 
 void MonitorPanelWidget::appendLineSample(QLineSeries* series, QValueAxis* axisX,
@@ -1128,14 +1173,12 @@ void MonitorPanelWidget::appendLineSample(QLineSeries* series, QValueAxis* axisX
     }
     auto* binding = ks::ui::MetricChartBinding::ForSeries(series, m_historyLength);
     binding->setXMode(ks::ui::MetricXMode::RelativeSlot); // 保留固定槽位左移的监视面板动画。
-    binding->append({ static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, value, valid });
-    const auto range = binding->range({ 0.0, 1.0, 1.2, {} });
-    axisX->setRange(range.minimumX, range.maximumX);
-    axisY->setRange(range.minimumY, range.maximumY);
+    binding->append({ static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, value, valid }, false);
 }
 
 void MonitorPanelWidget::applyChartTextTheme()
 {
+    if (!m_presentationExposed || !isVisible()) { m_chartThemeDirty = true; return; }
     const QColor primaryTextColor = monitorPanelTextColor();
     const QColor mutedTextColor = monitorPanelMutedTextColor();
     const QBrush primaryTextBrush(primaryTextColor);
@@ -1152,6 +1195,8 @@ void MonitorPanelWidget::applyChartTextTheme()
             .arg(primaryTextColor.name(QColor::HexRgb)));
     }
 
+    if (m_compactTextOnly) { m_chartThemeDirty = true; return; }
+    m_chartThemeDirty = false;
     // chartList 变量：统一枚举四张图，确保标题/图例在深浅色下都可读。
     const QList<QChart*> chartList{
         m_cpuChartView != nullptr ? m_cpuChartView->chart() : nullptr,
@@ -1203,14 +1248,30 @@ void MonitorPanelWidget::applyChartTextTheme()
 
 void MonitorPanelWidget::updateCompactVisibility()
 {
+    if (!m_presentationExposed || !isVisible()) return;
     // 低高度保护：
     // - 极小高度下标题、plotArea、图例和坐标轴没有足够的可绘制空间；
     // - 直接隐藏所有 chart view，仅保留一行摘要，避免布局震荡或崩溃。
     const bool compactTextOnly = height() > 0 && height() < 200;
+    const bool restoreCharts = m_compactTextOnly && !compactTextOnly;
+    m_compactTextOnly = compactTextOnly;
+    if (compactTextOnly && m_hasMetricSample)
+    {
+        const auto& sample = m_latestPresentation;
+        m_lastCompactSummaryText = ks::i18n::contextText(
+            QStringLiteral("monitor.panel.compact.summary"),
+            QStringLiteral("CPU %1% | 内存 %2% | 磁盘 读 %3 / 写 %4 | 网络 下 %5 / 上 %6"))
+            .arg(sample.totalCpuUsage, 0, 'f', 1)
+            .arg(sample.memory.usedPercent, 0, 'f', 1)
+            .arg(bytesPerSecondToText(sample.diskReadBytesPerSec))
+            .arg(bytesPerSecondToText(sample.diskWriteBytesPerSec))
+            .arg(bytesPerSecondToText(sample.networkRxBytesPerSec))
+            .arg(bytesPerSecondToText(sample.networkTxBytesPerSec));
+    }
     if (m_compactSummaryLabel != nullptr)
     {
         m_compactSummaryLabel->setVisible(compactTextOnly);
-        if (!m_lastCompactSummaryText.isEmpty())
+        if (!m_lastCompactSummaryText.isEmpty() && m_compactSummaryLabel->text() != m_lastCompactSummaryText)
         {
             m_compactSummaryLabel->setText(m_lastCompactSummaryText);
         }
@@ -1226,13 +1287,18 @@ void MonitorPanelWidget::updateCompactVisibility()
     {
         if (chartView != nullptr)
         {
-            chartView->setVisible(!compactTextOnly);
+            if (chartView->isHidden() != compactTextOnly) chartView->setVisible(!compactTextOnly);
         }
+    }
+    if (restoreCharts)
+    {
+        refreshVisiblePresentation(true);
     }
 }
 
 void MonitorPanelWidget::adjustChartCellHeights()
 {
+    if (!m_presentationExposed || !isVisible()) return;
     if (height() > 0 && height() < 200)
     {
         updateCompactVisibility();
