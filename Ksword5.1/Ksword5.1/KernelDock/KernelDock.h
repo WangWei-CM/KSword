@@ -21,6 +21,7 @@
 #include <QVector>
 #include <QStringList>
 #include <memory>
+#include <functional>
 #include <array>
 #include "../UI/PageNavigationCatalog.h"
 
@@ -805,7 +806,7 @@ private:
     // rebuildAtomTable：
     // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
     // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
-    void rebuildAtomTable(bool sourceChanged = false);
+    void rebuildAtomTable(bool sourceChanged = false, std::function<void()> onReady = {});
     // Cached search belongs to the current source snapshot and language. Business
     // exclusions use TS05 identities, so sorting and shared search/freeze compose.
     static constexpr int KernelSearchFieldsRole = Qt::UserRole + 171;

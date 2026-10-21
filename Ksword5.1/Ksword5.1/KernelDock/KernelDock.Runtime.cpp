@@ -327,11 +327,10 @@ void KernelDock::refreshAtomTableAsync()
             auto commitResult = [guardThis, success, errorText,
                 resultRows = std::move(resultRows)]() mutable {
                 if (guardThis == nullptr) return;
-                guardThis->m_atomRefreshRunning.store(false);
-                guardThis->m_refreshAtomButton->setEnabled(true);
-
                 if (!success)
                 {
+                    guardThis->m_atomRefreshRunning.store(false);
+                    guardThis->m_refreshAtomButton->setEnabled(true);
                     guardThis->m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.failed", QStringLiteral("状态：刷新失败")));
                     guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                     guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -345,27 +344,31 @@ void KernelDock::refreshAtomTableAsync()
                 }
 
                 guardThis->m_atomRows = std::move(resultRows);
-                guardThis->rebuildAtomTable(true);
-                guardThis->m_atomStatusLabel->setText(
-                    kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
-                    .arg(guardThis->m_atomRows.size()));
-                guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
+                guardThis->rebuildAtomTable(true, [guardThis]() {
+                    if (!guardThis) return;
+                    guardThis->m_atomRefreshRunning.store(false);
+                    guardThis->m_refreshAtomButton->setEnabled(true);
+                    guardThis->m_atomStatusLabel->setText(
+                        kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
+                        .arg(guardThis->m_atomRows.size()));
+                    guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
 
-                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_atomTable);
-                if (firstVisibleRow >= 0)
-                {
-                    guardThis->m_atomTable->setCurrentCell(firstVisibleRow, 0);
-                }
-                else
-                {
-                    guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.atom.empty", QStringLiteral("当前环境未发现可见原子记录。"))));
-                }
+                    const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_atomTable);
+                    if (firstVisibleRow >= 0)
+                    {
+                        guardThis->m_atomTable->setCurrentCell(firstVisibleRow, 0);
+                    }
+                    else
+                    {
+                        guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.atom.empty", QStringLiteral("当前环境未发现可见原子记录。"))));
+                    }
 
-                kLogEvent doneEvent;
-                info << doneEvent
-                    << "[KernelDock] 原子表刷新完成, count="
-                    << guardThis->m_atomRows.size()
-                    << eol;
+                    kLogEvent doneEvent;
+                    info << doneEvent
+                        << "[KernelDock] 原子表刷新完成, count="
+                        << guardThis->m_atomRows.size()
+                        << eol;
+                });
             };
             if (ks::ui::DeferTableUiCommitIfContextMenuOpen(guardThis.data(),
                 QStringLiteral("kernel_atom_snapshot_apply"), {guardThis->m_atomTable}, commitResult)) return;
@@ -952,7 +955,7 @@ void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFi
     finish();
 }
 
-void KernelDock::rebuildAtomTable(const bool sourceChanged)
+void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_atomTable == nullptr)
     {
@@ -965,6 +968,8 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
     if (!sourceChanged)
     {
+        // The current keyword is read again after every source row is ready.
+        if (m_atomTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_atomTable->property(KernelSearchLanguageProperty).toString() != language)
         {
             resetKernelResultFilterCache(m_atomTable);
@@ -985,52 +990,90 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
-    m_atomTable->setSortingEnabled(false);
-    resetKernelResultFilterCache(m_atomTable);
-    m_atomTable->setRowCount(0);
-    m_atomTable->setRowCount(static_cast<int>(m_atomRows.size()));
-
-    for (std::size_t sourceIndex = 0; sourceIndex < m_atomRows.size(); ++sourceIndex)
-    {
-        const KernelAtomEntry& entry = m_atomRows[sourceIndex];
-        const QString valueText = QString::number(entry.atomValue);
-        const QString hexText = QStringLiteral("0x%1")
-            .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
-            .toUpper();
-
-        const int rowIndex = static_cast<int>(sourceIndex);
-
-        auto* valueItem = new QTableWidgetItem(valueText);
-        valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        valueItem->setData(KernelSearchFieldsRole, searchFields(entry));
-        auto* hexItem = new QTableWidgetItem(hexText);
-        auto* nameItem = new QTableWidgetItem(entry.atomNameText);
-        auto* sourceItem = new QTableWidgetItem(entry.sourceText);
-        auto* statusItem = new QTableWidgetItem(entry.statusText);
-
-        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
-        hexItem->setFlags(hexItem->flags() & ~Qt::ItemIsEditable);
-        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
-        sourceItem->setFlags(sourceItem->flags() & ~Qt::ItemIsEditable);
-        statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
-
-        if (!entry.querySucceeded)
+    // Keep the refresh gate until publication finishes, so m_atomRows cannot be
+    // replaced while this cursor reads it. No second native snapshot is retained.
+    auto* timer = new QTimer(m_atomTable);
+    timer->setSingleShot(true);
+    const QPointer<QTimer> timerGuard(timer);
+    const QPointer<KernelDock> owner(this);
+    const bool wasForceDisabled = m_atomTable->testAttribute(Qt::WA_ForceDisabled);
+    m_atomTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+    m_atomTable->setEnabled(false);
+    connect(timer, &QTimer::timeout, this,
+        [this, owner, timerGuard, searchFields, wasForceDisabled,
+            sourceIndex = std::size_t{0}, initialized = false,
+            onReady = std::move(onReady)]() mutable {
+        if (!owner || !timerGuard) return;
+        const auto resume = [timerGuard]() { if (timerGuard) timerGuard->start(0); };
+        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(m_atomTable,
+            QStringLiteral("kernel_atom_source_projection"), {m_atomTable}, resume)) return;
+        QElapsedTimer budget;
+        budget.start();
+        if (!initialized)
         {
-            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
+            initialized = true;
+            ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
+            m_atomTable->setSortingEnabled(false);
+            resetKernelResultFilterCache(m_atomTable);
+            m_atomTable->setRowCount(0);
+            m_atomTable->setRowCount(static_cast<int>(m_atomRows.size()));
+            if (!owner || !timerGuard) return;
         }
+        int rows = 0;
+        while (sourceIndex < m_atomRows.size())
+        {
+            const KernelAtomEntry& entry = m_atomRows[sourceIndex];
+            const QString valueText = QString::number(entry.atomValue);
+            const QString hexText = QStringLiteral("0x%1")
+                .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
+                .toUpper();
 
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
-        rememberKernelResultFilterRow(m_atomTable, rowIndex);
-    }
+            const int rowIndex = static_cast<int>(sourceIndex);
 
-    m_atomTable->setSortingEnabled(true);
-    m_atomTable->setProperty(KernelSearchLanguageProperty, language);
-    applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
+            auto* valueItem = new QTableWidgetItem(valueText);
+            valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            valueItem->setData(KernelSearchFieldsRole, searchFields(entry));
+            auto* hexItem = new QTableWidgetItem(hexText);
+            auto* nameItem = new QTableWidgetItem(entry.atomNameText);
+            auto* sourceItem = new QTableWidgetItem(entry.sourceText);
+            auto* statusItem = new QTableWidgetItem(entry.statusText);
+
+            valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+            hexItem->setFlags(hexItem->flags() & ~Qt::ItemIsEditable);
+            nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+            sourceItem->setFlags(sourceItem->flags() & ~Qt::ItemIsEditable);
+            statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
+
+            if (!entry.querySucceeded)
+            {
+                statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
+            }
+
+            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
+            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
+            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
+            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
+            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
+            rememberKernelResultFilterRow(m_atomTable, rowIndex);
+            ++sourceIndex;
+            if (!owner || !timerGuard) return;
+            if (++rows >= 64 || budget.elapsed() >= 4) break;
+        }
+        if (sourceIndex < m_atomRows.size()) { resume(); return; }
+        timerGuard->deleteLater();
+        m_atomTable->setSortingEnabled(true);
+        if (!owner) return;
+        // Atom search fields contain only values from the accepted source rows;
+        // they have no LanguageManager-dependent formatting.
+        m_atomTable->setProperty(KernelSearchLanguageProperty,
+            ks::i18n::LanguageManager::instance().currentLanguageId());
+        applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
+        if (!owner) return;
+        m_atomTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+        m_atomTable->setEnabled(!wasForceDisabled);
+        if (onReady) onReady();
+    });
+    timer->start(0);
 }
 
 void KernelDock::rebuildNtQueryTable()
