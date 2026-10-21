@@ -1871,11 +1871,6 @@ bool RegisterHostClass() {
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
                 if (header && header->hwndFrom == state->tab && header->code == TCN_SELCHANGE) {
-                    auto cached = state->snapshots.find(state->currentTab);
-                    if (cached != state->snapshots.end() && cached->second.rows == state->rows) {
-                        cached->second.selected = ListView_GetNextItem(state->list, -1, LVNI_SELECTED);
-                        cached->second.top = ListView_GetTopIndex(state->list);
-                    }
                     const LRESULT selected = ::SendMessageW(state->tab, TCM_GETCURSEL, 0, 0);
                     if (selected >= 0) {
                         state->currentTab = static_cast<int>(selected);
