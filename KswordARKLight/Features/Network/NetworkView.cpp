@@ -63,6 +63,7 @@ struct NetworkFilterResult final {
     std::wstring query;
     bool useRegex = false;
     std::vector<std::size_t> visibleIndexes;
+    std::shared_ptr<const std::vector<Ksword::Ui::VirtualListRow>> rows;
 };
 
 struct NetworkAuditPageState final {
@@ -80,6 +81,7 @@ struct NetworkAuditPageState final {
     std::wstring filterQuery;
     bool filterUseRegex = false;
     std::uint64_t displayGeneration = 0;
+    std::uint64_t renderedModelGeneration = 0;
     int contextColumn = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<NetworkFilterResult>> filterTask;
 };
@@ -93,6 +95,7 @@ struct NetworkViewState final {
     NetworkAuditModel model;
     std::vector<std::unique_ptr<NetworkAuditPageState>> auditPages;
     bool auditRefreshStarted = false;
+    std::uint64_t modelGeneration = 1;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::vector<NetworkAuditPage>>> refreshTask;
 };
 
@@ -168,6 +171,14 @@ void ApplyNetworkFilter(NetworkViewState& state, NetworkFilterResult result) {
         result.useRegex != page->filterUseRegex) {
         return;
     }
+    // Keep the preceding complete projection visible until the replacement
+    // rows and their matching mapping are both ready.
+    if (result.rows != page->filterRows) {
+        return;
+    }
+    if (&page->list.rows() != result.rows.get()) {
+        page->list.setSharedRows(result.rows);
+    }
     page->list.setVisibleIndexes(std::move(result.visibleIndexes));
     if (!page->filterQuery.empty()) {
         SetStatus(*page, L"Network 筛选结果 " + std::to_wstring(page->list.rowCount()) + L" 项。");
@@ -194,6 +205,7 @@ void RequestNetworkFilter(NetworkAuditPageState& page, std::wstring query) {
             result.generation = generation;
             result.query = std::move(query);
             result.useRegex = useRegex;
+            result.rows = rows;
             result.visibleIndexes = Ksword::Ui::VirtualListView::FilterRowIndexes(*rows, result.query, useRegex);
             return result;
         },
@@ -210,6 +222,9 @@ void RequestNetworkFilter(NetworkAuditPageState& page, std::wstring query) {
 
 void RenderAuditPage(NetworkAuditPageState& page) {
     if (!page.owner) {
+        return;
+    }
+    if (page.renderedModelGeneration == page.owner->modelGeneration && page.filterRows) {
         return;
     }
     const NetworkAuditPage* audit = page.owner->model.pageAt(page.auditIndex);
@@ -231,9 +246,8 @@ void RenderAuditPage(NetworkAuditPageState& page) {
         }
         rows->push_back(std::move(row));
     }
-    page.list.setRows(*rows);
-    page.list.setVisibleIndexes({});
     page.filterRows = std::move(rows);
+    page.renderedModelGeneration = page.owner->modelGeneration;
     ++page.displayGeneration;
     SetSummary(page, audit->summary);
     RequestNetworkFilter(page, page.filterBar ? Ksword::Ui::GetFilterBarText(page.filterBar) : page.filterQuery);
@@ -241,7 +255,7 @@ void RenderAuditPage(NetworkAuditPageState& page) {
 
 void RenderAllAuditPages(NetworkViewState& state) {
     for (const std::unique_ptr<NetworkAuditPageState>& page : state.auditPages) {
-        if (page) {
+        if (page && ::IsWindowVisible(page->hwnd)) {
             RenderAuditPage(*page);
         }
     }
@@ -293,6 +307,7 @@ void BeginNetworkRefresh(NetworkViewState& state) {
                 return;
             }
             state.model.replacePages(std::move(*pages));
+            ++state.modelGeneration;
             RenderAllAuditPages(state);
             SetAuditStatusForAll(state, L"Network R0 与 R3 审计快照已刷新。");
         });
