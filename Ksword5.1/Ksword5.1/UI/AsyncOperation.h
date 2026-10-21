@@ -74,11 +74,7 @@ namespace ks::ui
             Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
             Job job;
-            job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
-            {
-                const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
-                return apply(*result, ticket);
-            };
+            job.apply = makeResultHandler<Result>(std::move(apply));
             job.failure = std::move(failure);
             return submitImpl<false, Request, Result>(std::move(request), std::move(worker),
                 std::move(job), std::move(cleanup), workerPriority);
@@ -91,17 +87,23 @@ namespace ks::ui
             Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
             Job job;
-            job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
-            {
-                const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
-                return apply(*result, ticket);
-            };
+            job.apply = makeResultHandler<Result>(std::move(apply));
             job.failure = std::move(failure);
             return submitImpl<true, Request, Result>(std::move(request), std::move(worker),
                 std::move(job), std::move(cleanup), workerPriority);
         }
 
     private:
+        template<class Result, class Apply>
+        static auto makeResultHandler(Apply apply)
+        {
+            return [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
+            {
+                const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
+                return apply(*result, ticket);
+            };
+        }
+
         // GUI回调已经由Job拥有；后台启动器不再把Apply/Failure类型嵌入每层实例，
         // 事务直接调用原worker，省去再包一层带全部回调类型的适配lambda。
         template<bool Transaction, class Request, class Result, class Worker>
