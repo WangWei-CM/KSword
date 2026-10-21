@@ -1388,6 +1388,16 @@ namespace
                     continue;
                 }
                 hostnameItem->setText(resolvedIterator.value());
+                if (auto* identity = eventTable->item(rowIndex, ColumnName))
+                {
+                    QStringList fields;
+                    for (int column = 0; column < ColumnCount; ++column)
+                    {
+                        auto* item = eventTable->item(rowIndex, column);
+                        fields.push_back(item ? item->text() : QString());
+                    }
+                    identity->setData(Qt::UserRole + 2, fields.join(QLatin1Char('\n')).toCaseFolded());
+                }
             }
         }
         eventTable->setUpdatesEnabled(true);
@@ -2884,7 +2894,7 @@ void NetworkFirewallPage::initializeConnections()
     });
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this]()
     {
-        applyFilterToRows();
+        m_eventFilterDirty = true;
     });
     connect(m_dropOnlyCheck, &QCheckBox::toggled, this, [this]()
     {
@@ -2893,6 +2903,9 @@ void NetworkFirewallPage::initializeConnections()
     connect(m_liveFlushTimer, &QTimer::timeout, this, [this]()
     {
         flushLiveEventsToUi();
+        if (m_eventFilterDirty && m_eventMonitorPage && m_eventMonitorPage->isVisible()) applyFilterToRows();
+        if (m_ruleProjectionDirty && m_ruleManagerPage && m_ruleManagerPage->isVisible()) appendRulesToTable(m_ruleEntryList, true);
+        else if (m_ruleFilterDirty && m_ruleManagerPage && m_ruleManagerPage->isVisible()) applyRuleFilterToRows();
     });
     connect(m_refreshRulesButton, &QPushButton::clicked, this, [this]()
     {
@@ -2916,7 +2929,7 @@ void NetworkFirewallPage::initializeConnections()
     });
     connect(m_ruleSearchEdit, &QLineEdit::textChanged, this, [this]()
     {
-        applyRuleFilterToRows();
+        m_ruleFilterDirty = true;
     });
     connect(m_ruleEnabledOnlyCheck, &QCheckBox::toggled, this, [this]()
     {
@@ -3377,6 +3390,9 @@ void NetworkFirewallPage::appendEventsToTable(
             safeText(entry.timestampText)
         };
 
+        QStringList searchableFields;
+        for (const auto& value : values) searchableFields.push_back(value);
+        const auto foldedSearch = searchableFields.join(QLatin1Char('\n')).toCaseFolded();
         for (int column = 0; column < ColumnCount; ++column)
         {
             QTableWidgetItem* item = new QTableWidgetItem(values[static_cast<std::size_t>(column)]);
@@ -3384,6 +3400,7 @@ void NetworkFirewallPage::appendEventsToTable(
             if (column == ColumnName)
             {
                 item->setData(Qt::UserRole + 1, entry.applicationPathText);
+                item->setData(Qt::UserRole + 2, foldedSearch);
             }
             // 不写入固定前景色：DROP/Allowed 均继承表格调色板，并可随主题切换自动更新。
             // 动作类别仍通过 Action 列和“仅 DROP”筛选判断。
@@ -3405,36 +3422,20 @@ void NetworkFirewallPage::applyFilterToRows()
 
 void NetworkFirewallPage::applyFilterToRowRange(const int firstRow, const int rowCount)
 {
-    if (m_eventTable == nullptr || rowCount <= 0)
+    if (!m_eventTable || rowCount <= 0) return;
+    if (!m_eventMonitorPage || !m_eventMonitorPage->isVisible()) { m_eventFilterDirty = true; return; }
+    const auto filter = m_searchEdit ? m_searchEdit->text().trimmed().toCaseFolded() : QString();
+    const bool dropOnly = m_dropOnlyCheck && m_dropOnlyCheck->isChecked();
+    const int end = std::min(m_eventTable->rowCount(), firstRow + rowCount);
+    for (int row = std::max(0, firstRow); row < end; ++row)
     {
-        return;
+        const auto* identity = m_eventTable->item(row, ColumnName);
+        const bool textMatches = filter.isEmpty() || (identity && identity->data(Qt::UserRole + 2).toString().contains(filter));
+        const bool dropMatches = !dropOnly || (identity && identity->data(Qt::UserRole).toBool());
+        m_eventTable->setRowHidden(row, !textMatches || !dropMatches);
     }
-    const QString filterText = m_searchEdit != nullptr ? m_searchEdit->text().trimmed().toLower() : QString();
-    const bool dropOnly = m_dropOnlyCheck != nullptr && m_dropOnlyCheck->isChecked();
-
-    const int firstValidRow = std::clamp(firstRow, 0, m_eventTable->rowCount());
-    const int lastValidRow = std::min(m_eventTable->rowCount(), firstValidRow + rowCount);
-    for (int row = firstValidRow; row < lastValidRow; ++row)
-    {
-        bool isDrop = false;
-        QString rowText;
-        for (int column = 0; column < ColumnCount; ++column)
-        {
-            QTableWidgetItem* item = m_eventTable->item(row, column);
-            if (item == nullptr)
-            {
-                continue;
-            }
-            rowText.append(item->text()).append(QLatin1Char('\n'));
-            if (column == ColumnAction)
-            {
-                isDrop = item->data(Qt::UserRole).toBool();
-            }
-        }
-        const bool textMatched = filterText.isEmpty() || rowText.toLower().contains(filterText);
-        const bool dropMatched = !dropOnly || isDrop;
-        m_eventTable->setRowHidden(row, !(textMatched && dropMatched));
-    }
+    // A newly appended tail cannot acknowledge a pending full-table query.
+    if (firstRow <= 0 && end == m_eventTable->rowCount()) m_eventFilterDirty = false;
 }
 
 void NetworkFirewallPage::flushLiveEventsToUi()
@@ -3654,6 +3655,8 @@ void NetworkFirewallPage::appendRulesToTable(
         return;
     }
 
+    if (!m_ruleManagerPage || !m_ruleManagerPage->isVisible()) { m_ruleProjectionDirty = true; return; }
+    m_ruleProjectionDirty = false;
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ruleDetailEditor);
 
     if (ks::ui::IsTableUiCommitBlockedByContextMenu({m_ruleTable}))
@@ -3699,11 +3702,15 @@ void NetworkFirewallPage::appendRulesToTable(
             safeText(ruleEntry.descriptionText)
         };
 
+        QStringList searchableFields;
+        for (const auto& value : valueList) searchableFields.push_back(value);
+        const auto foldedSearch = searchableFields.join(QLatin1Char('\n')).toCaseFolded();
         for (int column = 0; column < RuleColumnCount; ++column)
         {
             QTableWidgetItem* item = new QTableWidgetItem(valueList[static_cast<std::size_t>(column)]);
             item->setData(Qt::UserRole, ruleEntry.fingerprintText);
             item->setData(Qt::UserRole + 1, ruleEntry.enabled);
+            if (column == RuleColumnName) item->setData(Qt::UserRole + 2, foldedSearch);
             if (!ruleEntry.enabled)
             {
                 ks::ui::ApplyThemeItemForeground(item, ks::ui::ItemForegroundRole::Secondary);
@@ -3721,38 +3728,19 @@ void NetworkFirewallPage::appendRulesToTable(
 
 void NetworkFirewallPage::applyRuleFilterToRows()
 {
-    if (m_ruleTable == nullptr)
-    {
-        return;
-    }
-
+    if (!m_ruleTable) return;
+    if (!m_ruleManagerPage || !m_ruleManagerPage->isVisible()) { m_ruleFilterDirty = true; return; }
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ruleDetailEditor);
-
-    const QString filterText = m_ruleSearchEdit != nullptr ? m_ruleSearchEdit->text().trimmed().toLower() : QString();
-    const bool enabledOnly = m_ruleEnabledOnlyCheck != nullptr && m_ruleEnabledOnlyCheck->isChecked();
-
+    const auto filter = m_ruleSearchEdit ? m_ruleSearchEdit->text().trimmed().toCaseFolded() : QString();
+    const bool enabledOnly = m_ruleEnabledOnlyCheck && m_ruleEnabledOnlyCheck->isChecked();
     for (int row = 0; row < m_ruleTable->rowCount(); ++row)
     {
-        QString rowText;
-        bool enabled = false;
-        for (int column = 0; column < RuleColumnCount; ++column)
-        {
-            QTableWidgetItem* item = m_ruleTable->item(row, column);
-            if (item == nullptr)
-            {
-                continue;
-            }
-            rowText.append(item->text()).append(QLatin1Char('\n'));
-            if (column == RuleColumnEnabled)
-            {
-                enabled = item->data(Qt::UserRole + 1).toBool();
-            }
-        }
-
-        const bool textMatched = filterText.isEmpty() || rowText.toLower().contains(filterText);
-        const bool enabledMatched = !enabledOnly || enabled;
-        m_ruleTable->setRowHidden(row, !(textMatched && enabledMatched));
+        const auto* identity = m_ruleTable->item(row, RuleColumnName);
+        const bool textMatches = filter.isEmpty() || (identity && identity->data(Qt::UserRole + 2).toString().contains(filter));
+        const bool enabledMatches = !enabledOnly || (identity && identity->data(Qt::UserRole + 1).toBool());
+        m_ruleTable->setRowHidden(row, !textMatches || !enabledMatches);
     }
+    m_ruleFilterDirty = false;
 }
 
 void NetworkFirewallPage::updateRuleActionButtons()

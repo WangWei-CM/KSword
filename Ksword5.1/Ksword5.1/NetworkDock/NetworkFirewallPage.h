@@ -373,6 +373,9 @@ private:
     QCheckBox* m_ruleEnabledOnlyCheck = nullptr; // m_ruleEnabledOnlyCheck：仅显示启用规则。
     QSplitter* m_ruleSplitter = nullptr;       // m_ruleSplitter：规则表与详情 3:1 垂直分栏。
     QTableWidget* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
+    bool m_eventFilterDirty = false;
+    bool m_ruleFilterDirty = false;
+    bool m_ruleProjectionDirty = false;
     bool m_itemThemeRefreshScheduled = false; // 合并主题事件，保留隐藏行、排序和当前规则选择。
     ks::ui::StructuredFieldView* m_ruleDetailEditor = nullptr; // m_ruleDetailEditor：完整规则详情只读编辑器。
     std::atomic_bool m_refreshingRules{ false }; // m_refreshingRules：规则刷新互斥。
