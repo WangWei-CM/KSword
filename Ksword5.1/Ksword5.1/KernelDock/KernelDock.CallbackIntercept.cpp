@@ -2803,11 +2803,22 @@ private:
     void refreshMinifilterBypassPidsFromDriver()
     {
         if (m_controlOperation->isBusy()) return;
-        // 输入：无；处理：查询驱动当前白名单并刷新表格；
-        // 返回：无；失败只更新状态栏/日志，不改变本地表格。
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::MinifilterBypassPidResult queryResult =
-            driverClient.queryMinifilterBypassPids();
+        // Share the write admission/busy gate: a manual read cannot race a
+        // later accepted write or replace its post-write receipt.
+        m_controlOperation->submit<int, ksword::ark::MinifilterBypassPidResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.queryMinifilterBypassPids();
+            },
+            [this](const ksword::ark::MinifilterBypassPidResult& queryResult, std::uint64_t) {
+                presentMinifilterBypassPidsResult(queryResult);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
+    }
+
+    void presentMinifilterBypassPidsResult(const ksword::ark::MinifilterBypassPidResult& queryResult)
+    {
+        // Native failure retains the local draft, as before.
         if (!queryResult.io.ok)
         {
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
@@ -3855,8 +3866,15 @@ private:
     void refreshProcessProtectFromDriver()
     {
         if (m_controlOperation->isBusy()) return;
-        const ksword::ark::DriverClient driverClient;
-        presentProcessProtectState(driverClient.queryProcessProtectState());
+        m_controlOperation->submit<int, ksword::ark::ProcessProtectStateResult>(0,
+            [](int, const ks::ui::AsyncOperationToken&) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.queryProcessProtectState();
+            },
+            [this](const ksword::ark::ProcessProtectStateResult& queryResult, std::uint64_t) {
+                presentProcessProtectState(queryResult);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void presentProcessProtectState(const ksword::ark::ProcessProtectStateResult& queryResult)
