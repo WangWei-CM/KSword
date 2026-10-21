@@ -21,6 +21,7 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QEvent>
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QLabel>
@@ -37,6 +38,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThreadPool>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -47,6 +49,72 @@
 
 namespace
 {
+    // Show 只登记一次合并回填；真正消费时再次检查宿主、可见性和 dirty。
+    class CrossViewShowObserver final : public QObject
+    {
+    public:
+        CrossViewShowObserver(QWidget* table, std::function<void()> schedule)
+            : QObject(table), m_schedule(std::move(schedule))
+        {
+            table->installEventFilter(this);
+        }
+
+    protected:
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::Show)
+            {
+                m_schedule();
+            }
+            return false;
+        }
+
+    private:
+        std::function<void()> m_schedule;
+    };
+
+    struct CrossViewSelectionIdentity
+    {
+        qulonglong id = 0;
+        qulonglong object = 0;
+        bool valid = false;
+    };
+
+    CrossViewSelectionIdentity crossViewSelectionIdentity(QTableWidget* table)
+    {
+        const int row = table != nullptr ? table->currentRow() : -1;
+        const QTableWidgetItem* id = row >= 0 ? table->item(row, 0) : nullptr;
+        const QTableWidgetItem* object = row >= 0 ? table->item(row, 1) : nullptr;
+        bool idOk = false;
+        bool objectOk = false;
+        const qulonglong idValue = id != nullptr ? id->data(Qt::UserRole).toULongLong(&idOk) : 0ULL;
+        const qulonglong objectValue = object != nullptr ? object->data(Qt::UserRole).toULongLong(&objectOk) : 0ULL;
+        return { idValue, objectValue, idOk && objectOk };
+    }
+
+    void restoreCrossViewSelection(QTableWidget* table, const CrossViewSelectionIdentity& identity)
+    {
+        int selectedRow = table->rowCount() > 0 ? 0 : -1;
+        if (identity.valid)
+        {
+            for (int row = 0; row < table->rowCount(); ++row)
+            {
+                const QTableWidgetItem* id = table->item(row, 0);
+                const QTableWidgetItem* object = table->item(row, 1);
+                if (id != nullptr && object != nullptr
+                    && id->data(Qt::UserRole).toULongLong() == identity.id
+                    && object->data(Qt::UserRole).toULongLong() == identity.object)
+                {
+                    selectedRow = row;
+                    break;
+                }
+            }
+        }
+        if (selectedRow >= 0)
+        {
+            table->setCurrentCell(selectedRow, 0);
+        }
+    }
     enum class CrossViewColumn : int
     {
         Id = 0,
@@ -309,21 +377,18 @@ namespace
         table->setCurrentCell(0, columnIndex(CrossViewColumn::Id));
     }
 
-    void copyCrossViewCurrentRow(QTableWidget* table)
+    QString crossViewCurrentRowText(QTableWidget* table)
     {
-        // copyCrossViewCurrentRow：
-        // - 输入：Process/Thread Cross-View 表；
-        // - 处理：复制当前行 TSV；
-        // - 返回：无，只写剪贴板，不触发任何 R0 操作。
-        if (table == nullptr || QGuiApplication::clipboard() == nullptr)
+        // 固定当前显示行的 TSV；菜单进入嵌套事件循环后不再读取可能变化的投影。
+        if (table == nullptr)
         {
-            return;
+            return QString();
         }
 
         const int rowIndex = table->currentRow();
         if (rowIndex < 0 || rowIndex >= table->rowCount())
         {
-            return;
+            return QString();
         }
 
         QStringList fields;
@@ -332,7 +397,7 @@ namespace
         {
             fields.push_back(crossViewTableCellText(table, rowIndex, columnIndex));
         }
-        QGuiApplication::clipboard()->setText(fields.join(QLatin1Char('\t')));
+        return fields.join(QLatin1Char('\t'));
     }
 
     void installCrossViewContextMenu(
@@ -356,6 +421,11 @@ namespace
                 table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
             }
 
+            // 固定用户实际点击的显示行，不能先投影再用旧坐标重新命中另一实体。
+            const QString rowText = crossViewCurrentRowText(table);
+            const quint32 processId = processIdForRow != nullptr
+                ? processIdForRow(table, table->currentRow())
+                : 0U;
             QMenu contextMenu(table);
             contextMenu.setStyleSheet(KswordTheme::ContextMenuStyle());
             QAction* copyRowAction = contextMenu.addAction(
@@ -364,9 +434,6 @@ namespace
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
             copyRowAction->setEnabled(table->currentRow() >= 0);
-            const quint32 processId = processIdForRow != nullptr
-                ? processIdForRow(table, table->currentRow())
-                : 0U;
             QAction* openProcessAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_details.svg")),
                 QStringLiteral("转到进程详细信息"));
@@ -375,7 +442,10 @@ namespace
             QAction* selectedAction = contextMenu.exec(table->viewport()->mapToGlobal(localPosition));
             if (selectedAction == copyRowAction)
             {
-                copyCrossViewCurrentRow(table);
+                if (QGuiApplication::clipboard() != nullptr)
+                {
+                    QGuiApplication::clipboard()->setText(rowText);
+                }
             }
             else if (selectedAction == openProcessAction)
             {
@@ -508,6 +578,13 @@ void ProcessDock::initializeCrossViewPage()
         // 两张来源表保留独立圆角外壳，内部冻结窗格仍由共享层保持连体方角。
         ks::ui::ApplyTablePresentation(table);
     }
+    for (QTableWidget* table : { m_processCrossViewTable, m_threadCrossViewTable })
+    {
+        new CrossViewShowObserver(table, [guardThis = QPointer<ProcessDock>(this)]()
+        {
+            if (guardThis != nullptr) guardThis->scheduleCrossViewTableRebuild();
+        });
+    }
     installCrossViewContextMenu(
         m_processCrossViewTable,
         [](const QTableWidget* table, const int rowIndex)
@@ -525,20 +602,18 @@ void ProcessDock::initializeCrossViewPage()
         });
     installCrossViewContextMenu(
         m_threadCrossViewTable,
-        [this](const QTableWidget* table, const int rowIndex)
+        [](const QTableWidget* table, const int rowIndex)
         {
             const QTableWidgetItem* threadIdItem = table != nullptr
                 ? table->item(rowIndex, columnIndex(CrossViewColumn::Id))
                 : nullptr;
             bool ok = false;
-            const qulonglong cacheIndex = threadIdItem != nullptr
-                ? threadIdItem->data(Qt::UserRole + 1).toULongLong(&ok)
+            const qulonglong processId = threadIdItem != nullptr
+                ? threadIdItem->data(Qt::UserRole + 3).toULongLong(&ok)
                 : 0ULL;
-            if (!ok || cacheIndex >= static_cast<qulonglong>(m_threadCrossViewCache.size()))
-            {
-                return 0U;
-            }
-            return static_cast<quint32>(m_threadCrossViewCache[static_cast<std::size_t>(cacheIndex)].processId);
+            return ok && processId <= std::numeric_limits<quint32>::max()
+                ? static_cast<quint32>(processId)
+                : 0U;
         });
     innerTabs->addTab(m_processCrossViewTable, QStringLiteral("Process Cross-View"));
     innerTabs->addTab(m_threadCrossViewTable, QStringLiteral("Thread Cross-View"));
@@ -564,6 +639,14 @@ void ProcessDock::initializeCrossViewPage()
     connect(innerTabs, &QTabWidget::currentChanged, m_crossViewPage, [this, hostGuard](int index) {
         m_crossViewDetailEdit->setProperty("ks_cross_view_thread_selected", index == 1);
         if (!hostGuard.isNull()) hostGuard->setTableView(index == 1 ? m_threadCrossViewTable : m_processCrossViewTable);
+        if (m_crossViewFilterTimer != nullptr && m_crossViewFilterTimer->isActive())
+        {
+            invalidateCrossViewTables();
+        }
+        else
+        {
+            rebuildCrossViewTables();
+        }
         showCrossViewDetailForCurrentRow(index == 1);
     });
     splitter->setStretchFactor(0, 3);
@@ -585,12 +668,14 @@ void ProcessDock::initializeCrossViewConnections()
     connect(m_crossViewRefreshButton, &QPushButton::clicked, this, [this]() {
         refreshCrossViewAsync();
     });
-    connect(m_crossViewSearchEdit, &QLineEdit::textChanged, this, [this]() {
-        rebuildCrossViewTables();
-    });
-    connect(m_crossViewAnomalyOnlyCheck, &QCheckBox::toggled, this, [this]() {
-        rebuildCrossViewTables();
-    });
+    m_crossViewFilterTimer = new QTimer(this);
+    m_crossViewFilterTimer->setSingleShot(true);
+    m_crossViewFilterTimer->setInterval(100);
+    connect(m_crossViewFilterTimer, &QTimer::timeout, this, &ProcessDock::invalidateCrossViewTables);
+    connect(m_crossViewSearchEdit, &QLineEdit::textChanged, m_crossViewFilterTimer,
+        [this]() { m_crossViewFilterTimer->start(); });
+    connect(m_crossViewAnomalyOnlyCheck, &QCheckBox::toggled, this,
+        [this]() { invalidateCrossViewTables(); });
     connect(m_processCrossViewTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showCrossViewDetailForCurrentRow(false);
     });
@@ -652,7 +737,7 @@ void ProcessDock::refreshCrossViewAsync()
                 guardThis->m_lastThreadCrossViewResult = threadSnapshot;
                 guardThis->m_processCrossViewCache = processSnapshot.entries;
                 guardThis->m_threadCrossViewCache = threadSnapshot.entries;
-                guardThis->rebuildCrossViewTables();
+                guardThis->invalidateCrossViewTables();
 
                 QString statusText;
                 if (!processSnapshot.io.ok || !threadSnapshot.io.ok)
@@ -707,9 +792,34 @@ void ProcessDock::refreshCrossViewAsync()
     QThreadPool::globalInstance()->start(task);
 }
 
+void ProcessDock::invalidateCrossViewTables()
+{
+    if (m_crossViewFilterTimer != nullptr) m_crossViewFilterTimer->stop();
+    m_processCrossViewProjectionDirty = true;
+    m_threadCrossViewProjectionDirty = true;
+    rebuildCrossViewTables();
+}
+
+void ProcessDock::scheduleCrossViewTableRebuild()
+{
+    if (m_crossViewProjectionQueued) return;
+    m_crossViewProjectionQueued = true;
+    const QPointer<ProcessDock> guardThis(this);
+    QTimer::singleShot(0, this, [guardThis]()
+    {
+        if (guardThis == nullptr) return;
+        guardThis->m_crossViewProjectionQueued = false;
+        guardThis->rebuildCrossViewTables();
+    });
+}
+
 void ProcessDock::rebuildCrossViewTables()
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_crossViewDetailEdit);
+    const bool rebuildProcess = m_processCrossViewProjectionDirty
+        && m_processCrossViewTable != nullptr && m_processCrossViewTable->isVisible();
+    const bool rebuildThread = m_threadCrossViewProjectionDirty
+        && m_threadCrossViewTable != nullptr && m_threadCrossViewTable->isVisible();
+    if (!rebuildProcess && !rebuildThread) return;
     const QPointer<ProcessDock> safeThis(this);
     if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
         this,
@@ -726,14 +836,14 @@ void ProcessDock::rebuildCrossViewTables()
         return;
     }
 
-    // 输入：无，读取 cross-view 缓存和过滤控件。
-    // 处理：分别重绘进程/线程来源矩阵。
-    // 返回：无。
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_crossViewDetailEdit);
+    // 两份规范证据仍完整保留；隐藏表只留下 dirty，不为不可见页生成 item。
     const QString filter = m_crossViewSearchEdit != nullptr ? m_crossViewSearchEdit->text().trimmed() : QString();
     const bool anomalyOnly = m_crossViewAnomalyOnlyCheck != nullptr && m_crossViewAnomalyOnlyCheck->isChecked();
 
-    if (m_processCrossViewTable != nullptr)
+    if (rebuildProcess)
     {
+        const CrossViewSelectionIdentity selectedIdentity = crossViewSelectionIdentity(m_processCrossViewTable);
         QSignalBlocker blocker(m_processCrossViewTable);
         m_processCrossViewTable->setSortingEnabled(false);
         std::vector<std::size_t> indexes;
@@ -775,10 +885,6 @@ void ProcessDock::rebuildCrossViewTables()
                 columnIndex(CrossViewColumn::Detail),
                 textItem(crossViewTableDetail(false, row.sourceMask, row.anomalyFlags, row.confidence, narrowToQString(row.detail))));
         }
-        if (m_processCrossViewTable->rowCount() > 0 && m_processCrossViewTable->currentRow() < 0)
-        {
-            m_processCrossViewTable->setCurrentCell(0, columnIndex(CrossViewColumn::Id));
-        }
         if (m_processCrossViewTable->rowCount() == 0)
         {
             const QString detailText = crossViewEmptyStateDetail(
@@ -796,12 +902,15 @@ void ProcessDock::rebuildCrossViewTables()
                 QStringLiteral("诊断"),
                 detailText);
         }
+        restoreCrossViewSelection(m_processCrossViewTable, selectedIdentity);
         m_processCrossViewTable->setSortingEnabled(true);
+        m_processCrossViewProjectionDirty = false;
         ks::ui::RequestTableColumnAutoFit(m_processCrossViewTable);
     }
 
-    if (m_threadCrossViewTable != nullptr)
+    if (rebuildThread)
     {
+        const CrossViewSelectionIdentity selectedIdentity = crossViewSelectionIdentity(m_threadCrossViewTable);
         QSignalBlocker blocker(m_threadCrossViewTable);
         m_threadCrossViewTable->setSortingEnabled(false);
         std::vector<std::size_t> indexes;
@@ -832,6 +941,8 @@ void ProcessDock::rebuildCrossViewTables()
             const auto& row = m_threadCrossViewCache[cacheIndex];
             QTableWidgetItem* idItem = numericItem(QString::number(row.threadId), row.threadId);
             idItem->setData(Qt::UserRole + 1, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(cacheIndex)));
+            // 菜单读取显示代的 owner PID，不能用旧 cacheIndex 访问新证据。
+            idItem->setData(Qt::UserRole + 3, QVariant::fromValue<qulonglong>(row.processId));
             m_threadCrossViewTable->setItem(tableRow, columnIndex(CrossViewColumn::Id), idItem);
             m_threadCrossViewTable->setItem(tableRow, columnIndex(CrossViewColumn::Object), numericItem(hex64(row.objectAddress), row.objectAddress));
             m_threadCrossViewTable->setItem(tableRow, columnIndex(CrossViewColumn::Process), textItem(QStringLiteral("%1 %2").arg(row.processId).arg(narrowToQString(row.imageName))));
@@ -843,10 +954,6 @@ void ProcessDock::rebuildCrossViewTables()
                 tableRow,
                 columnIndex(CrossViewColumn::Detail),
                 textItem(crossViewTableDetail(true, row.sourceMask, row.anomalyFlags, row.confidence, narrowToQString(row.detail))));
-        }
-        if (m_threadCrossViewTable->rowCount() > 0 && m_threadCrossViewTable->currentRow() < 0)
-        {
-            m_threadCrossViewTable->setCurrentCell(0, columnIndex(CrossViewColumn::Id));
         }
         if (m_threadCrossViewTable->rowCount() == 0)
         {
@@ -865,9 +972,12 @@ void ProcessDock::rebuildCrossViewTables()
                 QStringLiteral("诊断"),
                 detailText);
         }
+        restoreCrossViewSelection(m_threadCrossViewTable, selectedIdentity);
         m_threadCrossViewTable->setSortingEnabled(true);
+        m_threadCrossViewProjectionDirty = false;
         ks::ui::RequestTableColumnAutoFit(m_threadCrossViewTable);
     }
+    showCrossViewDetailForCurrentRow(rebuildThread);
 }
 
 void ProcessDock::showCrossViewDetailForCurrentRow(const bool preferThreadTable)
@@ -875,8 +985,10 @@ void ProcessDock::showCrossViewDetailForCurrentRow(const bool preferThreadTable)
     // 输入：preferThreadTable 指示优先读取线程表还是进程表。
     // 处理：展开当前行 source/anomaly/DynData 细节到只读文本框。
     // 返回：无。
-    if (m_crossViewDetailEdit == nullptr)
+    if (m_crossViewDetailEdit == nullptr
+        || (preferThreadTable ? m_threadCrossViewProjectionDirty : m_processCrossViewProjectionDirty))
     {
+        // 隐藏旧投影的 cacheIndex 属于旧快照，必须先重建后才读取新规范证据。
         return;
     }
 

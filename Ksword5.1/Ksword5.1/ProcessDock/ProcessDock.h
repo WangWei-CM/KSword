@@ -634,6 +634,8 @@ private:
     // - 结果回填到 m_processCrossViewCache / m_threadCrossViewCache；
     // - 返回值：无。
     void refreshCrossViewAsync();
+    void invalidateCrossViewTables();
+    void scheduleCrossViewTableRebuild();
     // rebuildCrossViewTables 作用：
     // - 按当前搜索框和缓存重绘 PID/TID 来源矩阵；
     // - 只做 UI 投影，不再次查询驱动；
@@ -1390,6 +1392,10 @@ private:
     ksword::ark::ProcessCrossViewResult m_lastProcessCrossViewResult; // 最近一次进程 cross-view 元信息。
     ksword::ark::ThreadCrossViewResult m_lastThreadCrossViewResult; // 最近一次线程 cross-view 元信息。
     bool m_crossViewRefreshInProgress = false; // Cross-View 后台查询互斥标记。
+    QTimer* m_crossViewFilterTimer = nullptr; // 公共筛选输入合并。
+    bool m_processCrossViewProjectionDirty = true;
+    bool m_threadCrossViewProjectionDirty = true;
+    bool m_crossViewProjectionQueued = false;
     std::uint64_t m_crossViewRefreshTicket = 0; // Cross-View 查询序号。
 
     // ======== 右键菜单绑定状态 ========
