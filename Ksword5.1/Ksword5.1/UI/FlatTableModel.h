@@ -334,9 +334,6 @@ namespace ks::ui
         {
             const int columnTotal = static_cast<int>(m_columns.size());
             if (columnTotal == 0 || changes.empty()) return {};
-            std::vector<bool> changed(static_cast<std::size_t>(columnTotal), false);
-            std::vector<bool> allRoles(static_cast<std::size_t>(columnTotal), false);
-            std::vector<QList<int>> rolesByColumn(static_cast<std::size_t>(columnTotal));
             for (const ColumnChange& change : changes)
             {
                 const bool valid = change.firstColumn >= 0 && change.lastColumn >= change.firstColumn
@@ -348,6 +345,20 @@ namespace ks::ui
                     // 发布构建保守失效整行，不能因调用者区间错误漏掉显示或 flags 变化。
                     return { { 0, columnTotal - 1, {} } };
                 }
+            }
+            if (changes.size() == 1)
+            {
+                // 单列段无需建立整张表的临时列数组，保留同样的 roles 规范化。
+                QList<int>& roles = changes.front().roles;
+                std::sort(roles.begin(), roles.end());
+                roles.erase(std::unique(roles.begin(), roles.end()), roles.end());
+                return changes;
+            }
+            std::vector<bool> changed(static_cast<std::size_t>(columnTotal), false);
+            std::vector<bool> allRoles(static_cast<std::size_t>(columnTotal), false);
+            std::vector<QList<int>> rolesByColumn(static_cast<std::size_t>(columnTotal));
+            for (const ColumnChange& change : changes)
+            {
                 for (int column = change.firstColumn; column <= change.lastColumn; ++column)
                 {
                     const std::size_t slot = static_cast<std::size_t>(column);
@@ -405,7 +416,7 @@ namespace ks::ui
                 {
                     auto raw = resolver(m_rows[oldRow->second], rows[row]);
                     if (!alive || m_updateGeneration != generation) return {};
-                    changes = normalizeChanges(raw);
+                    changes = normalizeChanges(std::move(raw));
                 }
                 if (!changes.empty()) ++updatedRowCount;
                 std::vector<std::size_t> currentRowRectangles;
