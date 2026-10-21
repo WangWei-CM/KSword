@@ -4,6 +4,7 @@
 #include "../UI/TableContextMenu.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/LazyPageContent.h"
 #include "../UI/ToolbarMetrics.h"
@@ -264,6 +265,14 @@ KernelDock::KernelDock(QWidget* parent)
     });
 
     info << initEvent << "[KernelDock] 构造完成。" << eol;
+}
+
+
+KernelDock::~KernelDock()
+{
+    // Close GUI delivery before member caches and source identities are destroyed.
+    for (auto& cache : m_kernelResultFilterCaches)
+        if (cache.operation) cache.operation->close();
 }
 
 
