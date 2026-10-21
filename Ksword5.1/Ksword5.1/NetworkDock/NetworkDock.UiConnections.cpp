@@ -166,48 +166,8 @@ namespace
     }
 }
 
-void NetworkDock::initializeConnections()
+void NetworkDock::initializeNidsConnections()
 {
-    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
-        {
-            const QPointer<NetworkDock> owner(this);
-            ensureVisibleNetworkToolPage();
-            if (!owner) return;
-            initializeVisibleDiagnosticPage();
-            synchronizeVisiblePacketProjection();
-            synchronizeVisibleNidsProjection();
-            synchronizeVisibleHttpsProjection();
-            QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
-            if (currentPage == m_firewallTabPage && m_firewallPage != nullptr)
-            {
-                m_firewallPage->requestInitialRefresh();
-            }
-            else if (currentPage == m_networkAuditTabPage && m_networkAuditPage != nullptr)
-            {
-                m_networkAuditPage->requestInitialRefresh();
-            }
-        });
-
-    // 启停抓包与清空表格按钮连接。
-    connect(m_startMonitorButton, &QPushButton::clicked, this, [this]()
-        {
-            startTrafficMonitor();
-        });
-    connect(m_stopMonitorButton, &QPushButton::clicked, this, [this]()
-        {
-            stopTrafficMonitor();
-        });
-    connect(m_clearPacketButton, &QPushButton::clicked, this, [this]()
-        {
-            clearAllPacketRows();
-        });
-    connect(m_networkPluginMenu, &QMenu::aboutToShow, this, [this]()
-        {
-            ks::plugin_host::InvocationContext context;
-            context.targetKind = ks::plugin_host::TargetKind::Network;
-            ks::plugin_host::populateTargetMenu(m_networkPluginMenu, this, context);
-        });
-
     // NIDS 控制连接：实时检测开关、等级过滤和清空。
     connect(m_nidsEnableCheck, &QCheckBox::toggled, this, [this](const bool checked)
         {
@@ -257,6 +217,49 @@ void NetworkDock::initializeConnections()
     // - Qt 按连接顺序依次调用槽，于是一次右键先弹“复制类”菜单，关掉后又立刻弹出“详情类”菜单，
     //   表现为连续右键两次看到的菜单内容不一致；
     // - 现统一由 NetworkDock.Nids.cpp 的 initializeNidsTab() 注册唯一一份合并后的菜单，此处不再注册。
+}
+
+void NetworkDock::initializeConnections()
+{
+    connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
+        {
+            const QPointer<NetworkDock> owner(this);
+            ensureVisibleNetworkToolPage();
+            if (!owner) return;
+            initializeVisibleDiagnosticPage();
+            synchronizeVisiblePacketProjection();
+            synchronizeVisibleNidsProjection();
+            synchronizeVisibleHttpsProjection();
+            QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
+            if (currentPage == m_firewallTabPage && m_firewallPage != nullptr)
+            {
+                m_firewallPage->requestInitialRefresh();
+            }
+            else if (currentPage == m_networkAuditTabPage && m_networkAuditPage != nullptr)
+            {
+                m_networkAuditPage->requestInitialRefresh();
+            }
+        });
+
+    // 启停抓包与清空表格按钮连接。
+    connect(m_startMonitorButton, &QPushButton::clicked, this, [this]()
+        {
+            startTrafficMonitor();
+        });
+    connect(m_stopMonitorButton, &QPushButton::clicked, this, [this]()
+        {
+            stopTrafficMonitor();
+        });
+    connect(m_clearPacketButton, &QPushButton::clicked, this, [this]()
+        {
+            clearAllPacketRows();
+        });
+    connect(m_networkPluginMenu, &QMenu::aboutToShow, this, [this]()
+        {
+            ks::plugin_host::InvocationContext context;
+            context.targetKind = ks::plugin_host::TargetKind::Network;
+            ks::plugin_host::populateTargetMenu(m_networkPluginMenu, this, context);
+        });
 
     // 流量时间轴连接：
     // - ProcessTraceTimelineWidget 内部复用了 ETW 页的框选、拖拽和滚轮缩放工具；

@@ -41,7 +41,6 @@ void NetworkDock::initializeUi()
         return;
     }
     initializeTrafficMonitorTab();
-    initializeNidsTab();
     // The process rate-limit page is intentionally not exposed in the UI.
     // Its current implementation throttles by suspending/resuming the whole
     // target process, which is too coarse for a user-facing network dock tab.
@@ -56,6 +55,8 @@ void NetworkDock::initializeUi()
         m_coldNetworkToolFactories.insert(page, std::move(factory));
         network_navigation_detail::AddTab(m_sideTabWidget, page, id, icon);
     };
+    cold(m_nidsPage, QStringLiteral("nids"), QIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        [this]() { initializeNidsTab(); initializeNidsConnections(); });
     cold(m_firewallTabPage, QStringLiteral("firewall"), QIcon(QStringLiteral(":/Icon/process_critical.svg")),
         [this]() { initializeFirewallTab(); });
     cold(m_networkAuditTabPage, QStringLiteral("audit"), QIcon(QStringLiteral(":/Icon/process_details.svg")),
@@ -837,17 +838,6 @@ void NetworkDock::ensureVisibleNetworkToolPage()
     QWidget* selected = m_sideTabWidget->currentWidget();
     while (selected != nullptr)
     {
-        // The unchanged NIDS context menu uses the existing firewall pointer.
-        // Complete that dependency on first NIDS exposure, not on Dock cold open.
-        if (selected == m_nidsPage && m_firewallPage == nullptr)
-        {
-            if (!ensureNetworkToolPage(m_firewallTabPage) || !guard || !isVisible()) return;
-            if (m_sideTabWidget->currentWidget() != selected)
-            {
-                selected = m_sideTabWidget->currentWidget();
-                continue;
-            }
-        }
         if (!ensureNetworkToolPage(selected) || !guard || !isVisible()) return;
         ks::ui::PrepareWidgetThemeBindingsForShow(selected);
         if (!guard || !isVisible()) return;

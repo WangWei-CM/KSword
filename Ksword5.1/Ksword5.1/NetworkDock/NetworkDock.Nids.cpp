@@ -370,7 +370,7 @@ private:
 
 void NetworkDock::initializeNidsTab()
 {
-    m_nidsPage = new QWidget(this);
+    if (m_nidsPage == nullptr) m_nidsPage = new QWidget(this);
     m_nidsLayout = new QVBoxLayout(m_nidsPage);
     m_nidsLayout->setContentsMargins(6, 6, 6, 6);
     m_nidsLayout->setSpacing(6);
@@ -509,7 +509,7 @@ void NetworkDock::initializeNidsTab()
         QAction* addBlockRuleAction = menu.addAction(
             QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
             QStringLiteral("预填阻断规则"));
-        addBlockRuleAction->setEnabled(blockRuleEvidence.has_value() && m_firewallPage != nullptr);
+        addBlockRuleAction->setEnabled(blockRuleEvidence.has_value());
         menu.addSeparator();
         QAction* uploadVirusTotalAction = ks::online_scan::addVirusTotalSandboxMenu(
             &menu,
@@ -551,6 +551,8 @@ void NetworkDock::initializeNidsTab()
         }
         else if (selectedAction == addBlockRuleAction)
         {
+            const QPointer<NetworkDock> owner(this);
+            if (!ensureNetworkToolPage(m_firewallTabPage) || !owner) return;
             if (blockRuleEvidence.has_value() && m_firewallPage != nullptr)
             {
                 const auto& evidence = *blockRuleEvidence;
