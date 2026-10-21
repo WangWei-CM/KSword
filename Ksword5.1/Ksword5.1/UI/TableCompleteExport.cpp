@@ -1,4 +1,5 @@
 #include "TableCompleteExport.h"
+#include "TableInteractionSupport.h"
 #include "CompleteExportCapture.h"
 #include "TableFreezeSupport.h"
 #include "TableRowFilterSupport.h"
@@ -193,6 +194,7 @@ namespace ks::ui
                 const QPointer<Controller> alive(this);
                 m_operation.reconcile();
                 if (!alive || m_closed || !m_view || !m_view->model()) return;
+                if (IsTablePresentationPreparing(qobject_cast<QTableView*>(m_view.data()))) return;
                 if (busy())
                 {
                     QMessageBox::information(m_view, text("导出 TSV"), text("当前复制/导出尚未完成，请稍候。"));
@@ -212,6 +214,7 @@ namespace ks::ui
                     if (m_closed || !m_view || !m_view->model() || path.trimmed().isEmpty()) return;
                     if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".tsv");
                     if (busy()) return; // Native dialogs can reenter, close or admit another request.
+                    if (IsTablePresentationPreparing(qobject_cast<QTableView*>(m_view.data()))) return;
                 }
                 m_scope = scope; m_columns = columns; m_file = file; m_path = std::move(path); m_fallback = false;
                 m_translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();

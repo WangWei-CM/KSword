@@ -484,11 +484,13 @@ namespace
 
             connect(m_copyAllButton, &QToolButton::clicked, this, [this]()
                 {
-                    copyVisibleRowsToClipboard(activeTableView());
+                    if (!ks::ui::IsTablePresentationPreparing(m_table.data()))
+                        copyVisibleRowsToClipboard(activeTableView());
                 });
             connect(m_exportButton, &QToolButton::clicked, this, [this]()
                 {
-                    exportTableToTsv(activeTableView());
+                    if (!ks::ui::IsTablePresentationPreparing(m_table.data()))
+                        exportTableToTsv(activeTableView());
                 });
             connect(m_freezePaneMenu, &QMenu::aboutToShow, this, [this]()
                 {
@@ -621,7 +623,8 @@ namespace
                 if (static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName()
                     == ks::ui::TableRowFilterRevisionProperty
                     || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportBusyProperty
-                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportPreparingProperty) updateControls();
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::CompleteExportPreparingProperty
+                    || static_cast<QDynamicPropertyChangeEvent*>(event)->propertyName() == ks::ui::TablePresentationPreparingProperty) updateControls();
                 else updateFreezeButton();
             }
             return QFrame::eventFilter(source, event);
@@ -836,6 +839,7 @@ namespace
 
         void applyFreezeCounts()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             QTableView* tableView = activeTableView();
             if (m_inComparison || m_pauseCaptureInProgress || m_snapshotCaptureInProgress || m_comparisonInProgress
                 || tableView == nullptr || tableView->model() == nullptr) return;
@@ -872,6 +876,7 @@ namespace
         // - freezeRows/freezeColumns 控制本次只修改哪一个方向。
         void freezeToCurrentIndex(const bool freezeRows, const bool freezeColumns)
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             QTableView* tableView = activeTableView();
             if (m_inComparison || tableView == nullptr || tableView->model() == nullptr ||
                 !tableView->currentIndex().isValid())
@@ -1050,6 +1055,7 @@ namespace
 
         bool pauseRefresh()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return false;
             if (m_refreshPaused)
             {
                 return true;
@@ -1204,6 +1210,7 @@ namespace
 
         void addSnapshot()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             if (m_table.isNull() ||
                 m_inComparison ||
                 m_snapshotCaptureInProgress || m_pauseCaptureInProgress || m_comparisonInProgress ||
@@ -1735,6 +1742,7 @@ namespace
 
         void showComparisonView()
         {
+            if (ks::ui::IsTablePresentationPreparing(m_table.data())) return;
             if (m_table.isNull() ||
                 m_cleanupMode ||
                 m_comparisonInProgress || m_snapshotCaptureInProgress || m_pauseCaptureInProgress ||
@@ -2192,15 +2200,17 @@ namespace
 
         void updateControls()
         {
+            const bool presentationReady = !ks::ui::IsTablePresentationPreparing(m_table.data());
+            setEnabled(presentationReady);
             const bool hasSnapshots = !m_snapshots.isEmpty();
             const bool exactlyTwoSnapshotsSelected = m_selectedSnapshotSequences.size() == 2;
             QTableView* activeTable = activeTableView();
-            const bool hasVisibleRows = activeTable != nullptr &&
+            const bool hasVisibleRows = presentationReady && activeTable != nullptr &&
                 activeTable->model() != nullptr &&
                 ks::ui::HasTableRowsPassingFilters(activeTable) &&
                 activeTable->model()->columnCount() > 0;
             const bool projectionReady = !ks::ui::IsTableRowFilterProjectionPending(activeTable);
-            const bool controlsAvailable =
+            const bool controlsAvailable = presentationReady &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_pauseCaptureInProgress;
@@ -2227,7 +2237,7 @@ namespace
                     m_refreshPaused || m_pauseCaptureInProgress);
             }
             m_pauseRefreshButton->setEnabled(
-                !m_pauseCaptureInProgress &&
+                presentationReady && !m_pauseCaptureInProgress &&
                 !m_snapshotCaptureInProgress &&
                 !m_comparisonInProgress &&
                 !m_cleanupMode &&
@@ -2704,6 +2714,13 @@ namespace
 namespace ks::ui
 {
     // 宿主复用原有功能实现，避免迁移时丢失冻结、暂停、快照比较或搜索能力。
+    bool IsTablePresentationPreparing(const QTableView* tableView)
+    {
+        for (const QWidget* owner = tableView; owner != nullptr; owner = owner->parentWidget())
+            if (owner->property(TablePresentationPreparingProperty).toBool()) return true;
+        return false;
+    }
+
     void ConfigureResultTableInteractions(
         QTableView* tableView,
         const ResultTableCapabilities& capabilities)

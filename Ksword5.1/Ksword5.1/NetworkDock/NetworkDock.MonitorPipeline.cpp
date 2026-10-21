@@ -893,6 +893,7 @@ void NetworkDock::rebuildMonitorTableByFilter()
     m_packetTable->setSortingEnabled(false);
     // Partial QTableWidget rows are not actionable evidence. Keep its object,
     // shared action bar/frozen host and model identity while this short job runs.
+    m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
     m_packetTable->setEnabled(false);
     m_packetTable->setCursor(Qt::WaitCursor);
     QTimer::singleShot(0, this, [self, generation]()
@@ -1017,6 +1018,7 @@ void NetworkDock::continuePacketTableProjection(const std::uint64_t generation)
     projection.selected.clear();
     m_packetTableProjectionDirty = false;
     m_packetTable->setCursor(projection.cursor);
+    m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
     m_packetTable->setEnabled(projection.enabled);
     if (current.isValid()) m_packetTable->scrollTo(current);
     else if (rowCount > 0) m_packetTable->scrollToBottom();
@@ -1611,6 +1613,7 @@ void NetworkDock::clearAllPacketRows()
         // Canonical clear is immediate. Until the pure presentation commit can
         // run (including an export capture lease), old rows must not be actions.
         projection.active = true;
+        m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
         m_packetTable->setEnabled(false);
         m_packetTable->setCursor(Qt::WaitCursor);
     }

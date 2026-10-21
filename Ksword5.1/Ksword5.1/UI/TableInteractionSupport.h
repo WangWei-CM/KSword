@@ -22,6 +22,13 @@ namespace ks::ui
 {
     struct ResultTableCapabilities;
 
+    // Explicit producer preparation state, independent of QWidget enabled state.
+    // Only producers doing a cooperative partial presentation opt in. Controls
+    // and complete-value entry points must not capture that incomplete model.
+    inline constexpr char TablePresentationPreparingProperty[] = "ksword_table_presentation_preparing";
+    bool IsTablePresentationPreparing(const QTableView* tableView);
+
+
     // 由 ResultTableHost 复用现有排序、冻结、搜索和快照条实现；页面不直接调用。
     void ConfigureResultTableInteractions(
         QTableView* tableView,
