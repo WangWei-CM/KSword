@@ -36,6 +36,7 @@ constexpr int kListId = 66806;
 constexpr int kDetailId = 66807;
 constexpr int kStatusId = 66808;
 constexpr UINT kRefreshCompleted = WM_APP + 668;
+constexpr UINT kActionCompleted = WM_APP + 669;
 constexpr UINT kMenuSuspend = 66811;
 constexpr UINT kMenuResume = 66812;
 constexpr UINT kMenuTerminate = 66813;
@@ -106,6 +107,7 @@ struct ViewState {
     Ksword::Ui::VirtualListView list;
     std::vector<ThreadRow> threads;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<Snapshot>> task;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ksword::ark::IoResult>> actionTask;
 };
 
 std::wstring WideFromAnsi(const char* value, int length) {
@@ -248,7 +250,7 @@ const ThreadRow* Selected(const ViewState& state) {
 
 void UpdateDetail(ViewState& state) {
     const ThreadRow* row = Selected(state);
-    const BOOL enabled = row ? TRUE : FALSE;
+    const BOOL enabled = row && (!state.actionTask || !state.actionTask->running()) ? TRUE : FALSE;
     ::EnableWindow(state.suspend, enabled);
     ::EnableWindow(state.resume, enabled);
     ::EnableWindow(state.terminate, enabled);
@@ -325,6 +327,7 @@ bool Confirm(HWND hwnd, const std::wstring& title, const std::wstring& body) {
 }
 
 void RunAction(ViewState& state, unsigned long action) {
+    if (!state.actionTask || state.actionTask->running()) return;
     const ThreadRow* selected = Selected(state);
     if (!selected) return;
     const ThreadRow row = *selected;
@@ -344,17 +347,32 @@ void RunAction(ViewState& state, unsigned long action) {
     const unsigned long method = terminating
         ? KSWORD_ARK_DRIVER_THREAD_TERMINATE_METHOD_NORMAL_APC
         : KSWORD_ARK_DRIVER_THREAD_TERMINATE_METHOD_NONE;
-    const ksword::ark::DriverClient client;
-    const auto result = client.controlDriverThread(
-        row.tid, row.start, row.createTime, action, method,
-        action != KSWORD_ARK_DRIVER_THREAD_ACTION_RESUME);
-    const std::wstring message = result.ok
-        ? std::wstring(verb) + L"系统线程成功。"
-        : std::wstring(verb) + L"系统线程失败：Win32=" + std::to_wstring(result.win32Error) +
-            L"\n" + WideFromUtf8(result.message);
-    ::MessageBoxW(state.hwnd, message.c_str(), L"系统线程操作",
-        MB_OK | (result.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
-    BeginRefresh(state);
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    const std::wstring verbText = verb;
+    state.actionTask->request(
+        [row, action, method, lease] {
+            return ksword::ark::DriverClient().controlDriverThread(
+                row.tid, row.start, row.createTime, action, method,
+                action != KSWORD_ARK_DRIVER_THREAD_ACTION_RESUME);
+        },
+        [&state, verbText](std::uint64_t, std::optional<ksword::ark::IoResult>&& result, std::exception_ptr error) {
+            UpdateDetail(state);
+            if (error || !result) return;
+            const std::wstring message = result->ok
+                ? verbText + L"系统线程成功。"
+                : verbText + L"系统线程失败：Win32=" + std::to_wstring(result->win32Error) +
+                    L"\n" + WideFromUtf8(result->message);
+            if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) {
+                ::SetWindowTextW(state.status, message.c_str());
+                ::OutputDebugStringW(message.c_str());
+                return;
+            }
+            ::MessageBoxW(state.hwnd, message.c_str(), L"系统线程操作",
+                MB_OK | (result->ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+            BeginRefresh(state);
+        });
+    UpdateDetail(state);
 }
 
 void ShowRowMenu(ViewState& state, POINT screen) {
@@ -446,12 +464,16 @@ LRESULT CALLBACK ViewProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
         if (!state || !CreateChildren(*state)) return -1;
         state->task = std::make_unique<Ksword::Ui::AsyncSnapshotTask<Snapshot>>(hwnd, kRefreshCompleted);
+        state->actionTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<ksword::ark::IoResult>>(hwnd, kActionCompleted);
         Layout(*state);
         BeginRefresh(*state);
         return 0;
     case WM_SIZE:
         if (state) Layout(*state);
         return 0;
+    case kActionCompleted:
+        if (state && state->actionTask && state->actionTask->consume(hwnd, wParam, lParam)) return 0;
+        break;
     case kRefreshCompleted:
         if (state && state->task && state->task->consume(hwnd, wParam, lParam)) return 0;
         break;
@@ -508,6 +530,7 @@ LRESULT CALLBACK ViewProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_NCDESTROY:
         if (state) {
             if (state->task) state->task->cancel();
+            if (state->actionTask) state->actionTask->cancel();
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }

@@ -144,6 +144,33 @@ std::vector<char> ToUtf8WithBom(const std::wstring& text, std::wstring* errorOut
 
 } // namespace
 
+SaveTextFileResult ChooseTextExportDestination(HWND owner,
+    const wchar_t* suggestedFileName, const wchar_t* dialogTitle,
+    const wchar_t* fileFilter, const wchar_t* defaultExtension,
+    TextExportDestination& destination, std::wstring* errorOut) {
+    if (errorOut) errorOut->clear();
+    return ChooseSavePath(owner, suggestedFileName, dialogTitle, fileFilter,
+        defaultExtension, destination.path, errorOut);
+}
+
+SaveTextFileResult WriteUtf8TextToDestination(const TextExportDestination& destination,
+    const std::wstring& text, const std::wstring& evidenceSource,
+    const std::wstring& evidenceFormat, std::wstring* errorOut) {
+    if (errorOut) errorOut->clear();
+    std::wstring conversionError;
+    const auto bytes = ToUtf8WithBom(text, &conversionError);
+    if (bytes.empty()) {
+        if (errorOut) *errorOut = conversionError.empty() ? L"无法转换导出文本。" : conversionError;
+        return SaveTextFileResult::Failed;
+    }
+    const auto result = WriteExportFile(destination.path, bytes.data(), bytes.size(), errorOut);
+    if (result == SaveTextFileResult::Saved) {
+        GlobalEvidenceSession().record(evidenceSource.empty() ? L"文件导出" : evidenceSource,
+            evidenceFormat.empty() ? L"text" : evidenceFormat, text);
+    }
+    return result;
+}
+
 std::wstring BuildVisibleVirtualListTsv(
     const std::vector<std::wstring>& columnTitles,
     const VirtualListView& list) {
@@ -210,23 +237,11 @@ SaveTextFileResult SaveUtf8TextFileWithDialog(
         return selection;
     }
 
-    std::wstring conversionError;
-    const std::vector<char> bytes = ToUtf8WithBom(text, &conversionError);
-    if (bytes.empty()) {
-        if (errorOut) {
-            *errorOut = conversionError.empty() ? L"无法转换导出文本。" : conversionError;
-        }
-        return SaveTextFileResult::Failed;
-    }
-    const SaveTextFileResult writeResult = WriteExportFile(path, bytes.data(), bytes.size(), errorOut);
-    if (writeResult != SaveTextFileResult::Saved) {
-        return writeResult;
-    }
-    GlobalEvidenceSession().record(
+    TextExportDestination destination;
+    destination.path = path;
+    return WriteUtf8TextToDestination(destination, text,
         dialogTitle ? dialogTitle : L"文件导出",
-        defaultExtension ? defaultExtension : L"text",
-        text);
-    return SaveTextFileResult::Saved;
+        defaultExtension ? defaultExtension : L"text", errorOut);
 }
 
 SaveTextFileResult SaveBinaryFileWithDialog(

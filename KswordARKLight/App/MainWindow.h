@@ -6,6 +6,8 @@
 #include "../Core/Privilege.h"
 #include "../Docking/DockManager.h"
 #include "../Ui/PlaceholderPage.h"
+#include "../Ui/AsyncTask.h"
+#include <condition_variable>
 
 #include "../Core/Win32Lean.h"
 
@@ -142,9 +144,17 @@ private:
     void queryDriverStatusDeferred();
     void handleUiAccessButtonClicked();
     void installDriverFromButton();
+    void beginDriverTask(bool toggle);
     // stopDriverOnExit unloads only a driver started by Light and only after the
     // last live Light lease is released. Pre-existing drivers remain running.
     void stopDriverOnExit();
+    bool notifyPageRetirement(UINT message);
+    void beginClosing();
+    void pollClosing();
+    void retryClosing();
+    void cancelClosing();
+    void restoreAfterCancelledClose();
+    void setClosingStatus(const std::wstring& text);
     // requestProcessDockRefreshIfLoaded 用途：R0 驱动可用后通知已物化进程页重新枚举。
     // 处理过程：只投递刷新消息，不直接访问进程页内部控件或 R0 IOCTL。
     void requestProcessDockRefreshIfLoaded();
@@ -156,6 +166,8 @@ private:
     HWND commandEdit_;
     HWND navigationPalette_;
     HWND statusText_;
+    HWND closeRetryButton_ = nullptr;
+    HWND closeCancelButton_ = nullptr;
     HMENU mainMenu_;
     HMENU windowMenu_;
     HMENU evidenceMenu_;
@@ -168,7 +180,37 @@ private:
     std::vector<NavigationPaletteEntry> navigationPaletteEntries_;
     std::vector<Ksword::Core::PrivilegeEnableResult> startupPrivilegeResults_;
     std::wstring startupPrivilegeSummary_;
-    Ksword::Core::DriverLease driverLease_;
+    struct DriverControlLifetime {
+        Ksword::Core::DriverLease lease;
+        std::mutex mutex;
+        std::condition_variable idle;
+        std::atomic_size_t pending{0};
+        bool finalReleaseChecked = false;
+        bool finalStopRequired = false;
+        bool finalSucceeded = true;
+        Ksword::Core::DriverRuntimeStatus finalStatus;
+    };
+    struct DriverControlResult {
+        Ksword::Core::DriverRuntimeStatus status;
+        bool showWarning = false;
+    };
+    std::shared_ptr<DriverControlLifetime> driverLifetime_ = std::make_shared<DriverControlLifetime>();
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DriverControlResult>> driverTask_;
+    struct EvidenceExportOutcome {
+        bool saved = false;
+        std::wstring error;
+    };
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<EvidenceExportOutcome>> evidenceExportTask_;
+    enum class RuntimeRelaunch { None, Elevated, UiAccess };
+    RuntimeRelaunch runtimeRelaunch_ = RuntimeRelaunch::None;
+    enum class ClosePhase { Open, RetiringPages, ReleasingDriver };
+    ClosePhase closePhase_ = ClosePhase::Open;
+    bool closeCancelRequested_ = false;
+    bool closeFinalizing_ = false;
+    ULONGLONG closeStartedMs_ = 0;
+    std::wstring closingStatus_;
+    std::vector<HWND> disabledForClosing_;
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> driverExitCleanup_;
     Ksword::Core::DriverRuntimeStatus driverStatus_;
     RECT lastNormalScreenRect_{};
     int restoredModuleCommandId_ = 0;

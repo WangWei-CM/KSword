@@ -4,6 +4,7 @@
 #include "VirtualListView.h"
 
 #include <cstdint>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,19 @@ enum class SaveTextFileResult {
     Cancelled,
     Failed
 };
+
+// Destination selection is UI-only. A completed value packet can be handed to
+// a worker for lossless serialization/write without moving a dialog or HWND.
+struct TextExportDestination {
+    std::array<wchar_t, MAX_PATH> path{};
+};
+SaveTextFileResult ChooseTextExportDestination(HWND owner,
+    const wchar_t* suggestedFileName, const wchar_t* dialogTitle,
+    const wchar_t* fileFilter, const wchar_t* defaultExtension,
+    TextExportDestination& destination, std::wstring* errorOut = nullptr);
+SaveTextFileResult WriteUtf8TextToDestination(const TextExportDestination& destination,
+    const std::wstring& text, const std::wstring& evidenceSource,
+    const std::wstring& evidenceFormat, std::wstring* errorOut = nullptr);
 
 // BuildVisibleVirtualListTsv serializes the currently visible rows of a virtual
 // list with the supplied column captions. It deliberately follows the active
