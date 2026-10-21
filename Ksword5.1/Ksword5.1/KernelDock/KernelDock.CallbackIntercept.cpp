@@ -1742,8 +1742,11 @@ public:
         , m_hostPage(hostPage)
     {
         m_runtimeQuery = new ks::ui::AsyncOperation(this);
+        m_controlOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
+        m_controlOperation->setStateChangedCallback([this]() { updateControlActions(); });
+        updateControlActions();
 
         m_ruleProjectionTimer = new QTimer(this);
         m_ruleProjectionTimer->setInterval(0);
@@ -1769,9 +1772,34 @@ public:
         }
     }
 
-    ~CallbackInterceptController() override { if (m_runtimeQuery != nullptr) m_runtimeQuery->close(); }
+    ~CallbackInterceptController() override
+    {
+        if (m_controlOperation != nullptr) m_controlOperation->close();
+        if (m_runtimeQuery != nullptr) m_runtimeQuery->close();
+    }
 
 private:
+    void updateControlActions()
+    {
+        const bool ready = !m_controlOperation->isBusy();
+        for (auto* button : {m_applyButton, m_minifilterBypassApplyButton, m_minifilterBypassClearButton,
+            m_minifilterBypassRefreshButton, m_processProtectApplyButton, m_processProtectClearButton,
+            m_processProtectRefreshButton, m_startFileMonitorFsctlButton})
+            if (button != nullptr) button->setEnabled(ready);
+        if (m_reloadStateButton != nullptr) m_reloadStateButton->setEnabled(ready && !m_runtimeQuery->isBusy());
+        // Successful protect writes read back the canonical driver configuration.
+        // Keep this local draft stable until that accepted receipt is presented.
+        if (m_processProtectPage != nullptr) m_processProtectPage->setEnabled(ready);
+        if (m_minifilterBypassPage != nullptr) m_minifilterBypassPage->setEnabled(ready);
+    }
+
+    void controlOperationFailed()
+    {
+        // An exception is not proof that an accepted driver write failed. Keep
+        // its draft/known state and use the existing failure wording; never retry.
+        appendAppLog(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+    }
+
     void initializeUi()
     {
         if (m_hostPage == nullptr)
@@ -2225,37 +2253,42 @@ private:
 
     void startFileMonitorFsctlCapture()
     {
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::FileMonitorStatusResult beforeStatus = driverClient.queryFileMonitorStatus();
-        unsigned long requestedMask = KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-        if (beforeStatus.io.ok &&
-            (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
-        {
-            requestedMask = beforeStatus.operationMask | KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-        }
+        if (m_controlOperation->isBusy()) return;
+        struct Result { ksword::ark::IoResult startResult; unsigned long requestedMask = 0UL; };
+        m_controlOperation->submitTransaction<int, Result>(0,
+            [](int) {
+                const ksword::ark::DriverClient driverClient;
+                const auto beforeStatus = driverClient.queryFileMonitorStatus();
+                Result result;
+                result.requestedMask = KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+                if (beforeStatus.io.ok && (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+                    result.requestedMask = beforeStatus.operationMask | KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
+                result.startResult = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+                    result.requestedMask, beforeStatus.io.ok ? beforeStatus.processIdFilter : 0UL, 0UL);
+                return result;
+            },
+            [this](const Result& result, std::uint64_t) {
+                const auto& startResult = result.startResult;
+                const auto requestedMask = result.requestedMask;
+                if (!startResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
+                    m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.start_failed", QStringLiteral("启动失败：error=%1")).arg(startResult.win32Error));
+                    appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.start_failed", QStringLiteral("文件监控 FSCTL 启动失败：%1")).arg(detailText));
+                    return true;
+                }
 
-        const ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
-            KSWORD_ARK_FILE_MONITOR_ACTION_START,
-            requestedMask,
-            beforeStatus.io.ok ? beforeStatus.processIdFilter : 0UL,
-            0UL);
-        if (!startResult.ok)
-        {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(startResult.message));
-            m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.start_failed", QStringLiteral("启动失败：error=%1")).arg(startResult.win32Error));
-            appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.start_failed", QStringLiteral("文件监控 FSCTL 启动失败：%1")).arg(detailText));
-            return;
-        }
-
-        m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.started", QStringLiteral("FSCTL 文件监控已启动，mask=0x%1"))
-            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
-        appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.started", QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1"))
-            .arg(requestedMask, 8, 16, QChar('0')).toUpper());
-        if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
-        {
-            m_fileMonitorDrainTimer->start();
-        }
-        drainFileMonitorEvents();
+                m_fileMonitorStatusLabel->setText(kernelText("kernel.callback.intercept.file_monitor.status.started", QStringLiteral("FSCTL 文件监控已启动，mask=0x%1"))
+                    .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+                appendAppLog(kernelText("kernel.callback.intercept.file_monitor.log.started", QStringLiteral("文件监控 FSCTL 已启动：mask=0x%1"))
+                    .arg(requestedMask, 8, 16, QChar('0')).toUpper());
+                if (m_fileMonitorDrainTimer != nullptr && !m_fileMonitorDrainTimer->isActive())
+                {
+                    m_fileMonitorDrainTimer->start();
+                }
+                drainFileMonitorEvents();
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void drainFileMonitorEvents()
@@ -2447,6 +2480,7 @@ private:
         }
 
         auto* tabPage = new QWidget(parentWidget);
+        m_minifilterBypassPage = tabPage;
         auto* tabLayout = new QVBoxLayout(tabPage);
         tabLayout->setContentsMargins(8, 8, 8, 8);
         tabLayout->setSpacing(8);
@@ -2720,37 +2754,43 @@ private:
 
     void applyMinifilterBypassPidsToDriver()
     {
-        // 输入：当前白名单表格；处理：通过 ArkDriverClient 设置驱动白名单；
-        // 返回：无；失败弹窗并写应用日志。
-        const std::vector<std::uint32_t> processIds = collectMinifilterBypassPidsFromUi();
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult ioResult = driverClient.setMinifilterBypassPids(processIds);
-        if (!ioResult.ok)
-        {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
-            if (m_minifilterBypassStatusLabel != nullptr)
-            {
-                m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.apply_failed", QStringLiteral("应用失败：error=%1")).arg(ioResult.win32Error));
-            }
-            appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.apply_failed", QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2"))
-                .arg(ioResult.win32Error)
-                .arg(detailText));
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
-                kernelText("kernel.callback.intercept.minifilter.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。")).arg(ioResult.win32Error));
-            return;
-        }
+        if (m_controlOperation->isBusy()) return;
+        const auto processIds = collectMinifilterBypassPidsFromUi();
+        m_controlOperation->submitTransaction<std::vector<std::uint32_t>, ksword::ark::IoResult>(processIds,
+            [](const std::vector<std::uint32_t>& ids) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.setMinifilterBypassPids(ids);
+            },
+            [this, processIds](const ksword::ark::IoResult& ioResult, std::uint64_t) {
+                if (!ioResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
+                    if (m_minifilterBypassStatusLabel != nullptr)
+                    {
+                        m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.apply_failed", QStringLiteral("应用失败：error=%1")).arg(ioResult.win32Error));
+                    }
+                    appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.apply_failed", QStringLiteral("Minifilter PID 放行应用失败：error=%1，detail=%2"))
+                        .arg(ioResult.win32Error)
+                        .arg(detailText));
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.minifilter.title", QStringLiteral("Minifilter PID 放行")),
+                        kernelText("kernel.callback.intercept.minifilter.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。")).arg(ioResult.win32Error));
+                    return true;
+                }
 
-        if (m_minifilterBypassStatusLabel != nullptr)
-        {
-            m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.applied", QStringLiteral("已应用到驱动：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
-        }
-        appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.applied", QStringLiteral("Minifilter PID 放行已应用：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
+                if (m_minifilterBypassStatusLabel != nullptr)
+                {
+                    m_minifilterBypassStatusLabel->setText(kernelText("kernel.callback.intercept.minifilter.status.applied", QStringLiteral("已应用到驱动：%1 个 PID。")).arg(static_cast<qulonglong>(processIds.size())));
+                }
+                appendAppLog(kernelText("kernel.callback.intercept.minifilter.log.applied", QStringLiteral("Minifilter PID 放行已应用：count=%1。")).arg(static_cast<qulonglong>(processIds.size())));
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void clearMinifilterBypassPidsAndApply()
     {
+        if (m_controlOperation->isBusy()) return;
         // 输入：无；处理：清空 UI 表格并立即向驱动下发空白名单；
         // 返回：无，失败时驱动状态可能仍保持原白名单。
         if (m_minifilterBypassPidTable != nullptr)
@@ -2762,6 +2802,7 @@ private:
 
     void refreshMinifilterBypassPidsFromDriver()
     {
+        if (m_controlOperation->isBusy()) return;
         // 输入：无；处理：查询驱动当前白名单并刷新表格；
         // 返回：无；失败只更新状态栏/日志，不改变本地表格。
         const ksword::ark::DriverClient driverClient;
@@ -2813,6 +2854,7 @@ private:
         }
 
         auto* tabPage = new QWidget(parentWidget);
+        m_processProtectPage = tabPage;
         auto* tabLayout = new QVBoxLayout(tabPage);
         tabLayout->setContentsMargins(0, 0, 0, 0);
         auto* workspace = new ks::ui::ParameterWorkspace(tabPage, 460); // 保护参数滚动，规则与信任结果同时保留。
@@ -3733,47 +3775,68 @@ private:
 
     void applyProcessProtectToDriver()
     {
-        // 输入：当前表格与开关；处理：整表下发到 R0；
-        // 返回：无；成功后立即回读一次，让统计与能力状态与驱动对齐。
-        const std::vector<KSWORD_ARK_PROCESS_PROTECT_RULE> ruleList = collectProcessProtectRulesFromUi();
-        const std::vector<KSWORD_ARK_PROCESS_PROTECT_TRUSTED> trustedList = collectProcessProtectTrustedFromUi();
-        const quint32 globalFlags = collectProcessProtectGlobalFlags();
-
-        const unsigned long scanIntervalMs = m_processProtectScanIntervalSpin != nullptr
-            ? static_cast<unsigned long>(m_processProtectScanIntervalSpin->value())
-            : KSWORD_ARK_PROCESS_PROTECT_SCAN_INTERVAL_DEFAULT_MS;
-
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult ioResult =
-            driverClient.setProcessProtectConfig(globalFlags, ruleList, trustedList, scanIntervalMs);
-        if (!ioResult.ok)
+        if (m_controlOperation->isBusy()) return;
+        struct Request
         {
-            const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
-            setProcessProtectStatusText(
-                kernelText("kernel.callback.intercept.process_protect.status.apply_failed", QStringLiteral("应用失败：error=%1"))
-                .arg(ioResult.win32Error));
-            appendAppLog(
-                kernelText("kernel.callback.intercept.process_protect.log.apply_failed", QStringLiteral("进程保护配置应用失败：error=%1，detail=%2"))
-                .arg(ioResult.win32Error)
-                .arg(detailText));
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.process_protect.title", QStringLiteral("进程保护")),
-                kernelText("kernel.callback.intercept.process_protect.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。"))
-                .arg(ioResult.win32Error));
-            return;
-        }
+            std::vector<KSWORD_ARK_PROCESS_PROTECT_RULE> ruleList;
+            std::vector<KSWORD_ARK_PROCESS_PROTECT_TRUSTED> trustedList;
+            quint32 globalFlags;
+            unsigned long scanIntervalMs;
+        };
+        struct Result { ksword::ark::IoResult io; ksword::ark::ProcessProtectStateResult state; };
+        const Request request{collectProcessProtectRulesFromUi(), collectProcessProtectTrustedFromUi(),
+            collectProcessProtectGlobalFlags(), m_processProtectScanIntervalSpin != nullptr
+                ? static_cast<unsigned long>(m_processProtectScanIntervalSpin->value())
+                : KSWORD_ARK_PROCESS_PROTECT_SCAN_INTERVAL_DEFAULT_MS};
+        m_controlOperation->submitTransaction<Request, Result>(request,
+            [](const Request& value) {
+                const ksword::ark::DriverClient driverClient;
+                Result result;
+                result.io = driverClient.setProcessProtectConfig(value.globalFlags, value.ruleList,
+                    value.trustedList, value.scanIntervalMs);
+                if (result.io.ok)
+                {
+                    try { result.state = driverClient.queryProcessProtectState(); }
+                    catch (...) { result.state.io.ok = false; result.state.io.win32Error = ERROR_UNHANDLED_EXCEPTION; }
+                }
+                return result;
+            },
+            [this, request](const Result& result, std::uint64_t) {
+                const auto& ioResult = result.io;
+                const auto& ruleList = request.ruleList;
+                const auto& trustedList = request.trustedList;
+                const auto globalFlags = request.globalFlags;
+                if (!ioResult.ok)
+                {
+                    const QString detailText = callbackRuleIoMessageText(QString::fromStdString(ioResult.message));
+                    setProcessProtectStatusText(
+                        kernelText("kernel.callback.intercept.process_protect.status.apply_failed", QStringLiteral("应用失败：error=%1"))
+                        .arg(ioResult.win32Error));
+                    appendAppLog(
+                        kernelText("kernel.callback.intercept.process_protect.log.apply_failed", QStringLiteral("进程保护配置应用失败：error=%1，detail=%2"))
+                        .arg(ioResult.win32Error)
+                        .arg(detailText));
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.process_protect.title", QStringLiteral("进程保护")),
+                        kernelText("kernel.callback.intercept.process_protect.error.apply_to_driver", QStringLiteral("应用到驱动失败，error=%1。"))
+                        .arg(ioResult.win32Error));
+                    return true;
+                }
 
-        appendAppLog(
-            kernelText("kernel.callback.intercept.process_protect.log.applied", QStringLiteral("进程保护配置已应用：rules=%1，trusted=%2，flags=0x%3。"))
-            .arg(static_cast<qulonglong>(ruleList.size()))
-            .arg(static_cast<qulonglong>(trustedList.size()))
-            .arg(globalFlags, 8, 16, QChar('0')));
-        refreshProcessProtectFromDriver();
+                appendAppLog(
+                    kernelText("kernel.callback.intercept.process_protect.log.applied", QStringLiteral("进程保护配置已应用：rules=%1，trusted=%2，flags=0x%3。"))
+                    .arg(static_cast<qulonglong>(ruleList.size()))
+                    .arg(static_cast<qulonglong>(trustedList.size()))
+                    .arg(globalFlags, 8, 16, QChar('0')));
+                presentProcessProtectState(result.state);
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
     }
 
     void clearProcessProtectAndApply()
     {
+        if (m_controlOperation->isBusy()) return;
         if (m_processProtectRuleTable != nullptr)
         {
             m_processProtectRuleTable->setRowCount(0);
@@ -3791,10 +3854,13 @@ private:
 
     void refreshProcessProtectFromDriver()
     {
-        // 输入：无；处理：回读 R0 当前配置并重建两张表；
-        // 返回：无；失败只更新状态栏与日志，不清空本地编辑内容。
+        if (m_controlOperation->isBusy()) return;
         const ksword::ark::DriverClient driverClient;
-        const ksword::ark::ProcessProtectStateResult queryResult = driverClient.queryProcessProtectState();
+        presentProcessProtectState(driverClient.queryProcessProtectState());
+    }
+
+    void presentProcessProtectState(const ksword::ark::ProcessProtectStateResult& queryResult)
+    {
         if (!queryResult.io.ok)
         {
             const QString detailText = callbackRuleIoMessageText(QString::fromStdString(queryResult.io.message));
@@ -4404,6 +4470,7 @@ private:
 
     void setDirtyState(const bool dirtyState)
     {
+        if (dirtyState) ++m_editRevision;
         m_dirty = dirtyState;
         updateStatusLabel();
     }
@@ -5860,36 +5927,9 @@ private:
         return degradedItems.join(QStringLiteral("、"));
     }
 
-    bool queryRuntimeState(KSWORD_ARK_CALLBACK_RUNTIME_STATE* runtimeStateOut, QString* errorTextOut) const
-    {
-        if (runtimeStateOut == nullptr)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = kernelText("kernel.callback.intercept.validation.runtime_state_out_null", QStringLiteral("内部错误：runtimeStateOut 为空。"));
-            }
-            return false;
-        }
-
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::CallbackRuntimeResult runtimeResult = driverClient.queryCallbackRuntimeState();
-        if (!runtimeResult.io.ok)
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
-                    .arg(runtimeResult.io.win32Error)
-                    .arg(callbackRuleIoMessageText(QString::fromStdString(runtimeResult.io.message)));
-            }
-            return false;
-        }
-
-        *runtimeStateOut = runtimeResult.state;
-        return true;
-    }
-
     void reloadRuntimeState()
     {
+        if (m_controlOperation->isBusy()) return;
         m_reloadStateButton->setEnabled(false);
         m_statusLabel->setText(kernelText("kernel.callback.intercept.status.waiting_refresh", QStringLiteral("状态：等待刷新")));
         const auto ticket = m_runtimeQuery->submit<int, ksword::ark::CallbackRuntimeResult>(0,
@@ -5898,7 +5938,7 @@ private:
                 return client.queryCallbackRuntimeState();
             },
             [this](const ksword::ark::CallbackRuntimeResult& result, std::uint64_t) {
-                m_reloadStateButton->setEnabled(true);
+                m_reloadStateButton->setEnabled(!m_controlOperation->isBusy());
                 const QString error = result.io.ok ? QString()
                     : kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
                         .arg(result.io.win32Error).arg(callbackRuleIoMessageText(QString::fromStdString(result.io.message)));
@@ -5911,18 +5951,8 @@ private:
 
     void runtimeReadFailed()
     {
-        m_reloadStateButton->setEnabled(true);
+        m_reloadStateButton->setEnabled(!m_controlOperation->isBusy());
         applyRuntimeState({}, kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
-    }
-
-    void reloadRuntimeStateSynchronously()
-    {
-        m_runtimeQuery->cancel();
-        m_reloadStateButton->setEnabled(true);
-        KSWORD_ARK_CALLBACK_RUNTIME_STATE state{};
-        QString error;
-        queryRuntimeState(&state, &error);
-        applyRuntimeState(state, error);
     }
 
     void applyRuntimeState(const KSWORD_ARK_CALLBACK_RUNTIME_STATE& runtimeState, const QString& errorText)
@@ -5964,20 +5994,47 @@ private:
         updateStatusLabel();
     }
 
-    void ensureMinifilterRuntimeStarted(
-        const CallbackConfigDocument& configDocument,
+    struct MinifilterStartReceipt
+    {
+        bool needed = false;
+        bool legacyStarted = false;
+        bool unexpectedFailure = false;
+        ksword::ark::FileMonitorStatusResult before;
+        ksword::ark::IoResult start;
+        ksword::ark::FileMonitorStatusResult after;
+    };
+
+    static MinifilterStartReceipt startMinifilterRuntimeIfNeeded(const bool needed,
         const ksword::ark::DriverClient& driverClient)
     {
-        // 作用：应用含 Minifilter 规则后自动启动共享 file-monitor minifilter。
-        // 处理：只发 START，不主动 STOP，避免覆盖用户在文件监控页已有的运行意图。
-        // 返回：无；失败只写应用日志，规则应用本身仍然保持成功。
-        if (!hasActiveMinifilterRule(configDocument))
+        MinifilterStartReceipt receipt;
+        receipt.needed = needed;
+        if (!needed) return receipt;
+        receipt.before = driverClient.queryFileMonitorStatus();
+        if (receipt.before.io.ok && (receipt.before.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
+            return receipt;
+        receipt.start = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+            KSWORD_ARK_FILE_MONITOR_OPERATION_ALL, 0UL, 0UL);
+        if (!receipt.start.ok)
+        {
+            const auto legacyStart = driverClient.controlFileMonitor(KSWORD_ARK_FILE_MONITOR_ACTION_START,
+                KSWORD_ARK_FILE_MONITOR_OPERATION_ALL & ~KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL, 0UL, 0UL);
+            if (legacyStart.ok) { receipt.legacyStarted = true; receipt.start = legacyStart; }
+        }
+        // The original path rechecks status after both successful and failed starts.
+        receipt.after = driverClient.queryFileMonitorStatus();
+        return receipt;
+    }
+
+    void ensureMinifilterRuntimeStarted(const MinifilterStartReceipt& receipt)
+    {
+        if (!receipt.needed)
         {
             return;
         }
 
-        const ksword::ark::FileMonitorStatusResult beforeStatus =
-            driverClient.queryFileMonitorStatus();
+        if (receipt.unexpectedFailure) { controlOperationFailed(); return; }
+        const auto& beforeStatus = receipt.before;
         if (beforeStatus.io.ok &&
             (beforeStatus.runtimeFlags & KSWORD_ARK_FILE_MONITOR_RUNTIME_STARTED) != 0U)
         {
@@ -5997,32 +6054,18 @@ private:
                 .arg(callbackRuleIoMessageText(QString::fromStdString(beforeStatus.io.message))));
         }
 
-        ksword::ark::IoResult startResult = driverClient.controlFileMonitor(
-            KSWORD_ARK_FILE_MONITOR_ACTION_START,
-            KSWORD_ARK_FILE_MONITOR_OPERATION_ALL,
-            0UL,
-            0UL);
-        if (!startResult.ok)
+        const auto& startResult = receipt.start;
+        if (receipt.legacyStarted)
         {
             const unsigned long legacyOperationMask =
                 KSWORD_ARK_FILE_MONITOR_OPERATION_ALL & ~KSWORD_ARK_FILE_MONITOR_OPERATION_FSCTL;
-            const ksword::ark::IoResult legacyStartResult = driverClient.controlFileMonitor(
-                KSWORD_ARK_FILE_MONITOR_ACTION_START,
-                legacyOperationMask,
-                0UL,
-                0UL);
-            if (legacyStartResult.ok)
-            {
-                appendAppLog(
-                    kernelText("kernel.callback.intercept.runtime.minifilter.legacy_started", QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。"))
-                    .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
-                startResult = legacyStartResult;
-            }
+            appendAppLog(
+                kernelText("kernel.callback.intercept.runtime.minifilter.legacy_started", QStringLiteral("文件系统微过滤器以旧掩码启动：mask=0x%1；当前驱动可能尚未支持 FSCTL 事件。"))
+                .arg(legacyOperationMask, 8, 16, QChar('0')).toUpper());
         }
         if (!startResult.ok)
         {
-            const ksword::ark::FileMonitorStatusResult failStatus =
-                driverClient.queryFileMonitorStatus();
+            const auto& failStatus = receipt.after;
             const QString statusSuffix = failStatus.io.ok
                 ? kernelText("kernel.callback.intercept.runtime.minifilter.status_suffix", QStringLiteral("；status=%1，flags=0x%2，mask=0x%3，register=%4，start=%5，last=%6，queued=%7，dropped=%8"))
                     .arg(callbackRuleIoMessageText(QString::fromStdString(failStatus.io.message)))
@@ -6044,8 +6087,7 @@ private:
             return;
         }
 
-        const ksword::ark::FileMonitorStatusResult afterStatus =
-            driverClient.queryFileMonitorStatus();
+        const auto& afterStatus = receipt.after;
         if (afterStatus.io.ok)
         {
             appendAppLog(
@@ -6067,6 +6109,7 @@ private:
 
     void applyRulesToDriver()
     {
+        if (m_controlOperation->isBusy()) return;
         CallbackConfigDocument configDocument;
         QString errorText;
         if (!collectConfigFromUi(&configDocument, &errorText))
@@ -6088,51 +6131,81 @@ private:
             return;
         }
 
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::IoResult applyResult = driverClient.setCallbackRules(
-            blobBytes.data(),
-            static_cast<unsigned long>(blobBytes.size()));
-
-        if (!applyResult.ok)
+        struct Request { QByteArray blob; bool needsMinifilter; };
+        struct Result
         {
-            QMessageBox::warning(
-                m_hostPage,
-                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
-                kernelText("kernel.callback.intercept.apply.error", QStringLiteral("应用到驱动失败，error=%1。")).arg(applyResult.win32Error));
-            appendAppLog(kernelText("kernel.callback.intercept.apply.log_failed", QStringLiteral("应用到驱动失败，error=%1，detail=%2"))
-                .arg(applyResult.win32Error)
-                .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
-            return;
-        }
+            ksword::ark::IoResult apply;
+            MinifilterStartReceipt minifilter;
+            ksword::ark::CallbackRuntimeResult runtime;
+        };
+        const quint64 acceptedEditRevision = m_editRevision;
+        m_runtimeQuery->cancel(); // Old read receipts cannot overwrite this write's post-check.
+        const auto ticket = m_controlOperation->submitTransaction<Request, Result>(
+            Request{blobBytes, hasActiveMinifilterRule(configDocument)},
+            [](const Request& value) {
+                const ksword::ark::DriverClient driverClient;
+                Result result;
+                result.apply = driverClient.setCallbackRules(value.blob.constData(),
+                    static_cast<unsigned long>(value.blob.size()));
+                if (!result.apply.ok) return result;
+                result.minifilter.needed = value.needsMinifilter;
+                try { result.minifilter = startMinifilterRuntimeIfNeeded(value.needsMinifilter, driverClient); }
+                catch (...) { result.minifilter.unexpectedFailure = true; }
+                try { result.runtime = driverClient.queryCallbackRuntimeState(); }
+                catch (...) { result.runtime.io.ok = false; result.runtime.io.win32Error = ERROR_UNHANDLED_EXCEPTION; }
+                return result;
+            },
+            [this, configDocument, blobBytes, acceptedEditRevision](const Result& result, std::uint64_t) {
+                const auto& applyResult = result.apply;
+                if (!applyResult.ok)
+                {
+                    const QPointer<CallbackInterceptController> owner(this);
+                    QMessageBox::warning(
+                        m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                        kernelText("kernel.callback.intercept.apply.error", QStringLiteral("应用到驱动失败，error=%1。")).arg(applyResult.win32Error));
+                    if (!owner) return true;
+                    appendAppLog(kernelText("kernel.callback.intercept.apply.log_failed", QStringLiteral("应用到驱动失败，error=%1，detail=%2"))
+                        .arg(applyResult.win32Error)
+                        .arg(callbackRuleIoMessageText(QString::fromStdString(applyResult.message))));
+                    return true;
+                }
 
-        m_rulesApplied = true;
-        m_dirty = false;
-        m_nextRuleVersion = configDocument.ruleVersion + 1ULL;
+                m_rulesApplied = true;
+                m_dirty = m_editRevision != acceptedEditRevision;
+                m_nextRuleVersion = std::max<quint64>(m_nextRuleVersion, configDocument.ruleVersion + 1ULL);
 
-        appendAppLog(
-            kernelText("kernel.callback.intercept.apply.success", QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4"))
-            .arg(configDocument.ruleVersion)
-            .arg(configDocument.groups.size())
-            .arg(configDocument.rules.size())
-            .arg(blobBytes.size()));
+                appendAppLog(
+                    kernelText("kernel.callback.intercept.apply.success", QStringLiteral("应用成功：ruleVersion=%1, groupCount=%2, ruleCount=%3, blobBytes=%4"))
+                    .arg(configDocument.ruleVersion)
+                    .arg(configDocument.groups.size())
+                    .arg(configDocument.rules.size())
+                    .arg(blobBytes.size()));
 
-        ensureMinifilterRuntimeStarted(configDocument, driverClient);
-        reloadRuntimeStateSynchronously();
-        const bool hasAskUserRule = std::any_of(
-            configDocument.rules.cbegin(),
-            configDocument.rules.cend(),
-            [](const CallbackRuleModel& ruleModel) {
-                return ruleModel.enabled &&
-                    (ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
-                        ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
-                    ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER;
-            });
-        if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)
-        {
-            appendAppLog(
-                kernelText("kernel.callback.intercept.apply.ask_user_warning", QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。请确认弹窗管理器已启动，否则驱动将按默认决策回退。")));
-        }
-        updateStatusLabel();
+                ensureMinifilterRuntimeStarted(result.minifilter);
+                const QString runtimeError = result.runtime.io.ok ? QString()
+                    : kernelText("kernel.callback.intercept.runtime.query_failed", QStringLiteral("获取驱动状态失败，error=%1，detail=%2"))
+                        .arg(result.runtime.io.win32Error)
+                        .arg(callbackRuleIoMessageText(QString::fromStdString(result.runtime.io.message)));
+                applyRuntimeState(result.runtime.state, runtimeError);
+                const bool hasAskUserRule = std::any_of(
+                    configDocument.rules.cbegin(),
+                    configDocument.rules.cend(),
+                    [](const CallbackRuleModel& ruleModel) {
+                        return ruleModel.enabled &&
+                            (ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_REGISTRY ||
+                                ruleModel.callbackType == KSWORD_ARK_CALLBACK_TYPE_MINIFILTER) &&
+                            ruleModel.action == KSWORD_ARK_RULE_ACTION_ASK_USER;
+                    });
+                if (hasAskUserRule && m_runtimeState.waitingReceiverCount == 0U)
+                {
+                    appendAppLog(
+                        kernelText("kernel.callback.intercept.apply.ask_user_warning", QStringLiteral("警告：检测到“询问用户”规则，但当前等待接收者为 0。请确认弹窗管理器已启动，否则驱动将按默认决策回退。")));
+                }
+                updateStatusLabel();
+                return true;
+            }, [this](std::exception_ptr) { controlOperationFailed(); });
+        if (ticket == 0) updateControlActions();
     }
 
     void importConfigFromFile()
@@ -6313,6 +6386,9 @@ private:
     QPushButton* m_applyButton = nullptr;
     QPushButton* m_reloadStateButton = nullptr;
     ks::ui::AsyncOperation* m_runtimeQuery = nullptr;
+    ks::ui::AsyncOperation* m_controlOperation = nullptr;
+    QWidget* m_processProtectPage = nullptr;
+    QWidget* m_minifilterBypassPage = nullptr;
     QPushButton* m_importButton = nullptr;
     QPushButton* m_exportButton = nullptr;
     QLabel* m_statusLabel = nullptr;
@@ -6399,6 +6475,7 @@ private:
     quint64 m_nextRuleVersion = 1ULL;
     bool m_rulesApplied = false;
     bool m_dirty = false;
+    quint64 m_editRevision = 0;
     bool m_ignoreUiSignal = false;
 };
 
