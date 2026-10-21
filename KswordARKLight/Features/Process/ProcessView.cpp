@@ -291,6 +291,12 @@ bool OpenProcessDetailWindow(HWND owner, DWORD processId, ULONGLONG expectedCrea
 // Inputs are Win32 messages routed through ProcessViewWndProc. Processing keeps
 // the current snapshot, visible mode, icon cache, picker state, and selected
 // rows in sync. Return values are produced by WndProc message handling.
+struct ProcessTelemetryLifetime final {
+    ProcessTelemetry telemetry;
+    std::mutex sampleMutex;
+    std::atomic_bool retiring{false};
+};
+
 struct ProcessViewState {
     HWND hwnd = nullptr;
     HWND refreshButton = nullptr;
@@ -304,7 +310,8 @@ struct ProcessViewState {
     HWND listView = nullptr;
     HIMAGELIST imageList = nullptr;
     ProcessModel model;
-    std::shared_ptr<ProcessTelemetry> telemetry = std::make_shared<ProcessTelemetry>();
+    std::shared_ptr<ProcessTelemetryLifetime> telemetry = std::make_shared<ProcessTelemetryLifetime>();
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> telemetryRetirement;
     std::shared_ptr<std::unordered_map<std::wstring, std::string>> signatureCache =
         std::make_shared<std::unordered_map<std::wstring, std::string>>();
     // activeColumns 用途：当前运行期实际展示的逻辑列；关闭页面后不持久化。
@@ -1885,7 +1892,17 @@ void ApplyProcessRefresh(ProcessViewState& state, ProcessRefreshSnapshot snapsho
 // BeginProcessRefresh only schedules work and updates lightweight feedback. A
 // running request is coalesced by AsyncSnapshotTask so fast timers and manual
 // refreshes cannot start concurrent R0/R3 enumeration passes.
-void BeginProcessRefresh(ProcessViewState& state) {
+void BeginProcessRefresh(ProcessViewState& state, const bool manual = false) {
+    if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (state.telemetry->retiring.load(std::memory_order_acquire)) {
+        if (!manual || !state.telemetryRetirement) return;
+        if (!state.telemetryRetirement->complete()) {
+            Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+            return;
+        }
+        state.telemetry->retiring.store(false, std::memory_order_release);
+        if (state.refreshTask) state.refreshTask->resetOwner(state.hwnd);
+    }
     if (!state.refreshTask) {
         return;
     }
@@ -1896,7 +1913,9 @@ void BeginProcessRefresh(ProcessViewState& state) {
     const std::vector<ProcessColumnId> requestedColumns = state.activeColumns;
     state.refreshTask->request(
         [requestedColumns, signatureCache = state.signatureCache, telemetry = state.telemetry]() {
-            return CollectProcessRefreshSnapshot(requestedColumns, *signatureCache, *telemetry);
+            std::lock_guard lock(telemetry->sampleMutex);
+            if (telemetry->retiring.load(std::memory_order_acquire)) return ProcessRefreshSnapshot{};
+            return CollectProcessRefreshSnapshot(requestedColumns, *signatureCache, telemetry->telemetry);
         },
         [&state](std::uint64_t, std::optional<ProcessRefreshSnapshot>&& snapshot, std::exception_ptr error) {
             if (state.refreshButton) {
@@ -2667,6 +2686,31 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             TraceProcessStatus(L"无法确认当前 PID 对应的进程实例，已拒绝跨页打开。");
         }
         return FALSE;
+    case Ksword::Ui::kBeginNativeRetirementMessage:
+        if (state && !state->telemetry->retiring.exchange(true, std::memory_order_acq_rel)) {
+            ::KillTimer(hwnd, kRefreshTimerId);
+            state->refreshPaused = true;
+            UpdateToolbarTexts(*state);
+            if (state->refreshTask) state->refreshTask->cancel();
+            const auto telemetry = state->telemetry;
+            state->telemetryRetirement = Ksword::Ui::RunBackgroundRetirement([telemetry] {
+                std::lock_guard lock(telemetry->sampleMutex);
+                telemetry->telemetry.Stop();
+                return true;
+            });
+        }
+        return 0;
+    case Ksword::Ui::kPollNativeRetirementMessage:
+        return state && state->telemetryRetirement && !state->telemetryRetirement->complete() ? 1 : 0;
+    case Ksword::Ui::kCancelNativeRetirementMessage:
+        if (state) {
+            // Retain the model, canonical rows, filters and selection. Only an
+            // explicit Refresh/Resume action may restart private telemetry.
+            if (state->refreshButton) ::EnableWindow(state->refreshButton, TRUE);
+            UpdateToolbarTexts(*state);
+            RestartRefreshTimer(*state); // paused; retries only failed launches, never sampling
+        }
+        return 0;
     case kMsgRefreshCompleted:
         if (state && state->refreshTask && state->refreshTask->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -2715,13 +2759,19 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (state && HIWORD(wParam) == BN_CLICKED) {
             switch (LOWORD(wParam)) {
             case kRefreshButtonId:
-                BeginProcessRefresh(*state);
+                BeginProcessRefresh(*state, true);
                 return 0;
             case kColumnsButtonId: {
                 ShowColumnChooser(*state);
                 return 0;
             }
             case kPauseButtonId:
+                if (state->telemetry->retiring.load(std::memory_order_acquire)) {
+                    if (Ksword::Ui::BackgroundWorkRegistry::global().closing() ||
+                        !state->telemetryRetirement || !state->telemetryRetirement->complete()) return 0;
+                    state->telemetry->retiring.store(false, std::memory_order_release);
+                    if (state->refreshTask) state->refreshTask->resetOwner(hwnd);
+                }
                 ToggleRefreshPaused(*state);
                 return 0;
             case kPickerButtonId:
@@ -2740,6 +2790,10 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         break;
     case WM_TIMER:
         if (state && wParam == kRefreshTimerId) {
+            if (state->telemetry->retiring.load() && state->telemetryRetirement && !state->telemetryRetirement->complete()) {
+                Ksword::Ui::BackgroundWorkRegistry::global().retry();
+                return 0;
+            }
             // Automatic ticks must not supersede the in-flight generation:
             // slow signature/R0 queries would otherwise never reach the table.
             if (state->refreshPaused || (state->refreshTask && state->refreshTask->running())) {
@@ -2830,6 +2884,14 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_NCDESTROY:
         if (state) {
             ::KillTimer(hwnd, kRefreshTimerId);
+            if (!state->telemetry->retiring.exchange(true, std::memory_order_acq_rel)) {
+                const auto telemetry = state->telemetry;
+                state->telemetryRetirement = Ksword::Ui::RunBackgroundRetirement([telemetry] {
+                    std::lock_guard lock(telemetry->sampleMutex);
+                    telemetry->telemetry.Stop();
+                    return true;
+                });
+            }
             if (state->refreshTask) {
                 state->refreshTask->cancel();
             }

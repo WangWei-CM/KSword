@@ -16,8 +16,25 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <condition_variable>
 
 namespace Ksword::Features::Monitor {
+
+struct EtwSessionLifetime final {
+    EtwSessionController controller;
+    std::mutex operationMutex;
+    std::condition_variable idle;
+    std::atomic_size_t pending{0};
+    std::atomic_ulong stopError{ERROR_SUCCESS};
+    std::atomic_bool retiring{false};
+};
+
+struct EtwEventInbox final {
+    std::mutex mutex;
+    std::deque<EtwEvent> events;
+    std::optional<std::wstring> status;
+    bool accepting = true;
+};
 
 struct EtwEventFilterResult {
     std::uint64_t generation = 0;
@@ -60,6 +77,8 @@ private:
     void layout();
     void startSession();
     void stopSession();
+    void retireSession();
+    bool pollRetirement();
     void openFilterDialog();
     // enqueueEventFromWorker receives ETW rows from the controller callback.
     // Input is one compact event row from the ETW worker thread; processing only
@@ -128,9 +147,13 @@ private:
     int eventContextColumn_ = 0;
     std::wstring eventTextScratch_;
     EtwFilterModel filterModel_;
-    EtwSessionController controller_;
-    std::mutex pendingEventMutex_;
-    std::deque<EtwEvent> pendingEvents_;
+    std::shared_ptr<EtwSessionLifetime> session_ = std::make_shared<EtwSessionLifetime>();
+    std::shared_ptr<EtwEventInbox> inbox_ = std::make_shared<EtwEventInbox>();
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::wstring>> sessionTask_;
+    bool sessionControlPending_ = false;
+    bool sessionRetired_ = false;
+    bool retirementCancelled_ = false;
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> retirement_;
     std::unique_ptr<Ksword::Ui::AsyncShellIconLoader> iconLoader_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>> localFilterTask_;
     bool deleteOnDestroy_ = false;

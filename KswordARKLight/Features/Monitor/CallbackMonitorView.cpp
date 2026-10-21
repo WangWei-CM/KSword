@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cwctype>
 #include <memory>
 #include <optional>
@@ -22,6 +23,7 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"KswordARKLight.CallbackMonitor";
 constexpr UINT kPollMessage = WM_APP + 733;
+constexpr UINT kControlMessage = WM_APP + 734;
 constexpr UINT_PTR kPollTimer = 1;
 constexpr int kStart = 68101;
 constexpr int kStop = 68102;
@@ -40,6 +42,20 @@ struct PollSnapshot {
     ksword::ark::CallbackMonitorReadResult read;
 };
 
+enum class MonitorCommand { Query, Start, Stop, Clear };
+struct MonitorControlLifetime {
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::atomic_size_t pending{0};
+    bool ownsCapture = false;
+    std::atomic_bool retiring{false};
+    std::atomic_ulong stopError{0};
+};
+struct MonitorControlResult {
+    ksword::ark::CallbackMonitorStatusResult status;
+    bool ownsCapture = false;
+};
+
 struct State {
     HWND hwnd = nullptr;
     HWND start = nullptr;
@@ -56,6 +72,10 @@ struct State {
     std::vector<std::size_t> visible;
     std::wstring displayScratch;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<PollSnapshot>> pollTask;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<MonitorControlResult>> controlTask;
+    std::shared_ptr<MonitorControlLifetime> controlLifetime = std::make_shared<MonitorControlLifetime>();
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> retirement;
+    bool retirementCancelled = false;
     std::uint64_t cursor = 0;
     std::uint64_t generation = 0;
     std::uint64_t dropped = 0;
@@ -117,8 +137,12 @@ void SetStatus(State& state) {
         L" | R0 丢弃 " + std::to_wstring(state.dropped) +
         L" | 游标丢失 " + std::to_wstring(state.lost);
     ::SetWindowTextW(state.status, text.c_str());
-    ::EnableWindow(state.start, !state.capturing || state.paused);
-    ::EnableWindow(state.stop, state.capturing);
+    const bool busy = state.controlLifetime->retiring.load(std::memory_order_acquire) ||
+        (state.controlTask && state.controlTask->running());
+    ::EnableWindow(state.start, !busy && (!state.capturing || state.paused));
+    const bool retryStop = state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation;
+    ::EnableWindow(state.stop, retryStop || (!busy && state.capturing));
+    ::EnableWindow(state.clear, !busy);
     ::EnableWindow(state.pause, state.capturing);
     ::SetWindowTextW(state.pause, state.paused ? L"继续" : L"暂停");
 }
@@ -183,34 +207,125 @@ unsigned long SelectedCategoryMask(const State& state) {
     return mask;
 }
 
-void QueryStatus(State& state) {
-    const auto status = ksword::ark::DriverClient().queryCallbackMonitorStatus();
-    if (!status.io.ok) {
-        state.message = status.unsupported ? L"当前驱动不支持回调监控。" :
-            L"R0 状态查询失败：Win32=" + std::to_wstring(status.io.win32Error);
-    } else {
-        state.capturing = (status.runtimeFlags & KSWORD_ARK_CALLBACK_MONITOR_RUNTIME_CAPTURING) != 0;
-        state.cursor = status.latestSequence;
-        state.dropped = status.droppedCount;
-        if (state.capturing) {
-            constexpr std::array<unsigned long, 6> masks{
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_PROCESS,
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_THREAD,
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_IMAGE,
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_REGISTRY,
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_OBJECT,
-                KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_MINIFILTER };
-            for (std::size_t index = 0; index < masks.size(); ++index) {
-                ::SendMessageW(state.categories[index], BM_SETCHECK,
-                    (status.categoryMask & masks[index]) ? BST_CHECKED : BST_UNCHECKED, 0);
+void RequestMonitorControl(State& state, const MonitorCommand command, const unsigned long mask,
+    std::function<void(const ksword::ark::CallbackMonitorStatusResult&)> completed) {
+    if (!state.controlTask || state.controlTask->running() ||
+        state.controlLifetime->retiring.load(std::memory_order_acquire)) return;
+    const auto lifetime = state.controlLifetime;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    const auto pending = Ksword::Ui::HoldPendingOperation(lifetime);
+    state.controlTask->request(
+        [lifetime, lease, pending, command, mask] {
+            std::lock_guard lock(lifetime->mutex);
+            MonitorControlResult result;
+            const ksword::ark::DriverClient client;
+            if (command == MonitorCommand::Start) {
+                result.status = client.controlCallbackMonitor(KSWORD_ARK_CALLBACK_MONITOR_ACTION_START, mask);
+                if (result.status.io.ok) lifetime->ownsCapture = true;
+            } else if (command == MonitorCommand::Stop) {
+                if (lifetime->ownsCapture) {
+                    result.status = client.controlCallbackMonitor(KSWORD_ARK_CALLBACK_MONITOR_ACTION_STOP, 0);
+                    if (result.status.io.ok) lifetime->ownsCapture = false;
+                } else {
+                    result.status.io.ok = true; // Detach from a pre-existing capture.
+                }
+            } else {
+                result.status = client.queryCallbackMonitorStatus();
             }
-        }
-        state.message = state.capturing ? L"已连接到运行中的 R0 回调监控。" : L"R0 回调监控就绪。";
-    }
+            result.ownsCapture = lifetime->ownsCapture;
+            return result;
+        },
+        [&state, completed = std::move(completed)](std::uint64_t, std::optional<MonitorControlResult>&& result, std::exception_ptr error) {
+            if (error || !result) {
+                state.message = L"R0 状态查询失败：Win32=" + std::to_wstring(ERROR_UNHANDLED_EXCEPTION);
+                SetStatus(state);
+                return;
+            }
+            state.ownsCapture = result->ownsCapture;
+            if (state.controlLifetime->retiring.load(std::memory_order_acquire)) { SetStatus(state); return; }
+            completed(result->status);
+        });
     SetStatus(state);
 }
 
+void BeginRetirement(State& state) {
+    if (state.controlLifetime->retiring.exchange(true, std::memory_order_acq_rel)) return;
+    ::KillTimer(state.hwnd, kPollTimer);
+    ++state.generation;
+    const auto lifetime = state.controlLifetime;
+    state.retirement = Ksword::Ui::RunBackgroundRetirement([lifetime] {
+        std::unique_lock lock(lifetime->mutex);
+        lifetime->idle.wait(lock, [&] { return lifetime->pending.load(std::memory_order_acquire) == 0; });
+        if (!lifetime->ownsCapture) return true;
+        const auto result = ksword::ark::DriverClient().controlCallbackMonitor(
+            KSWORD_ARK_CALLBACK_MONITOR_ACTION_STOP, 0);
+        lifetime->stopError.store(result.io.win32Error, std::memory_order_release);
+        if (!result.io.ok) return false;
+        lifetime->ownsCapture = false;
+        return true;
+    });
+    state.message = L"正在停止采集；现有记录保留。 / Stopping; retained records remain available.";
+    SetStatus(state);
+}
+
+bool PollRetirement(State& state) {
+    if (!state.retirement) return true;
+    Ksword::Ui::BackgroundWorkRegistry::global().retry();
+    if (!state.retirement->complete()) {
+        if (state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+            state.message = L"R0 停止失败：Win32=" + std::to_wstring(state.controlLifetime->stopError.load());
+            SetStatus(state);
+        }
+        return false;
+    }
+    if (state.controlTask && state.controlTask->running()) return false;
+    state.capturing = false;
+    state.ownsCapture = false;
+    state.paused = false;
+    state.message = L"已停止本页采集。 / Capture stopped; start manually to resume.";
+    if (state.retirementCancelled) {
+        state.controlLifetime->retiring.store(false, std::memory_order_release);
+        state.retirementCancelled = false;
+        state.retirement.reset();
+        ::KillTimer(state.hwnd, kPollTimer);
+    }
+    SetStatus(state);
+    return true;
+}
+
+void QueryStatus(State& state) {
+    RequestMonitorControl(state, MonitorCommand::Query, 0, [&state](const auto& status) {
+        if (!status.io.ok) {
+            state.message = status.unsupported ? L"当前驱动不支持回调监控。" :
+                L"R0 状态查询失败：Win32=" + std::to_wstring(status.io.win32Error);
+        } else {
+            state.capturing = (status.runtimeFlags & KSWORD_ARK_CALLBACK_MONITOR_RUNTIME_CAPTURING) != 0;
+            state.cursor = status.latestSequence;
+            state.dropped = status.droppedCount;
+            if (state.capturing) {
+                constexpr std::array<unsigned long, 6> masks{
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_PROCESS,
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_THREAD,
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_IMAGE,
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_REGISTRY,
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_OBJECT,
+                    KSWORD_ARK_CALLBACK_MONITOR_CATEGORY_MINIFILTER };
+                for (std::size_t index = 0; index < masks.size(); ++index) {
+                    ::SendMessageW(state.categories[index], BM_SETCHECK,
+                        (status.categoryMask & masks[index]) ? BST_CHECKED : BST_UNCHECKED, 0);
+                }
+            }
+            state.message = state.capturing ? L"已连接到运行中的 R0 回调监控。" : L"R0 回调监控就绪。";
+        }
+        if (state.capturing) ::SetTimer(state.hwnd, kPollTimer, 500, nullptr);
+        SetStatus(state);
+    });
+}
+
 void Start(State& state) {
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (!state.controlTask || state.controlTask->running()) return;
     if (state.capturing && state.paused) {
         state.paused = false;
         state.message = L"已继续显示回调事件。";
@@ -224,33 +339,37 @@ void Start(State& state) {
         SetStatus(state);
         return;
     }
-    const auto status = ksword::ark::DriverClient().controlCallbackMonitor(
-        KSWORD_ARK_CALLBACK_MONITOR_ACTION_START, mask);
-    if (!status.io.ok) {
-        state.message = status.unsupported ? L"当前驱动不支持回调监控。" :
-            L"启动失败：Win32=" + std::to_wstring(status.io.win32Error);
-        SetStatus(state);
-        return;
-    }
-    ++state.generation;
-    state.cursor = status.latestSequence;
-    state.dropped = status.droppedCount;
-    state.lost = 0;
-    state.records.clear();
-    state.ownsCapture = true;
-    state.capturing = true;
-    state.paused = false;
-    state.message = L"R0 回调监控已启动。";
-    RebuildList(state);
-    ::SetTimer(state.hwnd, kPollTimer, 500, nullptr);
+    RequestMonitorControl(state, MonitorCommand::Start, mask, [&state](const auto& status) {
+        if (!status.io.ok) {
+            state.message = status.unsupported ? L"当前驱动不支持回调监控。" :
+                L"启动失败：Win32=" + std::to_wstring(status.io.win32Error);
+            SetStatus(state);
+            return;
+        }
+        ++state.generation;
+        state.cursor = status.latestSequence;
+        state.dropped = status.droppedCount;
+        state.lost = 0;
+        state.records.clear();
+        state.ownsCapture = true;
+        state.capturing = true;
+        state.paused = false;
+        state.message = L"R0 回调监控已启动。";
+        RebuildList(state);
+        ::SetTimer(state.hwnd, kPollTimer, 500, nullptr);
+    });
 }
 
 void Stop(State& state) {
+    if (state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+        return;
+    }
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (!state.controlTask || state.controlTask->running()) return;
     ::KillTimer(state.hwnd, kPollTimer);
     ++state.generation;
-    if (state.ownsCapture) {
-        const auto status = ksword::ark::DriverClient().controlCallbackMonitor(
-            KSWORD_ARK_CALLBACK_MONITOR_ACTION_STOP, 0);
+    RequestMonitorControl(state, MonitorCommand::Stop, 0, [&state](const auto& status) {
         if (!status.io.ok) {
             state.message = L"R0 停止失败：Win32=" + std::to_wstring(status.io.win32Error);
             ::SetTimer(state.hwnd, kPollTimer, 500, nullptr);
@@ -258,16 +377,17 @@ void Stop(State& state) {
             return;
         }
         state.dropped = status.droppedCount;
-    }
-    state.capturing = false;
-    state.ownsCapture = false;
-    state.paused = false;
-    state.message = L"已停止本页采集。";
-    SetStatus(state);
+        state.capturing = false;
+        state.ownsCapture = false;
+        state.paused = false;
+        state.message = L"已停止本页采集。";
+        SetStatus(state);
+    });
 }
 
 void Poll(State& state) {
-    if (!state.capturing || state.paused || !state.pollTask || state.pollTask->running()) { return; }
+    if (state.controlLifetime->retiring.load(std::memory_order_acquire) || !state.capturing || state.paused || !state.pollTask || state.pollTask->running() ||
+        (state.controlTask && state.controlTask->running())) { return; }
     const auto cursor = state.cursor;
     const auto generation = state.generation;
     state.pollTask->request(
@@ -403,14 +523,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE:
         if (!state || !CreateControls(*state)) { return -1; }
         state->pollTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<PollSnapshot>>(hwnd, kPollMessage);
+        state->controlTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<MonitorControlResult>>(hwnd, kControlMessage);
         Layout(*state);
         QueryStatus(*state);
-        if (state->capturing) { ::SetTimer(hwnd, kPollTimer, 500, nullptr); }
         return 0;
     case WM_SIZE:
         if (state) { Layout(*state); }
         return 0;
+    case Ksword::Ui::kBeginNativeRetirementMessage:
+        if (state) { state->retirementCancelled = false; BeginRetirement(*state); }
+        return 0;
+    case Ksword::Ui::kPollNativeRetirementMessage:
+        return state && !PollRetirement(*state) ? 1 : 0;
+    case Ksword::Ui::kCancelNativeRetirementMessage:
+        if (state) { state->retirementCancelled = true; PollRetirement(*state); if (state->retirementCancelled) ::SetTimer(hwnd, kPollTimer, 500, nullptr); }
+        return 0;
     case WM_TIMER:
+        if (state && state->retirementCancelled) { PollRetirement(*state); return 0; }
         if (state && wParam == kPollTimer) { Poll(*state); return 0; }
         break;
     case WM_COMMAND:
@@ -429,14 +558,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
             SetStatus(*state);
             return 0;
         case kClear: {
-            const auto status = ksword::ark::DriverClient().queryCallbackMonitorStatus();
+            if (!state->controlTask || state->controlTask->running()) return 0;
             ++state->generation;
-            if (status.io.ok) { state->cursor = status.latestSequence; state->dropped = status.droppedCount; }
-            state->lost = 0;
-            state->records.clear();
-            ::SetWindowTextW(state->detail, L"选择事件查看完整字段。");
-            state->message = L"已清空本页记录，驱动环形缓冲未清空。";
-            RebuildList(*state);
+            RequestMonitorControl(*state, MonitorCommand::Clear, 0, [state](const auto& status) {
+                if (status.io.ok) { state->cursor = status.latestSequence; state->dropped = status.droppedCount; }
+                state->lost = 0;
+                state->records.clear();
+                ::SetWindowTextW(state->detail, L"选择事件查看完整字段。");
+                state->message = L"已清空本页记录，驱动环形缓冲未清空。";
+                RebuildList(*state);
+            });
             return 0;
         }
         case kExport: {
@@ -490,15 +621,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (state) {
             ::KillTimer(hwnd, kPollTimer);
             if (state->pollTask) { state->pollTask->cancel(); }
-            if (state->ownsCapture) {
-                ksword::ark::DriverClient().controlCallbackMonitor(
-                    KSWORD_ARK_CALLBACK_MONITOR_ACTION_STOP, 0);
-            }
+            if (state->controlTask) state->controlTask->cancel();
+            BeginRetirement(*state);
             delete state;
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         }
         break;
     default:
+        if (state && message == kControlMessage && state->controlTask &&
+            state->controlTask->consume(hwnd, wParam, lParam)) return 0;
         if (state && message == kPollMessage && state->pollTask &&
             state->pollTask->consume(hwnd, wParam, lParam)) { return 0; }
         break;

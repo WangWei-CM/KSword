@@ -35,9 +35,9 @@ constexpr int kClearButtonId = 52004;
 constexpr int kExportButtonId = 52007;
 constexpr int kListId = 52005;
 constexpr int kLocalFilterBarId = 52006;
-constexpr UINT kStatusMessage = WM_APP + 62;
 constexpr UINT kLocalFilterMessage = WM_APP + 63;
 constexpr UINT kExternalProcessFilterMessage = WM_APP + 64;
+constexpr UINT kSessionControlMessage = WM_APP + 65;
 constexpr UINT kIconsReadyMessage = WM_APP + 66;
 constexpr UINT_PTR kEventFlushTimerId = 52061;
 constexpr UINT kEventFlushIntervalMs = 150;
@@ -197,7 +197,7 @@ EtwMonitorView::EtwMonitorView() = default;
 
 EtwMonitorView::~EtwMonitorView() {
     iconLoader_.reset();
-    controller_.stop();
+    retireSession();
     if (eventImageList_ != nullptr) {
         ImageList_Destroy(eventImageList_);
         eventImageList_ = nullptr;
@@ -318,21 +318,26 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
         break;
+    case Ksword::Ui::kBeginNativeRetirementMessage:
+        retirementCancelled_ = false;
+        retireSession();
+        return 0;
+    case Ksword::Ui::kPollNativeRetirementMessage:
+        return pollRetirement() ? 0 : 1;
+    case Ksword::Ui::kCancelNativeRetirementMessage:
+        retirementCancelled_ = true;
+        pollRetirement();
+        return 0;
     case WM_TIMER:
         if (wParam == kEventFlushTimerId) {
+            if (retirementCancelled_) pollRetirement();
             flushPendingEvents();
             return 0;
         }
         break;
-    case kStatusMessage: {
-        auto* statusText = reinterpret_cast<std::wstring*>(lParam);
-        if (statusText != nullptr) {
-            updateStatusText(*statusText);
-            updateButtonState();
-            delete statusText;
-        }
+    case kSessionControlMessage:
+        if (sessionTask_) sessionTask_->consume(hwnd, wParam, lParam);
         return 0;
-    }
     case kIconsReadyMessage:
         if (iconLoader_) {
             const auto changed = iconLoader_->consume(wParam);
@@ -374,7 +379,7 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (localFilterTask_) {
             localFilterTask_->cancel();
         }
-        controller_.stop();
+        retireSession();
         return 0;
     case WM_NCDESTROY:
         if (deleteOnDestroy_) {
@@ -431,13 +436,17 @@ void EtwMonitorView::createControls() {
     ::SendMessageW(eventList_, WM_SETFONT, reinterpret_cast<WPARAM>(Ksword::Ui::SystemUIFont()), TRUE);
     localFilterTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>>(hwnd_, kLocalFilterMessage);
 
-    controller_.setEventCallback([this](const EtwEvent& eventRow) {
-        enqueueEventFromWorker(eventRow);
+    sessionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<std::wstring>>(hwnd_, kSessionControlMessage);
+    const auto inbox = inbox_;
+    session_->controller.setEventCallback([inbox](const EtwEvent& eventRow) {
+        std::lock_guard lock(inbox->mutex);
+        if (!inbox->accepting) return;
+        inbox->events.push_back(eventRow);
+        while (inbox->events.size() > kMaxEventRows) inbox->events.pop_front();
     });
-    controller_.setStatusCallback([this](const std::wstring& text) {
-        if (hwnd_ != nullptr) {
-            ::PostMessageW(hwnd_, kStatusMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
-        }
+    session_->controller.setStatusCallback([inbox](const std::wstring& text) {
+        std::lock_guard lock(inbox->mutex);
+        if (inbox->accepting) inbox->status = text;
     });
 }
 
@@ -452,20 +461,99 @@ void EtwMonitorView::layout() {
 }
 
 void EtwMonitorView::startSession() {
-    if (controller_.running()) {
-        return;
-    }
+    if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (sessionRetired_ || sessionControlPending_ || !sessionTask_ || session_->controller.running()) return;
+    sessionControlPending_ = true;
     updateStatusText(L"正在启动 ETW...");
-    if (!controller_.start(filterModel_.state())) {
-        updateStatusText(controller_.lastError());
-    }
     updateButtonState();
+    const auto session = session_;
+    const auto filter = filterModel_.state();
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) { sessionControlPending_ = false; updateButtonState(); return; }
+    const auto pending = Ksword::Ui::HoldPendingOperation(session);
+    sessionTask_->request(
+        [session, filter, lease, pending] {
+            std::lock_guard lock(session->operationMutex);
+            return session->controller.start(filter) ? std::wstring{} : session->controller.lastError();
+        },
+        [this](std::uint64_t, std::optional<std::wstring>&& errorText, std::exception_ptr error) {
+            sessionControlPending_ = false;
+            if (error) updateStatusText(session_->controller.lastError());
+            else if (errorText && !errorText->empty()) updateStatusText(*errorText);
+            updateButtonState();
+        });
 }
 
 void EtwMonitorView::stopSession() {
-    controller_.stop();
-    flushPendingEvents();
+    if (Ksword::Ui::BackgroundWorkRegistry::global().closing()) return;
+    if (sessionRetired_ && retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+        return;
+    }
+    if (sessionRetired_ || sessionControlPending_ || !sessionTask_) return;
+    sessionControlPending_ = true;
     updateButtonState();
+    const auto session = session_;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) { sessionControlPending_ = false; updateButtonState(); return; }
+    const auto pending = Ksword::Ui::HoldPendingOperation(session);
+    sessionTask_->request(
+        [session, lease, pending] {
+            std::lock_guard lock(session->operationMutex);
+            return session->controller.stopChecked() ? std::wstring{} : session->controller.lastError();
+        },
+        [this](std::uint64_t, std::optional<std::wstring>&& errorText, std::exception_ptr error) {
+            sessionControlPending_ = false;
+            if (error) updateStatusText(session_->controller.lastError());
+            else if (errorText && !errorText->empty()) updateStatusText(*errorText);
+            flushPendingEvents();
+            updateButtonState();
+        });
+}
+
+void EtwMonitorView::retireSession() {
+    if (sessionRetired_) return;
+    sessionRetired_ = true;
+    session_->retiring.store(true, std::memory_order_release);
+    const auto session = session_;
+    const auto inbox = inbox_;
+    retirement_ = Ksword::Ui::RunBackgroundRetirement([session, inbox] {
+        std::unique_lock lock(session->operationMutex);
+        session->idle.wait(lock, [&] { return session->pending.load(std::memory_order_acquire) == 0; });
+        const bool stopped = session->controller.stopChecked();
+        // STOP joins the event producer first. Already accepted rows remain in
+        // this inbox and are drained into the retained canonical view on UI.
+        std::lock_guard inboxLock(inbox->mutex);
+        if (stopped) inbox->accepting = false;
+        const auto evidence = session->controller.evidence();
+        const bool closeFailed = evidence.closeAttempted && evidence.closeStatus != ERROR_SUCCESS &&
+            evidence.closeStatus != ERROR_CTX_CLOSE_PENDING && evidence.closeStatus != ERROR_INVALID_HANDLE;
+        session->stopError.store(stopped ? ERROR_SUCCESS : closeFailed ? evidence.closeStatus :
+            (evidence.stopStatuses.empty() ? ERROR_GEN_FAILURE : evidence.stopStatuses.back()));
+        return stopped;
+    });
+    updateButtonState();
+}
+
+bool EtwMonitorView::pollRetirement() {
+    if (!sessionRetired_) return true;
+    Ksword::Ui::BackgroundWorkRegistry::global().retry();
+    flushPendingEvents();
+    if (retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        updateStatusText(L"ETW 停止失败：Win32=" + std::to_wstring(session_->stopError.load()) + L" / Retry cleanup.");
+    }
+    bool inboxEmpty = false;
+    { std::lock_guard lock(inbox_->mutex); inboxEmpty = inbox_->events.empty(); }
+    const bool ready = retirement_ && retirement_->complete() && !sessionControlPending_ && inboxEmpty;
+    if (ready && retirementCancelled_) {
+        sessionRetired_ = false;
+        session_->retiring.store(false, std::memory_order_release);
+        { std::lock_guard lock(inbox_->mutex); inbox_->accepting = true; }
+        retirementCancelled_ = false;
+        updateStatusText(L"已停止采集；请手动开始。 / Stopped; start manually to resume.");
+        updateButtonState();
+    }
+    return ready;
 }
 
 void EtwMonitorView::openFilterDialog() {
@@ -473,7 +561,7 @@ void EtwMonitorView::openFilterDialog() {
     EtwFilterDialog dialog(hwnd_, editedState);
     if (dialog.showModal(editedState)) {
         filterModel_.setState(editedState);
-        updateStatusText(controller_.running()
+        updateStatusText(session_->controller.running()
             ? L"筛选器已更新；重新开始 ETW 后对 Provider 生效。"
             : L"筛选器已更新。");
     }
@@ -484,10 +572,10 @@ void EtwMonitorView::enqueueEventFromWorker(const EtwEvent& eventRow) {
     // - input: one ETW row on the ETW processing thread;
     // - processing: bounded append to a private queue protected by a mutex;
     // - return: none.  WM_TIMER later performs all UI work on the UI thread.
-    std::lock_guard<std::mutex> lock(pendingEventMutex_);
-    pendingEvents_.push_back(eventRow);
-    while (pendingEvents_.size() > kMaxEventRows) {
-        pendingEvents_.pop_front();
+    std::lock_guard<std::mutex> lock(inbox_->mutex);
+    inbox_->events.push_back(eventRow);
+    while (inbox_->events.size() > kMaxEventRows) {
+        inbox_->events.pop_front();
     }
 }
 
@@ -497,16 +585,22 @@ void EtwMonitorView::flushPendingEvents() {
     // - processing: drain at most kMaxEventsPerFlush rows per timer tick;
     // - return: none.  Remaining rows stay queued for the next timer tick.
     std::vector<EtwEvent> batch;
+    std::optional<std::wstring> status;
     {
-        std::lock_guard<std::mutex> lock(pendingEventMutex_);
-        const std::size_t takeCount = std::min<std::size_t>(pendingEvents_.size(), kMaxEventsPerFlush);
+        std::lock_guard<std::mutex> lock(inbox_->mutex);
+        status.swap(inbox_->status);
+        const std::size_t takeCount = std::min<std::size_t>(inbox_->events.size(), kMaxEventsPerFlush);
         batch.reserve(takeCount);
         for (std::size_t index = 0; index < takeCount; ++index) {
-            batch.push_back(std::move(pendingEvents_.front()));
-            pendingEvents_.pop_front();
+            batch.push_back(std::move(inbox_->events.front()));
+            inbox_->events.pop_front();
         }
     }
 
+    if (status) {
+        updateStatusText(*status);
+        updateButtonState();
+    }
     if (!batch.empty()) {
         appendEventsToView(std::move(batch));
     }
@@ -517,8 +611,8 @@ void EtwMonitorView::clearPendingEvents() {
     // - input: none;
     // - processing: discard queued rows that have not reached the ListView;
     // - return: none.  Historical rendered rows are cleared by the caller.
-    std::lock_guard<std::mutex> lock(pendingEventMutex_);
-    pendingEvents_.clear();
+    std::lock_guard<std::mutex> lock(inbox_->mutex);
+    inbox_->events.clear();
 }
 
 EtwMonitorView::ViewAnchor EtwMonitorView::captureViewAnchor() const {
@@ -753,9 +847,11 @@ void EtwMonitorView::updateStatusText(const std::wstring& text) {
 }
 
 void EtwMonitorView::updateButtonState() {
-    const BOOL running = controller_.running() ? TRUE : FALSE;
-    ::EnableWindow(startButton_, running ? FALSE : TRUE);
-    ::EnableWindow(stopButton_, running ? TRUE : FALSE);
+    const BOOL running = session_->controller.running() ? TRUE : FALSE;
+    ::EnableWindow(startButton_, !sessionRetired_ && !sessionControlPending_ && !running);
+    const bool retryStop = retirement_ && retirement_->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation;
+    ::EnableWindow(stopButton_, retryStop || (!sessionRetired_ && !sessionControlPending_ &&
+        (running || session_->controller.cleanupPending())));
 }
 
 int EtwMonitorView::iconIndexForProcessId(const std::uint32_t processId) {
@@ -1030,8 +1126,8 @@ void EtwMonitorView::showEventContextMenu(POINT screenPoint) {
     }
     HMENU sessionMenu = ::CreatePopupMenu();
     if (sessionMenu) {
-        ::AppendMenuW(sessionMenu, MF_STRING | (controller_.running() ? MF_GRAYED : 0U), kEtwMenuStart, L"开始");
-        ::AppendMenuW(sessionMenu, MF_STRING | (controller_.running() ? 0U : MF_GRAYED), kEtwMenuStop, L"停止");
+        ::AppendMenuW(sessionMenu, MF_STRING | (session_->controller.running() ? MF_GRAYED : 0U), kEtwMenuStart, L"开始");
+        ::AppendMenuW(sessionMenu, MF_STRING | ((session_->controller.running() || session_->controller.cleanupPending()) ? 0U : MF_GRAYED), kEtwMenuStop, L"停止");
         ::AppendMenuW(sessionMenu, MF_STRING, kEtwMenuFilter, L"筛选器...");
         ::AppendMenuW(sessionMenu, MF_SEPARATOR, 0, nullptr);
         ::AppendMenuW(sessionMenu, MF_STRING, kEtwMenuClear, L"清空列表");

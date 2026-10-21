@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -80,6 +81,15 @@ struct FilterSnapshot {
     std::vector<std::shared_ptr<const DebugRecordRow>> matches;
 };
 
+struct DebugControlLifetime final {
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::atomic_size_t pending{0};
+    std::atomic_bool retiring{false};
+    std::atomic_ulong stopError{0};
+    bool ownsCapture = false;
+};
+
 struct DriverDebugOutputViewState {
     HWND hwnd = nullptr;
     HWND startButton = nullptr;
@@ -106,6 +116,9 @@ struct DriverDebugOutputViewState {
     std::uint64_t nextSequence = 0;
     int contextColumn = 0;
     bool capturing = false;
+    std::shared_ptr<DebugControlLifetime> controlLifetime = std::make_shared<DebugControlLifetime>();
+    std::shared_ptr<Ksword::Ui::BackgroundCleanup> retirement;
+    bool retirementCancelled = false;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<ControlSnapshot>> controlTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<DrainSnapshot>> drainTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FilterSnapshot>> filterTask;
@@ -194,9 +207,11 @@ void SetStatus(DriverDebugOutputViewState& state, const std::wstring& text) {
 }
 
 void UpdateControls(DriverDebugOutputViewState& state) {
-    const bool controlBusy = state.controlTask && state.controlTask->running();
+    const bool controlBusy = state.controlLifetime->retiring.load() ||
+        (state.controlTask && state.controlTask->running());
     ::EnableWindow(state.startButton, !controlBusy && !state.capturing);
-    ::EnableWindow(state.stopButton, !controlBusy && state.capturing);
+    const bool retryStop = state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation;
+    ::EnableWindow(state.stopButton, retryStop || (!controlBusy && state.capturing));
     ::EnableWindow(state.queryButton, !controlBusy);
 }
 
@@ -389,13 +404,16 @@ void RequestDrain(DriverDebugOutputViewState& state) {
 }
 
 void RequestControl(DriverDebugOutputViewState& state, const unsigned long action, const std::uint64_t session) {
-    if (!state.controlTask) {
-        return;
-    }
+    if (!state.controlTask || state.controlTask->running() || state.controlLifetime->retiring.load()) return;
+    const auto lease = Ksword::Ui::TryAcceptBackgroundWork();
+    if (!lease) return;
+    const auto lifetime = state.controlLifetime;
+    const auto pending = Ksword::Ui::HoldPendingOperation(lifetime);
     const std::uint64_t requestId = ++state.controlRequestId;
     UpdateControls(state);
     state.controlTask->request(
-        [requestId, session, action] {
+        [requestId, session, action, lifetime, pending, lease] {
+            std::lock_guard lock(lifetime->mutex);
             ControlSnapshot snapshot{};
             snapshot.requestId = requestId;
             snapshot.captureSession = session;
@@ -409,6 +427,8 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
                 return snapshot;
             }
             snapshot.result = client.controlDebugOutput(handle, action);
+            if (snapshot.result.io.ok && action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_START) lifetime->ownsCapture = true;
+            if (snapshot.result.io.ok && action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP) lifetime->ownsCapture = false;
             return snapshot;
         },
         [&state](std::uint64_t, std::optional<ControlSnapshot>&& snapshot, std::exception_ptr error) {
@@ -418,6 +438,7 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
                 return;
             }
             const ControlSnapshot& completed = *snapshot;
+            if (state.controlLifetime->retiring.load()) { UpdateControls(state); return; }
             SetStatus(state, ControlStatusText(completed.result));
             if (completed.action == KSWORD_ARK_DEBUG_OUTPUT_ACTION_START && completed.result.io.ok &&
                 completed.captureSession == state.captureSession) {
@@ -435,7 +456,52 @@ void RequestControl(DriverDebugOutputViewState& state, const unsigned long actio
     UpdateControls(state);
 }
 
+void BeginRetirement(DriverDebugOutputViewState& state) {
+    if (state.controlLifetime->retiring.exchange(true, std::memory_order_acq_rel)) return;
+    ::KillTimer(state.hwnd, kDrainTimerId);
+    const auto lifetime = state.controlLifetime;
+    state.retirement = Ksword::Ui::RunBackgroundRetirement([lifetime] {
+        std::unique_lock lock(lifetime->mutex);
+        lifetime->idle.wait(lock, [&] { return lifetime->pending.load(std::memory_order_acquire) == 0; });
+        if (!lifetime->ownsCapture) return true;
+        const ksword::ark::DriverClient client;
+        auto handle = client.open();
+        if (!handle.isValid()) { lifetime->stopError.store(::GetLastError()); return false; }
+        const auto result = client.controlDebugOutput(handle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
+        lifetime->stopError.store(result.io.win32Error);
+        if (!result.io.ok) return false;
+        lifetime->ownsCapture = false;
+        return true;
+    });
+    SetStatus(state, L"正在停止采集；现有记录保留。 / Stopping; retained records remain available.");
+    UpdateControls(state);
+}
+
+bool PollRetirement(DriverDebugOutputViewState& state) {
+    if (!state.retirement) return true;
+    Ksword::Ui::BackgroundWorkRegistry::global().retry();
+    if (!state.retirement->complete()) {
+        if (state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+            SetStatus(state, L"R0 停止失败：Win32=" + std::to_wstring(state.controlLifetime->stopError.load()));
+        }
+        return false;
+    }
+    if ((state.controlTask && state.controlTask->running()) || (state.drainTask && state.drainTask->running())) return false;
+    state.capturing = false;
+    SetStatus(state, L"已停止本页采集。 / Capture stopped; start manually to resume.");
+    if (state.retirementCancelled) {
+        state.controlLifetime->retiring.store(false, std::memory_order_release);
+        state.retirementCancelled = false;
+        state.retirement.reset();
+        ::KillTimer(state.hwnd, kDrainTimerId);
+    }
+    UpdateControls(state);
+    return true;
+}
+
 void StartCapture(DriverDebugOutputViewState& state) {
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing() ||
+        !state.controlTask || state.controlTask->running()) return;
     if (state.capturing) {
         return;
     }
@@ -447,6 +513,12 @@ void StartCapture(DriverDebugOutputViewState& state) {
 }
 
 void StopCapture(DriverDebugOutputViewState& state) {
+    if (state.retirement && state.retirement->failure() == Ksword::Ui::BackgroundWorkRegistry::Failure::Operation) {
+        Ksword::Ui::BackgroundWorkRegistry::global().retry(true);
+        return;
+    }
+    if (state.controlLifetime->retiring.load() || Ksword::Ui::BackgroundWorkRegistry::global().closing() ||
+        !state.controlTask || state.controlTask->running()) return;
     ++state.captureSession;
     state.capturing = false;
     ::KillTimer(state.hwnd, kDrainTimerId);
@@ -582,7 +654,16 @@ bool RegisterViewClass() {
                 Layout(*state);
             }
             return 0;
+        case Ksword::Ui::kBeginNativeRetirementMessage:
+            if (state) { state->retirementCancelled = false; BeginRetirement(*state); }
+            return 0;
+        case Ksword::Ui::kPollNativeRetirementMessage:
+            return state && !PollRetirement(*state) ? 1 : 0;
+        case Ksword::Ui::kCancelNativeRetirementMessage:
+            if (state) { state->retirementCancelled = true; PollRetirement(*state); if (state->retirementCancelled) ::SetTimer(hwnd, kDrainTimerId, kDrainIntervalMs, nullptr); }
+            return 0;
         case WM_TIMER:
+            if (state && state->retirementCancelled) { PollRetirement(*state); return 0; }
             if (state && wParam == kDrainTimerId) {
                 RequestDrain(*state);
                 return 0;
@@ -656,15 +737,7 @@ bool RegisterViewClass() {
             break;
         case WM_NCDESTROY:
             if (state) {
-                if (state->capturing) {
-                    std::thread([] {
-                        ksword::ark::DriverClient client;
-                        ksword::ark::DriverHandle handle = client.open();
-                        if (handle.isValid()) {
-                            (void)client.controlDebugOutput(handle, KSWORD_ARK_DEBUG_OUTPUT_ACTION_STOP);
-                        }
-                    }).detach();
-                }
+                BeginRetirement(*state);
                 ++state->captureSession;
                 ::KillTimer(hwnd, kDrainTimerId);
                 if (state->controlTask) state->controlTask->cancel();
