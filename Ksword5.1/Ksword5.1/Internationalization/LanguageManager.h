@@ -138,7 +138,8 @@ namespace ks::i18n
         void observeRuntimeModel(QAbstractItemModel* model, QObject* owner);
         // Ordinary compatibility work is visible-only; true language switches
         // retain full source capture and complete hidden-page LanguageChange.
-        void applyRuntimeTranslations(QObject* object, bool visibleOnly = false);
+        void applyRuntimeTranslations(QObject* object, bool visibleOnly = false,
+            bool includeDescendants = true);
         // Binding registration updates only its declared property; language switches traverse the tree.
         void applyTextBinding(QObject* object) const;
         void applyBindings(QObject* object) const;

@@ -486,6 +486,55 @@ namespace
             std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &leaf) == 1
             && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &managed) == runtimeVisited.cend());
         leaf.removeEventFilter(&manager);
+
+        QObject child(&unknown);
+        QObject grandchild(&child);
+        unknown.installEventFilter(&manager);
+        drain();
+        runtimeVisited.clear();
+        QEvent update(QEvent::UpdateRequest);
+        QEvent layout(QEvent::LayoutRequest);
+        QCoreApplication::sendEvent(&unknown, &update);
+        QCoreApplication::sendEvent(&unknown, &layout);
+        drain();
+        requireTrue(QStringLiteral("window repaint and layout do not queue a compatibility subtree"), runtimeVisited.empty());
+        const QEvent::Type localEvents[]{QEvent::Paint, QEvent::Enter,
+            QEvent::ToolTip, QEvent::ToolTipChange, QEvent::WhatsThis,
+            QEvent::QueryWhatsThis, QEvent::WindowTitleChange};
+        for (const auto type : localEvents)
+        {
+            runtimeVisited.clear();
+            QEvent local(type);
+            QCoreApplication::sendEvent(&unknown, &local);
+            drain();
+            requireTrue(QStringLiteral("local event visits only its receiver"),
+                runtimeVisited.size() == 1 && runtimeVisited.front() == &unknown);
+        }
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&unknown);
+        QEvent paint(QEvent::Paint);
+        QCoreApplication::sendEvent(&unknown, &paint);
+        requireTrue(QStringLiteral("local paint retains an explicit subtree invalidation"),
+            unknown.property("ks_i18n_runtime_dirty_subtree").toBool()
+            && runtimeVisited.size() == 1 && runtimeVisited.front() == &unknown);
+        runtimeVisited.clear();
+        drain();
+        requireTrue(QStringLiteral("explicit invalidation still visits the complete unknown subtree"),
+            runtimeVisited.size() == 3
+            && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &grandchild) != runtimeVisited.cend()
+            && !unknown.property("ks_i18n_runtime_dirty_subtree").toBool());
+        manager.setRuntimeTranslationManaged(&unknown);
+        runtimeVisited.clear();
+        QCoreApplication::sendEvent(&unknown, &paint);
+        drain();
+        requireTrue(QStringLiteral("managed producer bypasses ordinary local paint"), runtimeVisited.empty());
+        manager.setRuntimeTranslationManaged(&unknown, false);
+        unknown.setProperty("ks_i18n_preserve_data_text", true);
+        runtimeVisited.clear();
+        QCoreApplication::sendEvent(&unknown, &paint);
+        drain();
+        requireTrue(QStringLiteral("canonical data boundary bypasses ordinary local paint"), runtimeVisited.empty());
+        unknown.removeEventFilter(&manager);
     }
 #endif
 

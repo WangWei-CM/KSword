@@ -3,6 +3,7 @@
 #include <QAbstractItemModel>
 #include <QAbstractProxyModel>
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
 #include <QAbstractButton>
 #include <QAction>
 #include <QActionEvent>
@@ -32,6 +33,7 @@
 #include <QScopedValueRollback>
 #include <QSet>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QSpinBox>
 #include <QTableView>
 #include <QTextEdit>
@@ -2477,8 +2479,8 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
         return QObject::eventFilter(watched, event);
     }
 
-    // Only relevant compatibility triggers inspect the ancestor path. Mouse,
-    // paint and timer events incur no subtree lookup or model traversal.
+    // No repaint/layout notification may schedule a window/subtree traversal.
+    // Widgets without text NOTIFY are checked at their own paint/help boundary.
     switch (event->type())
     {
     case QEvent::ChildAdded:
@@ -2486,8 +2488,13 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     case QEvent::PolishRequest:
     case QEvent::ActionAdded:
     case QEvent::ActionChanged:
-    case QEvent::LayoutRequest:
-    case QEvent::UpdateRequest:
+    case QEvent::Paint:
+    case QEvent::Enter:
+    case QEvent::ToolTip:
+    case QEvent::ToolTipChange:
+    case QEvent::WhatsThis:
+    case QEvent::QueryWhatsThis:
+    case QEvent::WindowTitleChange:
     {
         QObject* dirtyAncestor = nullptr;
         QObject* managedAncestor = runtimeManagedAncestor(watched, &dirtyAncestor);
@@ -2531,23 +2538,52 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
         scheduleRuntimeTranslation(actionEvent->action());
         break;
     }
-    case QEvent::LayoutRequest:
-    case QEvent::UpdateRequest:
+    case QEvent::Paint:
+    case QEvent::Enter:
+    case QEvent::ToolTip:
+    case QEvent::ToolTipChange:
+    case QEvent::WhatsThis:
+    case QEvent::QueryWhatsThis:
+    case QEvent::WindowTitleChange:
     {
-        QObject* targetObject = watched;
-        if (qobject_cast<QHeaderView*>(watched) != nullptr)
+        const QPointer<QObject> guardedWatched(watched);
+        // Keep the existing per-object translation rules and model/root stamps,
+        // but never visit children for ordinary drawing, hover or help events.
+        applyRuntimeTranslations(watched, true, false);
+        if (!guardedWatched) return true;
+        auto* widget = qobject_cast<QWidget*>(watched);
+        auto* parentWidget = widget != nullptr ? widget->parentWidget() : nullptr;
+        QWidget* ownerWidget = nullptr;
+        if (auto* area = qobject_cast<QAbstractScrollArea*>(parentWidget);
+            area != nullptr && area->viewport() == widget)
         {
-            QObject* parentObject = watched->parent();
-            while (parentObject != nullptr && qobject_cast<QAbstractItemView*>(parentObject) == nullptr)
+            // A viewport paints on behalf of its view/editor. This also notices
+            // a new rootModelIndex without rescanning any sibling view/model.
+            ownerWidget = area;
+        }
+        else if (qobject_cast<QTabBar*>(watched) != nullptr
+            && qobject_cast<QTabWidget*>(parentWidget) != nullptr)
+            ownerWidget = parentWidget;
+        else if (qobject_cast<QLineEdit*>(watched) != nullptr
+            && (qobject_cast<QSpinBox*>(parentWidget) != nullptr
+                || qobject_cast<QDoubleSpinBox*>(parentWidget) != nullptr
+                || qobject_cast<QComboBox*>(parentWidget) != nullptr))
+            ownerWidget = parentWidget;
+        if (ownerWidget != nullptr && runtimeManagedAncestor(ownerWidget) == nullptr)
+        {
+            const QPointer<QWidget> ownerGuard(ownerWidget);
+            applyRuntimeTranslations(ownerWidget, true, false);
+            if (!guardedWatched) return true;
+            // Header viewport -> header -> canonical table/tree, still no
+            // recursive walk and still the same model-data preservation policy.
+            if (ownerGuard && qobject_cast<QHeaderView*>(ownerGuard.data()) != nullptr)
             {
-                parentObject = parentObject->parent();
-            }
-            if (parentObject != nullptr)
-            {
-                targetObject = parentObject;
+                auto* view = qobject_cast<QAbstractItemView*>(ownerGuard->parentWidget());
+                if (view != nullptr && runtimeManagedAncestor(view) == nullptr)
+                    applyRuntimeTranslations(view, true, false);
             }
         }
-        scheduleRuntimeTranslation(targetObject);
+        if (!guardedWatched) return true;
         break;
     }
     default:
@@ -2620,7 +2656,8 @@ void ks::i18n::LanguageManager::observeRuntimeModel(QAbstractItemModel* model, Q
     if (!owners.contains(QPointer<QObject>(owner))) owners.append(QPointer<QObject>(owner));
 }
 
-void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const bool visibleOnly)
+void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const bool visibleOnly,
+    const bool includeDescendants)
 {
     if (object == nullptr || m_applyingRuntimeTranslations)
     {
@@ -2642,11 +2679,10 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const 
     QScopedValueRollback<bool> translationGuard(m_applyingRuntimeTranslations, true);
     QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedModelRoots;
     QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedHeaderRoots;
-    std::function<void(QAbstractItemModel*, const QModelIndex&, int&)> translateModelItems;
-    translateModelItems = [this, &translateModelItems](
+    const auto translateModelItems = [this](auto&& translateModelItems,
                               QAbstractItemModel* model,
                               const QModelIndex& parentIndex,
-                              int& remainingIndexBudget) {
+                              int& remainingIndexBudget) -> void {
         if (model == nullptr || remainingIndexBudget <= 0)
         {
             return;
@@ -2706,13 +2742,14 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const 
             const QModelIndex childParent = model->index(row, 0, parentIndex);
             if (childParent.isValid() && model->hasChildren(childParent))
             {
-                translateModelItems(model, childParent, remainingIndexBudget);
+                translateModelItems(translateModelItems, model, childParent, remainingIndexBudget);
             }
         }
     };
 
-    std::function<void(QObject*)> visitObject;
-    visitObject = [this, visibleOnly, languageGeneration, &translateModelItems, &translatedModelRoots, &translatedHeaderRoots, &visitObject](QObject* currentObject) {
+    const auto visitObject = [this, visibleOnly, includeDescendants, languageGeneration,
+        &translateModelItems, &translatedModelRoots, &translatedHeaderRoots]
+        (auto&& visitObject, QObject* currentObject) -> void {
         if (currentObject == nullptr || currentObject->property("ks_i18n_preserve_data_text").toBool())
         {
             return;
@@ -2731,7 +2768,8 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const 
                 return;
             }
         }
-        if (explicitlyDirty) currentObject->setProperty(kRuntimeDirtyProperty, QVariant());
+        if (explicitlyDirty && includeDescendants)
+            currentObject->setProperty(kRuntimeDirtyProperty, QVariant());
 
         if (QAction* action = qobject_cast<QAction*>(currentObject))
         {
@@ -3084,13 +3122,14 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const 
                 {
                     translatedModelRoots[model].insert(rootIndex);
                     int remainingIndexBudget = 50000;
-                    translateModelItems(model, itemView->rootIndex(), remainingIndexBudget);
+                    translateModelItems(translateModelItems, model, itemView->rootIndex(), remainingIndexBudget);
                     if (modelState.revision == itemStamp.second)
                         modelState.itemRoots.insert(rootIndex, itemStamp);
                 }
             }
         }
 
+        if (!includeDescendants) return;
         const QObjectList childList = currentObject->children();
         for (QObject* childObject : childList)
         {
@@ -3098,11 +3137,11 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const 
             // entry and the top-level language broadcast, never via its owner.
             const auto* childWidget = qobject_cast<const QWidget*>(childObject);
             if (childWidget != nullptr && childWidget->isWindow()) continue;
-            visitObject(childObject);
+            visitObject(visitObject, childObject);
         }
     };
 
-    visitObject(object);
+    visitObject(visitObject, object);
 }
 
 void ks::i18n::LanguageManager::applyTextBinding(QObject* object) const
