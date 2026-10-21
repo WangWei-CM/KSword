@@ -5,6 +5,7 @@
 #include "ProcessColumns.h"
 
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,7 @@ public:
     // the model; processing rebuilds both friendly and detail display rows; no
     // value is returned.
     void setRows(std::vector<ProcessSnapshotRow> rows);
+    void setSharedRows(std::shared_ptr<const std::vector<ProcessSnapshotRow>> rows);
 
     // rows returns the raw snapshot rows. There is no input; output is a const
     // reference valid until the next setRows call.
@@ -83,18 +85,19 @@ public:
 
 private:
     void rebuildDisplayRows();
-    void appendGroupRows(ProcessFriendlyGroup group, const std::vector<std::size_t>& sortedIndexes);
+    void appendGroupRows(ProcessFriendlyGroup group,const std::vector<std::size_t>& sortedIndexes,
+        const std::vector<std::wstring>& names,const std::vector<ProcessFriendlyGroup>& groups);
     void appendTreeRows(ProcessFriendlyGroup group,
         std::size_t sourceIndex,
         int depth,
         const std::vector<std::vector<std::size_t>>& childrenBySourceIndex,
         std::vector<bool>& emitted);
-    static ProcessFriendlyGroup classifyRow(const ProcessSnapshotRow& row);
+    static ProcessFriendlyGroup classifyRow(const ProcessSnapshotRow& row,const std::wstring& name);
     std::wstring groupTitle(ProcessFriendlyGroup group, int count) const;
     static std::size_t groupIndex(ProcessFriendlyGroup group);
 
 private:
-    std::vector<ProcessSnapshotRow> rows_;
+    std::shared_ptr<const std::vector<ProcessSnapshotRow>> rows_=std::make_shared<const std::vector<ProcessSnapshotRow>>();
     std::vector<ProcessDisplayRow> friendlyRows_;
     std::vector<ProcessDisplayRow> detailRows_;
     std::array<bool, 3> collapsedGroups_{ false, false, false };
