@@ -72,6 +72,17 @@
 #include <thread>
 #include <utility>
 
+namespace {
+const ks::ui::PageNavigationTabDefinition kApplicationControlPageNavigation[] = {
+    {"applocker", "", "", "AppLocker", true},
+    {"wdac", "", "", "WDAC / Code Integrity", false},
+    {"defender", "", "", "Defender / ASR", false},
+    {"platform", "", "", "平台安全", false},
+    {"events", "", "", "事件日志", false},
+    {"file", "", "", "文件诊断", false}
+};
+}
+
 namespace
 {
     // The model retains an immutable typed snapshot, never one item per cell.
@@ -819,12 +830,12 @@ namespace ks::misc
         m_eventPage = buildEventLogPage();
         m_fileDiagnosisPage = buildFileDiagnosisPage();
 
-        m_tabWidget->addTab(m_appLockerPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("AppLocker"));
-        m_tabWidget->addTab(m_wdacPage, QIcon(QStringLiteral(":/Icon/disk_storage.svg")), QStringLiteral("WDAC / Code Integrity"));
-        m_tabWidget->addTab(m_defenderPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("Defender / ASR"));
-        m_tabWidget->addTab(m_platformPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("平台安全"));
-        m_tabWidget->addTab(m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("事件日志"));
-        m_tabWidget->addTab(m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")), QStringLiteral("文件诊断"));
+        m_navigationTabs.add(kApplicationControlPageNavigation[0], m_tabWidget, m_appLockerPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[1], m_tabWidget, m_wdacPage, QIcon(QStringLiteral(":/Icon/disk_storage.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[2], m_tabWidget, m_defenderPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[3], m_tabWidget, m_platformPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[4], m_tabWidget, m_eventPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
+        m_navigationTabs.add(kApplicationControlPageNavigation[5], m_tabWidget, m_fileDiagnosisPage, QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
         // 明确登记本页的普通操作，不改策略权限、启用状态与写入确认。
         for (QPushButton* button : { m_refreshButton, m_exportButton, m_appLockerEditButton,
@@ -3819,3 +3830,17 @@ namespace ks::misc
         }
     }
 }
+
+ks::ui::PageNavigationCatalog ks::misc::ApplicationControlPage::navigationCatalog(const ApplicationControlPage* existing)
+{
+    ks::ui::PageNavigationCatalog schema;
+    for (const auto& definition : kApplicationControlPageNavigation)
+        schema.append(ks::ui::PageNavigationTabDescriptor(definition));
+    return existing ? existing->m_navigationTabs.describe(std::move(schema)) : schema;
+}
+QWidget* ks::misc::ApplicationControlPage::activateNavigationDescriptor(const QString& id)
+{
+    return m_navigationTabs.activate(id, navigationCatalog(this));
+}
+namespace { const bool kApplicationControlPageNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<ks::misc::ApplicationControlPage>(QStringLiteral("misc.app_control")); }

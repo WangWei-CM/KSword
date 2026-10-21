@@ -12,6 +12,7 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include "../UI/PageNavigationTabCatalog.h"
 #include <QPointer>
 class QProgressDialog;
 
@@ -47,6 +48,9 @@ namespace ks::misc
     class ApplicationControlPage final : public QWidget
     {
     public:
+        static ks::ui::PageNavigationCatalog navigationCatalog(const ApplicationControlPage* existing = nullptr);
+        QWidget* activateNavigationDescriptor(const QString& id);
+
         // 构造函数：
         // - parent 为 Qt 父控件；
         // - 创建 UI 并立即发起一次后台刷新。
@@ -62,6 +66,8 @@ namespace ks::misc
         void changeEvent(QEvent* event) override;
 
     private:
+        ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
         ks::ui::FieldDocument m_eventSummaryDocument;
         // AppLockerRuleRecord：AppLocker 规则行的只读展示模型。
         struct AppLockerRuleRecord
