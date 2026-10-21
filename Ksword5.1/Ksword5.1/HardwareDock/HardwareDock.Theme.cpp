@@ -21,6 +21,7 @@ void HardwareDock::scheduleUtilizationThemeRefresh()
 
 void HardwareDock::refreshUtilizationThemeColors()
 {
+    ++m_utilizationMirrorThemeRevision;
     using Role = KswordTheme::PerformanceRole;
     // 所有性能卡按设备身份重算边框与单双曲线角色，不清空采样历史或改变选中状态。
     for (const UtilizationNavEntry& entry : m_utilizationNavEntries)
@@ -140,6 +141,7 @@ void HardwareDock::refreshUtilizationChartThemeColors(const QPalette* const floa
 void HardwareDock::prepareNewUtilizationChartTheme(QChartView* const view,
     const KswordTheme::PerformanceRole primaryRole, const KswordTheme::PerformanceRole secondaryRole)
 {
+    if (view != nullptr) ++m_utilizationMirrorStructureRevision;
     QWidget* const page = m_utilizationFloatingPage.data();
     QWidget* const window = m_utilizationFloatingWindow.data();
     if (view == nullptr || page == nullptr || window == nullptr

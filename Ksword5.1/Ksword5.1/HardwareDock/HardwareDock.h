@@ -666,6 +666,8 @@ private:
     std::vector<FloatingWidgetStyleState> m_utilizationFloatingWidgetStyles;
     std::vector<FloatingLayoutStyleState> m_utilizationFloatingLayoutStyles;
     double m_utilizationFloatingAppliedContentScale = 1.0;
+    quint64 m_utilizationMirrorStructureRevision = 0;
+    quint64 m_utilizationMirrorThemeRevision = 0;
     bool m_utilizationThemeRefreshScheduled = false; // 合并 palette 事件，禁止同步 repolish 重入。
     QSize m_utilizationFloatingBaseSize;
     int m_utilizationFloatingScalePercent = 100;

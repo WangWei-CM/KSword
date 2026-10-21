@@ -54,6 +54,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QHash>
+#include <QHideEvent>
 #include <QHeaderView>
 #include <QIcon>
 #include <QKeyEvent>
@@ -99,6 +100,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -3551,69 +3553,96 @@ namespace
         };
         using WidgetStyleLookup = std::function<WidgetStyle(const QWidget*)>;
         using LayoutStyleLookup = std::function<LayoutStyle(const QLayout*)>;
+        using Revision = std::array<quint64, 3>; // sample, structure, theme
+        using RevisionLookup = std::function<Revision()>;
 
         UtilizationFollowMirror(QWidget* source, QWidget* parent,
-            WidgetStyleLookup widgetStyle, LayoutStyleLookup layoutStyle)
+            WidgetStyleLookup widgetStyle, LayoutStyleLookup layoutStyle,
+            RevisionLookup revisionLookup)
             : QWidget(parent), m_source(source), m_widgetStyle(std::move(widgetStyle)),
-              m_layoutStyle(std::move(layoutStyle))
+              m_layoutStyle(std::move(layoutStyle)), m_revisionLookup(std::move(revisionLookup))
         {
             setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
             auto* const layout = new QVBoxLayout(this);
             layout->setContentsMargins(0, 0, 0, 0);
             layout->setSpacing(0);
-            rebuild();
         }
 
         void synchronize()
         {
             QWidget* const source = m_source.data();
-            if (source == nullptr) return;
-            int sourceChartCount = dynamic_cast<QChartView*>(source) != nullptr ? 1 : 0;
-            for (QWidget* const child : source->findChildren<QWidget*>())
-                if (dynamic_cast<QChartView*>(child) != nullptr) ++sourceChartCount;
-            if (m_sidebarSource == nullptr && sourceChartCount != m_charts.size())
-            {
-                rebuild();
-            }
+            if (source == nullptr || !m_mapped) return;
+            const Revision revision = m_revisionLookup();
+            // Geometry/Z-order follows independently; only changed canonical data is projected.
+            const bool rebuildNeeded = !m_built || revision[1] != m_presented[1]
+                || revision[2] != m_presented[2];
+            if (rebuildNeeded) rebuild();
+            const bool copyData = m_dirty || rebuildNeeded || revision[0] != m_presented[0];
             for (const auto& [from, to] : m_labels)
             {
                 if (from != nullptr && to != nullptr && to->text() != from->text())
                     to->setText(from->text());
             }
-            for (const auto& [from, to] : m_memories)
+            if (copyData)
             {
-                if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
+                for (const auto& [from, to] : m_memories)
+                    if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
             }
             for (const ChartCopy& chart : m_charts)
             {
                 if (chart.from == nullptr || chart.to == nullptr) continue;
-                for (const auto& [from, to] : chart.lines)
+                if (copyData)
                 {
-                    if (from != nullptr && to != nullptr)
+                    for (const auto& [from, to] : chart.lines)
                     {
+                        if (from == nullptr || to == nullptr) continue;
                         ks::ui::MetricChartBinding::MirrorSeries(from, to);
-                        to->setPen(from->pen());
+                        if (to->pen() != from->pen()) to->setPen(from->pen());
+                    }
+                    for (const auto& [from, to] : chart.barSets)
+                    {
+                        if (from == nullptr || to == nullptr) continue;
+                        const QVector<qreal> values = from->values();
+                        const QVector<qreal> oldValues = to->values();
+                        for (int index = 0; index < values.size(); ++index)
+                        {
+                            if (index >= to->count()) to->append(values[index]);
+                            else if (oldValues[index] != values[index]) to->replace(index, values[index]);
+                        }
                     }
                 }
+                // Axis tweens can progress between samples; keep their live range without replacing history.
                 for (const auto& [from, to] : chart.axes)
                 {
-                    if (from != nullptr && to != nullptr) to->setRange(from->min(), from->max());
+                    if (from != nullptr && to != nullptr
+                        && (to->min() != from->min() || to->max() != from->max()))
+                        to->setRange(from->min(), from->max());
                 }
-                for (const auto& [from, to] : chart.barSets)
-                {
-                    if (from == nullptr || to == nullptr) continue;
-                    const QVector<qreal> values = from->values();
-                    for (int index = 0; index < values.size(); ++index)
-                    {
-                        if (index < to->count()) to->replace(index, values[index]);
-                        else to->append(values[index]);
-                    }
-                }
-                chart.to->chart()->setTitle(chart.from->chart()->title());
-                chart.to->chart()->setTitleBrush(QBrush(KswordTheme::TextPrimaryColor()));
-                chart.to->chart()->legend()->setLabelColor(KswordTheme::TextSecondaryColor());
+                if (chart.to->chart()->title() != chart.from->chart()->title())
+                    chart.to->chart()->setTitle(chart.from->chart()->title());
             }
-            synchronizeSidebar();
+            synchronizeSidebar(copyData);
+            m_presented = revision;
+            m_dirty = false;
+        }
+
+    protected:
+        void showEvent(QShowEvent* event) override
+        {
+            m_mapped = true;
+            m_dirty = true;
+            synchronize(); // prepare the current canonical snapshot before first paint
+            QWidget::showEvent(event);
+        }
+
+        void hideEvent(QHideEvent* event) override
+        {
+            m_mapped = false;
+            m_dirty = true;
+            // Only the mirror's bounded animations stop; source sampling/history is untouched.
+            for (QVariantAnimation* const animation : findChildren<QVariantAnimation*>())
+                animation->stop();
+            QWidget::hideEvent(event);
         }
 
     private:
@@ -3878,11 +3907,13 @@ namespace
             return to;
         }
 
-        void synchronizeSidebar()
+        void synchronizeSidebar(const bool copyData)
         {
             QListWidget* const source = m_sidebarSource.data();
             QListWidget* const copy = m_sidebarCopy.data();
             if (source == nullptr || copy == nullptr) return;
+            const bool selectionChanged = copy->currentRow() != source->currentRow();
+            if (!copyData && !selectionChanged) return;
             while (copy->count() < source->count())
             {
                 auto* const item = new QListWidgetItem();
@@ -3898,7 +3929,11 @@ namespace
                     source->itemWidget(source->item(row)));
                 auto* const to = dynamic_cast<PerformanceNavCard*>(
                     copy->itemWidget(copy->item(row)));
-                if (from != nullptr && to != nullptr) to->copyDisplayFrom(*from);
+                if (from != nullptr && to != nullptr)
+                {
+                    if (copyData) to->copyDisplayFrom(*from);
+                    else to->setSelectedState(row == source->currentRow());
+                }
             }
             if (copy->currentRow() != source->currentRow()) copy->setCurrentRow(source->currentRow());
         }
@@ -3919,12 +3954,17 @@ namespace
             m_sidebarSource = nullptr;
             m_sidebarCopy = nullptr;
             layout->addWidget(cloneWidget(source, this));
-            synchronizeSidebar();
+            m_built = true;
         }
 
         QPointer<QWidget> m_source;
         WidgetStyleLookup m_widgetStyle;
         LayoutStyleLookup m_layoutStyle;
+        RevisionLookup m_revisionLookup;
+        Revision m_presented{};
+        bool m_built = false;
+        bool m_mapped = false;
+        bool m_dirty = true;
         std::vector<std::pair<QPointer<QLabel>, QPointer<QLabel>>> m_labels;
         std::vector<std::pair<QPointer<MemoryCompositionHistoryWidget>,
             QPointer<MemoryCompositionHistoryWidget>>> m_memories;
@@ -3938,6 +3978,27 @@ namespace
     HWND utilizationFollowHookTarget = nullptr;
     HWND utilizationFollowFloatHandle = nullptr;
     std::function<void(DWORD)> utilizationFollowCallback;
+    quint64 utilizationFollowCallbackGeneration = 0;
+    bool utilizationFollowCallbackQueued = false;
+    bool utilizationFollowDestroyPending = false;
+
+    void queueUtilizationFollowCallback(const DWORD event)
+    {
+        if (!utilizationFollowCallback) return;
+        utilizationFollowDestroyPending |= event == EVENT_OBJECT_DESTROY;
+        if (utilizationFollowCallbackQueued) return;
+        utilizationFollowCallbackQueued = true;
+        const quint64 generation = utilizationFollowCallbackGeneration;
+        QTimer::singleShot(0, qApp, [generation]() {
+            if (generation != utilizationFollowCallbackGeneration) return;
+            utilizationFollowCallbackQueued = false;
+            const DWORD event = utilizationFollowDestroyPending
+                ? EVENT_OBJECT_DESTROY : EVENT_OBJECT_LOCATIONCHANGE;
+            utilizationFollowDestroyPending = false;
+            const auto callback = utilizationFollowCallback;
+            if (callback) callback(event);
+        });
+    }
 
     void utilizationRaiseFloatWithTarget()
     {
@@ -3974,8 +4035,7 @@ namespace
         {
             if (event == EVENT_OBJECT_REORDER || event == EVENT_OBJECT_SHOW)
                 utilizationRaiseFloatWithTarget();
-            const auto callback = utilizationFollowCallback;
-            QTimer::singleShot(0, qApp, [callback, event]() { callback(event); });
+            queueUtilizationFollowCallback(event);
         }
     }
 
@@ -3986,8 +4046,7 @@ namespace
         {
             if (foreground == utilizationFollowHookTarget)
                 utilizationRaiseFloatWithTarget();
-            const auto callback = utilizationFollowCallback;
-            QTimer::singleShot(0, qApp, [callback]() { callback(EVENT_SYSTEM_FOREGROUND); });
+            queueUtilizationFollowCallback(EVENT_SYSTEM_FOREGROUND);
         }
     }
 
@@ -5287,7 +5346,10 @@ void HardwareDock::attachUtilizationWindow(void* targetWindow, const bool restor
         m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar
             ? static_cast<QWidget*>(m_utilizationBodySplitter)
             : static_cast<QWidget*>(m_utilizationDetailStack),
-        originalWidgetStyle, originalLayoutStyle);
+        originalWidgetStyle, originalLayoutStyle, [this]() {
+            return UtilizationFollowMirror::Revision{ static_cast<quint64>(m_sampleCounter),
+                m_utilizationMirrorStructureRevision, m_utilizationMirrorThemeRevision };
+        });
     mirror->setFont(m_utilizationBorrowedFont);
     m_utilizationFollowMirror = mirror;
     if (m_utilizationFloatingMode == UtilizationFloatingMode::Sidebar)
@@ -5351,6 +5413,9 @@ void HardwareDock::clearUtilizationFollowHooks()
     utilizationFollowHookTarget = nullptr;
     utilizationFollowFloatHandle = nullptr;
     utilizationFollowCallback = {};
+    ++utilizationFollowCallbackGeneration;
+    utilizationFollowCallbackQueued = false;
+    utilizationFollowDestroyPending = false;
     if (m_utilizationFollowTimer != nullptr) m_utilizationFollowTimer->stop();
 }
 
@@ -7858,6 +7923,7 @@ void HardwareDock::relayoutVirtualNetworkTiles()
         m_virtualNetworkGrid->addWidget(tiles[static_cast<std::size_t>(index)],
             index / columns, index % columns);
     }
+    ++m_utilizationMirrorStructureRevision;
     m_virtualNetworkColumnCount = columns;
     m_virtualNetworkTileCount = static_cast<int>(tiles.size());
     m_virtualNetworkGrid->setColumnStretch(0, 1);
