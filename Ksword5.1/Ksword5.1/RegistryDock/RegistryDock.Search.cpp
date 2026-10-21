@@ -1,6 +1,8 @@
 #include "RegistryDock.h"
 #include "RegistryWorkbenchAccess.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncOperation.h"
+#include "../UI/AsyncCleanupRegistry.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -18,8 +20,6 @@
 void RegistryDock::startSearchAsync()
 {
     if (m_searchRunning.load()) return;
-    if (m_searchThread && m_searchThread->joinable()) m_searchThread->join();
-    m_searchThread.reset();
     QString keyword = m_searchEdit->text();
     if (keyword.isEmpty()) return;
     SearchOptions options;
@@ -52,71 +52,88 @@ void RegistryDock::startSearchAsync()
             QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKEY_USERS"), QStringLiteral("HKEY_CURRENT_CONFIG")};
     else roots.append(m_currentPath);
     const bool r0 = shouldUseRegistryR0();
+    auto session = std::make_shared<SearchSession>();
+    session->generation = options.generation;
+    auto lease = ks::ui::AsyncCleanupRegistry::global().acquire([session]() { session->stopping.store(true); });
+    if (!lease) { updateStatusBar(QStringLiteral("宿主正在关闭，注册表搜索未提交。")); return; }
+    auto retired = std::move(m_searchSession);
+    if (retired) QThreadPool::globalInstance()->start([retired]() {});
+    m_searchSession = session;
     m_searchRunning.store(true);
-    m_searchStopFlag.store(false);
     m_searchSkipped.store(0);
     m_searchDropped.store(0);
     m_searchScannedKeys = 0;
     m_searchHitCount = 0;
     m_lastSearchStopped = false;
-    { std::lock_guard<std::mutex> lock(m_pendingMutex); m_pendingRows.clear(); }
+    m_lastSearchFailed = false;
     m_searchResultTable->setRowCount(0);
     m_rightTabWidget->setCurrentWidget(m_searchResultTable);
     m_searchButton->setEnabled(false);
     m_stopSearchButton->setEnabled(true);
     m_searchFlushTimer->start();
-    if (m_progressPid == 0) m_progressPid = kPro.addReusable(this, "注册表", "搜索");
+    m_progressPid = kPro.add(this, "注册表", "搜索");
+    session->progressPid = m_progressPid;
     kPro.set(m_progressPid, "搜索中", 0, 0.0f);
-    const QPointer<RegistryDock> guarded(this);
-    const auto dispatcher = m_uiDispatcher;
-    m_searchThread = std::make_unique<std::thread>([this, guarded, dispatcher, roots, keyword, options, r0]() {
-        std::size_t scanned = 0, hits = 0;
-        for (const auto& root : roots)
-        {
-            if (m_searchStopFlag.load()) break;
-            const bool useR0 = r0 && root != QStringLiteral("HKEY_CLASSES_ROOT")
-                && !root.startsWith(QStringLiteral("HKEY_CLASSES_ROOT\\"), Qt::CaseInsensitive);
-            searchRegistryPath(root, useR0, keyword, options, &scanned, &hits);
-        }
-        dispatcher->post([guarded, scanned, hits, generation = options.generation]() {
-            if (!guarded || guarded->m_searchGeneration != generation) return;
-            guarded->m_lastSearchStopped = guarded->m_searchStopFlag.load();
-            if (guarded->m_searchThread && guarded->m_searchThread->joinable()) guarded->m_searchThread->join();
-            guarded->m_searchThread.reset();
-            guarded->m_searchRunning.store(false);
-            guarded->m_searchStopFlag.store(false);
-            guarded->m_searchScannedKeys = scanned;
-            guarded->m_searchHitCount = hits;
-            guarded->m_searchButton->setEnabled(true);
-            guarded->m_stopSearchButton->setEnabled(false);
-            guarded->flushPendingSearchRows();
-            kPro.set(guarded->m_progressPid, guarded->m_lastSearchStopped ? "搜索停止" : "搜索完成", 0, 100.0f);
+    struct Request {
+        QStringList roots; QString keyword; SearchOptions options; bool r0;
+        std::shared_ptr<SearchSession> session;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> lease;
+    } request{roots, keyword, options, r0, session, std::move(lease)};
+    struct Result {};
+    const auto ticket = m_searchOperation->submit<Request, Result>(std::move(request),
+        [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+            const auto shouldStop = [&]() { return token.isCanceled() || input.session->stopping.load(); };
+            std::size_t scanned = 0, hits = 0;
+            auto terminal = SearchSession::State::Complete;
+            try
+            {
+                for (const auto& root : input.roots)
+                {
+                    if (shouldStop()) break;
+                    const bool useR0 = input.r0 && root != QStringLiteral("HKEY_CLASSES_ROOT")
+                        && !root.startsWith(QStringLiteral("HKEY_CLASSES_ROOT\\"), Qt::CaseInsensitive);
+                    searchRegistryPath(root, useR0, input.keyword, input.options, input.session, shouldStop, &scanned, &hits);
+                }
+                terminal = shouldStop() ? SearchSession::State::Stopped : SearchSession::State::Complete;
+            }
+            catch (...) { terminal = SearchSession::State::Failed; }
+            input.session->scanned.store(scanned);
+            input.session->hits.store(hits);
+            input.session->state.store(terminal);
+            return Result{};
+        },
+        [this](const Result&, std::uint64_t) { flushPendingSearchRows(); return true; },
+        [this, session](std::exception_ptr) { session->state.store(SearchSession::State::Failed); flushPendingSearchRows(); },
+        [pid = session->progressPid](const ks::ui::AsyncOperationOutcome outcome) {
+            if (outcome == ks::ui::AsyncOperationOutcome::Canceled || outcome == ks::ui::AsyncOperationOutcome::OwnerClosed)
+                kPro.set(pid, "搜索停止", 0, 100.0f);
         });
-    });
+    if (!ticket) { session->state.store(SearchSession::State::Failed); flushPendingSearchRows(); }
 }
 
 void RegistryDock::searchRegistryPath(const QString& start, bool useR0, const QString& keyword,
-    const SearchOptions& options, std::size_t* scanned, std::size_t* hits)
+    const SearchOptions& options, const std::shared_ptr<SearchSession>& session,
+    const std::function<bool()>& shouldStop, std::size_t* scanned, std::size_t* hits)
 {
     struct Location { QString path; int depth; };
     QVector<Location> stack{{start, 0}};
-    QElapsedTimer progress;
-    progress.start();
     const auto sensitivity = options.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
     const auto matches = [&](const QString& text) {
         return options.exactMatch ? text.compare(keyword, sensitivity) == 0 : text.contains(keyword, sensitivity);
     };
     const RegistryAccessContext context{options.viewBits, useR0};
-    while (!stack.isEmpty() && !m_searchStopFlag.load())
+    while (!stack.isEmpty() && !shouldStop())
     {
         const Location location = stack.takeLast();
-        if (location.depth > options.maximumDepth) { ++m_searchSkipped; continue; }
+        if (location.depth > options.maximumDepth) { ++session->skipped; continue; }
         RegistryKeyListing listing;
         QString error;
         if (!RegistryWorkbenchAccess::enumerate(location.path, context, &listing, &error, options.recursive))
-        { ++m_searchSkipped; continue; }
+        { ++session->skipped; continue; }
+        if (shouldStop()) break;
         ++*scanned;
-        if (!listing.complete) ++m_searchSkipped;
+        session->scanned.store(*scanned);
+        if (!listing.complete) ++session->skipped;
         const QString keyName = location.path.mid(location.path.lastIndexOf(QLatin1Char('\\')) + 1);
         if (options.searchKeyName && options.valueType < 0 && matches(keyName))
         {
@@ -125,11 +142,11 @@ void RegistryDock::searchRegistryPath(const QString& start, bool useR0, const QS
             row.useR0 = context.useR0;
             row.keyPathText = location.path; row.valueNameText = QStringLiteral("<Key>");
             row.valueTypeText = QStringLiteral("<Key>"); row.hitSourceText = QStringLiteral("KeyName");
-            row.isKeyResult = true; enqueuePendingSearchRow(std::move(row)); ++*hits;
+            row.isKeyResult = true; enqueuePendingSearchRow(session, std::move(row)); ++*hits; session->hits.store(*hits);
         }
         for (auto value : listing.values)
         {
-            if (m_searchStopFlag.load()) break;
+            if (shouldStop()) break;
             if (options.valueType >= 0 && value.type != static_cast<quint32>(options.valueType)) continue;
             bool matched = options.searchValueName && matches(value.name);
             QString source = matched ? QStringLiteral("ValueName") : QString();
@@ -139,14 +156,15 @@ void RegistryDock::searchRegistryPath(const QString& start, bool useR0, const QS
                 {
                     RegistryValueState full;
                     if (!RegistryWorkbenchAccess::read(location.path, value.name, context, &full, &error) || !full.exists || !full.complete)
-                    { ++m_searchSkipped; continue; }
+                    { ++session->skipped; continue; }
+                    if (shouldStop()) break;
                     value = std::move(full);
                 }
                 if (!options.binaryPattern.isEmpty())
                     matched = options.exactMatch ? value.data == options.binaryPattern : value.data.contains(options.binaryPattern);
                 else if (value.type == REG_SZ || value.type == REG_EXPAND_SZ || value.type == REG_MULTI_SZ)
                 {
-                    if ((value.data.size() % 2) != 0) { ++m_searchSkipped; continue; }
+                    if ((value.data.size() % 2) != 0) { ++session->skipped; continue; }
                     const QString dataText = QString::fromUtf16(reinterpret_cast<const char16_t*>(value.data.constData()), value.data.size() / 2);
                     if (options.exactMatch)
                     {
@@ -168,36 +186,13 @@ void RegistryDock::searchRegistryPath(const QString& start, bool useR0, const QS
             row.valueDataPreviewText = formatValueData(value.type, value.data);
             if (!value.complete) row.valueDataPreviewText += QStringLiteral(" <数据摘要不完整>");
             row.hitSourceText = source + (useR0 ? QStringLiteral(" / R0") : QStringLiteral(" / Win32"));
-            enqueuePendingSearchRow(std::move(row)); ++*hits;
+            enqueuePendingSearchRow(session, std::move(row)); ++*hits; session->hits.store(*hits);
         }
         if (options.recursive)
             for (auto it = listing.subKeys.crbegin(); it != listing.subKeys.crend(); ++it)
             {
-                if (stack.size() >= 100000) { ++m_searchSkipped; break; }
+                if (stack.size() >= 100000) { ++session->skipped; break; }
                 stack.push_back({location.path + QLatin1Char('\\') + *it, location.depth + 1});
             }
-        if (progress.elapsed() >= 150)
-        {
-            const auto scannedCount = *scanned, hitCount = *hits;
-            const QPointer<RegistryDock> guarded(this);
-            m_uiDispatcher->post([guarded, scannedCount, hitCount, generation = options.generation]() {
-                if (guarded && guarded->m_searchGeneration == generation) guarded->updateStatusBar(QStringLiteral("搜索中：扫描 %1 键，命中 %2 项。")
-                    .arg(scannedCount).arg(hitCount));
-            });
-            progress.restart();
-        }
     }
-}
-
-void RegistryDock::searchRegistryRecursive(HKEY root, const QString& subPath, const QString& keyword,
-    const SearchOptions& options, std::size_t* scanned, std::size_t* hits)
-{
-    searchRegistryPath(rootKeyToText(root) + (subPath.isEmpty() ? QString() : QLatin1Char('\\') + subPath),
-        false, keyword, options, scanned, hits);
-}
-
-void RegistryDock::searchRegistryRecursiveByR0(const QString&, const QString& path,
-    const QString& keyword, const SearchOptions& options, std::size_t* scanned, std::size_t* hits)
-{
-    searchRegistryPath(path, true, keyword, options, scanned, hits);
 }

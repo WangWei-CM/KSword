@@ -222,28 +222,24 @@ private:
     void importRegFileAsync();
 
     // ===================== 搜索能力 =====================
+    struct SearchSession {
+        enum class State { Running, Complete, Stopped, Failed };
+        std::mutex mutex;
+        std::deque<PendingSearchRow> rows;
+        std::atomic_bool stopping{false};
+        std::atomic_size_t scanned{0}, hits{0}, skipped{0}, dropped{0};
+        std::atomic<State> state{State::Running};
+        quint64 generation = 0;
+        int progressPid = 0;
+        bool uiFinalized = false; // GUI-only terminal claim; workers never access this member.
+    };
     void startSearchAsync();
-    void stopSearch(bool waitForThread);
+    void stopSearch(bool invalidateResults);
     void flushPendingSearchRows();
-    void enqueuePendingSearchRow(PendingSearchRow&& row);
-    void searchRegistryRecursive(
-        HKEY rootKey,
-        const QString& subPath,
-        const QString& keyword,
-        const SearchOptions& options,
-        std::size_t* scannedKeyCount,
-        std::size_t* hitCount);
-    // searchRegistryRecursiveByR0：
-    // - 作用：R0 在线时用驱动枚举完成后台搜索，避免搜索路径绕回 Win32。
-    void searchRegistryRecursiveByR0(
-        const QString& kernelKeyPath,
-        const QString& displayKeyPath,
-        const QString& keyword,
-        const SearchOptions& options,
-        std::size_t* scannedKeyCount,
-        std::size_t* hitCount);
-    void searchRegistryPath(const QString& path, bool useR0, const QString& keyword,
-        const SearchOptions& options, std::size_t* scanned, std::size_t* hits);
+    static void enqueuePendingSearchRow(const std::shared_ptr<SearchSession>& session, PendingSearchRow&& row);
+    static void searchRegistryPath(const QString& path, bool useR0, const QString& keyword,
+        const SearchOptions& options, const std::shared_ptr<SearchSession>& session,
+        const std::function<bool()>& shouldStop, std::size_t* scanned, std::size_t* hits);
 
     // ===================== WinAPI 工具 =====================
     static bool parseRegistryPath(const QString& pathText, HKEY* rootKeyOut, QString* subPathOut);
@@ -298,14 +294,12 @@ private:
 
     // ===================== 搜索线程状态 =====================
     std::atomic_bool m_searchRunning{ false };   // 搜索线程是否运行中。
-    std::atomic_bool m_searchStopFlag{ false };  // 搜索线程停止标志。
-    std::unique_ptr<std::thread> m_searchThread; // 搜索线程对象。
+    std::unique_ptr<ks::ui::AsyncOperation> m_searchOperation;
+    std::shared_ptr<SearchSession> m_searchSession;
     struct SubKeyLoadRecovery;
     std::shared_ptr<SubKeyLoadRecovery> m_subKeyLoadRecovery;
     QTimer* m_subKeyRecoveryTimer = nullptr;
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_uiDispatcher; // 晚到的导入/导出与搜索消息受页面关闭门禁保护。
-    std::mutex m_pendingMutex;                   // 待刷入搜索结果队列锁。
-    std::deque<PendingSearchRow> m_pendingRows;  // 有界待刷入搜索结果 FIFO 队列。
     QTimer* m_searchFlushTimer = nullptr;        // UI 节流刷新定时器。
 
     // ===================== 进度与统计 =====================
@@ -315,6 +309,7 @@ private:
     std::atomic_size_t m_searchSkipped{0};
     std::atomic_size_t m_searchDropped{0};
     bool m_lastSearchStopped = false;
+    bool m_lastSearchFailed = false;
     quint64 m_searchGeneration = 0;
     int m_activeLocationIndex = 0;
 

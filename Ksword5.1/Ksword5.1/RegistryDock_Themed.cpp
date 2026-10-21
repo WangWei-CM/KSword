@@ -445,6 +445,8 @@ RegistryDock::RegistryDock(QWidget* parent)
         info << event << "[RegistryDock] 构造开始，准备初始化注册表模块。" << eol;
     }
 
+    m_searchOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_searchOperation->setStateChangedCallback([this]() { flushPendingSearchRows(); });
     m_uiDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(qApp);
     m_subKeyLoadRecovery = std::make_shared<SubKeyLoadRecovery>();
     m_subKeyRecoveryTimer = new QTimer(this);
@@ -466,6 +468,8 @@ RegistryDock::~RegistryDock()
 {
     if (m_applyOperation) m_applyOperation->close();
     if (m_legacyMutationOperation) m_legacyMutationOperation->close();
+    if (m_searchSession) m_searchSession->stopping.store(true);
+    m_searchOperation->close();
     kLogEvent event;
     info << event << "[RegistryDock] 析构开始，准备停止搜索线程。" << eol;
 
@@ -479,7 +483,7 @@ RegistryDock::~RegistryDock()
     }
 
     kLogEvent finishEvent;
-    info << finishEvent << "[RegistryDock] 析构完成，后台资源已回收。" << eol;
+    info << finishEvent << ks::i18n::sourceText(QStringLiteral("[RegistryDock] 析构完成，在途搜索由后台安全收尾。")).toStdString() << eol;
 }
 
 void RegistryDock::initializeUi()
@@ -1721,53 +1725,36 @@ void RegistryDock::readRegistryValueByR0(const QString& valueName)
     });
 }
 
-void RegistryDock::stopSearch(bool waitForThread)
+void RegistryDock::stopSearch(const bool invalidateResults)
 {
-    if (waitForThread) ++m_searchGeneration;
-    kLogEvent event;
-    info << event
-        << "[RegistryDock] 停止搜索请求, waitForThread="
-        << (waitForThread ? "true" : "false")
-        << eol;
-
-    m_searchStopFlag.store(true);
-
-    if (m_searchThread == nullptr || !m_searchThread->joinable())
+    if (m_searchSession) m_searchSession->stopping.store(true);
+    if (invalidateResults)
     {
-        m_searchThread.reset();
+        ++m_searchGeneration;
+        m_searchOperation->cancel();
+        auto retired = std::move(m_searchSession);
+        if (retired) QThreadPool::globalInstance()->start([retired]() {});
         m_searchRunning.store(false);
         m_searchButton->setEnabled(true);
         m_stopSearchButton->setEnabled(false);
-        if (m_searchFlushTimer != nullptr) m_searchFlushTimer->stop();
+        if (m_searchFlushTimer) m_searchFlushTimer->stop();
         return;
     }
-
-    if (waitForThread)
-    {
-        m_searchThread->join();
-        m_searchThread.reset();
-        m_searchRunning.store(false);
-        m_searchButton->setEnabled(true);
-        m_stopSearchButton->setEnabled(false);
-        if (m_searchFlushTimer != nullptr) m_searchFlushTimer->stop();
-        return;
-    }
-
-    // 交互停止不能移走唯一的线程所有权：析构路径需要用它同步等待，
-    // 才能保证递归搜索不会在 RegistryDock 释放后继续访问成员。
     m_stopSearchButton->setEnabled(false);
-    updateStatusBar(QStringLiteral("状态: 搜索已停止"));
+    updateStatusBar(QStringLiteral("状态：已请求停止搜索，正在等待当前调用安全收尾。"));
 }
 
-void RegistryDock::enqueuePendingSearchRow(PendingSearchRow&& row)
+void RegistryDock::enqueuePendingSearchRow(const std::shared_ptr<SearchSession>& session, PendingSearchRow&& row)
 {
-    std::lock_guard<std::mutex> lock(m_pendingMutex);
-    if (m_pendingRows.size() < kMaxPendingSearchRows) m_pendingRows.push_back(std::move(row));
-    else ++m_searchDropped;
+    std::lock_guard<std::mutex> lock(session->mutex);
+    if (session->rows.size() < kMaxPendingSearchRows) session->rows.push_back(std::move(row));
+    else ++session->dropped;
 }
 
 void RegistryDock::flushPendingSearchRows()
 {
+    const auto session = m_searchSession;
+    if (!session || session->generation != m_searchGeneration || session->uiFinalized) return;
     // 搜索线程只负责入队；菜单打开时不消费队列，
     // 避免批量扩容让右键动作保存的结果行发生漂移。
     const QPointer<RegistryDock> safeThis(this);
@@ -1788,21 +1775,23 @@ void RegistryDock::flushPendingSearchRows()
 
     std::vector<PendingSearchRow> rows;
     bool hasPendingRows = false;
+    SearchSession::State state;
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        const std::size_t count = std::min<std::size_t>(kSearchFlushBatchSize, m_pendingRows.size());
+        std::lock_guard<std::mutex> lock(session->mutex);
+        const std::size_t count = std::min<std::size_t>(kSearchFlushBatchSize, session->rows.size());
         rows.reserve(count);
         for (std::size_t i = 0; i < count; ++i)
         {
-            rows.push_back(std::move(m_pendingRows.front()));
-            m_pendingRows.pop_front();
+            rows.push_back(std::move(session->rows.front()));
+            session->rows.pop_front();
         }
-        hasPendingRows = !m_pendingRows.empty();
+        hasPendingRows = !session->rows.empty();
+        state = session->state.load(); // Same queue snapshot: a later terminal publication cannot hide a later final batch.
     }
 
     const int availableRows = std::max(0, kMaxSearchResultRows - m_searchResultTable->rowCount());
     const int rowsToAppend = std::min(availableRows, static_cast<int>(rows.size()));
-    m_searchDropped.fetch_add(rows.size() - static_cast<std::size_t>(rowsToAppend));
+    session->dropped.fetch_add(rows.size() - static_cast<std::size_t>(rowsToAppend));
     if (rowsToAppend > 0)
     {
         const int firstRow = m_searchResultTable->rowCount();
@@ -1836,12 +1825,29 @@ void RegistryDock::flushPendingSearchRows()
         if (updatesEnabled) m_searchResultTable->viewport()->update();
     }
 
-    if (!m_searchRunning.load() && !hasPendingRows && m_searchFlushTimer != nullptr)
+    m_searchScannedKeys = session->scanned.load();
+    m_searchHitCount = session->hits.load();
+    m_searchSkipped.store(session->skipped.load());
+    m_searchDropped.store(session->dropped.load());
+    m_lastSearchStopped = state == SearchSession::State::Stopped || session->stopping.load();
+    m_lastSearchFailed = state == SearchSession::State::Failed;
+    if (state != SearchSession::State::Running)
     {
+        m_searchRunning.store(false);
+        m_searchButton->setEnabled(true);
+        m_stopSearchButton->setEnabled(false);
+    }
+    if (state != SearchSession::State::Running && !hasPendingRows && m_searchFlushTimer != nullptr)
+    {
+        session->uiFinalized = true;
         m_searchFlushTimer->stop();
+        kPro.set(session->progressPid, m_lastSearchFailed ? "搜索未完整完成" : m_lastSearchStopped ? "搜索停止" : "搜索完成", 0, 100.0f);
         updateStatusBar(QStringLiteral("%1：扫描 %2 键，命中 %3 项，显示 %4 项，跳过 %5 项，未展示 %6 项。")
-            .arg(m_lastSearchStopped ? QStringLiteral("搜索已停止") : QStringLiteral("搜索完成"))
+            .arg(m_lastSearchFailed ? QStringLiteral("搜索未完整完成") : m_lastSearchStopped ? QStringLiteral("搜索已停止") : QStringLiteral("搜索完成"))
             .arg(m_searchScannedKeys).arg(m_searchHitCount).arg(m_searchResultTable->rowCount())
             .arg(m_searchSkipped.load()).arg(m_searchDropped.load()));
     }
+    else if (state == SearchSession::State::Running)
+        updateStatusBar(QStringLiteral("搜索中：扫描 %1 键，命中 %2 项。").arg(m_searchScannedKeys).arg(m_searchHitCount));
+
 }
