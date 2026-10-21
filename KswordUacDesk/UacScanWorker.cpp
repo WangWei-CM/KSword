@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <mutex>
+#include <process.h>
 
 namespace
 {
@@ -207,49 +209,60 @@ struct UacScanWorker::NativeOwner
     }
 };
 
+struct UacScanWorker::Startup
+{
+    QString executable;
+    std::atomic_bool closed{false};
+    std::mutex gate;
+    bool done = false;
+    std::unique_ptr<NativeOwner> result;
+};
+
 UacScanWorker::UacScanWorker(QObject* parent) : QObject(parent)
 {
+    connect(&m_startPoll, &QTimer::timeout, this, [this] { collectStartup(); });
 }
 
 UacScanWorker::~UacScanWorker() { close(); }
 
-bool UacScanWorker::start()
+std::unique_ptr<UacScanWorker::NativeOwner> UacScanWorker::createNative(
+    const QString& executable, const std::atomic_bool& closed)
 {
+    if (closed.load()) return {};
     auto native = std::make_unique<NativeOwner>();
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     native->request = CreateEventW(&security, FALSE, FALSE, nullptr);
     native->ready = CreateEventW(&security, FALSE, FALSE, nullptr);
     native->stop = CreateEventW(&security, TRUE, FALSE, nullptr);
     native->mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0, sizeof(SharedScan), nullptr);
-    if (!native->request || !native->ready || !native->stop || !native->mapping) return false;
+    if (!native->request || !native->ready || !native->stop || !native->mapping) return {};
     native->shared = static_cast<SharedScan*>(MapViewOfFile(native->mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedScan)));
     if (!native->shared || !DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
-        &native->parent, SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, TRUE, 0)) return false;
+        &native->parent, SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, TRUE, 0)) return {};
     // The mapped region is private to this pair, never a named IPC endpoint.
     native->shared->magic = kMagic;
     native->shared->version = kVersion;
     native->shared->parentPid = GetCurrentProcessId();
     native->shared->sessionId = PrivilegeStage::currentSessionId();
     native->shared->parentCreation = processCreationTime(GetCurrentProcess());
-    if (!native->shared->parentCreation) return false;
+    if (!native->shared->parentCreation) return {};
     native->job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!native->job || !SetInformationJobObject(native->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
-        return false;
+        return {};
 
     const std::array<HANDLE, 5> inherited{native->request, native->ready, native->stop, native->mapping, native->parent};
     SIZE_T attributeSize = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeSize);
     std::vector<BYTE> attributeBuffer(attributeSize);
     auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeBuffer.data());
-    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeSize)) return false;
+    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeSize)) return {};
     const AttributeListLease attributeLease{attributes};
     const bool attributesOk = UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         const_cast<HANDLE*>(inherited.data()), sizeof(inherited), nullptr, nullptr) != FALSE;
     if (!attributesOk)
-        return false;
-    const QString executable = QCoreApplication::applicationFilePath();
+        return {};
     QString command = quoteArgument(executable) + QStringLiteral(" --ksword-uac-stage=collector");
     for (size_t index = 0; index < inherited.size(); ++index)
         command += QStringLiteral(" --ksword-scan-h%1=%2").arg(index).arg(reinterpret_cast<quintptr>(inherited[index]));
@@ -265,33 +278,82 @@ bool UacScanWorker::start()
     // than asking a second privilege-stage launcher to discover another one.
     HANDLE sourceToken = nullptr;
     HANDLE primaryToken = nullptr;
-    const bool tokenOk = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &sourceToken) &&
+    const bool tokenOk = !closed.load() && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &sourceToken) &&
         DuplicateTokenEx(sourceToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary, &primaryToken);
     if (sourceToken) CloseHandle(sourceToken);
-    const bool created = tokenOk && CreateProcessAsUserW(primaryToken, nativeExecutable.c_str(), nativeCommand.data(), nullptr, nullptr, TRUE,
+    const bool created = tokenOk && !closed.load() && CreateProcessAsUserW(primaryToken, nativeExecutable.c_str(), nativeCommand.data(), nullptr, nullptr, TRUE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
         &startup.StartupInfo, &process) != FALSE;
     if (primaryToken) CloseHandle(primaryToken);
-    if (!created) return false;
+    if (!created) return {};
     native->process = process.hProcess;
     const bool assigned = AssignProcessToJobObject(native->job, process.hProcess) != FALSE;
-    const bool resumed = assigned && ResumeThread(process.hThread) != static_cast<DWORD>(-1);
+    const bool resumed = assigned && !closed.load() && ResumeThread(process.hThread) != static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
     if (!resumed)
     {
         // This is the exact suspended process returned by our create call,
         // before any collector code runs. Never terminate a discovered PID.
         TerminateProcess(process.hProcess, ERROR_CANCELLED);
-        return false;
+        return {};
     }
     // Retain only the parent endpoint handles; child inheritance is complete.
     for (HANDLE handle : inherited) SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-    m_native = std::move(native);
-    m_ready = std::make_unique<QWinEventNotifier>(m_native->ready);
-    m_exited = std::make_unique<QWinEventNotifier>(m_native->process);
-    connect(m_ready.get(), &QWinEventNotifier::activated, this, [this](HANDLE) { finish(true); });
-    connect(m_exited.get(), &QWinEventNotifier::activated, this, [this](HANDLE) { finish(false); });
+    return native;
+}
+
+bool UacScanWorker::start()
+{
+    auto startup = std::make_shared<Startup>();
+    startup->executable = QCoreApplication::applicationFilePath();
+    m_startup = startup;
+    auto context = std::make_unique<std::shared_ptr<Startup>>(startup);
+    // The native starter owns only values. Closing/destroying this controller
+    // can abandon it even while the OS process-creation call has not returned.
+    const uintptr_t thread = _beginthreadex(nullptr, 0, [](void* value) -> unsigned
+    {
+        const std::unique_ptr<std::shared_ptr<Startup>> context(
+            static_cast<std::shared_ptr<Startup>*>(value));
+        const auto& state = *context;
+        std::unique_ptr<NativeOwner> native;
+        try { native = createNative(state->executable, state->closed); }
+        catch (...) { }
+        {
+            std::lock_guard lock(state->gate);
+            if (!state->closed.load()) state->result = std::move(native);
+            state->done = true;
+        }
+        return 0;
+    }, context.get(), 0, nullptr);
+    if (!thread) return false;
+    context.release();
+    CloseHandle(reinterpret_cast<HANDLE>(thread));
+    m_startPoll.start(20); // Active only during initial/recovery startup.
     return true;
+}
+
+void UacScanWorker::collectStartup()
+{
+    if (m_closed || !m_startup) return;
+    std::unique_ptr<NativeOwner> native;
+    {
+        std::lock_guard lock(m_startup->gate);
+        if (!m_startup->done) return;
+        native = std::move(m_startup->result);
+    }
+    m_startPoll.stop();
+    m_startup.reset();
+    if (!native) { finish(false); return; }
+    try
+    {
+        m_native = std::move(native);
+        m_ready = std::make_unique<QWinEventNotifier>(m_native->ready);
+        m_exited = std::make_unique<QWinEventNotifier>(m_native->process);
+        connect(m_ready.get(), &QWinEventNotifier::activated, this, [this](HANDLE) { finish(true); });
+        connect(m_exited.get(), &QWinEventNotifier::activated, this, [this](HANDLE) { finish(false); });
+    }
+    catch (...) { finish(false); return; }
+    sendRequest();
 }
 
 bool UacScanWorker::request(const UacScanOriginHint& originHint, std::function<void(UacScanResult)> completed)
@@ -300,27 +362,35 @@ bool UacScanWorker::request(const UacScanOriginHint& originHint, std::function<v
     if (GetTickCount64() < m_retryAfterMs) return false;
     m_busy = true;
     m_completed = std::move(completed);
+    m_originHint = originHint;
+    bool started = false;
     try
     {
-        if (!m_native && !start())
-        {
-            finish(false);
-            return true;
-        }
+        if (!m_native) started = start();
     }
     catch (...)
     {
         finish(false);
         return true;
     }
+    if (!m_native)
+    {
+        if (!started) finish(false);
+        return true;
+    }
+    sendRequest();
+    return true;
+}
+
+void UacScanWorker::sendRequest()
+{
     auto& shared = *m_native->shared;
     shared.payloadSize = 0;
     shared.response = 0;
     shared.request = ++m_sequence;
-    shared.originHint = originHint;
+    shared.originHint = m_originHint;
     MemoryBarrier();
     if (!SetEvent(m_native->request)) finish(false);
-    return true;
 }
 
 void UacScanWorker::finish(bool success)
@@ -366,6 +436,9 @@ void UacScanWorker::finish(bool success)
 
 void UacScanWorker::discardProcess()
 {
+    m_startPoll.stop();
+    if (m_startup) m_startup->closed = true;
+    m_startup.reset();
     if (m_ready) m_ready->setEnabled(false);
     if (m_exited) m_exited->setEnabled(false);
     m_ready.reset();

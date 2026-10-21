@@ -42,14 +42,22 @@ public:
 
 private:
     struct NativeOwner;
+    struct Startup;
+    static std::unique_ptr<NativeOwner> createNative(const QString& executable,
+        const std::atomic_bool& closed);
     bool start();
+    void collectStartup();
+    void sendRequest();
     void finish(bool success);
     void discardProcess();
 
     std::unique_ptr<NativeOwner> m_native;
+    std::shared_ptr<Startup> m_startup;
+    QTimer m_startPoll;
     std::unique_ptr<QWinEventNotifier> m_ready;
     std::unique_ptr<QWinEventNotifier> m_exited;
     std::function<void(UacScanResult)> m_completed;
+    UacScanOriginHint m_originHint;
     quint64 m_sequence = 0;
     quint64 m_retryAfterMs = 0;
     bool m_busy = false;
