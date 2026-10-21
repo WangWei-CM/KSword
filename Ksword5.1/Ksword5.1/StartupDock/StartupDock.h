@@ -14,6 +14,8 @@
 
 #include <QHash>
 #include <QIcon>
+#include <QPersistentModelIndex>
+#include <QSet>
 #include <QWidget>
 
 #include <atomic>   // std::atomic_bool：后台刷新运行状态。
@@ -39,6 +41,8 @@ class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
+
+namespace ks::ui { class AsyncOperation; }
 
 class StartupDock final : public QWidget
 {
@@ -211,6 +215,11 @@ private:
     QTableWidget* currentCategoryTable() const;
     StartupCategory currentCategory() const;
     QIcon resolveEntryIcon(const StartupEntry& entry);
+    static QString entryIconKey(const StartupEntry& entry);
+    void trackEntryIcon(const StartupEntry& entry, const QPersistentModelIndex& index);
+    void reconcileEntryIconBatch();
+    void scheduleEntryIconDrain();
+    void drainEntryIcons();
     void appendEntryRow(QTableWidget* tableWidget, int rowIndex, const StartupEntry& entry, int entryIndex);
     void appendRegistryTreeLeaf(QTreeWidgetItem* parentItem, const StartupEntry& entry, int entryIndex);
 
@@ -253,6 +262,12 @@ private:
 
     // ===================== 数据缓存 =====================
     std::vector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
+    std::unique_ptr<ks::ui::AsyncOperation> m_iconOperation;
+    QHash<QString, QString> m_pendingIconPaths;
+    QStringList m_activeIconKeys;
+    QSet<QString> m_requestedIconKeys;
+    QHash<QString, QVector<QPersistentModelIndex>> m_iconWaiters;
+    bool m_iconDrainScheduled = false;
     QHash<QString, QIcon> m_iconCache;        // m_iconCache：路径到图标缓存。
     QTimer* m_refreshTimer = nullptr;         // m_refreshTimer：自动刷新定时器。
     QTimer* m_tableRebuildTimer = nullptr;    // m_tableRebuildTimer：分时落表调度器。

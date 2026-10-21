@@ -784,6 +784,7 @@ void StartupDock::appendEntryRow(
     nameItem->setData(Qt::UserRole, entryIndex);
     nameItem->setIcon(resolveEntryIcon(entry));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Name), nameItem);
+    trackEntryIcon(entry, tableWidget->model()->index(rowIndex, toStartupColumn(StartupColumn::Name)));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Publisher), createReadOnlyItem(entry.publisherText));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::ImagePath), createReadOnlyItem(entry.imagePathText));
     tableWidget->setItem(rowIndex, toStartupColumn(StartupColumn::Command), createReadOnlyItem(entry.commandText));
@@ -847,6 +848,7 @@ void StartupDock::appendRegistryTreeLeaf(
     entryItem->setText(toStartupColumn(StartupColumn::Type), ks::i18n::sourceText(entry.sourceTypeText));
     entryItem->setText(toStartupColumn(StartupColumn::Detail), startupLocalizedDetailText(entry.detailText));
     entryItem->setIcon(toStartupColumn(StartupColumn::Name), resolveEntryIcon(entry));
+    trackEntryIcon(entry, m_registryTree->indexFromItem(entryItem, toStartupColumn(StartupColumn::Name)));
 
     // shouldHighlightUntrusted 用途：树节点模式下沿用表格相同的不受信任着色规则。
     const bool shouldHighlightUntrusted = isUntrustedStartupEntry(entry);

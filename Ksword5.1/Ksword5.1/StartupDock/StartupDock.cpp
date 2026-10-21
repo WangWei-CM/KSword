@@ -1,11 +1,20 @@
 #include "StartupDock.Internal.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/AsyncOperation.h"
+#include <QImage>
+#include <QPixmap>
+#include <Objbase.h>
 
 using namespace startup_dock_detail;
 
 StartupDock::StartupDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_iconOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_iconOperation->setStateChangedCallback([this]() {
+        reconcileEntryIconBatch();
+        scheduleEntryIconDrain();
+    });
     // 初始化顺序：
     // - 先创建 UI；
     // - 再连接交互；
@@ -22,6 +31,7 @@ StartupDock::StartupDock(QWidget* parent)
 
 StartupDock::~StartupDock()
 {
+    m_iconOperation->close();
     m_destroying.store(true);
     if (m_tableRebuildTimer != nullptr)
     {
@@ -210,33 +220,19 @@ QTableWidget* StartupDock::currentCategoryTable() const
     }
 }
 
-QIcon StartupDock::resolveEntryIcon(const StartupEntry& entry)
+QString StartupDock::entryIconKey(const StartupEntry& entry)
 {
-    // 图标解析留在 UI 线程：
-    // - 避免后台线程构造 QIcon / QFileIconProvider；
-    // - 同一路径走缓存，降低表格重建开销。
-    const QString cacheKeyText =
-        entry.imagePathText.trimmed().isEmpty()
+    return entry.imagePathText.trimmed().isEmpty()
         ? QStringLiteral("type:%1").arg(entry.sourceTypeText)
         : QStringLiteral("path:%1").arg(QDir::toNativeSeparators(entry.imagePathText));
+}
 
+QIcon StartupDock::resolveEntryIcon(const StartupEntry& entry)
+{
+    const QString cacheKeyText = entryIconKey(entry);
     const auto cacheIt = m_iconCache.constFind(cacheKeyText);
-    if (cacheIt != m_iconCache.constEnd())
-    {
-        return cacheIt.value();
-    }
-
+    if (cacheIt != m_iconCache.constEnd()) return cacheIt.value();
     QIcon resolvedIcon;
-    if (!entry.imagePathText.trimmed().isEmpty())
-    {
-        const QFileInfo fileInfo(entry.imagePathText);
-        if (fileInfo.exists())
-        {
-            static QFileIconProvider fileIconProvider;
-            resolvedIcon = fileIconProvider.icon(fileInfo);
-        }
-    }
-
     if (resolvedIcon.isNull())
     {
         if (entry.category == StartupCategory::Services)
@@ -270,7 +266,115 @@ QIcon StartupDock::resolveEntryIcon(const StartupEntry& entry)
     }
 
     m_iconCache.insert(cacheKeyText, resolvedIcon);
+    if (!entry.imagePathText.trimmed().isEmpty() && !m_requestedIconKeys.contains(cacheKeyText))
+    {
+        m_requestedIconKeys.insert(cacheKeyText);
+        m_pendingIconPaths.insert(cacheKeyText, entry.imagePathText);
+        scheduleEntryIconDrain();
+    }
     return resolvedIcon;
+}
+
+void StartupDock::trackEntryIcon(const StartupEntry& entry, const QPersistentModelIndex& index)
+{
+    const QString key = entryIconKey(entry);
+    if (!index.isValid() || !m_requestedIconKeys.contains(key)) return;
+    auto* model = const_cast<QAbstractItemModel*>(index.model());
+    model->setData(index, key, Qt::UserRole + 92);
+    m_iconWaiters[key].push_back(index);
+}
+
+void StartupDock::reconcileEntryIconBatch()
+{
+    if (!m_iconOperation->isBusy() && !m_activeIconKeys.isEmpty())
+    {
+        // A dropped delivery can become idle before its queued recovery callback.
+        for (const auto& key : m_activeIconKeys)
+        {
+            m_requestedIconKeys.remove(key);
+            m_iconWaiters.remove(key);
+            m_iconCache.remove(key);
+        }
+        m_activeIconKeys.clear();
+    }
+}
+
+void StartupDock::scheduleEntryIconDrain()
+{
+    if (m_destroying.load() || m_iconDrainScheduled || !m_iconOperation ||
+        m_iconOperation->isBusy() || m_pendingIconPaths.isEmpty()) return;
+    m_iconDrainScheduled = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_iconDrainScheduled = false;
+        drainEntryIcons();
+    });
+}
+
+void StartupDock::drainEntryIcons()
+{
+    if (m_destroying.load()) return;
+    reconcileEntryIconBatch();
+    if (m_iconOperation->isBusy() || m_pendingIconPaths.isEmpty()) return;
+    using Request = std::vector<std::pair<QString, QString>>;
+    using Result = std::vector<std::pair<QString, QImage>>;
+    Request paths;
+    constexpr std::size_t maximumPathsPerWorker = 16;
+    while (!m_pendingIconPaths.isEmpty() && paths.size() < maximumPathsPerWorker)
+    {
+        auto it = m_pendingIconPaths.begin();
+        paths.emplace_back(it.key(), it.value());
+        m_pendingIconPaths.erase(it);
+    }
+    QStringList activeKeys;
+    for (const auto& path : paths) activeKeys.push_back(path.first);
+    m_activeIconKeys = activeKeys;
+    m_iconOperation->submit<Request, Result>(std::move(paths),
+        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
+            Result result;
+            const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            struct ComLease { bool owned; ~ComLease() { if (owned) ::CoUninitialize(); } } com{SUCCEEDED(comResult)};
+            for (const auto& [key, path] : request)
+            {
+                if (token.isCanceled()) break;
+                SHFILEINFOW info{};
+                const DWORD_PTR found = ::SHGetFileInfoW(reinterpret_cast<LPCWSTR>(path.utf16()), 0,
+                    &info, sizeof(info), SHGFI_ICON | SHGFI_SMALLICON);
+                struct IconLease { HICON icon; ~IconLease() { if (icon) ::DestroyIcon(icon); } } nativeIcon{info.hIcon};
+                QImage image;
+                if (found != 0 && nativeIcon.icon) image = QImage::fromHICON(nativeIcon.icon);
+                result.emplace_back(key, std::move(image));
+            }
+            return result;
+        },
+        [this](const Result& result, std::uint64_t) {
+            for (const auto& [key, image] : result)
+            {
+                if (!image.isNull()) m_iconCache.insert(key, QIcon(QPixmap::fromImage(image)));
+                const QIcon icon = m_iconCache.value(key);
+                const auto waiters = m_iconWaiters.take(key);
+                for (const auto& index : waiters)
+                    if (index.isValid() && index.data(Qt::UserRole + 92).toString() == key)
+                        const_cast<QAbstractItemModel*>(index.model())->setData(index, icon, Qt::DecorationRole);
+                m_requestedIconKeys.remove(key);
+            }
+            m_activeIconKeys.clear();
+            // Cache eviction affects only icons; the complete startup snapshot is never capped.
+            constexpr qsizetype maximumCachedPaths = 2048;
+            for (auto it = m_iconCache.begin(); it != m_iconCache.end() && m_iconCache.size() > maximumCachedPaths;)
+                if (!m_requestedIconKeys.contains(it.key())) it = m_iconCache.erase(it);
+                else ++it;
+            return true;
+        },
+        [this, activeKeys](std::exception_ptr) {
+            // Unresolved rows retain their category fallback; a new projection can retry these paths.
+            for (const auto& key : activeKeys)
+            {
+                m_requestedIconKeys.remove(key);
+                m_iconWaiters.remove(key);
+                m_iconCache.remove(key);
+            }
+            m_activeIconKeys.clear();
+        });
 }
 
 void StartupDock::requestAsyncRefresh(const bool forceRefresh)
