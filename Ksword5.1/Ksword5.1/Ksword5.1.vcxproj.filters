@@ -3636,6 +3636,9 @@
     <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MonitorDock\TimelineRateModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\EventTimelineModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>

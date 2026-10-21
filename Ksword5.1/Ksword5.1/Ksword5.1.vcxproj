@@ -1195,6 +1195,7 @@
     <ClInclude Include="MonitorDock\ProcessTraceEventArchive.h" />
     <ClInclude Include="MonitorDock\ProcessTraceMonitorWidget.h" />
     <ClInclude Include="MonitorDock\ProcessTraceTimelineWidget.h" />
+    <ClInclude Include="MonitorDock\TimelineRateModel.h" />
     <ClInclude Include="MonitorDock\EventTimelineModel.h" />
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.NavigationData.h" />

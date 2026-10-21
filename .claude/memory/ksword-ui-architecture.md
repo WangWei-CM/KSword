@@ -480,3 +480,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - `AsyncOperation`的回投包装拥有本次Result，现有`apply(*result, ticket)`可接收`Result&`；一次性PreparedRows在页面完成代次/可见性/模型修订/完整捕获门禁后直接move给模型，避免GUI再复制整份行向量及差异数组，不需新增共享指针或控制器。门禁延期只重新请求最新值，不保留对回投局部Result的引用；消费后不可重用计划。`setPreparedRows`仍按值拥有参数，保证模型通知中页面/控制器被销毁时计划活到提交退出。普通setRows、最终Qt结构提交/排序及旧值退役仍有原同步成本，不据此宣称整项完成或量测内存改善。
 
 - 诊断开启时，主程序在真实QApplication::notify前后用PerfNotifyScope记录分派墙钟及线程CPU；直接嵌套notify按scope/parent身份分出inclusive/self，不把后续0ms回投或其它事件时间塞进Paint/Layout。线程cycles保留原单位，不能换算毫秒；GetThreadTimes的100ns累计值保留OS计账精度，短事件为0不代表无CPU。probe_setup_ns/probe_until_enqueue_ns分别说明探针准备和截至受锁保护入队的墙钟开销，不包含最后unlock/notify尾部，也不能当CPU开销。receiver标签在派发前复制，之后不解引用；初始化后才采样，退出关闭前停用。默认宏0时仍直接构造QApplication，notify覆盖和CPU采样均编译移除。该边界是Qt分派，不等同物理呈现；输入到呈现及退出持久化仍由MR-003/004单列。
+
+
+- 2026-10-21 KCB-003后续已由七表/Minifilter完整后台值模型替代此前timer/items及detached树流程。源数组共享不可变根；字段/role/筛选/原Qt比较排序在既有worker准备，旧值在既有CompleteExport退役lane释放。sourceIndex、失败分隔行、persistent映射和捕获门禁继续保留；必要Qt通知/选择/展开仍在GUI。静态及HostX64构建44通过，真实GUI、原生事务与峰值内存没有代用户验收。此前分片段落记录历史阶段，不代表当前仍使用旧流程。
+
+- 速率时间轴的完整采样与绘制投影分开：后台对64点叶块建立小索引，绘制按物理像素列分别保留上下行首末及极值，最后一个原样本独立按原动画插值；最大Y值仍来自目标时间范围内全部原始值，不能改用动画值或降采样值。无序/非有限兼容输入保留原顺序和原扫描语义。投影缓存只按值源、目标/动画范围、物理宽度失效；主题和选区不重建原数据。纯值等价/峰谷守恒不等同GUI逐像素栅格一致或实测FPS证明，实际视觉由用户验收。

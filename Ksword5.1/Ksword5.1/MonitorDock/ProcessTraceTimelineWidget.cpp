@@ -330,6 +330,8 @@ void ProcessTraceTimelineWidget::resetTimeline(const std::uint64_t start100ns)
     m_rateAnimationProgress = 1.0;
     m_hasPreviousRatePoint = false;
     m_rateOverlay = {};
+    m_rateProjection = {};
+    m_rateProjectionValid = false;
     m_rangeStart100ns = start100ns;
     m_rangeEnd100ns = saturatingAdd(start100ns, kDefaultRange100ns);
     m_previousRateRangeStart100ns = m_rangeStart100ns;
@@ -493,27 +495,29 @@ ProcessTraceTimelineWidget::PreparedRateOverlay ProcessTraceTimelineWidget::prep
     std::vector<ProcessTraceTimelineRatePoint> ratePointList)
 {
     PreparedRateOverlay prepared;
-    prepared.m_points = ks::ui::RetainCompleteExportSnapshot(
-        std::make_shared<const std::vector<ProcessTraceTimelineRatePoint>>(std::move(ratePointList)));
+    prepared.m_values = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const ks::ui::TimelineRateValues>(std::move(ratePointList)));
     return prepared;
 }
 
 const std::vector<ProcessTraceTimelineRatePoint>& ProcessTraceTimelineWidget::rateOverlayPoints() const
 {
     static const std::vector<ProcessTraceTimelineRatePoint> empty;
-    return m_rateOverlay.m_points ? *m_rateOverlay.m_points : empty;
+    return m_rateOverlay.m_values ? m_rateOverlay.m_values->points : empty;
 }
 
 void ProcessTraceTimelineWidget::applyRateOverlayPoints(const PreparedRateOverlay& prepared)
 {
     static const std::vector<ProcessTraceTimelineRatePoint> empty;
-    const auto& ratePointList = prepared.m_points ? *prepared.m_points : empty;
+    const auto& ratePointList = prepared.m_values ? prepared.m_values->points : empty;
     const ProcessTraceTimelineRatePoint previousRatePoint = rateOverlayPoints().empty()
         ? (ratePointList.empty() ? ProcessTraceTimelineRatePoint{} : ratePointList.back())
         : rateOverlayPoints().back();
     m_rateOverlay = prepared; // O(1); the obsolete full vector retires on the existing value lane.
+    m_rateProjectionValid = false;
     if (rateOverlayPoints().empty())
     {
+        m_rateProjection = {};
         m_rateAnimation->stop();
         m_rateAnimationProgress = 1.0;
         m_hasPreviousRatePoint = false;

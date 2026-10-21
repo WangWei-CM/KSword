@@ -14,6 +14,7 @@
 #include <QRectF>
 #include <QString>
 #include "EventTimelineModel.h"
+#include "TimelineRateModel.h"
 
 #include <cstdint>     // std::uint64_t：ETW FILETIME 兼容的 100ns 时间戳。
 #include <functional>  // std::function：不依赖 Qt moc signal 的轻量回调。
@@ -38,12 +39,6 @@ using ProcessTraceTimelineEventPoint = ks::ui::EventTimelinePoint;
 // - uploadBytesPerSecond：该秒出站/上传速率，单位 B/s；
 // - downloadBytesPerSecond：该秒入站/下载速率，单位 B/s；
 // - 该结构是可选叠加层，ETW 页面不设置时不会绘制任何速率折线。
-struct ProcessTraceTimelineRatePoint
-{
-    std::uint64_t time100ns = 0;
-    double uploadBytesPerSecond = 0.0;
-    double downloadBytesPerSecond = 0.0;
-};
 
 class ProcessTraceTimelineWidget final : public QWidget
 {
@@ -124,7 +119,7 @@ public:
     public:
         PreparedRateOverlay() = default;
     private:
-        std::shared_ptr<const std::vector<ProcessTraceTimelineRatePoint>> m_points;
+        std::shared_ptr<const ks::ui::TimelineRateValues> m_values;
         friend class ProcessTraceTimelineWidget;
     };
     static PreparedRateOverlay prepareRateOverlayPoints(
@@ -195,7 +190,6 @@ private:
     };
     const std::vector<ProcessTraceTimelineRatePoint>& rateOverlayPoints() const;
     ProcessTraceTimelineRatePoint animatedRatePointAt(std::size_t pointIndex) const;
-    double animatedRateTimeToX(std::uint64_t time100ns) const;
 
 
     // timelineRect：
@@ -261,6 +255,9 @@ private:
     bool m_asyncEventProjection = false;
     bool m_eventProjectionQueued = false;
     PreparedRateOverlay m_rateOverlay; // Complete immutable values; GUI replaces only this owner.
+    ks::ui::TimelineRateValues::Projection m_rateProjection;
+    ks::ui::TimelineRateValues::Parameters m_rateProjectionParameters;
+    bool m_rateProjectionValid = false;
     QVariantAnimation* m_rateAnimation = nullptr; // m_rateAnimation：最新速率点插值动画。
     ProcessTraceTimelineRatePoint m_previousRatePoint; // m_previousRatePoint：最新点动画起始值。
     double m_rateAnimationProgress = 1.0; // m_rateAnimationProgress：最新速率点动画进度。

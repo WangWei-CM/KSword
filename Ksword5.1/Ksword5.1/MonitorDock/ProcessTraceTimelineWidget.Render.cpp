@@ -49,31 +49,6 @@ ProcessTraceTimelineRatePoint ProcessTraceTimelineWidget::animatedRatePointAt(
     return result;
 }
 
-double ProcessTraceTimelineWidget::animatedRateTimeToX(const std::uint64_t time100ns) const
-{
-    long double rangeStart = static_cast<long double>(m_rangeStart100ns);
-    long double rangeEnd = static_cast<long double>(m_rangeEnd100ns);
-    if (m_hasPreviousRateRange && m_rateAnimationProgress < 1.0)
-    {
-        const long double progress = m_rateAnimationProgress;
-        rangeStart = static_cast<long double>(m_previousRateRangeStart100ns)
-            + (rangeStart - static_cast<long double>(m_previousRateRangeStart100ns)) * progress;
-        rangeEnd = static_cast<long double>(m_previousRateRangeEnd100ns)
-            + (rangeEnd - static_cast<long double>(m_previousRateRangeEnd100ns)) * progress;
-    }
-
-    const QRectF axisRect = timelineRect();
-    if (rangeEnd <= rangeStart)
-    {
-        return axisRect.left();
-    }
-    const long double ratio = std::clamp(
-        (static_cast<long double>(time100ns) - rangeStart) / (rangeEnd - rangeStart),
-        0.0L,
-        1.0L);
-    return axisRect.left() + axisRect.width() * static_cast<double>(ratio);
-}
-
 void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
 {
     (void)eventPointer;
@@ -137,16 +112,26 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
     // - 折线绘制在选区框之前，保证框选区域仍然位于最上层。
     if (!rateOverlayPoints().empty() && m_rangeEnd100ns > m_rangeStart100ns)
     {
-        double maxVisibleRate = 0.0;
-        for (const ProcessTraceTimelineRatePoint& ratePoint : rateOverlayPoints())
+        ks::ui::TimelineRateValues::Parameters projection;
+        projection.first = m_rangeStart100ns;
+        projection.last = m_rangeEnd100ns;
+        projection.animatedFirst = static_cast<long double>(m_rangeStart100ns);
+        projection.animatedLast = static_cast<long double>(m_rangeEnd100ns);
+        projection.physicalWidth = std::max(1.0, axisRect.width() * devicePixelRatioF());
+        if (m_hasPreviousRateRange && m_rateAnimationProgress < 1.0)
         {
-            if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)
-            {
-                continue;
-            }
-            maxVisibleRate = std::max(maxVisibleRate, ratePoint.uploadBytesPerSecond);
-            maxVisibleRate = std::max(maxVisibleRate, ratePoint.downloadBytesPerSecond);
+            projection.animatedFirst = static_cast<long double>(m_previousRateRangeStart100ns)
+                + (projection.animatedFirst - static_cast<long double>(m_previousRateRangeStart100ns)) * m_rateAnimationProgress;
+            projection.animatedLast = static_cast<long double>(m_previousRateRangeEnd100ns)
+                + (projection.animatedLast - static_cast<long double>(m_previousRateRangeEnd100ns)) * m_rateAnimationProgress;
         }
+        if (!m_rateProjectionValid || !(projection == m_rateProjectionParameters))
+        {
+            m_rateProjection = m_rateOverlay.m_values->project(projection);
+            m_rateProjectionParameters = projection;
+            m_rateProjectionValid = true;
+        }
+        const double maxVisibleRate = m_rateProjection.maximum;
 
         if (maxVisibleRate > 0.0)
         {
@@ -155,27 +140,40 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
             const QRectF rateRect = axisRect.adjusted(0.0, 3.0, 0.0, -4.0);
 
             // appendRatePoint 用途：把“某秒 B/s”映射成折线坐标点。
-            const auto appendRatePoint = [this, &rateRect, maxVisibleRate](
+            const auto appendRatePoint = [&projection, &axisRect, &rateRect, maxVisibleRate](
                 QPolygonF& polygon,
                 const std::uint64_t time100ns,
                 const double bytesPerSecond)
                 {
                     const double clampedRate = std::clamp(bytesPerSecond, 0.0, maxVisibleRate);
                     const double ratio = maxVisibleRate <= 0.0 ? 0.0 : clampedRate / maxVisibleRate;
-                    const double xValue = animatedRateTimeToX(time100ns);
+                    const long double span = projection.animatedLast - projection.animatedFirst;
+                    const auto position = span <= 0 ? 0.0L : std::clamp(
+                        (static_cast<long double>(time100ns) - projection.animatedFirst) / span, 0.0L, 1.0L);
+                    const double xValue = axisRect.left() + axisRect.width() * static_cast<double>(position);
                     const double yValue = rateRect.bottom() - rateRect.height() * ratio;
                     polygon << QPointF(xValue, yValue);
                 };
 
-            for (std::size_t rateIndex = 0; rateIndex < rateOverlayPoints().size(); ++rateIndex)
+            uploadPolygon.reserve(static_cast<qsizetype>(m_rateProjection.upload.size() + 1));
+            downloadPolygon.reserve(static_cast<qsizetype>(m_rateProjection.download.size() + 1));
+            for (const auto index : m_rateProjection.upload)
             {
-                const ProcessTraceTimelineRatePoint ratePoint = animatedRatePointAt(rateIndex);
-                if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)
-                {
-                    continue;
-                }
-                appendRatePoint(uploadPolygon, ratePoint.time100ns, ratePoint.uploadBytesPerSecond);
-                appendRatePoint(downloadPolygon, ratePoint.time100ns, ratePoint.downloadBytesPerSecond);
+                const auto& point = rateOverlayPoints()[index];
+                appendRatePoint(uploadPolygon, point.time100ns, point.uploadBytesPerSecond);
+            }
+            for (const auto index : m_rateProjection.download)
+            {
+                const auto& point = rateOverlayPoints()[index];
+                appendRatePoint(downloadPolygon, point.time100ns, point.downloadBytesPerSecond);
+            }
+            // Interpolate the original final sample, even when it crosses a
+            // target-range boundary. It never belongs to a static pixel bucket.
+            const auto last = animatedRatePointAt(rateOverlayPoints().size() - 1);
+            if (last.time100ns >= m_rangeStart100ns && last.time100ns <= m_rangeEnd100ns)
+            {
+                appendRatePoint(uploadPolygon, last.time100ns, last.uploadBytesPerSecond);
+                appendRatePoint(downloadPolygon, last.time100ns, last.downloadBytesPerSecond);
             }
 
             // 上行/下行沿用绿蓝语义色，但改由 KswordTheme 取值，保证跟随主题与自定义强调色。
