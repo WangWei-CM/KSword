@@ -733,10 +733,10 @@ void NetworkDock::initializeConnections()
     }
 
     // 双击报文行：打开独立详情窗口（非阻塞）。
-    connect(m_packetTable, &QTableWidget::cellDoubleClicked, this,
-        [this](const int row, const int /*column*/)
+    connect(m_packetTable, &QTableView::doubleClicked, this,
+        [this](const QModelIndex& index)
         {
-            openPacketDetailWindowFromTableRow(m_packetTable, row);
+            openPacketDetailWindowBySequenceId(index.siblingAtColumn(0).data(Qt::UserRole).toULongLong());
         });
 
     // 右键菜单：查看详情 / 预填阻断规则 / 复制行 / 批量复制ASCII/HEX / 重放到请求构造 / 跟踪此进程 / 转到进程详细信息。
@@ -805,13 +805,7 @@ void NetworkDock::initializeConnections()
                             continue;
                         }
 
-                        QTableWidgetItem* timeItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Time));
-                        if (timeItem == nullptr)
-                        {
-                            continue;
-                        }
-
-                        const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
+                        const QVariant sequenceVariant = m_packetTable->cell(row, toPacketColumn(PacketTableColumn::Time), Qt::UserRole);
                         if (!sequenceVariant.isValid())
                         {
                             continue;
@@ -875,12 +869,10 @@ void NetworkDock::initializeConnections()
                         uploadTarget.errorText = QStringLiteral("当前报文选择为空，无法解析 PID。");
                         return uploadTarget;
                     }
-                    const QTableWidgetItem* pidItem =
-                        (m_packetTable != nullptr && rowIndex >= 0)
-                        ? m_packetTable->item(rowIndex, toPacketColumn(PacketTableColumn::Pid))
-                        : nullptr;
+                    const QString pidText = m_packetTable != nullptr && rowIndex >= 0
+                        ? m_packetTable->cell(rowIndex, toPacketColumn(PacketTableColumn::Pid)).toString() : QString{};
                     std::uint32_t targetPid = 0;
-                    if (pidItem == nullptr || !ks::online_scan::tryParsePidFromText(pidItem->text(), &targetPid))
+                    if (pidText.isEmpty() || !ks::online_scan::tryParsePidFromText(pidText, &targetPid))
                     {
                         uploadTarget.errorText = QStringLiteral("当前报文行没有可解析 PID。");
                         return uploadTarget;
@@ -902,7 +894,7 @@ void NetworkDock::initializeConnections()
             {
                 if (anchorRow >= 0)
                 {
-                    openPacketDetailWindowFromTableRow(m_packetTable, anchorRow);
+                    openPacketDetailWindowBySequenceId(m_packetTable->cell(anchorRow, 0, Qt::UserRole).toULongLong());
                 }
             }
             else if (selectedAction == addBlockRuleAction)
@@ -919,7 +911,7 @@ void NetworkDock::initializeConnections()
                     return;
                 }
 
-                const ks::network::PacketRecord& packetRecord = packetIt->second;
+                const ks::network::PacketRecord& packetRecord = *packetIt->second;
                 m_firewallPage->addBlockRuleFromEvidence(
                     QString::fromUtf8(packetRecord.remoteAddress.c_str()),
                     QString::number(packetRecord.remotePort),
@@ -938,8 +930,7 @@ void NetworkDock::initializeConnections()
                 rowTextList.reserve(m_packetTable->columnCount());
                 for (int columnIndex = 0; columnIndex < m_packetTable->columnCount(); ++columnIndex)
                 {
-                    QTableWidgetItem* item = m_packetTable->item(anchorRow, columnIndex);
-                    rowTextList.push_back(item == nullptr ? QString() : item->text());
+                    rowTextList.push_back(m_packetTable->cell(anchorRow, columnIndex).toString());
                 }
                 if (QGuiApplication::clipboard() != nullptr)
                 {
@@ -982,7 +973,7 @@ void NetworkDock::initializeConnections()
                         continue;
                     }
 
-                    const ks::network::PacketRecord& packetRecord = iterator->second;
+                    const ks::network::PacketRecord& packetRecord = *iterator->second;
                     if (copyHexMode)
                     {
                         // 十六进制模式：始终保留报文头元信息，方便回溯上下文。
@@ -1226,7 +1217,7 @@ void NetworkDock::refreshR0TrafficSnapshotAsync(
         for (auto& packetRecord : packetRecords)
         {
             packetRecord.sequenceId = m_r0SyntheticSequence++;
-            onPacketCaptured(packetRecord);
+            onPacketCaptured(std::move(packetRecord));
         }
         if (m_monitorStatusLabel)
             m_monitorStatusLabel->setText(QStringLiteral("状态：运行中；来源：R0 WFP IPv4/IPv6 逐包捕获（报文前缀最长 %1 字节；%2）")

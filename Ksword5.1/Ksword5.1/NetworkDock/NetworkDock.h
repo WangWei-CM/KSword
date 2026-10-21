@@ -11,6 +11,7 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "PacketMonitorTable.h"
 #include "../UI/PageNavigationCatalog.h"
 #include "../MonitorDock/ProcessTraceTimelineWidget.h"
 #include "../ksword/network/network_nids.h"
@@ -540,7 +541,7 @@ private:
     // - 作用：处理一条抓包记录，写入缓存并按过滤状态决定是否显示。
     // - 参数 packetRecord：后台服务解析出的报文记录。
     // - 返回：无。
-    void onPacketCaptured(const ks::network::PacketRecord& packetRecord);
+    void onPacketCaptured(ks::network::PacketRecord packetRecord);
 
     // processNidsPacket：
     // - 作用：把单条报文送入 NIDS 引擎并追加新告警。
@@ -583,12 +584,9 @@ private:
     // - 返回：无。
     void onRateLimitActionArrived(const ks::network::RateLimitActionEvent& actionEvent);
 
-    // appendPacketToMonitorTable：
-    // - 作用：把一条报文追加到“流量监控”主表末尾。
-    // - 参数 packetRecord：待追加报文。
-    // - 返回：无。
-    void appendPacketToMonitorTable(const ks::network::PacketRecord& packetRecord);
-    void populatePacketMonitorRow(int row, const ks::network::PacketRecord& packetRecord);
+    // Visible metadata requests never materialize or mutate table items.
+    void requestPacketMetadata(const ks::network::PacketRecord& packetRecord);
+    void drainPacketMetadata();
 
     // scheduleDomainResolutionForPacket：
     // - 对远端 IP 启动有界线程池解析，优先使用本机 DNS 缓存；
@@ -606,7 +604,8 @@ private:
     // - 作用：按当前组合过滤条件重建主流量表。
     // - 返回：无。
     void rebuildMonitorTableByFilter();
-    void continuePacketTableProjection(std::uint64_t generation);
+    void requestPacketTableProjection();
+    void replacePacketTableRecord(std::uint64_t sequence);
 
     // trimOldestPacketWhenNeeded：
     // - 作用：当缓存超上限时删除最老报文，限制内存占用。
@@ -884,9 +883,9 @@ private:
     // - 参数 packetRecord：待匹配报文。
     // - 参数 groupFilter：编译后的规则组。
     // - 返回：true=命中；false=不命中。
-    bool packetMatchesMonitorFilterGroup(
+    static bool packetMatchesMonitorFilterGroup(
         const ks::network::PacketRecord& packetRecord,
-        const MonitorFilterRuleGroupCompiled& groupFilter) const;
+        const MonitorFilterRuleGroupCompiled& groupFilter);
 
     // findMonitorFilterRuleGroupById：
     // - 作用：按规则组 ID 查找 UI 状态对象。
@@ -1407,7 +1406,7 @@ private:
     QPushButton* m_exportMonitorFilterButton = nullptr;     // 导出配置按钮。
     QLabel* m_monitorFilterStateLabel = nullptr;            // 当前过滤状态汇总标签。
     ProcessTraceTimelineWidget* m_packetTimelineWidget = nullptr; // 流量监控页时间轴（复用 ETW 框选交互控件）。
-    QTableWidget* m_packetTable = nullptr;             // 全量发送报文表格。
+    PacketMonitorTable* m_packetTable = nullptr;             // 全量发送报文表格。
 
     // ========================= Tab2：NIDS ====================
     QWidget* m_nidsPage = nullptr;            // NIDS 页容器。
@@ -1681,7 +1680,7 @@ private:
     // - 仍保留硬上限，避免极端场景内存失控。
     static constexpr std::size_t kMaxPendingPacketQueueCount = 80000;
     std::deque<std::uint64_t> m_packetSequenceOrder; // 报文序号按时间顺序缓存。
-    std::unordered_map<std::uint64_t, ks::network::PacketRecord> m_packetBySequence; // 序号 -> 报文映射。
+    std::unordered_map<std::uint64_t, std::shared_ptr<ks::network::PacketRecord>> m_packetBySequence; // 序号 -> 报文映射。
     std::uint64_t m_r0LastEventSequence = 0; // 已消费的驱动 WFP 逐包 cursor，用于严格增量去重。
     std::uint64_t m_r0LastDroppedEventCount = 0; // 驱动逐包 ring 累计覆盖数，供状态栏显示。
     std::uint64_t m_r0SyntheticSequence = (1ULL << 63U); // UI 主键序号；原始驱动 sequence 单独保存在 PacketRecord。
@@ -1701,19 +1700,18 @@ private:
     struct PacketTableProjectionState
     {
         std::uint64_t generation = 0;
-        bool active = false;
-        bool enabled = true;
-        bool sortingEnabled = false;
+        bool active = false, enabled = true, locked = false;
         int sortColumn = -1;
         Qt::SortOrder sortOrder = Qt::AscendingOrder;
         QCursor cursor;
-        std::deque<std::uint64_t> pending;
-        std::deque<std::uint64_t> filled;
-        QSet<qulonglong> selected;
-        bool hasCurrent = false;
-        qulonglong currentSequence = 0;
-        int currentColumn = 0;
     };
+    std::deque<std::vector<std::uint64_t>> m_packetMetadataBatches;
+    std::size_t m_packetMetadataCursor = 0;
+    bool m_packetMetadataScheduled = false, m_packetTableKickScheduled = false;
+    QHash<QString, QSet<qulonglong>> m_packetSequencesByAddress;
+    std::uint64_t m_packetTableContentVersion = 0;
+    ks::ui::AsyncOperation* m_packetTableProjectionOperation = nullptr;
+    std::unordered_map<std::uint64_t, std::shared_ptr<const PacketMonitorRecord>> m_packetTableRecords;
     PacketTableProjectionState m_packetTableProjection;
     bool m_packetTableProjectionDirty = false;
     bool m_packetTimelineProjectionDirty = false;

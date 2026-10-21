@@ -259,10 +259,9 @@ void NetworkDock::initializeTrafficMonitorTab()
     m_trafficMonitorLayout->addWidget(m_packetTimelineWidget, 0);
 
     // 报文主表：展示“全部发送 UDP/TCP 包”。
-    m_packetTable = new ks::ui::VisibleTableWidget(m_trafficMonitorPage);
+    m_packetTable = new PacketMonitorTable(m_trafficMonitorPage);
     // 报文是实时主证据，保留冻结、导出和快照对比。
     ks::ui::SetTableActionBarMode(m_packetTable, ks::ui::TableActionBarMode::Full);
-    m_packetTable->setColumnCount(toPacketColumn(PacketTableColumn::Count));
     m_packetTable->setHorizontalHeaderLabels({
         QStringLiteral("时间"),
         QStringLiteral("协议"),
@@ -277,6 +276,25 @@ void NetworkDock::initializeTrafficMonitorTab()
         QStringLiteral("负载"),
         QStringLiteral("内容预览")
         });
+    m_packetTable->sortRequested = [this](int column, Qt::SortOrder order)
+    {
+        m_packetTableProjection.sortColumn = column;
+        m_packetTableProjection.sortOrder = order;
+        rebuildMonitorTableByFilter();
+    };
+    m_packetTable->processIcon = [this](quint32 pid)
+    {
+        const auto found = m_processIconCacheByPid.constFind(pid);
+        static const QIcon placeholder(QStringLiteral(":/Icon/process_main.svg"));
+        return found == m_processIconCacheByPid.constEnd() ? placeholder : found.value();
+    };
+    m_packetTable->requestMetadata = [this](const auto& packet)
+    {
+        if (isPacketProjectionVisible()) requestPacketMetadata(packet);
+    };
+    // Uniform natural row height avoids per-record section measurements during
+    // an atomic batch insertion, including the final tail-follow layout.
+    m_packetTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_packetTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     // 抓包列表改为支持多选，便于批量复制报文 ASCII / 十六进制内容。
     m_packetTable->setSelectionMode(QAbstractItemView::ExtendedSelection);

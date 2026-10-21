@@ -265,8 +265,8 @@ void NetworkDock::replayPacketToManualRequestByTableRow(const int row)
     }
 
     // 从时间列 UserRole 取出 sequenceId，用于回查完整报文实体。
-    QTableWidgetItem* timeItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Time));
-    if (timeItem == nullptr)
+    const QVariant sequenceVariant = m_packetTable->cell(row, toPacketColumn(PacketTableColumn::Time), Qt::UserRole);
+    if (!sequenceVariant.isValid())
     {
         warn << replayEvent
             << "[NetworkDock] 报文重放失败：时间列为空, row=" << row
@@ -274,7 +274,6 @@ void NetworkDock::replayPacketToManualRequestByTableRow(const int row)
         return;
     }
 
-    const QVariant sequenceVariant = timeItem->data(Qt::UserRole);
     if (!sequenceVariant.isValid())
     {
         warn << replayEvent
@@ -314,7 +313,7 @@ void NetworkDock::replayPacketToManualRequestByTableRow(const int row)
     }
 
     // packetRecord 用途：承载本次要回放的抓包实体，后续统一从该对象提取参数。
-    const ks::network::PacketRecord& packetRecord = packetIterator->second;
+    const ks::network::PacketRecord& packetRecord = *packetIterator->second;
 
     // 当前请求构造执行器仅支持 IPv4；IPv6 报文给出明确提示，避免用户误操作。
     std::uint32_t remoteIpv4HostOrder = 0;

@@ -1595,7 +1595,7 @@ void NetworkDock::updateMonitorFilterStateLabel()
 
 bool NetworkDock::packetMatchesMonitorFilterGroup(
     const ks::network::PacketRecord& packetRecord,
-    const MonitorFilterRuleGroupCompiled& groupFilter) const
+    const MonitorFilterRuleGroupCompiled& groupFilter)
 {
     if (!groupFilter.processIdList.empty())
     {
@@ -2048,14 +2048,10 @@ void NetworkDock::trackProcessByTableRow(const int row)
         return;
     }
 
-    QTableWidgetItem* pidItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Pid));
-    if (pidItem == nullptr)
-    {
-        return;
-    }
+    const QString pidText = m_packetTable->cell(row, toPacketColumn(PacketTableColumn::Pid)).toString();
 
     std::uint32_t targetPid = 0;
-    if (!tryParsePidText(pidItem->text(), targetPid))
+    if (!tryParsePidText(pidText, targetPid))
     {
         QMessageBox::information(this, QStringLiteral("跟踪进程"), QStringLiteral("该行 PID 无效，无法跟踪。"));
         return;
@@ -2074,14 +2070,10 @@ void NetworkDock::gotoProcessDetailByTableRow(const int row)
         return;
     }
 
-    QTableWidgetItem* pidItem = m_packetTable->item(row, toPacketColumn(PacketTableColumn::Pid));
-    if (pidItem == nullptr)
-    {
-        return;
-    }
+    const QString pidText = m_packetTable->cell(row, toPacketColumn(PacketTableColumn::Pid)).toString();
 
     std::uint32_t targetPid = 0;
-    if (!tryParsePidText(pidItem->text(), targetPid))
+    if (!tryParsePidText(pidText, targetPid))
     {
         QMessageBox::information(this, QStringLiteral("进程详情"), QStringLiteral("该行 PID 无效，无法打开进程详情。"));
         return;

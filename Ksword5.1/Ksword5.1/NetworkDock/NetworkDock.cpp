@@ -288,6 +288,7 @@ NetworkDock::~NetworkDock()
     { std::lock_guard<std::mutex> lock(m_packetMailbox->mutex); m_packetMailbox->closed = true; }
     if (m_trafficCleanup && !m_trafficCleanup->isCleanupRequested()) m_trafficCleanup->requestCleanup();
     ++m_packetTableProjection.generation;
+    if (m_packetTableProjectionOperation != nullptr) m_packetTableProjectionOperation->close();
     if (m_packetTimelineProjectionOperation != nullptr) m_packetTimelineProjectionOperation->close();
     if (m_nidsIconOperation != nullptr) m_nidsIconOperation->close();
     if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->close();

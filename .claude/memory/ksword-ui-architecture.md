@@ -487,3 +487,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 速率时间轴的完整采样与绘制投影分开：后台对64点叶块建立小索引，绘制按物理像素列分别保留上下行首末及极值，最后一个原样本独立按原动画插值；最大Y值仍来自目标时间范围内全部原始值，不能改用动画值或降采样值。无序/非有限兼容输入保留原顺序和原扫描语义。投影缓存只按值源、目标/动画范围、物理宽度失效；主题和选区不重建原数据。纯值等价/峰谷守恒不等同GUI逐像素栅格一致或实测FPS证明，实际视觉由用户验收。
 
 - 网络审计/防火墙完整值模型接纳使用worker预备的持久范围树，使原begin/end增删通知内不再erase/shift/copy整个Row数组；最终回到连续根，固定模型/identity proxy保留persistent索引。排序比较在worker按实际显示QString和当前语言进行，切列时同值必须沿原Qt proxy的先前显示顺序稳定排列，不能每次从canonical顺序重排。root的真实QSortFilterProxyModel三次切列对照发现并纠正了此差异。必要Qt通知/真实persistent映射仍随规模增长，不能宣称常量时间。
+
+- 抓包主表的展示版本与规范缓存必须共享同一个PacketRecord负载所有者，不能为后台格式化再深拷贝packetBytes；R0/R3已消费批次move到该所有者。remoteDomain只在GUI更新，后台只读独立捕获的PacketMonitorRecord::domain，不能从后台读/复制可变的remoteDomain成员。展示快照/元数据COW只复制句柄和QString，旧值沿既有退役lane释放；真实复制/内存峰值仍须区分canonical、采集队列、NIDS独立队列与实际视图。root受控1MiB负载检查证明规范/展示字节缓冲身份相同，未量测实际应用峰值内存。
