@@ -12,6 +12,7 @@
 #include "UI/SecondaryPageLayout.h"
 #include "UI/AsyncCleanupRegistry.h"
 #include "UI/AsyncOperation.h"
+#include "UI/TableInteractionSupport.h"
 #include "UI/RetainedCleanupJob.h"
 #include <QFileSystemWatcher>
 #include <QElapsedTimer>
@@ -21,6 +22,11 @@
 #include "ksword/log/log.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QTableView>
+#include <QThreadPool>
+#include <QStringDecoder>
 #include <QBrush>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -1287,6 +1293,222 @@ namespace
         return KswordTheme::TextPrimaryColor();
     }
 
+    // Pure protocol state is used by one worker at a time. Only the durable
+    // pending batch crosses the mutex, so a dropped Qt delivery can be recovered
+    // on the existing AsyncOperation idle notification without losing records.
+    struct PluginResultCell
+    {
+        QString text, tone;
+        bool numeric = false;
+        bool tooltip = false;
+    };
+    using PluginResultRow = QVector<PluginResultCell>;
+    struct PluginOutputRecord
+    {
+        QByteArray raw;
+        QJsonObject object;
+        PluginResultRow row;
+        QString text;
+        bool invalid = false;
+    };
+    struct PluginOutputBatch
+    {
+        QVector<PluginOutputRecord> records;
+        QString standardError;
+        bool more = false;
+        bool flushed = false;
+    };
+    struct PluginOutputState
+    {
+        explicit PluginOutputState(bool tab)
+            : errorDecoder(tab ? QStringConverter::Utf8 : QStringConverter::System) {}
+        QByteArray buffer; // Worker-only; no QWidget or QProcess enters this state.
+        QStringDecoder errorDecoder;
+        std::mutex mutex;
+        std::shared_ptr<const PluginOutputBatch> pending;
+    };
+    struct PluginOutputRequest
+    {
+        std::shared_ptr<PluginOutputState> state;
+        QByteArray output, error;
+        QString pluginId, resultEvent;
+        QList<VisualizationField> columns;
+        bool structured = true;
+        bool tab = false;
+        bool writeHostLog = false;
+        bool sourceDrained = false;
+        bool flush = false;
+    };
+    std::shared_ptr<const PluginOutputBatch> parsePluginOutput(
+        const PluginOutputRequest& request, const ks::ui::AsyncOperationToken& token)
+    {
+        auto batch = std::make_shared<PluginOutputBatch>();
+        auto& state = *request.state;
+        state.buffer += request.output;
+        batch->standardError = state.errorDecoder(request.error);
+        qsizetype consumed = 0;
+        QElapsedTimer budget;
+        budget.start();
+        for (int count = 0; count < 64 && (count == 0 || budget.elapsed() < 4); ++count)
+        {
+            if (token.isCanceled()) return batch;
+            const qsizetype newline = state.buffer.indexOf('\n', consumed);
+            if (newline < 0 && request.sourceDrained && state.buffer.size() - consumed > kMaxBufferedStdoutBytes) break;
+            const bool remainder = newline < 0 && request.flush && !request.tab && consumed < state.buffer.size();
+            if (newline < 0 && !remainder) break;
+            const qsizetype end = newline >= 0 ? newline : state.buffer.size();
+            PluginOutputRecord record;
+            record.raw = state.buffer.mid(consumed, end - consumed);
+            consumed = newline >= 0 ? newline + 1 : end;
+            if (record.raw.endsWith('\r')) record.raw.chop(1);
+            const QString line = QString::fromUtf8(record.raw).trimmed();
+            if (line.isEmpty()) continue;
+            if (request.tab && record.raw.size() > kMaxBufferedStdoutBytes)
+            {
+                record.invalid = true;
+                record.text = QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。");
+            }
+            else if (!request.structured) record.text = line;
+            else
+            {
+                QJsonParseError error;
+                const QJsonDocument document = QJsonDocument::fromJson(record.raw, &error);
+                if (error.error != QJsonParseError::NoError || !document.isObject())
+                {
+                    record.invalid = true;
+                    record.text = request.tab
+                        ? QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。")
+                        : QStringLiteral("无法解析插件 JSON Lines：%1\n%2").arg(error.errorString(), line);
+                }
+                else
+                {
+                    record.object = document.object();
+                    if (record.object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
+                        record.object.value(QStringLiteral("plugin_id")).toString() != request.pluginId)
+                    {
+                        record.invalid = true;
+                        record.text = request.tab
+                            ? QStringLiteral("Tab 插件协议版本或 plugin_id 与清单不匹配。")
+                            : QStringLiteral("插件输出的 protocol 或 plugin_id 与清单不一致。");
+                    }
+                }
+            }
+            if (!record.invalid && !request.tab && request.structured &&
+                record.object.value(QStringLiteral("event")).toString() == request.resultEvent) {
+                for (const auto& field : request.columns) {
+                    const auto value = record.object.value(field.field);
+                    PluginResultCell cell;
+                    cell.text = visualizationValueText(value, field.format);
+                    if (field.format == QStringLiteral("badge")) {
+                        const auto style = field.valueStyles.value(value.toString());
+                        if (!style.label.isEmpty()) cell.text = style.label;
+                        cell.tone = style.tone;
+                    }
+                    cell.numeric = field.format == QStringLiteral("integer") || field.format == QStringLiteral("number") || field.format == QStringLiteral("percent");
+                    cell.tooltip = field.format == QStringLiteral("path") || cell.text.size() > 80;
+                    record.row.push_back(std::move(cell));
+                }
+            }
+            if (request.writeHostLog && !record.invalid && record.object.value(QStringLiteral("event")).toString() == QStringLiteral("log")) {
+                const QString message = record.object.value(QStringLiteral("message")).toString();
+                if (!message.isEmpty()) info << "[PluginHost:" << request.pluginId.toStdString() << "] " << message.toStdString() << eol;
+            }
+            batch->records.push_back(std::move(record));
+            if (request.tab && (batch->records.back().invalid ||
+                batch->records.back().object.value(QStringLiteral("event")).toString() == QStringLiteral("error"))) break; // Original Tab protocol is fail-closed.
+        }
+        state.buffer.remove(0, consumed); // One compaction per bounded batch, never once per line.
+        if (!state.buffer.contains('\n') && request.sourceDrained && state.buffer.size() > kMaxBufferedStdoutBytes)
+        {
+            PluginOutputRecord record;
+            record.invalid = true;
+            record.text = request.tab
+                ? QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。")
+                : QStringLiteral("插件输出存在超过 1 MiB 的无换行记录，已拒绝解析。");
+            batch->records.push_back(std::move(record));
+            state.buffer.clear();
+        }
+        batch->more = state.buffer.contains('\n') || (request.flush && !request.tab && !state.buffer.isEmpty());
+        batch->flushed = request.flush && !batch->more;
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.pending = batch;
+        }
+        return batch;
+    }
+    std::shared_ptr<const PluginOutputBatch> takePluginOutputBatch(const std::shared_ptr<PluginOutputState>& state)
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        return std::exchange(state->pending, {});
+    }
+    QByteArray readPluginChannel(QProcess* process, QProcess::ProcessChannel channel)
+    {
+        process->setReadChannel(channel);
+        QByteArray bytes = process->read(64 * 1024);
+        process->setReadChannel(QProcess::StandardOutput);
+        return bytes;
+    }
+    bool pluginChannelsDrained(QProcess* process)
+    {
+        process->setReadChannel(QProcess::StandardError);
+        const bool errorEmpty = process->bytesAvailable() == 0;
+        process->setReadChannel(QProcess::StandardOutput);
+        return errorEmpty && process->bytesAvailable() == 0;
+    }
+
+    // This is only the existing 2000-block text viewport projection, not a
+    // protocol queue: every structured record has already been interpreted.
+    // Retaining its last 2000 pending lines produces the same final visible
+    // window as QPlainTextEdit::maximumBlockCount without building hidden text.
+    void appendPluginTextProjection(std::deque<QString>& pending, const QString& text)
+    {
+        const QStringList lines = text.split(QLatin1Char('\n'));
+        for (const QString& line : lines) {
+            pending.push_back(line);
+            if (pending.size() > 2000) pending.pop_front();
+        }
+    }
+
+    class PluginResultModel final : public QAbstractTableModel
+    {
+    public:
+        PluginResultModel(QVector<VisualizationField> fields, QObject* parent)
+            : QAbstractTableModel(parent), m_fields(std::move(fields)) {}
+        ~PluginResultModel() override
+        {
+            auto retired = std::move(m_rows);
+            if (!retired.isEmpty()) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+        }
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_published; }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_fields.size()); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        { return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_fields.size()
+            ? QVariant(m_fields.at(section).label) : QVariant(); }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() >= m_published || index.column() >= m_fields.size()) return {};
+            const auto& cell = m_rows.at(index.row()).at(index.column());
+            if (role == Qt::DisplayRole || (role == Qt::ToolTipRole && cell.tooltip)) return cell.text;
+            if (role == Qt::ForegroundRole && !cell.tone.isEmpty()) return QBrush(visualizationToneColor(cell.tone));
+            if (role == Qt::TextAlignmentRole && cell.numeric) return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
+            return {};
+        }
+        int storedCount() const { return static_cast<int>(m_rows.size()); }
+        void append(const PluginResultRow& row) { m_rows.push_back(row); }
+        void publish()
+        {
+            const int count = storedCount();
+            if (count == m_published) return;
+            beginInsertRows({}, m_published, count - 1);
+            m_published = count;
+            endInsertRows();
+        }
+    private:
+        QVector<VisualizationField> m_fields;
+        QVector<PluginResultRow> m_rows;
+        int m_published = 0;
+    };
+
     class PluginRunDialog final : public QDialog
     {
     public:
@@ -1299,6 +1521,14 @@ namespace
             : QDialog(parent),
               m_descriptor(descriptor)
         {
+            m_parserState = std::make_shared<PluginOutputState>(false);
+            m_parseOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_outputTimer = new QTimer(this);
+            m_outputTimer->setSingleShot(true);
+            connect(m_outputTimer, &QTimer::timeout, this, [this]() { drainProcessOutput(); });
+            m_parseOperation->setStateChangedCallback([this]() {
+                if (!m_parseOperation->isBusy()) { consumeParsedOutput(); m_outputTimer->start(0); }
+            });
             setAttribute(Qt::WA_DeleteOnClose, true);
             setWindowTitle(descriptor.visualization.enabled
                 ? descriptor.visualization.title
@@ -1380,13 +1610,14 @@ namespace
             ks::ui::StyleJoinedResultTabs(m_tabs, resultsHeader); // 结果和页签使用相同宽度。
             if (descriptor.visualization.enabled)
             {
-                m_resultTable = new ks::ui::VisibleTableWidget(m_tabs);
+                m_resultTable = new ks::ui::TableActionTableView(m_tabs);
+                m_resultModel = new PluginResultModel(descriptor.visualization.columns, m_resultTable);
+                auto* proxy = new QSortFilterProxyModel(m_resultTable);
+                proxy->setDynamicSortFilter(false);
+                proxy->setSourceModel(m_resultModel);
+                m_resultTable->setModel(proxy);
                 // 一次插件扫描结果保留复制/导出，避免通用快照栏挤占插件内容。
                 ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::Compact);
-                m_resultTable->setColumnCount(descriptor.visualization.columns.size());
-                QStringList labels;
-                for (const VisualizationField& field : descriptor.visualization.columns) labels.push_back(field.label);
-                m_resultTable->setHorizontalHeaderLabels(labels);
                 m_resultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
                 m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
                 m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1396,6 +1627,7 @@ namespace
                 m_resultTable->verticalHeader()->setVisible(false);
                 QHeaderView* header = m_resultTable->horizontalHeader();
                 header->setStretchLastSection(false);
+                header->setResizeContentsPrecision(64);
                 for (int column = 0; column < descriptor.visualization.columns.size(); ++column)
                 {
                     const QString format = descriptor.visualization.columns.at(column).format;
@@ -1431,6 +1663,7 @@ namespace
             m_diagnostics->setPlaceholderText(QStringLiteral("插件错误和协议诊断会显示在这里。"));
             m_tabs->addTab(m_diagnostics, QStringLiteral("诊断"));
             resultsLayout->addWidget(m_tabs, 1);
+            connect(m_tabs, &QTabWidget::currentChanged, this, [this]() { presentVisibleOutput(); });
 
             auto* footer = new QHBoxLayout();
             m_status = new QLabel(QStringLiteral("正在启动…"), this);
@@ -1451,17 +1684,17 @@ namespace
             m_process->setProcessEnvironment(environment);
 
             connect(m_closeButton, &QPushButton::clicked, this, [this]() {
-                if (!m_process || m_process->state() == QProcess::NotRunning) close();
+                if (m_finished) close();
                 else cancelRun();
             });
             connect(m_process, &QProcess::started, this, [this]() {
                 setStatus(QStringLiteral("正在扫描…"), QStringLiteral("info"));
             });
             connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
-                consumeStandardOutput(false);
+                m_outputTimer->start(0);
             });
             connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
-                consumeStandardError();
+                m_outputTimer->start(0);
             });
             connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
                 if (error != QProcess::FailedToStart || m_finished) return;
@@ -1476,46 +1709,10 @@ namespace
             });
             connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
-                    if (m_finished) return;
-                    m_finished = true;
-                    consumeStandardOutput(true);
-                    consumeStandardError();
-                    const bool protocolComplete = !m_descriptor.visualization.enabled || m_completeSeen;
-                    const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0 &&
-                        !m_protocolError && protocolComplete && !m_cancelRequested;
-                    if (m_cancelRequested)
-                    {
-                        setStatus(QStringLiteral("扫描已取消"), QStringLiteral("warning"));
-                    }
-                    else if (succeeded)
-                    {
-                        if (m_totalItems > 0)
-                        {
-                            m_progress->setRange(0, m_totalItems);
-                            m_progress->setValue(qMin(m_completedItems, m_totalItems));
-                        }
-                        else
-                        {
-                            m_progress->setRange(0, 1);
-                            m_progress->setValue(1);
-                        }
-                        setStatus(QStringLiteral("扫描完成，共处理 %1 项").arg(m_completedItems),
-                            QStringLiteral("success"));
-                    }
-                    else
-                    {
-                        if (!protocolComplete)
-                        {
-                            appendDiagnostic(QStringLiteral("插件未发送声明的完成事件：%1")
-                                .arg(m_descriptor.visualization.completeEvent));
-                        }
-                        setStatus(QStringLiteral("扫描失败（退出码 %1）").arg(exitCode),
-                            QStringLiteral("danger"));
-                        if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
-                    }
-                    m_closeButton->setText(QStringLiteral("关闭"));
-                    m_closeButton->setEnabled(true);
-                    if (m_resultTable != nullptr) m_resultTable->setSortingEnabled(true);
+                    m_processExited = true;
+                    m_exitCode = exitCode;
+                    m_exitStatus = exitStatus;
+                    m_outputTimer->start(0); // Final status follows every stdout/error record, including the last unterminated line.
                 });
         }
 
@@ -1526,12 +1723,27 @@ namespace
             m_process->start();
         }
 
-        ~PluginRunDialog() override { retirePluginProcess(m_process, m_processStop); }
+        ~PluginRunDialog() override
+        {
+            m_parseOperation->close();
+            retirePluginProcess(m_process, m_processStop);
+        }
 
     protected:
+        void showEvent(QShowEvent* event) override
+        {
+            QDialog::showEvent(event);
+            presentVisibleOutput();
+        }
+        void changeEvent(QEvent* event) override
+        {
+            QDialog::changeEvent(event);
+            if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)
+                schedulePresentation();
+        }
         void closeEvent(QCloseEvent* event) override
         {
-            if (m_process != nullptr && m_process->state() != QProcess::NotRunning)
+            if (!m_finished)
             {
                 cancelRun();
                 event->ignore();
@@ -1555,74 +1767,154 @@ namespace
 
         void setStatus(const QString& text, const QString& tone)
         {
-            m_status->setText(text);
-            m_status->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
-                .arg(visualizationToneColor(tone).name()));
+            if (m_statusText == text && m_statusTone == tone) return;
+            m_statusText = text;
+            m_statusTone = tone;
+            schedulePresentation();
         }
-
+        void setProgress(int total, int value, QString format = {})
+        {
+            m_progressTotal = total;
+            m_progressValue = value;
+            if (!format.isEmpty()) m_progressFormat = std::move(format);
+            m_progressDirty = true;
+            schedulePresentation();
+        }
         void appendDiagnostic(const QString& text)
         {
-            if (!text.trimmed().isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
+            if (!text.trimmed().isEmpty()) { appendPluginTextProjection(m_pendingDiagnostics, text); schedulePresentation(); }
         }
-
-        void consumeStandardError()
+        void schedulePresentation()
         {
-            const QString text = QString::fromLocal8Bit(m_process->readAllStandardError());
-            appendDiagnostic(text);
+            if (m_presentationScheduled) return;
+            m_presentationScheduled = true;
+            QTimer::singleShot(0, this, [this]() { m_presentationScheduled = false; presentVisibleOutput(); });
         }
-
-        void consumeStandardOutput(const bool flushRemainder)
+        void presentVisibleOutput()
         {
-            m_stdoutBuffer += m_process->readAllStandardOutput();
-            int newlineIndex = -1;
-            while ((newlineIndex = m_stdoutBuffer.indexOf('\n')) >= 0)
-            {
-                QByteArray line = m_stdoutBuffer.left(newlineIndex);
-                m_stdoutBuffer.remove(0, newlineIndex + 1);
-                if (line.endsWith('\r')) line.chop(1);
-                processOutputLine(line);
+            if (!isVisible()) return; // Parsing/counts continue; hidden widgets have no projection work.
+            const QPointer<PluginRunDialog> guard(this);
+            if (m_status->text() != m_statusText && !m_statusText.isEmpty()) m_status->setText(m_statusText);
+            if (!guard) return;
+            const QString style = QStringLiteral("font-weight:600;color:%1;").arg(visualizationToneColor(m_statusTone).name());
+            if (m_statusStyle != style) { m_statusStyle = style; m_status->setStyleSheet(style); }
+            if (!guard) return;
+            if (m_progressDirty) {
+                m_progressDirty = false;
+                m_progress->setRange(0, m_progressTotal);
+                if (!guard) return;
+                m_progress->setValue(m_progressValue);
+                if (!guard) return;
+                if (!m_progressFormat.isEmpty()) m_progress->setFormat(m_progressFormat);
             }
-            if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes)
-            {
-                appendDiagnostic(QStringLiteral("插件输出存在超过 1 MiB 的无换行记录，已拒绝解析。"));
-                m_stdoutBuffer.clear();
-                m_protocolError = true;
+            if (!guard) return;
+            if (m_resultTable && m_resultTable->isVisible()) {
+                if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("plugin-result-projection"), {m_resultTable},
+                    [guard]() { if (guard) guard->schedulePresentation(); })) return;
+                m_resultModel->publish(); // One row-range notification; no per-cell allocation or hidden proxy rebuilding.
+                if (!guard) return;
+                if (m_finished && !m_sortingActivated) { m_sortingActivated = true; m_resultTable->setSortingEnabled(true); }
             }
-            if (flushRemainder && !m_stdoutBuffer.isEmpty())
-            {
-                processOutputLine(m_stdoutBuffer);
-                m_stdoutBuffer.clear();
-            }
+            if (!guard) return;
+            if (m_summaryDirty) { m_summaryDirty = false; presentSummary(m_pendingSummary); }
+            if (!guard) return;
+            QElapsedTimer budget;
+            budget.start();
+            int units = 0;
+            const auto project = [&](QPlainTextEdit* editor, std::deque<QString>& pending) {
+                if (!editor || !editor->isVisible()) return;
+                while (!pending.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
+                    const QString text = std::move(pending.front()); pending.pop_front();
+                    editor->appendPlainText(text);
+                    if (!guard) return;
+                    ++units;
+                }
+            };
+            project(m_plainOutput, m_pendingPlainOutput);
+            if (!guard) return;
+            project(m_diagnostics, m_pendingDiagnostics);
+            if (!guard) return;
+            if ((m_plainOutput && m_plainOutput->isVisible() && !m_pendingPlainOutput.empty()) ||
+                (m_diagnostics->isVisible() && !m_pendingDiagnostics.empty())) schedulePresentation();
         }
-
-        void processOutputLine(const QByteArray& lineBytes)
+        void consumeParsedOutput()
         {
-            const QString line = QString::fromUtf8(lineBytes).trimmed();
-            if (line.isEmpty()) return;
-            if (!m_descriptor.visualization.enabled)
-            {
-                m_plainOutput->appendPlainText(line);
+            const auto batch = takePluginOutputBatch(m_parserState);
+            if (!batch) return;
+            for (const auto& record : batch->records) {
+                if (record.invalid) { m_protocolError = true; appendDiagnostic(record.text); }
+                else if (!m_descriptor.visualization.enabled) { appendPluginTextProjection(m_pendingPlainOutput, record.text); schedulePresentation(); }
+                else processOutputObject(record.object, record.row);
+            }
+            appendDiagnostic(batch->standardError);
+            m_parsePending = batch->more;
+            m_outputFlushed = batch->flushed;
+        }
+        void drainProcessOutput()
+        {
+            if (m_finished || !m_process) return;
+            consumeParsedOutput();
+            if (m_parseOperation->isBusy()) return;
+            if (m_processExited && (m_outputUnavailable || (m_outputFlushed && !m_parsePending && pluginChannelsDrained(m_process)))) {
+                finalizeOutput();
                 return;
             }
-
-            QJsonParseError parseError;
-            const QJsonDocument document = QJsonDocument::fromJson(lineBytes, &parseError);
-            if (parseError.error != QJsonParseError::NoError || !document.isObject())
-            {
-                appendDiagnostic(QStringLiteral("无法解析插件 JSON Lines：%1\n%2")
-                    .arg(parseError.errorString(), line));
-                m_protocolError = true;
-                return;
+            if (m_outputUnavailable) return;
+            PluginOutputRequest request;
+            request.state = m_parserState;
+            request.pluginId = m_descriptor.id;
+            request.structured = m_descriptor.visualization.enabled;
+            request.resultEvent = m_descriptor.visualization.resultEvent;
+            request.columns = m_descriptor.visualization.columns;
+            if (!m_parsePending) {
+                request.output = readPluginChannel(m_process, QProcess::StandardOutput);
+                request.error = readPluginChannel(m_process, QProcess::StandardError);
             }
-            const QJsonObject object = document.object();
-            if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
-                object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
-            {
-                appendDiagnostic(QStringLiteral("插件输出的 protocol 或 plugin_id 与清单不一致。"));
+            request.sourceDrained = m_process->bytesAvailable() == 0; // readPluginChannel restores stdout.
+            request.flush = m_processExited && pluginChannelsDrained(m_process);
+            if (request.output.isEmpty() && request.error.isEmpty() && !m_parsePending && !request.flush) return;
+            const auto ticket = m_parseOperation->submit<PluginOutputRequest, std::shared_ptr<const PluginOutputBatch>>(
+                std::move(request), parsePluginOutput,
+                [this](const std::shared_ptr<const PluginOutputBatch>&, std::uint64_t) { consumeParsedOutput(); return true; },
+                [this](std::exception_ptr) {
+                    m_protocolError = true;
+                    m_outputUnavailable = true;
+                    appendDiagnostic(QStringLiteral("插件输出处理失败；本次结果不完整。"));
+                    const bool userCanceled = m_cancelRequested;
+                    cancelRun();
+                    m_cancelRequested = userCanceled;
+                });
+            if (!ticket) {
                 m_protocolError = true;
-                return;
+                m_outputUnavailable = true;
+                appendDiagnostic(QStringLiteral("插件输出处理失败；本次结果不完整。"));
+                const bool userCanceled = m_cancelRequested;
+                cancelRun();
+                m_cancelRequested = userCanceled;
             }
+        }
+        void finalizeOutput()
+        {
+            m_finished = true;
+            const bool protocolComplete = !m_descriptor.visualization.enabled || m_completeSeen;
+            const bool succeeded = m_exitStatus == QProcess::NormalExit && m_exitCode == 0 &&
+                !m_protocolError && protocolComplete && !m_cancelRequested;
+            if (m_cancelRequested) setStatus(QStringLiteral("扫描已取消"), QStringLiteral("warning"));
+            else if (succeeded) {
+                setProgress(m_totalItems > 0 ? m_totalItems : 1, m_totalItems > 0 ? qMin(m_completedItems, m_totalItems) : 1);
+                setStatus(QStringLiteral("扫描完成，共处理 %1 项").arg(m_completedItems), QStringLiteral("success"));
+            } else {
+                if (!protocolComplete) appendDiagnostic(QStringLiteral("插件未发送声明的完成事件：%1").arg(m_descriptor.visualization.completeEvent));
+                setStatus(QStringLiteral("扫描失败（退出码 %1）").arg(m_exitCode), QStringLiteral("danger"));
+                if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
+            }
+            m_closeButton->setText(QStringLiteral("关闭"));
+            m_closeButton->setEnabled(true);
+            schedulePresentation();
+        }
 
+        void processOutputObject(const QJsonObject& object, const PluginResultRow& row)
+        {
             const QString event = object.value(QStringLiteral("event")).toString();
             if (event == QStringLiteral("error"))
             {
@@ -1638,9 +1930,7 @@ namespace
                 m_totalItems = qMax(0, object.value(m_descriptor.visualization.totalField).toInt());
                 if (m_totalItems > 0)
                 {
-                    m_progress->setRange(0, m_totalItems);
-                    m_progress->setValue(0);
-                    m_progress->setFormat(QStringLiteral("%v / %m"));
+                    setProgress(m_totalItems, 0, QStringLiteral("%v / %m"));
                 }
                 setStatus(m_totalItems > 0
                     ? QStringLiteral("正在扫描 0 / %1").arg(m_totalItems)
@@ -1649,11 +1939,11 @@ namespace
             }
             if (event == m_descriptor.visualization.resultEvent)
             {
-                appendResult(object);
+                appendResult(row);
                 ++m_completedItems;
                 if (m_totalItems > 0)
                 {
-                    m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                    setProgress(m_totalItems, qMin(m_completedItems, m_totalItems));
                     setStatus(QStringLiteral("正在扫描 %1 / %2").arg(m_completedItems).arg(m_totalItems),
                         QStringLiteral("info"));
                 }
@@ -1667,53 +1957,32 @@ namespace
             {
                 m_completeSeen = true;
                 updateSummary(object);
-                if (m_totalItems > 0) m_progress->setValue(qMin(m_completedItems, m_totalItems));
+                if (m_totalItems > 0) setProgress(m_totalItems, qMin(m_completedItems, m_totalItems));
                 setStatus(QStringLiteral("正在完成扫描…"), QStringLiteral("info"));
             }
         }
 
-        void appendResult(const QJsonObject& object)
+        void appendResult(const PluginResultRow& row)
         {
-            if (m_resultTable == nullptr) return;
-            if (m_resultTable->rowCount() >= kMaxVisualizationRows)
-            {
-                if (!m_rowLimitReported)
-                {
-                    appendDiagnostic(QStringLiteral("扫描结果超过 %1 行，后续结果不再显示。")
-                        .arg(kMaxVisualizationRows));
+            if (!m_resultModel) return;
+            if (m_resultModel->storedCount() >= kMaxVisualizationRows) {
+                if (!m_rowLimitReported) {
+                    appendDiagnostic(QStringLiteral("扫描结果超过 %1 行，后续结果不再显示。").arg(kMaxVisualizationRows));
                     m_rowLimitReported = true;
                 }
                 return;
             }
-
-            const int row = m_resultTable->rowCount();
-            m_resultTable->insertRow(row);
-            for (int column = 0; column < m_descriptor.visualization.columns.size(); ++column)
-            {
-                const VisualizationField& field = m_descriptor.visualization.columns.at(column);
-                const QJsonValue value = object.value(field.field);
-                QString text = visualizationValueText(value, field.format);
-                QString tone;
-                if (field.format == QStringLiteral("badge"))
-                {
-                    const VisualizationValueStyle style = field.valueStyles.value(value.toString());
-                    if (!style.label.isEmpty()) text = style.label;
-                    tone = style.tone;
-                }
-                auto* item = new QTableWidgetItem(text);
-                if (!tone.isEmpty()) item->setForeground(QBrush(visualizationToneColor(tone)));
-                if (field.format == QStringLiteral("path") || text.size() > 80) item->setToolTip(text);
-                if (field.format == QStringLiteral("integer") ||
-                    field.format == QStringLiteral("number") ||
-                    field.format == QStringLiteral("percent"))
-                {
-                    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-                }
-                m_resultTable->setItem(row, column, item);
-            }
+            m_resultModel->append(row);
+            schedulePresentation();
+        }
+        void updateSummary(const QJsonObject& object)
+        {
+            m_pendingSummary = object;
+            m_summaryDirty = true;
+            schedulePresentation();
         }
 
-        void updateSummary(const QJsonObject& object)
+        void presentSummary(const QJsonObject& object)
         {
             for (const VisualizationField& field : m_descriptor.visualization.summary)
             {
@@ -1728,11 +1997,11 @@ namespace
                     if (!style.label.isEmpty()) text = style.label;
                     tone = style.tone;
                 }
-                label->setText(QStringLiteral("%1：%2").arg(field.label, text));
-                label->setStyleSheet(QStringLiteral("font-weight:600;color:%1;")
-                    .arg(tone.isEmpty()
-                        ? KswordTheme::TextPrimaryColorHex()
-                        : visualizationToneColor(tone).name()));
+                const QString labelText = QStringLiteral("%1：%2").arg(field.label, text);
+                if (label->text() != labelText) label->setText(labelText);
+                const QString style = QStringLiteral("font-weight:600;color:%1;").arg(tone.isEmpty()
+                    ? KswordTheme::TextPrimaryColorHex() : visualizationToneColor(tone).name());
+                if (label->styleSheet() != style) label->setStyleSheet(style);
             }
         }
 
@@ -1741,13 +2010,24 @@ namespace
         std::shared_ptr<PluginProcessStop> m_processStop;
         QProgressBar* m_progress = nullptr;
         QTabWidget* m_tabs = nullptr;
-        QTableWidget* m_resultTable = nullptr;
+        QTableView* m_resultTable = nullptr;
+        PluginResultModel* m_resultModel = nullptr;
+        std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
+        std::shared_ptr<PluginOutputState> m_parserState;
+        QTimer* m_outputTimer = nullptr;
+        std::deque<QString> m_pendingDiagnostics, m_pendingPlainOutput;
+        QString m_statusText, m_statusTone, m_statusStyle, m_progressFormat;
+        QJsonObject m_pendingSummary;
+        int m_progressTotal = 0, m_progressValue = 0;
+        int m_exitCode = 0;
+        QProcess::ExitStatus m_exitStatus = QProcess::NormalExit;
+        bool m_processExited = false, m_parsePending = false, m_outputFlushed = false, m_outputUnavailable = false;
+        bool m_presentationScheduled = false, m_progressDirty = false, m_summaryDirty = false, m_sortingActivated = false;
         QPlainTextEdit* m_plainOutput = nullptr;
         QPlainTextEdit* m_diagnostics = nullptr;
         QLabel* m_status = nullptr;
         QPushButton* m_closeButton = nullptr;
         QHash<QString, QLabel*> m_summaryLabels;
-        QByteArray m_stdoutBuffer;
         int m_totalItems = 0;
         int m_completedItems = 0;
         bool m_completeSeen = false;
@@ -1789,6 +2069,14 @@ namespace
         PluginTabPage(QWidget* parent, const PluginDescriptor& descriptor)
             : QWidget(parent), m_descriptor(descriptor)
         {
+            m_parserState = std::make_shared<PluginOutputState>(true);
+            m_parseOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+            m_outputTimer = new QTimer(this);
+            m_outputTimer->setSingleShot(true);
+            connect(m_outputTimer, &QTimer::timeout, this, [this]() { drainTabOutput(); });
+            m_parseOperation->setStateChangedCallback([this]() {
+                if (!m_parseOperation->isBusy()) { consumeParsedTabOutput(); m_outputTimer->start(0); }
+            });
             setObjectName(QStringLiteral("ksExternalPluginTab_%1").arg(descriptor.id));
             auto* rootLayout = new QVBoxLayout(this);
             rootLayout->setContentsMargins(4, 4, 4, 4);
@@ -1825,6 +2113,7 @@ namespace
 
             connect(m_diagnosticsButton, &QPushButton::clicked, this, [this]() {
                 m_diagnostics->setVisible(!m_diagnostics->isVisible());
+                scheduleTabDiagnostics();
             });
             connect(m_retryButton, &QPushButton::clicked, this, [this]() { start(); });
         }
@@ -1832,6 +2121,7 @@ namespace
         ~PluginTabPage() override
         {
             m_stopping = true;
+            m_parseOperation->close();
             DWORD windowPid = 0;
             if (::IsWindow(m_pluginWindow)) ::GetWindowThreadProcessId(m_pluginWindow, &windowPid);
             if (m_process && windowPid == static_cast<DWORD>(m_process->processId())
@@ -1858,6 +2148,7 @@ namespace
         void showEvent(QShowEvent* event) override
         {
             QWidget::showEvent(event);
+            scheduleTabDiagnostics();
             if (!m_startScheduled)
             {
                 m_startScheduled = true;
@@ -1887,10 +2178,14 @@ namespace
             {
                 return;
             }
+            ++m_runGeneration;
             m_failed = false;
             m_ready = false;
             m_pluginWindow = nullptr;
-            m_stdoutBuffer.clear();
+            m_parseOperation->cancel();
+            m_parserState = std::make_shared<PluginOutputState>(true);
+            m_parsePending = m_outputFlushed = m_processExited = m_outputUnavailable = false;
+            m_exitReported = false;
             m_retryButton->setVisible(false);
             m_statusLabel->setText(QStringLiteral("正在启动外部 Tab 插件…"));
             m_statusLabel->setStyleSheet({});
@@ -1944,10 +2239,7 @@ namespace
                 m_statusLabel->setText(QStringLiteral("插件进程已启动，等待窗口握手…"));
             });
             connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() { consumeStdout(); });
-            connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
-                const QString text = QString::fromUtf8(m_process->readAllStandardError());
-                if (!text.isEmpty()) m_diagnostics->appendPlainText(text.trimmed());
-            });
+            connect(m_process, &QProcess::readyReadStandardError, this, [this]() { m_outputTimer->start(0); });
             connect(m_process, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error) {
                 if (error == QProcess::FailedToStart)
                 {
@@ -1957,12 +2249,10 @@ namespace
             connect(m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [this](const int exitCode, const QProcess::ExitStatus exitStatus) {
                     if (m_stopping) return;
-                    m_pluginWindow = nullptr;
-                    const QString exitText = QStringLiteral("插件进程已退出：exit=%1, status=%2")
-                        .arg(exitCode)
-                        .arg(exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crashed"));
-                    m_diagnostics->appendPlainText(exitText);
-                    if (!m_failed) fail(exitText, false);
+                    m_processExited = true;
+                    m_exitCode = exitCode;
+                    m_exitStatus = exitStatus;
+                    m_outputTimer->start(0);
                 });
             m_processStop = ownPluginProcess(m_process, 1200);
             if (!m_processStop)
@@ -1970,8 +2260,8 @@ namespace
             m_process->start();
 
             QPointer<PluginTabPage> guard(this);
-            QTimer::singleShot(m_descriptor.tabPresentation.startupTimeoutMs, this, [guard]() {
-                if (guard != nullptr && !guard->m_ready && !guard->m_failed)
+            QTimer::singleShot(m_descriptor.tabPresentation.startupTimeoutMs, this, [guard, generation = m_runGeneration]() {
+                if (guard != nullptr && guard->m_runGeneration == generation && !guard->m_ready && !guard->m_failed)
                 {
                     guard->fail(QStringLiteral("Tab 插件启动超时，未收到有效的窗口握手。"), true);
                 }
@@ -1979,7 +2269,32 @@ namespace
         }
 
         void consumeStdout();
-        void processProtocolLine(const QByteArray& line);
+        void processProtocolLine(const QByteArray& line, const QJsonObject& object);
+        void drainTabOutput();
+        void consumeParsedTabOutput();
+        void appendTabDiagnostic(const QString& text)
+        {
+            if (text.isEmpty()) return;
+            appendPluginTextProjection(m_pendingDiagnostics, text);
+            scheduleTabDiagnostics();
+        }
+        void scheduleTabDiagnostics()
+        {
+            if (m_diagnosticsScheduled) return;
+            m_diagnosticsScheduled = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_diagnosticsScheduled = false;
+                if (!m_diagnostics->isVisible()) return;
+                QElapsedTimer budget; budget.start();
+                const QPointer<PluginTabPage> guard(this);
+                for (int unit = 0; !m_pendingDiagnostics.empty() && unit < 32 && (unit == 0 || budget.elapsed() < 3); ++unit) {
+                    const QString text = std::move(m_pendingDiagnostics.front()); m_pendingDiagnostics.pop_front();
+                    m_diagnostics->appendPlainText(text);
+                    if (!guard) return;
+                }
+                if (!m_pendingDiagnostics.empty()) scheduleTabDiagnostics();
+            });
+        }
         void resizePluginWindow();
         void schedulePluginThemeUpdate();
         void fail(const QString& message, bool stopProcess);
@@ -1992,7 +2307,15 @@ namespace
         QPushButton* m_diagnosticsButton = nullptr;
         QPushButton* m_retryButton = nullptr;
         QPlainTextEdit* m_diagnostics = nullptr;
-        QByteArray m_stdoutBuffer;
+        std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
+        std::shared_ptr<PluginOutputState> m_parserState;
+        QTimer* m_outputTimer = nullptr;
+        std::deque<QString> m_pendingDiagnostics;
+        int m_exitCode = 0;
+        QProcess::ExitStatus m_exitStatus = QProcess::NormalExit;
+        quint64 m_runGeneration = 0;
+        bool m_parsePending = false, m_outputFlushed = false, m_processExited = false;
+        bool m_outputUnavailable = false, m_exitReported = false, m_diagnosticsScheduled = false;
         HWND m_pluginWindow = nullptr;
         bool m_ready = false;
         bool m_asyncResize = false;
@@ -2002,55 +2325,62 @@ namespace
         bool m_themeUpdatePending = false; // 合并同一轮外观事件，生命周期由this约束。
     };
 
-    void PluginTabPage::consumeStdout()
+    void PluginTabPage::consumeStdout() { m_outputTimer->start(0); }
+
+    void PluginTabPage::consumeParsedTabOutput()
     {
-        if (m_process == nullptr)
-        {
-            return;
-        }
-        m_stdoutBuffer += m_process->readAllStandardOutput();
-        if (m_stdoutBuffer.size() > kMaxBufferedStdoutBytes && !m_stdoutBuffer.contains('\n'))
-        {
-            fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
-            return;
-        }
-        while (true)
-        {
-            const qsizetype newlineIndex = m_stdoutBuffer.indexOf('\n');
-            if (newlineIndex < 0)
-            {
+        const auto batch = takePluginOutputBatch(m_parserState);
+        if (!batch) return;
+        appendTabDiagnostic(batch->standardError);
+        for (const auto& record : batch->records) {
+            if (m_failed) break;
+            if (record.invalid) {
+                if (record.text == QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。"))
+                    appendTabDiagnostic(QString::fromUtf8(record.raw));
+                fail(record.text, true);
                 break;
             }
-            if (newlineIndex > kMaxBufferedStdoutBytes)
-            {
-                fail(QStringLiteral("Tab 插件 stdout 单行缓冲超过 1 MiB，已终止插件。"), true);
-                return;
-            }
-            QByteArray line = m_stdoutBuffer.left(newlineIndex);
-            m_stdoutBuffer.remove(0, newlineIndex + 1);
-            if (line.endsWith('\r')) line.chop(1);
-            if (!line.trimmed().isEmpty()) processProtocolLine(line);
-            if (m_failed) return;
+            processProtocolLine(record.raw, record.object);
         }
+        m_parsePending = batch->more;
+        m_outputFlushed = batch->flushed;
+    }
+    void PluginTabPage::drainTabOutput()
+    {
+        if (m_stopping || !m_process || m_exitReported) return;
+        consumeParsedTabOutput();
+        if (m_parseOperation->isBusy()) return;
+        if (m_processExited && (m_outputUnavailable || (m_outputFlushed && !m_parsePending && pluginChannelsDrained(m_process)))) {
+            m_exitReported = true;
+            m_pluginWindow = nullptr;
+            const QString text = QStringLiteral("插件进程已退出：exit=%1, status=%2").arg(m_exitCode)
+                .arg(m_exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crashed"));
+            appendTabDiagnostic(text);
+            if (!m_failed) fail(text, false);
+            return;
+        }
+        if (m_outputUnavailable) return;
+        PluginOutputRequest request;
+        request.state = m_parserState;
+        request.pluginId = m_descriptor.id;
+        request.tab = true;
+        request.writeHostLog = !m_failed;
+        if (!m_parsePending) {
+            request.output = readPluginChannel(m_process, QProcess::StandardOutput);
+            request.error = readPluginChannel(m_process, QProcess::StandardError);
+        }
+        request.sourceDrained = m_process->bytesAvailable() == 0;
+        request.flush = m_processExited && pluginChannelsDrained(m_process);
+        if (request.output.isEmpty() && request.error.isEmpty() && !m_parsePending && !request.flush) return;
+        const auto ticket = m_parseOperation->submit<PluginOutputRequest, std::shared_ptr<const PluginOutputBatch>>(
+            std::move(request), parsePluginOutput,
+            [this](const std::shared_ptr<const PluginOutputBatch>&, std::uint64_t) { consumeParsedTabOutput(); return true; },
+            [this](std::exception_ptr) { m_outputUnavailable = true; fail(QStringLiteral("插件输出处理失败；本次结果不完整。"), true); });
+        if (!ticket) { m_outputUnavailable = true; fail(QStringLiteral("插件输出处理失败；本次结果不完整。"), true); }
     }
 
-    void PluginTabPage::processProtocolLine(const QByteArray& line)
+    void PluginTabPage::processProtocolLine(const QByteArray& line, const QJsonObject& object)
     {
-        QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
-        if (parseError.error != QJsonParseError::NoError || !document.isObject())
-        {
-            m_diagnostics->appendPlainText(QString::fromUtf8(line));
-            fail(QStringLiteral("Tab 插件输出不是有效的 JSON Lines 协议事件。"), true);
-            return;
-        }
-        const QJsonObject object = document.object();
-        if (object.value(QStringLiteral("protocol")).toString() != QStringLiteral("ksword-plugin/1") ||
-            object.value(QStringLiteral("plugin_id")).toString() != m_descriptor.id)
-        {
-            fail(QStringLiteral("Tab 插件协议版本或 plugin_id 与清单不匹配。"), true);
-            return;
-        }
         const QString event = object.value(QStringLiteral("event")).toString();
         if (event == QStringLiteral("error"))
         {
@@ -2063,15 +2393,13 @@ namespace
             const QString message = object.value(QStringLiteral("message")).toString();
             if (!message.isEmpty())
             {
-                m_diagnostics->appendPlainText(message);
-                info << "[PluginHost:" << m_descriptor.id.toStdString() << "] "
-                    << message.toStdString() << eol;
+                appendTabDiagnostic(message);
             }
             return;
         }
         if (event != m_descriptor.tabPresentation.readyEvent)
         {
-            m_diagnostics->appendPlainText(QString::fromUtf8(line));
+            appendTabDiagnostic(QString::fromUtf8(line));
             return;
         }
 
@@ -2209,7 +2537,7 @@ namespace
         m_statusLabel->setStyleSheet(QStringLiteral("color:%1;font-weight:600;")
             .arg(KswordTheme::ErrorColor().name(QColor::HexRgb)));
         m_retryButton->setVisible(true);
-        m_diagnostics->appendPlainText(message);
+        appendTabDiagnostic(message);
         if (stopProcess && m_process != nullptr && m_process->state() != QProcess::NotRunning)
         {
             m_process->terminate();
