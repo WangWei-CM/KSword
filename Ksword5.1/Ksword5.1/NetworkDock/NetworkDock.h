@@ -16,6 +16,7 @@
 #include "../ksword/network/network_nids.h"
 
 #include <QCache>
+#include <QCursor>
 #include <QHash>
 #include <QIcon>
 #include <QPointer>
@@ -530,6 +531,7 @@ private:
     // - 参数 packetRecord：待追加报文。
     // - 返回：无。
     void appendPacketToMonitorTable(const ks::network::PacketRecord& packetRecord);
+    void populatePacketMonitorRow(int row, const ks::network::PacketRecord& packetRecord);
 
     // scheduleDomainResolutionForPacket：
     // - 对远端 IP 启动有界线程池解析，优先使用本机 DNS 缓存；
@@ -547,6 +549,7 @@ private:
     // - 作用：按当前组合过滤条件重建主流量表。
     // - 返回：无。
     void rebuildMonitorTableByFilter();
+    void continuePacketTableProjection(std::uint64_t generation);
 
     // trimOldestPacketWhenNeeded：
     // - 作用：当缓存超上限时删除最老报文，限制内存占用。
@@ -1627,8 +1630,28 @@ private:
     std::uint64_t m_packetTimelineAccumulatedActive100ns = 0; // 已完成会话累计监控时长，停机时不增加。
     std::uint64_t m_packetTimelineLastHeartbeatSecond = 0; // 时间轴空闲刷新秒号，用于空流量时补零速率。
     qint64 m_lastPacketTimelineRefreshMs = 0; // 上次把完整点集复制到时间轴控件的时间，用于限制高频全量复制。
+    struct PacketTableProjectionState
+    {
+        std::uint64_t generation = 0;
+        bool active = false;
+        bool enabled = true;
+        bool sortingEnabled = false;
+        int sortColumn = -1;
+        Qt::SortOrder sortOrder = Qt::AscendingOrder;
+        QCursor cursor;
+        std::deque<std::uint64_t> pending;
+        std::deque<std::uint64_t> filled;
+        QSet<qulonglong> selected;
+        bool hasCurrent = false;
+        qulonglong currentSequence = 0;
+        int currentColumn = 0;
+    };
+    PacketTableProjectionState m_packetTableProjection;
     bool m_packetTableProjectionDirty = false;
     bool m_packetTimelineProjectionDirty = false;
+    ks::ui::AsyncOperation* m_packetTimelineProjectionOperation = nullptr;
+    std::uint64_t m_packetTimelineProjectionEpoch = 0;
+    bool m_packetTimelineProjectionQueued = false;
     bool m_packetTimelineUserSelectionActive = false;      // 用户是否已启用流量时间轴框选过滤。
     bool m_packetTimelineSessionActive = false;            // 是否存在正在运行的时间轴监控会话。
 

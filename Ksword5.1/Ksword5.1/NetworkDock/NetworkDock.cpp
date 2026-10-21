@@ -160,6 +160,8 @@ NetworkDock::~NetworkDock()
     // A scoped audit host never owned capture/proxy/download services. In
     // particular its teardown must not disable the global driver's capture.
     if (m_constructScope == ConstructScope::ProcessConnections) return;
+    ++m_packetTableProjection.generation;
+    if (m_packetTimelineProjectionOperation != nullptr) m_packetTimelineProjectionOperation->close();
     if (m_nidsIconOperation != nullptr) m_nidsIconOperation->close();
     if (m_nidsAnalysisOperation != nullptr) m_nidsAnalysisOperation->close();
     retireNidsAnalysisSession();
