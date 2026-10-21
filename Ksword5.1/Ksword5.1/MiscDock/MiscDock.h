@@ -65,7 +65,8 @@ public:
 
     // prepareNavigationPages：按需构造可见的嵌套页，供全局搜索/Taskbar 目录建立真实路由。
     // 只执行一次，不改变当前页签；不调用“首次激活”回调，避免目录请求启动轮询。
-    void prepareNavigationPages(bool currentPageOnly = false);
+    // singleStep limits full search preparation to one existing page factory.
+    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false);
 
 private:
     int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
@@ -186,5 +187,7 @@ private:
     ScannerDock* m_scannerPage = nullptr;   // m_scannerPage：PE/ELF/Mach-O 扫描与安全编辑页。
     MinidumpDock* m_minidumpPage = nullptr; // m_minidumpPage：崩溃转储分析页。
     QWidget* m_pluginPage = nullptr;        // m_pluginPage：进程隔离 Tab 插件宿主容器。
+    int m_navigationPrepareCursor = 0;
+    bool m_navigationPagePreparing = false;
     bool m_navigationPagesPrepared = false; // m_navigationPagesPrepared：导航索引已完成一次嵌套页准备。
 };

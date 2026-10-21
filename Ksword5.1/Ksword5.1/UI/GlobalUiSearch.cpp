@@ -1634,8 +1634,14 @@ namespace ks::ui
                         // 纯导航目录不代表冷页正文完整；未证明全文覆盖时保留原factory正文搜索。
                         if (dock && m_dockPreparer) m_dockPreparer(dock.data());
                         if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
-                        if (dock && m_nestedDockPreparer) m_nestedDockPreparer(dock.data(), m_activeSearchScope);
+                        const bool prepared = !dock || !m_nestedDockPreparer
+                            || m_nestedDockPreparer(dock.data(), m_activeSearchScope, true);
                         if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        if (!prepared)
+                        {
+                            QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                            return;
+                        }
                     }
                     if (dock) m_dockSearchCursor = std::make_shared<DockSearchCursor>(dock.data(),
                         m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage);
@@ -1982,7 +1988,7 @@ namespace ks::ui
                 if (!lifetime) return;
                 catalogAvailable = dockWidget && catalog && ResolvePageNavigationCatalog(*catalog, dockWidget->windowTitle()).has_value();
             }
-            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global);
+            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global, false);
         }
         if (!lifetime) return;
         if (dockWidget != nullptr && m_dockActivator)

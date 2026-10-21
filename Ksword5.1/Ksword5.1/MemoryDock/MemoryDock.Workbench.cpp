@@ -75,38 +75,48 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
-void MemoryDock::prepareNavigationPages(const bool currentPageOnly)
+bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep)
 {
     if (currentPageOnly)
     {
         const QPointer<MemoryDock> owner(this);
         ensureCurrentLazyPage();
-        if (!owner || !m_tabWidget) { return; }
+        if (!owner || !m_tabWidget) { return true; }
         const QPointer<QWidget> current(m_tabWidget->currentWidget());
         if (current && current == m_tabWorkbench) { ensureWorkbenchView(); }
-        if (!owner || !current || !m_tabWidget || m_tabWidget->currentWidget() != current) { return; }
+        if (!owner || !current || !m_tabWidget || m_tabWidget->currentWidget() != current) { return true; }
         if (current == m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
-        return;
+        return true;
     }
-    if (m_navigationPagesPrepared || m_tabWidget == nullptr)
-    {
-        return;
-    }
+    if (m_navigationPagesPrepared || !m_tabWidget) { return true; }
+    if (m_navigationPagePreparing) { return false; }
 
-    // 目录/搜索请求是显式导航需求：准备真实工作台与调试页，确保嵌套 Tab 的控件
-    // 进入统一索引；不切换当前页、不枚举进程，首次展示仍由各页自己的 showEvent 负责。
-    // Compatibility discovery fallback: materialize all registered pages without selecting them.
-    // The static catalog provider introduced separately bypasses this path for search.
     const QPointer<MemoryDock> owner(this);
-    QStringList ids; for (const auto& state : m_lazyPages) { ids.append(state.id); }
-    for (const auto& id : ids) { ensureLazyPage(id); if (!owner) { return; } }
-    ensureWorkbenchView();
-    if (!owner) { return; }
-    if (m_memoryDebugPage != nullptr)
+    // The registered roots, workbench and debug view keep their original order.
+    // The cursor survives a cancelled query; no factory is discarded or selected.
+    const int lazyCount = static_cast<int>(m_lazyPages.size());
+    const int total = lazyCount + 2;
+    do
     {
-        m_memoryDebugPage->prepareForNavigation();
-    }
-    if (owner) { m_navigationPagesPrepared = true; }
+        const int index = m_navigationPrepareCursor;
+        m_navigationPagePreparing = true;
+        try
+        {
+            if (index < lazyCount) { const QString id = m_lazyPages[index].id; ensureLazyPage(id); }
+            else if (index == lazyCount) { ensureWorkbenchView(); }
+            else if (m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
+        }
+        catch (...)
+        {
+            if (owner) { m_navigationPagePreparing = false; }
+            throw;
+        }
+        if (!owner) { return true; }
+        m_navigationPagePreparing = false;
+        ++m_navigationPrepareCursor;
+    } while (!singleStep && m_navigationPrepareCursor < total);
+    m_navigationPagesPrepared = m_navigationPrepareCursor >= total;
+    return m_navigationPagesPrepared;
 }
 
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。

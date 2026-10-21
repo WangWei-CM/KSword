@@ -451,25 +451,34 @@ void MiscDock::activateTabByIndex(const int tabIndex)
     m_mainTabWidget->setCurrentIndex(tabIndex);
 }
 
-void MiscDock::prepareNavigationPages(const bool currentPageOnly)
+bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep)
 {
     if (currentPageOnly)
     {
         if (m_mainTabWidget) { ensureTabInitialized(m_mainTabWidget->currentIndex(), false); }
-        return;
+        return true;
     }
-    if (m_navigationPagesPrepared || m_mainTabWidget == nullptr)
-    {
-        return;
-    }
+    if (m_navigationPagesPrepared || !m_mainTabWidget) { return true; }
+    if (m_navigationPagePreparing) { return false; }
 
-    // 搜索/目录请求是显式的导航需求，此处只构造页壳与控件树，仍不切换当前页签。
-    // hidden 的蓝屏诊断页由 ensureTabInitialized 按可见配置保持未构造。
-    for (int index = 0; index < m_mainTabWidget->count(); ++index)
+    const QPointer<MiscDock> owner(this);
+    // Preserve the original hidden/disabled policy and never activate a page.
+    while (m_navigationPrepareCursor < m_mainTabWidget->count())
     {
-        ensureTabInitialized(index, false);
+        m_navigationPagePreparing = true;
+        try { ensureTabInitialized(m_navigationPrepareCursor, false); }
+        catch (...)
+        {
+            if (owner) { m_navigationPagePreparing = false; }
+            throw;
+        }
+        if (!owner) { return true; }
+        m_navigationPagePreparing = false;
+        ++m_navigationPrepareCursor;
+        if (singleStep) { break; }
     }
-    m_navigationPagesPrepared = true;
+    m_navigationPagesPrepared = m_navigationPrepareCursor >= m_mainTabWidget->count();
+    return m_navigationPagesPrepared;
 }
 
 MinidumpDock* MiscDock::activateMinidumpTab()

@@ -55,3 +55,5 @@
 - 当前页只搜索实际可见分支，不应为它构造所有隐藏的Memory/Misc子页。NestedDockPreparer传实际UiSearchScope，MainWindow将CurrentPage映射到prepareNavigationPages(true)，只保证当前根及其工作台/调试视图已准备。此路径不置全局prepared，之后全范围搜索仍完整准备全部原分支；Taskbar兼容路由及旧调用默认false。
 - 现有DockSearchCursor仍按64节点/4ms目标和完整表格游标恢复，保留当前可见性、字段、索引和查询代次；本步未改匹配/排序/过滤/高亮导航。全范围冷正文仍缺完整值索引，不能据此将searchComplete置true或关闭GN-009/FP-003。
 - 133项QtCore检查抽取真实Memory/Misc/MainWindow方法、原MainWindow搜索lambda与冻结旧路径；验证全范围调用等价、当前页0个无关工厂及构造中销毁/换页保护。实际产品GUI、语言/主题与可见正文仍由用户验收；未运行窗口、业务或驱动。
+
+- 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。

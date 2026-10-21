@@ -503,3 +503,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 诊断操作身份来自真实notify入口的输入事件，Qt转发同一个QEvent复用ID，嵌套事件循环的不同输入另建ID；spontaneous与synthetic分开。AsyncOperation只在诊断宏1下捕获两个整数action/request ID并沿原worker、投递、apply、cleanup传递；请求ID全局唯一，子请求记录parent，0明确表示没有已证明的输入父项。UiCommitCoordinator与滚动动画/延迟probe也保存接纳时的值上下文，不能在回投时借用最新输入。取消settled可能早于query worker返回，不能叫ready；input_dispatch_end、apply和GL frameSwapped都不是物理呈现。心跳区间始终无单一action归因。writer提供QPC对时上下界，供外部WPR证据关联；没有自动运行产品采集。真实生产QtCore检查488项及原异步153项通过，普通宏0不保留新字段/worker调用/连接；完整input-to-present与非共享异步路径仍未完成。
 
 - 标题栏CurrentPage搜索的nested prepare必须与游标的visibleOnly范围一致。Memory/Misc的prepareNavigationPages(true)只准备当前选中根及当前工作台/调试视图，不置全局prepared；false默认仍保留完整兼容发现。搜索层传UiSearchScope，MainWindow只把CurrentPage映射为true，Taskbar及旧路由默认false；不通过改searchComplete伪造冷页正文索引。133项QtCore抽取实际方法/原路径对照证明全范围工厂调用顺序相同、当前页不调用其它工厂及重入销毁保护；实际GUI/可见正文/主题仍由用户验收，GN-009/FP-003全范围冷正文尚未完成。
+
+- 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。

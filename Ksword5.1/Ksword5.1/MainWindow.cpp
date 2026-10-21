@@ -7308,8 +7308,9 @@ void MainWindow::initGlobalUiSearchController()
     m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget) {
         if (navigationAdmission()) ensureDockContentInitialized(dockWidget);
     });
-    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, ks::ui::UiSearchScope scope) {
-        if (navigationAdmission()) prepareNestedDockContentForNavigation(dockWidget, scope == ks::ui::UiSearchScope::CurrentPage);
+    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, ks::ui::UiSearchScope scope, const bool singleStep) {
+        return !navigationAdmission() || prepareNestedDockContentForNavigation(dockWidget,
+            scope == ks::ui::UiSearchScope::CurrentPage, singleStep);
     });
     m_globalUiSearchController->setDockActivator([this, navigationAdmission](ads::CDockWidget* dockWidget) {
         if (navigationAdmission()) activateDockForSearchNavigation(dockWidget);
@@ -11066,23 +11067,24 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
 }
 
-void MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, const bool currentPageOnly)
+bool MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, const bool currentPageOnly, const bool singleStep)
 {
     if (dockWidget == nullptr)
     {
-        return;
+        return true;
     }
 
     const QString dockKey = dockWidget->property("ks_lazy_key").toString().trimmed().toLower();
     // 全局搜索与 Taskbar 目录只在显式请求时准备嵌套懒页；普通启动和切页仍保持原有懒加载。
     if (dockKey == QStringLiteral("misc") && m_miscWidget != nullptr)
     {
-        m_miscWidget->prepareNavigationPages(currentPageOnly);
+        return m_miscWidget->prepareNavigationPages(currentPageOnly, singleStep);
     }
     else if (dockKey == QStringLiteral("memory") && m_memoryWidget != nullptr)
     {
-        m_memoryWidget->prepareNavigationPages(currentPageOnly);
+        return m_memoryWidget->prepareNavigationPages(currentPageOnly, singleStep);
     }
+    return true;
 }
 
 void MainWindow::configureDockWidgetPersistentIdentity(
