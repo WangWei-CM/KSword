@@ -211,12 +211,12 @@ private:
 class UacWindowScanner final
 {
 public:
-    static UacApplicationIdentity scan();
+    static UacApplicationIdentity scan(const std::atomic_bool* cancel = nullptr);
     static BOOL CALLBACK enumChildProc(HWND hwnd, LPARAM lParam);
 
 private:
     static BOOL CALLBACK enumWindowProc(HWND hwnd, LPARAM lParam);
-    static QString readUiAutomationName(HWND hwnd);
+    static QString readUiAutomationName(HWND hwnd, const std::atomic_bool* cancel);
 };
 
 class UacDeskWindow final : public QMainWindow

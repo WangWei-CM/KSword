@@ -93,6 +93,11 @@ namespace
     const GUID kLegacyAlpcProvider = {0x45d8cccd, 0x539f, 0x4b72, {0xa8, 0xb7, 0x5c, 0x68, 0x31, 0x42, 0x60, 0x9a}};
     UacEventMonitor* g_eventMonitor = nullptr;
 
+    bool scanCanceled(const std::atomic_bool* cancel)
+    {
+        return cancel && cancel->load();
+    }
+
     QString winError(DWORD error = GetLastError())
     {
         wchar_t buffer[512] = {};
@@ -2215,9 +2220,10 @@ void UacEventMonitor::stopAlpcEtw()
     m_alpcTraceHandle.store(0);
 }
 
-UacApplicationIdentity UacWindowScanner::scan()
+UacApplicationIdentity UacWindowScanner::scan(const std::atomic_bool* cancel)
 {
     UacApplicationIdentity result;
+    if (scanCanceled(cancel)) return result;
     HDESK desktop = OpenDesktopW(kWinlogonDesktopName, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_ENUMERATE);
     bool closeDesktop = true;
     if (!desktop)
@@ -2234,6 +2240,7 @@ UacApplicationIdentity UacWindowScanner::scan()
     QVector<HWND> windows;
     EnumDesktopWindows(desktop, &enumWindowProc, reinterpret_cast<LPARAM>(&windows));
     if (closeDesktop) CloseDesktop(desktop);
+    if (scanCanceled(cancel)) return result;
     struct Candidate
     {
         HWND hwnd = nullptr;
@@ -2257,6 +2264,7 @@ UacApplicationIdentity UacWindowScanner::scan()
                                static_cast<qint64>(std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN)));
     for (HWND hwnd : windows)
     {
+        if (scanCanceled(cancel)) return {};
         const QString process = desktopProcessName(hwnd);
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
@@ -2288,7 +2296,9 @@ UacApplicationIdentity UacWindowScanner::scan()
         candidate.className = className;
         candidate.title = title;
         candidate.children = collectChildText(hwnd);
-        candidate.automation = readUiAutomationName(hwnd);
+        if (scanCanceled(cancel)) return {};
+        candidate.automation = readUiAutomationName(hwnd, cancel);
+        if (scanCanceled(cancel)) return {};
         candidate.applicationName = uacApplicationNameFromText(candidate.automation);
         candidate.publisher = uacPublisherFromText(candidate.automation);
         candidate.imagePath = uacPathFromText(candidate.automation);
@@ -2354,12 +2364,15 @@ UacApplicationIdentity UacWindowScanner::scan()
 
 namespace
 {
-    ProcessActionState resolveTargetInWorker(UacApplicationIdentity& identity, DWORD sessionId)
+    ProcessActionState resolveTargetInWorker(UacApplicationIdentity& identity, DWORD sessionId,
+        const std::atomic_bool* cancel)
     {
         ProcessActionState state;
+        if (scanCanceled(cancel)) return state;
         std::optional<UacOriginEvidence> appInfoEvidence;
         if (g_eventMonitor)
             appInfoEvidence = g_eventMonitor->readConsentOrigin(sessionId);
+        if (scanCanceled(cancel)) return state;
 
         // AppInfo evidence can arrive a little before the native window scan.
         // Keep it visible in that case, but do not pretend the target path is
@@ -2415,14 +2428,21 @@ namespace
             }
             if (!cacheHit)
             {
+                if (scanCanceled(cancel)) return state;
                 state.originIcon = processIcon(state.origin.imagePath);
+                if (scanCanceled(cancel)) return state;
                 state.launchChain = processLaunchChain(state.origin);
+                if (scanCanceled(cancel)) return state;
                 state.integrityLevel = tokenIntegrityLevel(state.origin.pid);
+                if (scanCanceled(cancel)) return state;
                 state.elevationType = tokenElevationType(state.origin.pid);
                 state.startTime = formatFileTime(state.origin.creationTime);
                 state.runDuration = processRunDuration(state.origin.creationTime);
+                if (scanCanceled(cancel)) return state;
                 state.originSignature = verifyFileSignature(state.origin.imagePath);
+                if (scanCanceled(cancel)) return state;
                 state.targetSignature = verifyFileSignature(appInfoEvidence->targetPath);
+                if (scanCanceled(cancel)) return state; // Never publish incomplete canceled details.
                 QMutexLocker locker(&detailCacheMutex);
                 cachedDetailKey = detailKey;
                 cachedDetails = state;
@@ -2477,9 +2497,9 @@ BOOL CALLBACK UacWindowScanner::enumChildProc(HWND hwnd, LPARAM lParam)
     return TRUE;
 }
 
-QString UacWindowScanner::readUiAutomationName(HWND hwnd)
+QString UacWindowScanner::readUiAutomationName(HWND hwnd, const std::atomic_bool* cancel)
 {
-    if (!hwnd)
+    if (!hwnd || scanCanceled(cancel))
         return {};
 
     KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral("uac-ui: probe begin hwnd=0x%1")
@@ -2495,16 +2515,17 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
     QStringList uiAutomationValues;
     IUIAutomation* automation = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+    HRESULT hr = scanCanceled(cancel) ? E_ABORT : CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&automation));
     if (SUCCEEDED(hr) && automation)
     {
         IUIAutomationElement* root = nullptr;
-        hr = automation->ElementFromHandle(hwnd, &root);
+        hr = scanCanceled(cancel) ? E_ABORT : automation->ElementFromHandle(hwnd, &root);
         if (SUCCEEDED(hr) && root)
         {
             auto readRootBstr = [&](const wchar_t* label, HRESULT (STDMETHODCALLTYPE IUIAutomationElement::*getter)(BSTR*))
             {
+                if (scanCanceled(cancel)) return;
                 BSTR value = nullptr;
                 const HRESULT valueResult = (root->*getter)(&value);
                 if (SUCCEEDED(valueResult) && value)
@@ -2522,24 +2543,24 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
             IUIAutomationCondition* condition = nullptr;
             IUIAutomationElementArray* elements = nullptr;
-            hr = automation->CreateTrueCondition(&condition);
-            if (SUCCEEDED(hr) && condition)
+            hr = scanCanceled(cancel) ? E_ABORT : automation->CreateTrueCondition(&condition);
+            if (!scanCanceled(cancel) && SUCCEEDED(hr) && condition)
                 hr = root->FindAll(TreeScope_Descendants, condition, &elements);
 
             int elementCount = 0;
             if (SUCCEEDED(hr) && elements)
             {
                 int length = 0;
-                if (SUCCEEDED(elements->get_Length(&length)))
+                if (!scanCanceled(cancel) && SUCCEEDED(elements->get_Length(&length)))
                     elementCount = std::min(length, 256);
-                for (int i = 0; i < elementCount; ++i)
+                for (int i = 0; i < elementCount && !scanCanceled(cancel); ++i)
                 {
                     IUIAutomationElement* element = nullptr;
                     if (FAILED(elements->GetElement(i, &element)) || !element)
                         continue;
 
                     BSTR name = nullptr;
-                    if (SUCCEEDED(element->get_CurrentName(&name)) && name)
+                    if (!scanCanceled(cancel) && SUCCEEDED(element->get_CurrentName(&name)) && name)
                     {
                         const QString elementName = QString::fromWCharArray(name).trimmed();
                         appendUniqueText(uiAutomationValues, QStringLiteral("Text=%1").arg(elementName));
@@ -2578,14 +2599,14 @@ QString UacWindowScanner::readUiAutomationName(HWND hwnd)
 
     QStringList msaaValues;
     IAccessible* accessible = nullptr;
-    hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
+    hr = scanCanceled(cancel) ? E_ABORT : AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
                                     reinterpret_cast<void**>(&accessible));
     if (SUCCEEDED(hr) && accessible)
     {
         LONG childCount = 0;
-        accessible->get_accChildCount(&childCount);
+        if (!scanCanceled(cancel)) accessible->get_accChildCount(&childCount);
         childCount = std::clamp<LONG>(childCount, 0, 256);
-        for (LONG child = 0; child <= childCount; ++child)
+        for (LONG child = 0; child <= childCount && !scanCanceled(cancel); ++child)
         {
             VARIANT childId{};
             VariantInit(&childId);
@@ -2875,8 +2896,9 @@ void UacDeskWindow::refreshUacState()
     const DWORD sessionId = PrivilegeStage::currentSessionId();
     m_scanThread = std::thread([this, generation, sessionId]
     {
-        UacApplicationIdentity identity = UacWindowScanner::scan();
-        ProcessActionState actionState = resolveTargetInWorker(identity, sessionId);
+        UacApplicationIdentity identity = UacWindowScanner::scan(&m_scanStop);
+        ProcessActionState actionState;
+        if (!m_scanStop.load()) actionState = resolveTargetInWorker(identity, sessionId, &m_scanStop);
         if (!m_scanStop.load())
         {
             QMetaObject::invokeMethod(this,
