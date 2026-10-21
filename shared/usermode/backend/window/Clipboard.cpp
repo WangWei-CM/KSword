@@ -153,7 +153,7 @@ ClipboardSnapshot CaptureClipboardSnapshot(HWND owner,const ClipboardCaptureOpti
         const bool preview = options.previews && !targeted && (format == CF_UNICODETEXT || format == CF_TEXT);
         HANDLE handle = nullptr;
         if (IsHandleBackedFormat(format)) {info.sizeText = L"—";info.note = L"GDI / 显示句柄，非内存对象，无法用 GlobalSize 度量";}
-        else if (options.materialize || preview) {
+        else if ((options.materialize && (options.materializeFormat == 0 || options.materializeFormat == format)) || preview) {
             info.dataRequested = true;handle = ReadData(format,info.dataError);info.dataAvailable = handle != nullptr;
             if (handle) {info.sizeKnown = MemorySize(handle,info.byteSize,info.sizeError);info.sizeText = ByteSizeText(info.byteSize);}
             else {info.sizeText = L"—";info.note = L"GetClipboardData 返回空，通常是延迟渲染失败或所有者已退出";}

@@ -52,6 +52,8 @@ struct ClipboardTextEvidence {
 struct ClipboardCaptureOptions {
     bool materialize = true,previews = true,ownerDescriptions = true,autoText = false;
     UINT textFormat = 0;
+    // Zero preserves whole-capture callers; a nonzero format limits materialization.
+    UINT materializeFormat = 0;
     std::size_t previewUnits = kPreviewCharLimit;
 };
 struct ClipboardSnapshot final {
