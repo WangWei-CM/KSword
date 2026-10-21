@@ -189,8 +189,10 @@ NetworkDock::~NetworkDock()
         m_r0TrafficRefreshTimer->stop();
     }
 
-    // 先收尾 ICMP 扫描，避免析构后的后台 worker 继续访问 NetworkDock 成员。
-    cancelAndWaitForAliveHostScan();
+    // Close receiver borrowing before cancellation; remaining ICMP calls only
+    // own copied targets, cancellation state and native handle RAII.
+    if (m_aliveScanDispatcher) m_aliveScanDispatcher->close();
+    cancelAliveHostScan();
 
     // 析构前请求取消全部下载任务，避免窗口释放后继续长期下载。
     {

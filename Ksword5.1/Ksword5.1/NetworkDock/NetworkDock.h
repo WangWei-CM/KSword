@@ -1087,10 +1087,10 @@ private:
     // - 返回：无。
     void stopAliveHostScan();
 
-    // cancelAndWaitForAliveHostScan：
-    // - 作用：请求 ICMP 扫描停止，并在析构前等待后台协调任务及其 worker 退出；
+    // cancelAliveHostScan：
+    // - 作用：请求 ICMP 扫描停止，后台值任务自行归还原生句柄；
     // - 返回：无。
-    void cancelAndWaitForAliveHostScan();
+    void cancelAliveHostScan();
 
     // appendAliveHostRow：
     // - 作用：向扫描结果表追加一行。
@@ -1657,17 +1657,14 @@ private:
     // AliveScanTaskState：让后台扫描在 QWidget 生命周期之外仍可安全记录退出状态。
     struct AliveScanTaskState
     {
-        std::mutex mutex; // mutex：保护 activeTaskCount。
-        std::condition_variable completion; // completion：最后一个协调任务退出时唤醒析构路径。
         std::atomic_bool cancelRequested{ false }; // cancelRequested：独立于 QWidget 的取消请求。
-        std::size_t activeTaskCount = 0; // activeTaskCount：尚未退出的 ICMP 扫描协调任务数。
     };
 
     // 存活主机扫描状态：防止重复启动并支持用户中断。
     std::atomic_bool m_aliveScanRunning{ false };
     std::atomic_bool m_aliveScanCancel{ false };
     int m_aliveScanProgressPid = 0;
-    QThreadPool m_aliveScanThreadPool; // m_aliveScanThreadPool：仅承载本 Dock 的扫描协调任务，避免等待全局任务池。
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_aliveScanDispatcher; // GUI close gate; workers never borrow QObject receiver.
     std::shared_ptr<AliveScanTaskState> m_aliveScanTaskState = std::make_shared<AliveScanTaskState>();
 
     // 多线程下载任务运行状态：支持多任务并行与界面周期刷新。
