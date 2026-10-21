@@ -1347,8 +1347,8 @@ void RegistryOptimizationPage::rebuildItemTable()
                 }
             }
             return result;
-        }, [this](const ScopeProjection& result, std::uint64_t) {
-            if (result.revision != m_scopeProjectionRevision) return;
+        }, [this](const ScopeProjection& result, std::uint64_t) -> bool {
+            if (result.revision != m_scopeProjectionRevision) return true;
             m_scopeProjection = std::make_shared<ScopeProjection>(result);
             m_nextScopeProjectionRow = 0;
             m_scopeProjectionClearing = true;
@@ -1358,6 +1358,7 @@ void RegistryOptimizationPage::rebuildItemTable()
                 connect(m_scopeProjectionTimer, &QTimer::timeout, this, [this]() { continueItemProjection(); });
             }
             m_scopeProjectionTimer->start(0);
+            return true;
         }, [this, revision](std::exception_ptr) {
             if (revision != m_scopeProjectionRevision) return;
             updateStatusText(ks::i18n::sourceText(QStringLiteral("系统优化：列表准备失败，请重新筛选或加载。")));
