@@ -26,8 +26,8 @@ namespace
 ProcessTraceTimelineRatePoint ProcessTraceTimelineWidget::animatedRatePointAt(
     const std::size_t pointIndex) const
 {
-    const ProcessTraceTimelineRatePoint targetPoint = m_ratePointList[pointIndex];
-    if (!m_hasPreviousRatePoint || pointIndex + 1U != m_ratePointList.size() || m_rateAnimationProgress >= 1.0)
+    const ProcessTraceTimelineRatePoint targetPoint = rateOverlayPoints()[pointIndex];
+    if (!m_hasPreviousRatePoint || pointIndex + 1U != rateOverlayPoints().size() || m_rateAnimationProgress >= 1.0)
     {
         return targetPoint;
     }
@@ -135,10 +135,10 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
     // - 折线使用同一条 X 轴，Y 轴按当前可见范围内的峰值自适应；
     // - 绿色表示上传/出站，蓝色表示下载/入站；
     // - 折线绘制在选区框之前，保证框选区域仍然位于最上层。
-    if (!m_ratePointList.empty() && m_rangeEnd100ns > m_rangeStart100ns)
+    if (!rateOverlayPoints().empty() && m_rangeEnd100ns > m_rangeStart100ns)
     {
         double maxVisibleRate = 0.0;
-        for (const ProcessTraceTimelineRatePoint& ratePoint : m_ratePointList)
+        for (const ProcessTraceTimelineRatePoint& ratePoint : rateOverlayPoints())
         {
             if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)
             {
@@ -167,7 +167,7 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
                     polygon << QPointF(xValue, yValue);
                 };
 
-            for (std::size_t rateIndex = 0; rateIndex < m_ratePointList.size(); ++rateIndex)
+            for (std::size_t rateIndex = 0; rateIndex < rateOverlayPoints().size(); ++rateIndex)
             {
                 const ProcessTraceTimelineRatePoint ratePoint = animatedRatePointAt(rateIndex);
                 if (ratePoint.time100ns < m_rangeStart100ns || ratePoint.time100ns > m_rangeEnd100ns)

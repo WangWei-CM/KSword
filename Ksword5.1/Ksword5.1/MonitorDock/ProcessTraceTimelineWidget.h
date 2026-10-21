@@ -17,6 +17,7 @@
 
 #include <cstdint>     // std::uint64_t：ETW FILETIME 兼容的 100ns 时间戳。
 #include <functional>  // std::function：不依赖 Qt moc signal 的轻量回调。
+#include <memory>
 #include <vector>      // std::vector：从事件表缓存复制而来的轻量点列表。
 
 class QEvent;
@@ -88,6 +89,21 @@ public:
     // - 传入空列表表示关闭速率折线叠加层。
     void setRateOverlayPoints(const std::vector<ProcessTraceTimelineRatePoint>& ratePointList);
 
+    // Pure-value preparation may run on a worker. The opaque result owns every
+    // point and retires its complete vector off GUI, including drop/reset/close.
+    class PreparedRateOverlay final
+    {
+    public:
+        PreparedRateOverlay() = default;
+    private:
+        std::shared_ptr<const std::vector<ProcessTraceTimelineRatePoint>> m_points;
+        friend class ProcessTraceTimelineWidget;
+    };
+    static PreparedRateOverlay prepareRateOverlayPoints(
+        std::vector<ProcessTraceTimelineRatePoint> ratePointList);
+    void applyRateOverlayPoints(const PreparedRateOverlay& prepared);
+
+
     // setSelectionChangedCallback：
     // - 注册用户交互导致选区变化时的回调；
     // - 回调参数是绝对起止时间戳，单位为 100ns。
@@ -149,6 +165,7 @@ private:
         ResizeLeft,
         ResizeRight
     };
+    const std::vector<ProcessTraceTimelineRatePoint>& rateOverlayPoints() const;
     ProcessTraceTimelineRatePoint animatedRatePointAt(std::size_t pointIndex) const;
     double animatedRateTimeToX(std::uint64_t time100ns) const;
 
@@ -206,7 +223,7 @@ private:
     mutable std::vector<ks::ui::EventTimelineBucket> m_eventBuckets; // count/min/max 绘制投影，不取代原始数据。
     mutable bool m_eventBucketsDirty = true; // 合成事件、范围或 viewport 变化时置脏。
     mutable int m_bucketPixelBudget = 0;     // DPR 改变即使尺寸相同也会重聚合。
-    std::vector<ProcessTraceTimelineRatePoint> m_ratePointList; // m_ratePointList：上传/下载速率折线点缓存，空时不绘制。
+    PreparedRateOverlay m_rateOverlay; // Complete immutable values; GUI replaces only this owner.
     QVariantAnimation* m_rateAnimation = nullptr; // m_rateAnimation：最新速率点插值动画。
     ProcessTraceTimelineRatePoint m_previousRatePoint; // m_previousRatePoint：最新点动画起始值。
     double m_rateAnimationProgress = 1.0; // m_rateAnimationProgress：最新速率点动画进度。

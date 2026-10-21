@@ -1,4 +1,5 @@
 #include "ProcessTraceTimelineWidget.h"
+#include "../UI/CompleteExport.h"
 
 // ============================================================
 // ProcessTraceTimelineWidget.cpp
@@ -305,7 +306,7 @@ void ProcessTraceTimelineWidget::resetTimeline(const std::uint64_t start100ns)
     m_rateAnimation->stop();
     m_rateAnimationProgress = 1.0;
     m_hasPreviousRatePoint = false;
-    m_ratePointList.clear();
+    m_rateOverlay = {};
     m_rangeStart100ns = start100ns;
     m_rangeEnd100ns = saturatingAdd(start100ns, kDefaultRange100ns);
     m_previousRateRangeStart100ns = m_rangeStart100ns;
@@ -351,14 +352,34 @@ bool ProcessTraceTimelineWidget::setEventPoints(
 void ProcessTraceTimelineWidget::setRateOverlayPoints(
     const std::vector<ProcessTraceTimelineRatePoint>& ratePointList)
 {
-    // 速率折线是可选叠加层：
-    // - ETW 页不会设置该列表，因此原有事件瀑布流绘制不受影响；
-    // - 网络页传入按秒聚合后的上传/下载速率，控件只负责映射到当前时间范围。
-    const ProcessTraceTimelineRatePoint previousRatePoint = m_ratePointList.empty()
+    // Compatibility callers retain the synchronous complete-value contract.
+    applyRateOverlayPoints(prepareRateOverlayPoints(ratePointList));
+}
+
+ProcessTraceTimelineWidget::PreparedRateOverlay ProcessTraceTimelineWidget::prepareRateOverlayPoints(
+    std::vector<ProcessTraceTimelineRatePoint> ratePointList)
+{
+    PreparedRateOverlay prepared;
+    prepared.m_points = ks::ui::RetainCompleteExportSnapshot(
+        std::make_shared<const std::vector<ProcessTraceTimelineRatePoint>>(std::move(ratePointList)));
+    return prepared;
+}
+
+const std::vector<ProcessTraceTimelineRatePoint>& ProcessTraceTimelineWidget::rateOverlayPoints() const
+{
+    static const std::vector<ProcessTraceTimelineRatePoint> empty;
+    return m_rateOverlay.m_points ? *m_rateOverlay.m_points : empty;
+}
+
+void ProcessTraceTimelineWidget::applyRateOverlayPoints(const PreparedRateOverlay& prepared)
+{
+    static const std::vector<ProcessTraceTimelineRatePoint> empty;
+    const auto& ratePointList = prepared.m_points ? *prepared.m_points : empty;
+    const ProcessTraceTimelineRatePoint previousRatePoint = rateOverlayPoints().empty()
         ? (ratePointList.empty() ? ProcessTraceTimelineRatePoint{} : ratePointList.back())
-        : m_ratePointList.back();
-    m_ratePointList = ratePointList;
-    if (m_ratePointList.empty())
+        : rateOverlayPoints().back();
+    m_rateOverlay = prepared; // O(1); the obsolete full vector retires on the existing value lane.
+    if (rateOverlayPoints().empty())
     {
         m_rateAnimation->stop();
         m_rateAnimationProgress = 1.0;

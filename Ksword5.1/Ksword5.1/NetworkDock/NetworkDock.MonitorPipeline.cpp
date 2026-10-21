@@ -1143,7 +1143,7 @@ void NetworkDock::refreshPacketTimelineRatePoints()
         };
         struct Output
         {
-            std::vector<ProcessTraceTimelineRatePoint> rates;
+            ProcessTraceTimelineWidget::PreparedRateOverlay rates;
             std::uint64_t epoch = 0;
             std::uint64_t monitorGeneration = 0;
         };
@@ -1175,7 +1175,8 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                 seconds.push_back(value.endSecond);
                 std::sort(seconds.begin(), seconds.end());
                 seconds.erase(std::unique(seconds.begin(), seconds.end()), seconds.end());
-                output.rates.reserve(seconds.size());
+                std::vector<ProcessTraceTimelineRatePoint> rates;
+                rates.reserve(seconds.size());
                 for (const auto second : seconds)
                 {
                     if (token.isCanceled()) return std::make_shared<Output>();
@@ -1187,8 +1188,9 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                         point.uploadBytesPerSecond = static_cast<double>(found->second.uploadBytes);
                         point.downloadBytesPerSecond = static_cast<double>(found->second.downloadBytes);
                     }
-                    output.rates.push_back(point);
+                    rates.push_back(point);
                 }
+                output.rates = ProcessTraceTimelineWidget::prepareRateOverlayPoints(std::move(rates));
                 return std::make_shared<Output>(std::move(output));
             },
             [self](const std::shared_ptr<const Output>& output, const std::uint64_t ticket)
@@ -1203,7 +1205,7 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                         self->m_packetTimelineProjectionDirty = true;
                         return;
                     }
-                    self->m_packetTimelineWidget->setRateOverlayPoints(value.rates);
+                    self->m_packetTimelineWidget->applyRateOverlayPoints(value.rates);
                 };
                 const auto pending = output; // Already an immutable worker value; no GUI vector copy.
                 if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self.data(),
