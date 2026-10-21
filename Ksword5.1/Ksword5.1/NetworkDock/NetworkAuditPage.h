@@ -31,6 +31,7 @@ class QSplitter;
 class QShowEvent;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
 class QTableWidgetItem;
 class QTimer;
 class QVBoxLayout;
@@ -291,7 +292,7 @@ private:
     void initializeCrossViewConnections();
     void updateProcessFilterLabel();
     bool ensureCurrentAuditPage();
-    void addLazyAuditTableTab(QTabWidget* tabs, QTableWidget* NetworkAuditPage::* member,
+    void addLazyAuditTableTab(QTabWidget* tabs, QTableView* NetworkAuditPage::* member,
         const QStringList& headers, const QString& id, bool fullToolbar);
 
     // initializeConnections 作用：
@@ -378,19 +379,19 @@ private:
     // - 重建 AFD 相关句柄表格；
     // - 输入 snapshot：来自后台的 AFD 句柄结果；
     // - 返回：无。
-    void refreshAfdTable(const std::vector<AfdHandleRow>& snapshot);
+    void refreshAfdTable(const std::shared_ptr<AuditSnapshot>& snapshot);
 
     // refreshWfpTables 作用：
     // - 重建 WFP provider / sublayer / callout / filter 四张只读表；
     // - 输入 snapshot：来自后台的 WFP 目录结果；
     // - 返回：无。
-    void refreshWfpTables(const AuditSnapshot& snapshot, QTableWidget* targetTable);
+    void refreshWfpTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable);
 
     // refreshNdisTables 作用：
     // - 重建 NDIS miniport / binding / protocol 表；
     // - 输入 snapshot：来自后台的 NDIS 结果；
     // - 返回：无。
-    void refreshNdisTables(const AuditSnapshot& snapshot, QTableWidget* targetTable);
+    void refreshNdisTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable);
 
     // refreshNsiSummaryTable 作用：
     // - 重建 NSI 与 R0 网络审计摘要表；
@@ -463,23 +464,23 @@ private:
 
     // AFD view.
     QWidget* m_afdPage = nullptr;
-    QTableWidget* m_afdTable = nullptr;
+    QTableView* m_afdTable = nullptr;
 
     // WFP view.
     QWidget* m_wfpPage = nullptr;
     QTabWidget* m_wfpTabWidget = nullptr;
-    QTableWidget* m_wfpProviderTable = nullptr;
-    QTableWidget* m_wfpSubLayerTable = nullptr;
-    QTableWidget* m_wfpCalloutTable = nullptr;
-    QTableWidget* m_wfpFilterTable = nullptr;
+    QTableView* m_wfpProviderTable = nullptr;
+    QTableView* m_wfpSubLayerTable = nullptr;
+    QTableView* m_wfpCalloutTable = nullptr;
+    QTableView* m_wfpFilterTable = nullptr;
 
     // NDIS view.
     QWidget* m_ndisPage = nullptr;
     QTabWidget* m_ndisTabWidget = nullptr;
-    QTableWidget* m_ndisAdapterTable = nullptr;
-    QTableWidget* m_ndisBindingTable = nullptr;
-    QTableWidget* m_ndisProtocolTable = nullptr;
-    QTableWidget* m_ndisUnknownTable = nullptr;
+    QTableView* m_ndisAdapterTable = nullptr;
+    QTableView* m_ndisBindingTable = nullptr;
+    QTableView* m_ndisProtocolTable = nullptr;
+    QTableView* m_ndisUnknownTable = nullptr;
 
     // NSI summary.
     QWidget* m_nsiPage = nullptr;
@@ -488,7 +489,7 @@ private:
     std::shared_ptr<AuditSnapshot> m_latestAuditSnapshot; // 最新完整规范数据；采集不受页面隐藏影响。
     QHash<QWidget*, std::function<void()>> m_auditPageFactories;
     bool m_constructingAuditPage = false;
-    QSet<QTableWidget*> m_dirtyAuditTables; // 未投影表只保留规范数据，不构造隐藏 item。
+    QSet<QTableView*> m_dirtyAuditTables; // 未投影表只保留规范数据，不构造隐藏 item。
     bool m_projectionRequestedWhileBusy = false;
     bool m_projectionInProgress = false; // 防止投影期间同步 Show/currentChanged 重入。
     QTimer* m_crossAutoRefreshTimer = nullptr; // 原连接管理页自动刷新能力。

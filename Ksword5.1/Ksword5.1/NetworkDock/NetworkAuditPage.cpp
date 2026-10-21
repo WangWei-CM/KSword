@@ -4,6 +4,8 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/FlatTableModel.h"
+#include <QTableView>
 #include "../UI/ThemeBinding.h"
 #include "../UI/TablePresentation.h"
 #include "../UI/ToolbarMetrics.h"
@@ -216,25 +218,24 @@ namespace
     // - 把当前 QTableWidget 行复制为 TSV；
     // - 输入 table：目标表格；
     // - 返回：无，剪贴板不可用或未选中时直接返回。
-    void copyCurrentTableRow(QTableWidget* table)
+    void copyCurrentTableRow(QTableView* table)
     {
         if (table == nullptr || QApplication::clipboard() == nullptr)
         {
             return;
         }
 
-        const int rowIndex = table->currentRow();
-        if (rowIndex < 0 || rowIndex >= table->rowCount())
+        const int rowIndex = table->currentIndex().row();
+        if (rowIndex < 0 || rowIndex >= table->model()->rowCount())
         {
             return;
         }
 
         QStringList fields;
-        fields.reserve(table->columnCount());
-        for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+        fields.reserve(table->model()->columnCount());
+        for (int columnIndex = 0; columnIndex < table->model()->columnCount(); ++columnIndex)
         {
-            const QTableWidgetItem* item = table->item(rowIndex, columnIndex);
-            fields.push_back(item != nullptr ? item->text() : QString());
+            fields.push_back(table->model()->index(rowIndex, columnIndex).data().toString());
         }
         QApplication::clipboard()->setText(fields.join('\t'));
     }
@@ -243,7 +244,7 @@ namespace
     // - 给只读审计表格安装“复制当前行”菜单；
     // - processIdColumn 为显式指定的 PID 列，-1 表示该表没有 PID；
     // - 返回：无，菜单只读，不改变网络栈状态。
-    void installCopyMenu(QTableWidget* table, const int processIdColumn = -1)
+    void installCopyMenu(QTableView* table, const int processIdColumn = -1)
     {
         if (table == nullptr)
         {
@@ -251,12 +252,12 @@ namespace
         }
 
         table->setContextMenuPolicy(Qt::CustomContextMenu);
-        QObject::connect(table, &QTableWidget::customContextMenuRequested, table, [table, processIdColumn](const QPoint& localPosition)
+        QObject::connect(table, &QWidget::customContextMenuRequested, table, [table, processIdColumn](const QPoint& localPosition)
         {
             const QModelIndex clickedIndex = table->indexAt(localPosition);
             if (clickedIndex.isValid())
             {
-                table->setCurrentCell(clickedIndex.row(), clickedIndex.column());
+                table->setCurrentIndex(clickedIndex);
                 table->selectRow(clickedIndex.row());
             }
 
@@ -265,16 +266,14 @@ namespace
             QAction* copyRowAction = menu.addAction(QIcon(QStringLiteral(":/Icon/process_copy_row.svg")), QStringLiteral("复制当前行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-            copyRowAction->setEnabled(table->currentRow() >= 0);
+            copyRowAction->setEnabled(table->currentIndex().row() >= 0);
             quint32 processId = 0;
-            if (processIdColumn >= 0 && processIdColumn < table->columnCount() &&
-                table->currentRow() >= 0 && table->currentRow() < table->rowCount())
+            if (processIdColumn >= 0 && processIdColumn < table->model()->columnCount() &&
+                table->currentIndex().row() >= 0 && table->currentIndex().row() < table->model()->rowCount())
             {
-                const QTableWidgetItem* processIdItem = table->item(table->currentRow(), processIdColumn);
+                const auto processIdText = table->model()->index(table->currentIndex().row(), processIdColumn).data().toString();
                 bool parseOk = false;
-                const uint parsedProcessId = processIdItem != nullptr
-                    ? processIdItem->text().toUInt(&parseOk, 10)
-                    : 0U;
+                const uint parsedProcessId = processIdText.toUInt(&parseOk, 10);
                 if (parseOk && parsedProcessId != 0U)
                 {
                     processId = static_cast<quint32>(parsedProcessId);
@@ -299,6 +298,44 @@ namespace
                 ks::ui::OpenProcessDetailByPid(processId);
             }
         });
+    }
+
+    void setAuditValueHeaders(QTableView* table, const QStringList& headers)
+    {
+        using Model = ks::ui::FlatTableModel<QStringList>;
+        std::vector<Model::ColumnSpec> columns;
+        for (const auto& header : headers) columns.push_back({header});
+        table->setProperty("ksword_audit_value_headers", headers);
+        table->setProperty("ks_i18n_preserve_model_data", true);
+        table->setModel(new Model(std::move(columns), [](const QStringList&, int, int) -> QVariant { return {}; }, table));
+    }
+
+    template<class Snapshot, class Row, class Resolver>
+    void presentAuditValueRows(QTableView* table, const std::shared_ptr<Snapshot>& snapshot,
+        const std::vector<Row>& rows, Resolver resolve)
+    {
+        using SharedRow = std::shared_ptr<const Row>;
+        using Model = ks::ui::FlatTableModel<SharedRow>;
+        auto* model = dynamic_cast<Model*>(table->model());
+        if (!model)
+        {
+            std::vector<typename Model::ColumnSpec> columns;
+            for (const auto& header : table->property("ksword_audit_value_headers").toStringList()) columns.push_back({header});
+            model = new Model(std::move(columns), [resolve](const SharedRow& value, int column, int role) -> QVariant
+            {
+                if (role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+                return resolve(*value, column);
+            }, table);
+            auto* old = table->model();
+            table->setModel(model);
+            if (old && old->parent() == table) old->deleteLater();
+        }
+        std::vector<SharedRow> projected;
+        projected.reserve(rows.size());
+        // Aliasing pointers keep the accepted immutable snapshot as the only
+        // field source; no GUI cell objects or shadow formatted document.
+        for (const auto& row : rows) projected.emplace_back(snapshot, &row);
+        model->setRows(std::move(projected));
     }
 
     // joinCompactLines 作用：
@@ -1071,11 +1108,10 @@ void NetworkAuditPage::initializeUi()
     QVBoxLayout* afdLayout = new QVBoxLayout(m_afdPage);
     afdLayout->setContentsMargins(4, 4, 4, 4);
     afdLayout->setSpacing(6);
-    m_afdTable = new ks::ui::VisibleTableWidget(m_afdPage);
+    m_afdTable = new ks::ui::TableActionTableView(m_afdPage);
     // AFD 是可独立保留现场的对象清单，保留完整操作栏。
     ks::ui::SetTableActionBarMode(m_afdTable, ks::ui::TableActionBarMode::Full);
-    m_afdTable->setColumnCount(8);
-    m_afdTable->setHorizontalHeaderLabels({
+    setAuditValueHeaders(m_afdTable, {
         QStringLiteral("PID"),
         QStringLiteral("进程"),
         QStringLiteral("句柄"),
@@ -1173,7 +1209,7 @@ void NetworkAuditPage::initializeUi()
 }
 
 void NetworkAuditPage::addLazyAuditTableTab(QTabWidget* tabs,
-    QTableWidget* NetworkAuditPage::* member, const QStringList& headers,
+    QTableView* NetworkAuditPage::* member, const QStringList& headers,
     const QString& id, bool fullToolbar)
 {
     QWidget* const page = new QWidget(tabs);
@@ -1182,10 +1218,9 @@ void NetworkAuditPage::addLazyAuditTableTab(QTabWidget* tabs,
     layout->setSpacing(0);
     m_auditPageFactories.insert(page, [this, page, layout, member, headers, fullToolbar]()
     {
-        auto* const table = new ks::ui::VisibleTableWidget(page);
+        auto* const table = new ks::ui::TableActionTableView(page);
         this->*member = table;
-        table->setColumnCount(headers.size());
-        table->setHorizontalHeaderLabels(headers);
+        setAuditValueHeaders(table, headers);
         table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
         table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2261,7 +2296,7 @@ void NetworkAuditPage::presentVisibleSnapshot()
     if (!ensureCurrentAuditPage()) return;
     if (!isVisible() || m_sectionTabWidget == nullptr || m_latestAuditSnapshot == nullptr) return;
 
-    QTableWidget* table = nullptr;
+    QTableView* table = nullptr;
     QWidget* const section = m_sectionTabWidget->currentWidget();
     if (section == m_crossViewPage)
     {
@@ -2335,15 +2370,15 @@ void NetworkAuditPage::presentVisibleSnapshot()
     }
     else if (section == m_afdPage)
     {
-        refreshAfdTable(snapshot->afdRows);
+        refreshAfdTable(snapshot);
     }
     else if (section == m_wfpPage)
     {
-        refreshWfpTables(*snapshot, table);
+        refreshWfpTables(snapshot, table);
     }
     else if (section == m_ndisPage)
     {
-        refreshNdisTables(*snapshot, table);
+        refreshNdisTables(snapshot, table);
     }
     else if (section == m_nsiPage)
     {
@@ -2930,147 +2965,149 @@ void NetworkAuditPage::showCrossViewContextMenu(
     }
 }
 
-void NetworkAuditPage::refreshAfdTable(const std::vector<AfdHandleRow>& snapshot)
+void NetworkAuditPage::refreshAfdTable(const std::shared_ptr<AuditSnapshot>& snapshot)
 {
-    if (m_afdTable == nullptr)
+    if (!m_afdTable) return;
+    presentAuditValueRows(m_afdTable, snapshot, snapshot->afdRows, [](const AfdHandleRow& row, int column) -> QVariant
     {
-        return;
-    }
-    m_afdTable->setRowCount(static_cast<int>(snapshot.size()));
-    int rowIndex = 0;
-    for (const AfdHandleRow& row : snapshot)
-    {
-        m_afdTable->setItem(rowIndex, 0, createReadOnlyCell(QString::number(row.processId)));
-        m_afdTable->setItem(rowIndex, 1, createReadOnlyCell(row.processName));
-        m_afdTable->setItem(rowIndex, 2, createReadOnlyCell(row.handleValueText));
-        m_afdTable->setItem(rowIndex, 3, createReadOnlyCell(row.typeName));
-        m_afdTable->setItem(rowIndex, 4, createReadOnlyCell(row.objectName));
-        m_afdTable->setItem(rowIndex, 5, createReadOnlyCell(row.sourceText));
-        m_afdTable->setItem(rowIndex, 6, createReadOnlyCell(row.diffText));
-        m_afdTable->setItem(rowIndex, 7, createReadOnlyCell(row.detailText + QStringLiteral(" | access=") + row.accessText));
-        ++rowIndex;
-    }
-}
-
-void NetworkAuditPage::refreshWfpTables(const AuditSnapshot& snapshot, QTableWidget* targetTable)
-{
-    auto fillTable = [targetTable](QTableWidget* tableWidget, const auto& rows, const auto& writer)
-    {
-        if (tableWidget == nullptr || tableWidget != targetTable)
+        switch (column)
         {
-            return;
+        case 0: return QString::number(row.processId);
+        case 1: return row.processName;
+        case 2: return row.handleValueText;
+        case 3: return row.typeName;
+        case 4: return row.objectName;
+        case 5: return row.sourceText;
+        case 6: return row.diffText;
+        case 7: return row.detailText + QStringLiteral(" | access=") + row.accessText;
+        default: return {};
         }
-        tableWidget->setRowCount(static_cast<int>(rows.size()));
-        int rowIndex = 0;
-        for (const auto& row : rows)
-        {
-            writer(tableWidget, rowIndex, row);
-            ++rowIndex;
-        }
-    };
-
-    fillTable(m_wfpProviderTable, snapshot.wfpProviderRows, [](QTableWidget* tableWidget, int rowIndex, const WfpProviderRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.nameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.descriptionText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.guidText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.flagsText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.serviceNameText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.dataSizeText));
-    });
-
-    fillTable(m_wfpSubLayerTable, snapshot.wfpSubLayerRows, [](QTableWidget* tableWidget, int rowIndex, const WfpSubLayerRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.nameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.descriptionText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.guidText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.flagsText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.providerGuidText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.weightText));
-    });
-
-    fillTable(m_wfpCalloutTable, snapshot.wfpCalloutRows, [](QTableWidget* tableWidget, int rowIndex, const WfpCalloutRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.nameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.descriptionText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.guidText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.flagsText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.providerGuidText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.layerGuidText));
-        tableWidget->setItem(rowIndex, 6, createReadOnlyCell(row.calloutIdText));
-    });
-
-    fillTable(m_wfpFilterTable, snapshot.wfpFilterRows, [](QTableWidget* tableWidget, int rowIndex, const WfpFilterRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.nameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.descriptionText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.guidText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.flagsText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.providerGuidText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.layerGuidText));
-        tableWidget->setItem(rowIndex, 6, createReadOnlyCell(row.subLayerGuidText));
-        tableWidget->setItem(rowIndex, 7, createReadOnlyCell(row.weightText));
-        tableWidget->setItem(rowIndex, 8, createReadOnlyCell(row.actionText));
-        tableWidget->setItem(rowIndex, 9, createReadOnlyCell(row.conditionText));
-        tableWidget->setItem(rowIndex, 10, createReadOnlyCell(row.filterIdText));
     });
 }
 
-void NetworkAuditPage::refreshNdisTables(const AuditSnapshot& snapshot, QTableWidget* targetTable)
+void NetworkAuditPage::refreshWfpTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable)
 {
-    auto fillTable = [targetTable](QTableWidget* tableWidget, const auto& rows, const auto& writer)
-    {
-        if (tableWidget == nullptr || tableWidget != targetTable)
+    if (m_wfpProviderTable && m_wfpProviderTable == targetTable)
+        presentAuditValueRows(m_wfpProviderTable, snapshot, snapshot->wfpProviderRows, [](const WfpProviderRow& row, int column) -> QVariant
         {
-            return;
-        }
-        tableWidget->setRowCount(static_cast<int>(rows.size()));
-        int rowIndex = 0;
-        for (const auto& row : rows)
+            switch (column)
+            {
+            case 0: return row.nameText;
+            case 1: return row.descriptionText;
+            case 2: return row.guidText;
+            case 3: return row.flagsText;
+            case 4: return row.serviceNameText;
+            case 5: return row.dataSizeText;
+            default: return {};
+            }
+        });
+    if (m_wfpSubLayerTable && m_wfpSubLayerTable == targetTable)
+        presentAuditValueRows(m_wfpSubLayerTable, snapshot, snapshot->wfpSubLayerRows, [](const WfpSubLayerRow& row, int column) -> QVariant
         {
-            writer(tableWidget, rowIndex, row);
-            ++rowIndex;
-        }
-    };
+            switch (column)
+            {
+            case 0: return row.nameText;
+            case 1: return row.descriptionText;
+            case 2: return row.guidText;
+            case 3: return row.flagsText;
+            case 4: return row.providerGuidText;
+            case 5: return row.weightText;
+            default: return {};
+            }
+        });
+    if (m_wfpCalloutTable && m_wfpCalloutTable == targetTable)
+        presentAuditValueRows(m_wfpCalloutTable, snapshot, snapshot->wfpCalloutRows, [](const WfpCalloutRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.nameText;
+            case 1: return row.descriptionText;
+            case 2: return row.guidText;
+            case 3: return row.flagsText;
+            case 4: return row.providerGuidText;
+            case 5: return row.layerGuidText;
+            case 6: return row.calloutIdText;
+            default: return {};
+            }
+        });
+    if (m_wfpFilterTable && m_wfpFilterTable == targetTable)
+        presentAuditValueRows(m_wfpFilterTable, snapshot, snapshot->wfpFilterRows, [](const WfpFilterRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.nameText;
+            case 1: return row.descriptionText;
+            case 2: return row.guidText;
+            case 3: return row.flagsText;
+            case 4: return row.providerGuidText;
+            case 5: return row.layerGuidText;
+            case 6: return row.subLayerGuidText;
+            case 7: return row.weightText;
+            case 8: return row.actionText;
+            case 9: return row.conditionText;
+            case 10: return row.filterIdText;
+            default: return {};
+            }
+        });
+}
 
-    fillTable(m_ndisAdapterTable, snapshot.ndisAdapterRows, [](QTableWidget* tableWidget, int rowIndex, const NdisAdapterRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.nameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.descriptionText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.ifIndexText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.statusText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.macText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.linkSpeedText));
-        tableWidget->setItem(rowIndex, 6, createReadOnlyCell(row.connectionStateText));
-    });
-
-    fillTable(m_ndisBindingTable, snapshot.ndisBindingRows, [](QTableWidget* tableWidget, int rowIndex, const NdisBindingRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.adapterNameText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.displayNameText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.componentIdText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.enabledText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.instanceIdText));
-    });
-
-    fillTable(m_ndisProtocolTable, snapshot.ndisProtocolRows, [](QTableWidget* tableWidget, int rowIndex, const NdisProtocolRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.interfaceAliasText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.ifIndexText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.addressFamilyText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.connectionStateText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.interfaceMetricText));
-        tableWidget->setItem(rowIndex, 5, createReadOnlyCell(row.mtuText));
-    });
-
-    fillTable(m_ndisUnknownTable, snapshot.ndisUnknownRows, [](QTableWidget* tableWidget, int rowIndex, const NdisUnknownRow& row)
-    {
-        tableWidget->setItem(rowIndex, 0, createReadOnlyCell(row.kindText));
-        tableWidget->setItem(rowIndex, 1, createReadOnlyCell(row.componentText));
-        tableWidget->setItem(rowIndex, 2, createReadOnlyCell(row.ownerModuleText));
-        tableWidget->setItem(rowIndex, 3, createReadOnlyCell(row.objectAddressText));
-        tableWidget->setItem(rowIndex, 4, createReadOnlyCell(row.detailText));
-    });
+void NetworkAuditPage::refreshNdisTables(const std::shared_ptr<AuditSnapshot>& snapshot, QTableView* targetTable)
+{
+    if (m_ndisAdapterTable && m_ndisAdapterTable == targetTable)
+        presentAuditValueRows(m_ndisAdapterTable, snapshot, snapshot->ndisAdapterRows, [](const NdisAdapterRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.nameText;
+            case 1: return row.descriptionText;
+            case 2: return row.ifIndexText;
+            case 3: return row.statusText;
+            case 4: return row.macText;
+            case 5: return row.linkSpeedText;
+            case 6: return row.connectionStateText;
+            default: return {};
+            }
+        });
+    if (m_ndisBindingTable && m_ndisBindingTable == targetTable)
+        presentAuditValueRows(m_ndisBindingTable, snapshot, snapshot->ndisBindingRows, [](const NdisBindingRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.adapterNameText;
+            case 1: return row.displayNameText;
+            case 2: return row.componentIdText;
+            case 3: return row.enabledText;
+            case 4: return row.instanceIdText;
+            default: return {};
+            }
+        });
+    if (m_ndisProtocolTable && m_ndisProtocolTable == targetTable)
+        presentAuditValueRows(m_ndisProtocolTable, snapshot, snapshot->ndisProtocolRows, [](const NdisProtocolRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.interfaceAliasText;
+            case 1: return row.ifIndexText;
+            case 2: return row.addressFamilyText;
+            case 3: return row.connectionStateText;
+            case 4: return row.interfaceMetricText;
+            case 5: return row.mtuText;
+            default: return {};
+            }
+        });
+    if (m_ndisUnknownTable && m_ndisUnknownTable == targetTable)
+        presentAuditValueRows(m_ndisUnknownTable, snapshot, snapshot->ndisUnknownRows, [](const NdisUnknownRow& row, int column) -> QVariant
+        {
+            switch (column)
+            {
+            case 0: return row.kindText;
+            case 1: return row.componentText;
+            case 2: return row.ownerModuleText;
+            case 3: return row.objectAddressText;
+            case 4: return row.detailText;
+            default: return {};
+            }
+        });
 }
 
 void NetworkAuditPage::refreshNsiSummaryTable(const AuditSnapshot& snapshot)
