@@ -340,7 +340,8 @@ KernelIoTimerTab::Snapshot KernelIoTimerTab::collectSnapshot()
         const ksword::ark::DriverObjectQueryResult queryResult = driverClient.queryDriverObject(
             driverObjectPath.toStdWString(),
             KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES |
-                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES,
+                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES |
+                KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_SKIP_START_IO,
             KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT,
             0UL);
         ++snapshot.driverObjectsQueried;

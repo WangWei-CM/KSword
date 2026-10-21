@@ -1,8 +1,10 @@
 #include "ArkDriverClient.h"
+#include "../../../shared/usermode/backend/driver/DriverQueries.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -748,15 +750,77 @@ namespace ksword::ark
         return enumResult;
     }
 
+    DriverObjectModuleSnapshot DriverClient::captureDriverObjectModules() const
+    {
+        using namespace ks::r3::driver;
+        const auto ntdll = ::GetModuleHandleW(L"ntdll.dll");
+        const auto query = ntdll ? reinterpret_cast<ks::r3::common::NtQuerySystemInformationFn>(
+            ::GetProcAddress(ntdll, "NtQuerySystemInformation")) : nullptr;
+        if (!query) return {};
+        constexpr unsigned long limit = 16UL * 1024UL * 1024UL;
+        unsigned long capacity = 64UL * 1024UL;
+        for (unsigned attempt = 0; attempt < 4; ++attempt)
+        {
+            DriverObjectModuleSnapshot value;
+            value.systemInformation.resize(capacity, 0U);
+            unsigned long bytes = 0;
+            const auto status = query(11UL, value.systemInformation.data(), capacity, &bytes);
+            if (status >= 0)
+            {
+                const auto header = offsetof(KRTL_PROCESS_MODULES, Modules);
+                if (bytes < header || bytes > capacity) return {};
+                const auto* raw = reinterpret_cast<const KRTL_PROCESS_MODULES*>(value.systemInformation.data());
+                if (raw->NumberOfModules == 0 || raw->NumberOfModules > (bytes - header) / sizeof(KRTL_PROCESS_MODULE_INFORMATION)) return {};
+                for (unsigned long index = 0; index < raw->NumberOfModules; ++index)
+                {
+                    const auto& module = raw->Modules[index];
+                    const auto base = reinterpret_cast<std::uintptr_t>(module.ImageBase);
+                    if (!base || !module.ImageSize || base > (std::numeric_limits<std::uintptr_t>::max)() - module.ImageSize) return {};
+                    const auto pathEnd = std::find(std::begin(module.FullPathName), std::end(module.FullPathName), 0U);
+                    if (module.OffsetToFileName < sizeof(module.FullPathName)
+                        && module.OffsetToFileName > static_cast<std::size_t>(pathEnd - std::begin(module.FullPathName))) return {};
+                }
+                value.systemInformation.resize(header + raw->NumberOfModules * sizeof(KRTL_PROCESS_MODULE_INFORMATION));
+                // Ignore native alignment/name-tail padding when comparing batch identities.
+                std::fill(value.systemInformation.begin() + sizeof(raw->NumberOfModules),
+                    value.systemInformation.begin() + header, 0U);
+                auto* normalized = reinterpret_cast<KRTL_PROCESS_MODULES*>(value.systemInformation.data());
+                for (unsigned long index = 0; index < normalized->NumberOfModules; ++index)
+                {
+                    auto& path = normalized->Modules[index].FullPathName;
+                    const auto end = std::find(std::begin(path), std::end(path), 0U);
+                    std::fill(end, std::end(path), 0U);
+                }
+                return value;
+            }
+            if ((status != kStatusInfoLengthMismatch && status != kStatusBufferTooSmall && status != kStatusBufferOverflow)
+                || bytes > limit || capacity == limit) return {};
+            const auto next = (std::max)(static_cast<std::uint64_t>(capacity) * 2,
+                static_cast<std::uint64_t>(bytes) + 4096);
+            if (next > limit) return {};
+            capacity = static_cast<unsigned long>(next);
+        }
+        return {};
+    }
+
     DriverObjectQueryResult DriverClient::queryDriverObject(
         const std::wstring& driverName,
         const unsigned long flags,
         const unsigned long maxDevices,
-        const unsigned long maxAttachedDevices) const
+        const unsigned long maxAttachedDevices,
+        const DriverObjectModuleSnapshot* modules) const
     {
         DriverObjectQueryResult queryResult{};
         KSWORD_ARK_QUERY_DRIVER_OBJECT_REQUEST request{};
-        request.flags = flags;
+        request.flags = flags & ~KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_DEFER_MODULE_OWNERSHIP;
+        using NativeModules = ks::r3::driver::KRTL_PROCESS_MODULES;
+        using NativeModule = ks::r3::driver::KRTL_PROCESS_MODULE_INFORMATION;
+        const auto moduleHeader = offsetof(NativeModules, Modules);
+        const NativeModules* moduleInfo = modules && modules->systemInformation.size() >= moduleHeader
+            ? reinterpret_cast<const NativeModules*>(modules->systemInformation.data()) : nullptr;
+        if (moduleInfo && moduleInfo->NumberOfModules != 0UL && moduleInfo->NumberOfModules <= (modules->systemInformation.size() - moduleHeader) / sizeof(NativeModule))
+            request.flags |= KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_DEFER_MODULE_OWNERSHIP;
+        else moduleInfo = nullptr;
         request.maxDevices = maxDevices;
         request.maxAttachedDevices = maxAttachedDevices;
         copyWideToFixed(
@@ -900,6 +964,34 @@ namespace ksword::ark
                 row.ioTimerAddress = static_cast<std::uint64_t>(sourceEntry->ioTimerAddress);
             }
             queryResult.devices.push_back(std::move(row));
+        }
+
+        if (moduleInfo && (queryResult.fieldFlags & KSWORD_ARK_DRIVER_OBJECT_FIELD_MODULE_OWNERSHIP_DEFERRED) != 0U)
+        {
+            const auto resolve = [moduleInfo](const std::uint64_t address, std::uint64_t& base, std::wstring& name, std::uint32_t& rowFlags) {
+                base = 0;
+                name.clear();
+                rowFlags &= ~KSWORD_ARK_DRIVER_DISPATCH_FLAG_MODULE_RESOLVED;
+                if (!address) return;
+                for (unsigned long index = 0; index < moduleInfo->NumberOfModules; ++index)
+                {
+                    const auto& module = moduleInfo->Modules[index];
+                    const auto imageBase = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(module.ImageBase));
+                    if (address < imageBase || address - imageBase >= module.ImageSize) continue;
+                    base = imageBase;
+                    const std::size_t offset = module.OffsetToFileName < sizeof(module.FullPathName) ? module.OffsetToFileName : 0U;
+                    for (std::size_t at = offset; at < sizeof(module.FullPathName)
+                        && name.size() + 1 < KSWORD_ARK_DRIVER_MODULE_NAME_CHARS && module.FullPathName[at] != 0; ++at)
+                        name.push_back(static_cast<wchar_t>(module.FullPathName[at]));
+                    rowFlags |= KSWORD_ARK_DRIVER_DISPATCH_FLAG_MODULE_RESOLVED;
+                    return;
+                }
+            };
+            for (auto& row : queryResult.majorFunctions)
+                resolve(row.dispatchAddress, row.moduleBase, row.moduleName, row.flags);
+            if (queryResult.startIo.state == KSWORD_ARK_DRIVER_START_IO_STATE_PRESENT)
+                resolve(queryResult.startIo.address, queryResult.startIo.moduleBase, queryResult.startIo.moduleName, queryResult.startIo.flags);
+            queryResult.fieldFlags &= ~KSWORD_ARK_DRIVER_OBJECT_FIELD_MODULE_OWNERSHIP_DEFERRED;
         }
 
         std::ostringstream stream;

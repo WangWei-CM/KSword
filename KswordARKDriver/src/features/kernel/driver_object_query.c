@@ -965,6 +965,8 @@ Return Value:
     BOOLEAN includeDevices = FALSE;
     BOOLEAN includeNames = FALSE;
     BOOLEAN includeAttached = FALSE;
+    BOOLEAN includeStartIo = TRUE;
+    BOOLEAN deferModules = FALSE;
 
     if (outputBuffer == NULL || bytesWrittenOut == NULL || request == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -993,6 +995,8 @@ Return Value:
     includeDevices = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL) ? TRUE : FALSE;
     includeNames = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_NAMES) != 0UL) ? TRUE : FALSE;
     includeAttached = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ATTACHED) != 0UL) ? TRUE : FALSE;
+    includeStartIo = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_SKIP_START_IO) == 0UL) ? TRUE : FALSE;
+    deferModules = ((requestSnapshot.flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_DEFER_MODULE_OWNERSHIP) != 0UL) ? TRUE : FALSE;
 
     status = KswordARKReferenceDriverObjectByRequestName(&requestSnapshot, &driverObject);
     response->lastStatus = status;
@@ -1049,13 +1053,20 @@ Return Value:
         }
     }
 
-    status = KswordARKBuildSystemModuleSnapshot(&moduleInfo, &moduleInfoBytes);
-    if (!NT_SUCCESS(status)) {
-        moduleInfo = NULL;
+    if (!deferModules && (includeMajor || includeStartIo)) {
+        status = KswordARKBuildSystemModuleSnapshot(&moduleInfo, &moduleInfoBytes);
+        if (!NT_SUCCESS(status)) {
+            moduleInfo = NULL;
+        }
+    }
+    if (deferModules && (includeMajor || includeStartIo)) {
+        response->fieldFlags |= KSWORD_ARK_DRIVER_OBJECT_FIELD_MODULE_OWNERSHIP_DEFERRED;
     }
 
-    /* DriverStartIo 与 DriverUnload 同级，是 DriverObject 基础字段，不跟随 MajorFunction 开关。 */
-    KswordARKFillStartIoRow(driverObject, moduleInfo, response);
+    /* StartIo stays a default basic field; only a caller with no consumer opts out. */
+    if (includeStartIo) {
+        KswordARKFillStartIoRow(driverObject, moduleInfo, response);
+    }
 
     if (includeMajor) {
         KswordARKFillMajorFunctionRows(driverObject, moduleInfo, response);

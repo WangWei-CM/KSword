@@ -517,94 +517,107 @@ void KernelIoctlAuditTab::refreshAsync()
         ksword::ark::DriverClient client;
         if (workerOk)
         {
-            QSet<QString> seenDriverNames;
-            for (const KernelDeviceDriverObjectEntry& objectRow : objectRows)
+            auto moduleSnapshot = client.captureDriverObjectModules();
+            for (unsigned attempt = 0; attempt < 2; ++attempt)
             {
-                if (objectRow.isScopeEntry || objectRow.objectTypeText.compare(QStringLiteral("Driver"), Qt::CaseInsensitive) != 0)
+                QSet<QString> seenDriverNames;
+                for (const KernelDeviceDriverObjectEntry& objectRow : objectRows)
                 {
-                    continue;
-                }
-                const QString driverPath = objectRow.fullPathText.trimmed();
-                const QString normalizedDriverPath = driverPath.toCaseFolded();
-                if (driverPath.isEmpty() || seenDriverNames.contains(normalizedDriverPath))
-                {
-                    continue;
-                }
-                seenDriverNames.insert(normalizedDriverPath);
+                    if (objectRow.isScopeEntry || objectRow.objectTypeText.compare(QStringLiteral("Driver"), Qt::CaseInsensitive) != 0)
+                    {
+                        continue;
+                    }
+                    const QString driverPath = objectRow.fullPathText.trimmed();
+                    const QString normalizedDriverPath = driverPath.toCaseFolded();
+                    if (driverPath.isEmpty() || seenDriverNames.contains(normalizedDriverPath))
+                    {
+                        continue;
+                    }
+                    seenDriverNames.insert(normalizedDriverPath);
 
-                DriverRow driverRow;
-                driverRow.driverName = driverPath;
-                const std::wstring driverName = driverPath.toStdWString();
-                const ksword::ark::DriverObjectQueryResult query = client.queryDriverObject(driverName);
-                if (!query.io.ok)
-                {
-                    ++snapshot.queryFailureCount;
+                    DriverRow driverRow;
+                    driverRow.driverName = driverPath;
+                    const std::wstring driverName = driverPath.toStdWString();
+                    const ksword::ark::DriverObjectQueryResult query = client.queryDriverObject(driverName, KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_ALL,
+                        KSWORD_ARK_DRIVER_DEVICE_LIMIT_DEFAULT, KSWORD_ARK_DRIVER_ATTACHED_LIMIT_DEFAULT, &moduleSnapshot);
+                    if (!query.io.ok)
+                    {
+                        ++snapshot.queryFailureCount;
+                        driverRow.lastStatus = static_cast<std::int32_t>(query.lastStatus);
+                        driverRow.status = query.io.message.empty()
+                            ? QStringLiteral("DriverObject 查询失败")
+                            : QString::fromStdString(query.io.message);
+                        snapshot.driverRows.push_back(std::move(driverRow));
+                        continue;
+                    }
+
+                    driverRow.driverObjectAddress = query.driverObjectAddress;
+                    driverRow.driverStart = query.driverStart;
+                    driverRow.driverSize = query.driverSize;
+                    driverRow.driverFlags = query.driverFlags;
+                    driverRow.majorFunctionCount = query.majorFunctionCount;
+                    driverRow.returnedDeviceCount = query.returnedDeviceCount;
+                    driverRow.totalDeviceCount = query.totalDeviceCount;
+                    driverRow.queryStatus = query.queryStatus;
                     driverRow.lastStatus = static_cast<std::int32_t>(query.lastStatus);
-                    driverRow.status = query.io.message.empty()
-                        ? QStringLiteral("DriverObject 查询失败")
-                        : QString::fromStdString(query.io.message);
+                    if (query.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_PARTIAL)
+                    {
+                        ++snapshot.partialDriverCount;
+                    }
                     snapshot.driverRows.push_back(std::move(driverRow));
-                    continue;
-                }
 
-                driverRow.driverObjectAddress = query.driverObjectAddress;
-                driverRow.driverStart = query.driverStart;
-                driverRow.driverSize = query.driverSize;
-                driverRow.driverFlags = query.driverFlags;
-                driverRow.majorFunctionCount = query.majorFunctionCount;
-                driverRow.returnedDeviceCount = query.returnedDeviceCount;
-                driverRow.totalDeviceCount = query.totalDeviceCount;
-                driverRow.queryStatus = query.queryStatus;
-                driverRow.lastStatus = static_cast<std::int32_t>(query.lastStatus);
-                if (query.queryStatus == KSWORD_ARK_DRIVER_OBJECT_QUERY_STATUS_PARTIAL)
-                {
-                    ++snapshot.partialDriverCount;
+                    for (const ksword::ark::DriverDeviceEntry& device : query.devices)
+                    {
+                        DeviceRow row;
+                        row.driverName = driverPath;
+                        row.deviceName = QString::fromStdWString(device.deviceName);
+                        row.relationDepth = device.relationDepth;
+                        row.deviceType = device.deviceType;
+                        row.flags = device.flags;
+                        row.characteristics = device.characteristics;
+                        row.stackSize = device.stackSize;
+                        row.nameStatus = static_cast<std::int32_t>(device.nameStatus);
+                        row.rootDeviceObjectAddress = device.rootDeviceObjectAddress;
+                        row.deviceObjectAddress = device.deviceObjectAddress;
+                        row.nextDeviceObjectAddress = device.nextDeviceObjectAddress;
+                        row.attachedDeviceObjectAddress = device.attachedDeviceObjectAddress;
+                        row.ownerDriverObjectAddress = device.driverObjectAddress;
+                        snapshot.deviceRows.push_back(std::move(row));
+                    }
+                    for (const ksword::ark::DriverMajorFunctionEntry& major : query.majorFunctions)
+                    {
+                        DispatchRow row;
+                        row.driverName = driverPath;
+                        row.driverObjectAddress = query.driverObjectAddress;
+                        row.majorFunction = major.majorFunction;
+                        row.dispatchAddress = major.dispatchAddress;
+                        row.moduleBase = major.moduleBase;
+                        row.moduleName = QString::fromStdWString(major.moduleName);
+                        row.flags = major.flags;
+                        snapshot.dispatchRows.push_back(std::move(row));
+                    }
+                    if (query.startIo.state != KSWORD_ARK_DRIVER_START_IO_STATE_NOT_QUERIED)
+                    {
+                        DispatchRow row;
+                        row.driverName = driverPath;
+                        row.driverObjectAddress = query.driverObjectAddress;
+                        row.dispatchAddress = query.startIo.address;
+                        row.moduleBase = query.startIo.moduleBase;
+                        row.moduleName = QString::fromStdWString(query.startIo.moduleName);
+                        row.flags = query.startIo.flags;
+                        row.isStartIo = true;
+                        row.startIoState = query.startIo.state;
+                        snapshot.dispatchRows.push_back(std::move(row));
+                    }
                 }
-                snapshot.driverRows.push_back(std::move(driverRow));
-
-                for (const ksword::ark::DriverDeviceEntry& device : query.devices)
-                {
-                    DeviceRow row;
-                    row.driverName = driverPath;
-                    row.deviceName = QString::fromStdWString(device.deviceName);
-                    row.relationDepth = device.relationDepth;
-                    row.deviceType = device.deviceType;
-                    row.flags = device.flags;
-                    row.characteristics = device.characteristics;
-                    row.stackSize = device.stackSize;
-                    row.nameStatus = static_cast<std::int32_t>(device.nameStatus);
-                    row.rootDeviceObjectAddress = device.rootDeviceObjectAddress;
-                    row.deviceObjectAddress = device.deviceObjectAddress;
-                    row.nextDeviceObjectAddress = device.nextDeviceObjectAddress;
-                    row.attachedDeviceObjectAddress = device.attachedDeviceObjectAddress;
-                    row.ownerDriverObjectAddress = device.driverObjectAddress;
-                    snapshot.deviceRows.push_back(std::move(row));
-                }
-                for (const ksword::ark::DriverMajorFunctionEntry& major : query.majorFunctions)
-                {
-                    DispatchRow row;
-                    row.driverName = driverPath;
-                    row.driverObjectAddress = query.driverObjectAddress;
-                    row.majorFunction = major.majorFunction;
-                    row.dispatchAddress = major.dispatchAddress;
-                    row.moduleBase = major.moduleBase;
-                    row.moduleName = QString::fromStdWString(major.moduleName);
-                    row.flags = major.flags;
-                    snapshot.dispatchRows.push_back(std::move(row));
-                }
-                if (query.startIo.state != KSWORD_ARK_DRIVER_START_IO_STATE_NOT_QUERIED)
-                {
-                    DispatchRow row;
-                    row.driverName = driverPath;
-                    row.driverObjectAddress = query.driverObjectAddress;
-                    row.dispatchAddress = query.startIo.address;
-                    row.moduleBase = query.startIo.moduleBase;
-                    row.moduleName = QString::fromStdWString(query.startIo.moduleName);
-                    row.flags = query.startIo.flags;
-                    row.isStartIo = true;
-                    row.startIoState = query.startIo.state;
-                    snapshot.dispatchRows.push_back(std::move(row));
-                }
+                // One after-batch validation prevents changed/redacted module data from
+                // labeling mixed generations. Retry once through the original R0 path.
+                if (moduleSnapshot.systemInformation.empty()
+                    || client.captureDriverObjectModules().systemInformation == moduleSnapshot.systemInformation) break;
+                moduleSnapshot.systemInformation.clear();
+                Snapshot retry;
+                retry.errorText = snapshot.errorText;
+                snapshot = std::move(retry);
             }
         }
 
