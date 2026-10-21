@@ -2574,14 +2574,18 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
         }
     }
 
-    const auto appendCallbackRow = [this, &searchFields](const std::size_t sourceIndex) {
+    // Allocate the complete row range once, before creating persistent source
+    // identities. Appending each later row used to revisit the earlier indices.
+    m_callbackEnumTable->setRowCount(static_cast<int>(successfulSourceIndices.size()
+        + deferredSourceIndices.size() + (deferredSourceIndices.empty() ? 0U : 1U)));
+    int nextCallbackRow = 0;
+    const auto appendCallbackRow = [this, &searchFields, &nextCallbackRow](const std::size_t sourceIndex) {
         const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
         const QString addressText = callbackEnumPrimaryAddressText(entry);
         const QString moduleText = entry.modulePathText.isEmpty()
             ? kernelText("kernel.callback.enum.placeholder.unresolved", QStringLiteral("<未解析>"))
             : entry.modulePathText;
-        const int rowIndex = m_callbackEnumTable->rowCount();
-        m_callbackEnumTable->insertRow(rowIndex);
+        const int rowIndex = nextCallbackRow++;
 
         auto* classItem = new QTableWidgetItem(entry.classText);
         classItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
@@ -2654,8 +2658,7 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
 
     if (!deferredSourceIndices.empty())
     {
-        const int separatorRow = m_callbackEnumTable->rowCount();
-        m_callbackEnumTable->insertRow(separatorRow);
+        const int separatorRow = nextCallbackRow++;
         m_callbackEnumSeparatorIndex = QPersistentModelIndex(m_callbackEnumTable->model()->index(separatorRow, 0));
         int firstVisibleColumn = -1;
         for (int columnIndex = 0; columnIndex < m_callbackEnumTable->columnCount(); ++columnIndex)
@@ -2726,6 +2729,7 @@ void KernelDock::prepareMinifilterCallbackTree()
     {
         m_minifilterCallbackTree->clear();
         QHash<qulonglong, QTreeWidgetItem*> filterParents;
+        std::vector<std::unique_ptr<QTreeWidgetItem>> parentOwners;
         for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
         {
             const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
@@ -2739,7 +2743,10 @@ void KernelDock::prepareMinifilterCallbackTree()
                 continue;
             }
 
-            auto* parentItem = new QTreeWidgetItem(m_minifilterCallbackTree);
+            // Fill a detached tree so text/role/brush updates do not each
+            // notify the live model, selection, sizing and presentation hooks.
+            auto parentOwner = std::make_unique<QTreeWidgetItem>();
+            auto* parentItem = parentOwner.get();
             parentItem->setText(0, callbackEnumSafeText(entry.nameText));
             parentItem->setText(
                 1,
@@ -2749,8 +2756,8 @@ void KernelDock::prepareMinifilterCallbackTree()
             parentItem->setData(0, Qt::UserRole, static_cast<qulonglong>(sourceIndex));
             parentItem->setData(0, KernelSearchFieldsRole, searchFields(entry));
             parentItem->setToolTip(0, entry.detailText);
-            parentItem->setExpanded(true);
             filterParents.insert(static_cast<qulonglong>(entry.registrationAddress), parentItem);
+            parentOwners.push_back(std::move(parentOwner));
         }
 
         for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
@@ -2829,6 +2836,15 @@ void KernelDock::prepareMinifilterCallbackTree()
             }
         }
 
+        QList<QTreeWidgetItem*> roots;
+        roots.reserve(static_cast<qsizetype>(parentOwners.size()));
+        for (const auto& owner : parentOwners) roots.push_back(owner.get());
+        m_minifilterCallbackTree->addTopLevelItems(roots);
+        for (auto& owner : parentOwners)
+        {
+            auto* item = owner.release(); // ownership transferred to the tree
+            item->setExpanded(true);
+        }
     }
 
     const auto refreshLanguageCache = [this, &searchFields](QTreeWidgetItem* item) {
