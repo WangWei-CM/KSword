@@ -4786,7 +4786,7 @@ namespace
 
     // 浮动窗只借用主窗口现有的背景绘制宿主，不改变 ADS 的布局/父子身份。
     // 只查直接子级；业务页面不参与背景宿主查找。
-    constexpr auto kFloatingBackgroundObjectName = "ksFloatingDockBackground";
+    constexpr auto kFloatingBackgroundObjectName = "ks_floating_dock_background";
 
     MainWindowBackgroundWidget* floatingDockBackgroundWidget(
         ads::CFloatingDockContainer* floatingWidget)
