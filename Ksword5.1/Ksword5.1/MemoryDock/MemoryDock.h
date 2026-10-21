@@ -490,7 +490,7 @@ private:
     // - 说明：该函数只做“缓存 -> UI”投影，不做 Win32 枚举。
     // - 返回：无。
     void rebuildModuleTableFromCache();
-    enum class CoreKind { Modules, Regions, Processes, KernelExecutable, KernelEvidence, PteEvidence, ProcessEvidence };
+    enum class CoreKind { Modules, Regions, Processes, KernelExecutable, KernelEvidence, PteEvidence, ProcessEvidence, SearchResults };
     struct PreparedProcessSnapshot;
     static void prepareProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared);
     void commitProcessSnapshot(const std::shared_ptr<PreparedProcessSnapshot>& prepared, std::uint64_t generation, std::uint32_t previousPid);
@@ -510,6 +510,7 @@ private:
         std::shared_ptr<const void> extraSource;
         std::size_t extraCount = 0;
         bool extraRisk = false;
+        bool extraDiagnosticRow = true;
         QString extraDiagnostic;
         std::function<bool(std::size_t)> extraMatches;
         std::function<QString(std::size_t)> extraKey;
@@ -522,6 +523,7 @@ private:
     void captureKernelMemoryProjection(CoreProjectionData& data) const;
     void capturePteProjection(CoreProjectionData& data) const;
     void captureProcessEvidenceProjection(CoreProjectionData& data) const;
+    void captureSearchResultProjection(CoreProjectionData& data) const;
 
     struct CoreProjectionJob;
     struct RegionRefreshJob;
@@ -985,7 +987,7 @@ private:
     QComboBox* m_nextScanCompareCombo = nullptr; // 再次扫描条件下拉框。
     QLineEdit* m_nextScanValueEdit = nullptr;    // 再次扫描值输入框。
     QLineEdit* m_nextScanValueBEdit = nullptr;   // Between 上界输入框。
-    QTableWidget* m_searchResultTable = nullptr; // 扫描结果表格。
+    MemoryTableView* m_searchResultTable = nullptr; // 扫描结果表格。
     QProgressBar* m_scanProgressBar = nullptr;   // 扫描进度条。
     QLabel* m_scanStatusLabel = nullptr;         // 扫描状态文本。
 
@@ -1102,7 +1104,7 @@ private:
     int m_regionDumpProgressPid = 0;         // 区域转储独立进度，避免与整进程 Dump 互相覆盖。
     std::shared_ptr<const std::vector<RegionEntry>> m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>();   // 区域缓存（Tab2/Tab3 复用）。
 
-    std::vector<SearchResultEntry> m_searchResultCache; // 扫描结果缓存（Tab3）。
+    std::shared_ptr<const std::vector<SearchResultEntry>> m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>(); // 扫描结果缓存（Tab3）。
     std::size_t m_searchResultVisibleCount = 0;         // 当前结果表实际显示条数（可能小于缓存总数）。
     SearchValueType m_lastSearchValueType = SearchValueType::Byte; // 最近一次扫描类型。
     std::atomic<bool> m_scanInProgress{ false };       // 当前是否正在扫描。
@@ -1180,10 +1182,10 @@ private:
     QTimer* m_coreProjectionDebounce = nullptr;
     std::array<QString, 4> m_extraStatusTemplates;
     std::array<ks::ui::FieldDocument, 4> m_extraDiagnosticDocuments;
-    std::array<bool, 7> m_coreInitialized{};
-    std::array<int, 7> m_coreSortColumns{0, 0, 0, 0, 0, 0, 0};
-    std::array<Qt::SortOrder, 7> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder};
-    std::array<std::shared_ptr<CoreProjectionData>, 7> m_corePublished, m_coreReady, m_coreFailed;
+    std::array<bool, 8> m_coreInitialized{};
+    std::array<int, 8> m_coreSortColumns{0, 0, 0, 0, 0, 0, 0, 0};
+    std::array<Qt::SortOrder, 8> m_coreSortOrders{Qt::AscendingOrder, Qt::DescendingOrder, Qt::AscendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder, Qt::DescendingOrder};
+    std::array<std::shared_ptr<CoreProjectionData>, 8> m_corePublished, m_coreReady, m_coreFailed;
     std::shared_ptr<CoreProjectionJob> m_coreProjectionJob;
     std::shared_ptr<RegionRefreshJob> m_regionRefreshJob, m_regionRefreshPendingJob;
     std::shared_ptr<std::atomic_bool> m_coreProjectionLifetime = std::make_shared<std::atomic_bool>(false);

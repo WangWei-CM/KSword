@@ -1295,10 +1295,9 @@ void MemoryDock::initializeMemorySearchTab()
     static_cast<QHBoxLayout*>(backendSelector->layout())->setDirection(QBoxLayout::TopToBottom);
     workspace->parameters()->addWidget(backendSelector);
 
-    m_searchResultTable = new ks::ui::VisibleTableWidget(m_tabSearch);
+    m_searchResultTable = new MemoryTableView(m_tabSearch);
     // 搜索已经提供前次值/再次扫描比较，通用快照会重复同一信息。
     ks::ui::SetTableActionBarMode(m_searchResultTable, ks::ui::TableActionBarMode::Compact);
-    m_searchResultTable->setColumnCount(4);
     m_searchResultTable->setHorizontalHeaderLabels(QStringList{ "地址", "当前值", "前次值", "备注" });
     m_searchResultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_searchResultTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1310,6 +1309,9 @@ void MemoryDock::initializeMemorySearchTab()
     m_searchResultTable->verticalHeader()->setVisible(false);
     m_searchResultTable->horizontalHeader()->setStretchLastSection(true);
     workspace->results()->addWidget(m_searchResultTable, 1);
+    ks::ui::SetTableColumnAutoFitEnabled(m_searchResultTable, false);
+    ks::ui::SetTableRowFilterBusinessOwnership(m_searchResultTable, ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    initializeCoreProjection(CoreKind::SearchResults);
 
     QHBoxLayout* progressLayout = new QHBoxLayout();
     progressLayout->setContentsMargins(0, 0, 0, 0);

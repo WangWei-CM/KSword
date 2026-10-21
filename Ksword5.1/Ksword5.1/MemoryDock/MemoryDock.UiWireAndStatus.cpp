@@ -988,13 +988,13 @@ void MemoryDock::initializeSearchConnections()
         {
             return false;
         }
-        const QTableWidgetItem* const addressItem = m_searchResultTable->item(row, 0);
-        if (addressItem == nullptr)
+        const QModelIndex addressItem = m_searchResultTable->model()->index(row, 0);
+        if (!addressItem.isValid())
         {
             return false;
         }
         bool converted = false;
-        const qulonglong value = addressItem->data(Qt::UserRole).toULongLong(&converted);
+        const qulonglong value = addressItem.data(Qt::UserRole).toULongLong(&converted);
         if (!converted)
         {
             return false;
@@ -1004,19 +1004,20 @@ void MemoryDock::initializeSearchConnections()
     };
     // findSearchEntry：按地址在可见缓存里回查结果行；找不到返回空指针。
     const auto findSearchEntry = [this](const std::uint64_t address) -> const SearchResultEntry* {
-        const std::size_t visibleCount = std::min(m_searchResultVisibleCount, m_searchResultCache.size());
+        const std::size_t visibleCount = std::min(m_searchResultVisibleCount, m_searchResultCache->size());
         for (std::size_t index = 0; index < visibleCount; ++index)
         {
-            if (m_searchResultCache[index].address == address)
+            if ((*m_searchResultCache)[index].address == address)
             {
-                return &m_searchResultCache[index];
+                return &(*m_searchResultCache)[index];
             }
         }
         return nullptr;
     };
 
-    connect(m_searchResultTable, &QTableWidget::cellDoubleClicked, this, [this, searchRowAddress](int row, int column) {
-        Q_UNUSED(column);
+    connect(m_searchResultTable, &QTableView::doubleClicked, this, [this, searchRowAddress](const QModelIndex& index) {
+        if (!coreProjectionIsCurrent(CoreKind::SearchResults)) { return; }
+        const int row = index.row();
         std::uint64_t resultAddress = 0;
         if (!searchRowAddress(row, resultAddress))
         {
@@ -1032,22 +1033,22 @@ void MemoryDock::initializeSearchConnections()
         jumpToAddress(resultAddress);
         });
 
-    connect(m_searchResultTable, &QTableWidget::customContextMenuRequested, this,
+    connect(m_searchResultTable, &QTableView::customContextMenuRequested, this,
         [this, searchRowAddress, findSearchEntry](const QPoint& localPosition) {
-        QTableWidgetItem* clickedItem = m_searchResultTable->itemAt(localPosition);
-        if (clickedItem == nullptr)
+        const QModelIndex clickedItem = m_searchResultTable->indexAt(localPosition);
+        if (!clickedItem.isValid() || !coreProjectionIsCurrent(CoreKind::SearchResults))
         {
             return;
         }
 
-        const int row = clickedItem->row();
+        const int row = clickedItem.row();
         std::uint64_t rowAddress = 0;
         if (!searchRowAddress(row, rowAddress))
         {
             return;
         }
 
-        m_searchResultTable->setCurrentCell(row, clickedItem->column());
+        m_searchResultTable->setCurrentCell(row, clickedItem.column());
 
         QMenu menu(this);
         menu.setStyleSheet(KswordTheme::ContextMenuStyle());

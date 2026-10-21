@@ -1526,7 +1526,7 @@ void MemoryDock::detachProcess()
     m_moduleCachePid = 0U;
     m_moduleCacheCreateTime = 0U;
     m_regionCache = ks::memory_detail::ValueStorage<std::vector<RegionEntry>>(); m_regionCachePartial = false; m_regionCacheError = 0;
-    m_searchResultCache.clear();
+    m_searchResultCache = ks::memory_detail::ValueStorage<std::vector<SearchResultEntry>>();
     m_searchResultVisibleCount = 0;
     m_processPteTranslateCache = ks::memory_detail::ValueStorage<std::vector<ProcessMemoryEvidenceEntry>>();
     m_processPteTranslateVisibleCount = 0;
@@ -1543,7 +1543,7 @@ void MemoryDock::detachProcess()
                 .arg(KswordTheme::TextSecondaryColor().name(QColor::HexRgb)));
     }
     if (m_regionTable) { m_regionTable->clearEntries(); }
-    if (m_searchResultTable) { m_searchResultTable->setRowCount(0); }
+    if (m_searchResultTable) { m_searchResultTable->clearEntries(); }
     if (m_processPteTranslateTable != nullptr)
     {
         m_processPteTranslateTable->clearEntries();
@@ -2348,13 +2348,14 @@ std::shared_ptr<MemoryDock::CoreProjectionData> MemoryDock::captureCoreRequest(c
         }
     }
     if (static_cast<int>(kind) >= 3) {
-        data->pid = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence ? m_attachedPid : 0;
-        data->target = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence ? m_processAttachmentGeneration.load() : 0;
+        data->pid = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence || kind == CoreKind::SearchResults ? m_attachedPid : 0;
+        data->target = kind == CoreKind::PteEvidence || kind == CoreKind::ProcessEvidence || kind == CoreKind::SearchResults ? m_processAttachmentGeneration.load() : 0;
         switch (kind) {
         case CoreKind::KernelExecutable: captureKernelExecutableProjection(*data); break;
         case CoreKind::KernelEvidence: captureKernelMemoryProjection(*data); break;
         case CoreKind::PteEvidence: capturePteProjection(*data); break;
         case CoreKind::ProcessEvidence: captureProcessEvidenceProjection(*data); break;
+        case CoreKind::SearchResults: captureSearchResultProjection(*data); break;
         default: break;
         }
         if (auto* table = extraCoreTable(kind)) { data->selectedKey = table->currentIndex().data(ks::memory_detail::CoreIdentityRole).toString(); data->selectedColumn = table->currentIndex().column(); }
@@ -2402,7 +2403,7 @@ void MemoryDock::buildCoreProjection(const std::shared_ptr<CoreProjectionJob>& j
                 if (row.source == selected) { data.selectedRow = static_cast<int>(data.rows->size()); }
                 data.rows->push_back(row.source);
             }
-            if (data.extraSource && data.rows->empty()) { data.rows->push_back(SIZE_MAX); }
+            if (data.extraSource && data.extraDiagnosticRow && data.rows->empty()) { data.rows->push_back(SIZE_MAX); }
         }
     } catch (...) { job->failed = true; }
     job->done.store(true);
@@ -2526,7 +2527,7 @@ void MemoryDock::pollCoreProjection()
                 QAbstractItemView* view = job->data->kind == CoreKind::Processes ? static_cast<QAbstractItemView*>(m_processTable) : job->data->kind == CoreKind::Modules ? static_cast<QAbstractItemView*>(m_moduleTable) : job->data->kind == CoreKind::Regions ? m_regionTable : extraCoreTable(job->data->kind);
                 if (view) { view->setEnabled(true); }
                 if (!owner) { return; }
-                QLabel* label = job->data->kind == CoreKind::Processes ? m_processCountLabel : job->data->kind == CoreKind::Modules ? m_moduleStatusLabel : job->data->kind == CoreKind::Regions ? m_regionStatusLabel : job->data->kind == CoreKind::KernelExecutable ? m_kernelExecutableStatusLabel : job->data->kind == CoreKind::KernelEvidence ? m_kernelMemoryEvidenceStatusLabel : job->data->kind == CoreKind::PteEvidence ? m_processPteTranslateStatusLabel : job->data->kind == CoreKind::ProcessEvidence ? m_processMemoryEvidenceStatusLabel : nullptr;
+                QLabel* label = job->data->kind == CoreKind::Processes ? m_processCountLabel : job->data->kind == CoreKind::Modules ? m_moduleStatusLabel : job->data->kind == CoreKind::Regions ? m_regionStatusLabel : job->data->kind == CoreKind::KernelExecutable ? m_kernelExecutableStatusLabel : job->data->kind == CoreKind::KernelEvidence ? m_kernelMemoryEvidenceStatusLabel : job->data->kind == CoreKind::PteEvidence ? m_processPteTranslateStatusLabel : job->data->kind == CoreKind::ProcessEvidence ? m_processMemoryEvidenceStatusLabel : job->data->kind == CoreKind::SearchResults ? m_scanStatusLabel : nullptr;
                 if (label) { label->setText(ks::i18n::packedSourceText(QStringLiteral("Memory table projection failed"))); }
             } else { m_coreReady[kind] = job->data; }
         }
@@ -2543,6 +2544,8 @@ void MemoryDock::pollCoreProjection()
     if (auto* table = extraCoreTable(CoreKind::PteEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::PteEvidence, false); }
     if (!owner) { return; }
     if (auto* table = extraCoreTable(CoreKind::ProcessEvidence); table && table->isVisible()) { requestCoreProjection(CoreKind::ProcessEvidence, false); }
+    if (!owner) { return; }
+    if (m_searchResultTable && m_searchResultTable->isVisible()) { requestCoreProjection(CoreKind::SearchResults, false); }
     if (!owner) { return; }
     if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation) { m_coreProjectionPoll->stop(); }
 }
@@ -2673,6 +2676,7 @@ MemoryTableView* MemoryDock::extraCoreTable(const CoreKind kind) const
     case CoreKind::KernelEvidence: return m_kernelMemoryEvidenceTable;
     case CoreKind::PteEvidence: return m_processPteTranslateTable;
     case CoreKind::ProcessEvidence: return m_processMemoryEvidenceTable;
+    case CoreKind::SearchResults: return m_searchResultTable;
     default: return nullptr;
     }
 }
