@@ -66,6 +66,8 @@ struct DumpMemoryReadResult
     std::uint64_t address = 0;
     std::uint64_t fileOffset = 0;
     int rangeIndex = -1;
+    std::size_t moduleIndex = static_cast<std::size_t>(-1);
+    std::size_t regionIndex = static_cast<std::size_t>(-1);
     QByteArray bytes;
     QString errorText;
 };
@@ -265,6 +267,22 @@ namespace
             result.status = DumpMemoryReadStatus::ReadFailed;
             return result;
         }
+        // Preserve original first-match order, but perform the full metadata search off GUI.
+        for (std::size_t index = 0; index < source.modules.size(); ++index)
+        {
+            if ((index & 255U) == 0U && canceled()) { result.status = DumpMemoryReadStatus::Canceled; return result; }
+            const auto& module = source.modules[index];
+            if (module.size != 0 && result.address >= module.base && result.address - module.base < module.size)
+            { result.moduleIndex = index; break; }
+        }
+        for (std::size_t index = 0; index < source.regions.size(); ++index)
+        {
+            if ((index & 255U) == 0U && canceled()) { result.status = DumpMemoryReadStatus::Canceled; return result; }
+            const auto& region = source.regions[index];
+            if (region.size != 0 && result.address >= region.base && result.address - region.base < region.size)
+            { result.regionIndex = index; break; }
+        }
+        if (canceled()) { result.status = DumpMemoryReadStatus::Canceled; return result; }
         result.status = DumpMemoryReadStatus::Success;
         return result;
     }
@@ -718,22 +736,20 @@ void DumpMemoryView::refreshDiagnostic()
     details.field(QStringLiteral("捕获大小（字节）"), QString::number(range.bytes));
     details.field(QStringLiteral("文件偏移"), formatHex(m_lastRead->fileOffset));
     details.field(QStringLiteral("来源"), range.source, true);
-    for (const ks::minidump::ModuleEntry& module : m_source->modules)
+    if (m_lastRead->moduleIndex < m_source->modules.size())
     {
-        if (module.size == 0 || address < module.base || address - module.base >= module.size) continue;
+        const auto& module = m_source->modules[m_lastRead->moduleIndex];
         details.field(QStringLiteral("所属模块"), module.name);
         details.field(QStringLiteral("模块偏移"), formatHex(address - module.base));
-        break;
     }
-    for (const ks::minidump::MemoryRegionEntry& region : m_source->regions)
+    if (m_lastRead->regionIndex < m_source->regions.size())
     {
-        if (region.size == 0 || address < region.base || address - region.base >= region.size) continue;
+        const auto& region = m_source->regions[m_lastRead->regionIndex];
         details.section(QStringLiteral("内存区域"));
         details.field(QStringLiteral("基址"), formatHex(region.base));
         details.field(QStringLiteral("状态"), region.state, true);
         details.field(QStringLiteral("保护"), region.protect, true);
         details.field(QStringLiteral("类型"), region.type, true);
-        break;
     }
     details.field(QStringLiteral("本次读取（字节）"), QString::number(m_lastRead->bytes.size()));
     m_messageView->setDocument(details);

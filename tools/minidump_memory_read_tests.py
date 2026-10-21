@@ -189,6 +189,16 @@ int main(int argc, char** argv) {
     auto result = readDumpMemory(request, token);
     check(result.status == DumpMemoryReadStatus::Success && result.address == 0x1004 && result.bytes.size() == 256);
     check(result.sourceGeneration == 123 && result.bytes[0] == '\x7f' && device.opensCount == 1 && device.identityCount == 2);
+    check(result.moduleIndex == static_cast<std::size_t>(-1) && result.regionIndex == static_cast<std::size_t>(-1));
+    shared->modules = {{QStringLiteral("zero"), 0x1000, 0}, {QStringLiteral("first"), 0x1000, 32}, {QStringLiteral("overlap"), 0x1004, 32}};
+    shared->regions = {{0x1000, 0, {}, {}, {}, {}}, {0x1000, 16, QStringLiteral("first"), {}, {}, {}}, {0x1004, 16, QStringLiteral("overlap"), {}, {}, {}}};
+    auto attributed = readDumpMemory(request, token);
+    check(attributed.status == DumpMemoryReadStatus::Success && attributed.moduleIndex == 1 && attributed.regionIndex == 1);
+    request.address = 0x1030;
+    attributed = readDumpMemory(request, token);
+    check(attributed.status == DumpMemoryReadStatus::Success && attributed.moduleIndex == static_cast<std::size_t>(-1) && attributed.regionIndex == static_cast<std::size_t>(-1));
+    request.address = 0x1004;
+    shared->modules.clear(); shared->regions.clear();
     resetDevice(canceled); device.modified = 1001;
     check(readDumpMemory(request, token).status == DumpMemoryReadStatus::FileChanged && device.opensCount == 0);
     resetDevice(canceled); device.opens = false;
