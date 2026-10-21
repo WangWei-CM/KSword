@@ -3,6 +3,7 @@
 #include <QAbstractItemModel>
 #include <QItemSelection>
 #include "../UI/AsyncOperation.h"
+#include "../UI/CompleteExport.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
@@ -328,7 +329,6 @@ void NetworkDock::synchronizeVisiblePacketProjection()
         refreshPacketTimelineRange();
         refreshPacketTimelinePoints();
         refreshPacketTimelineRatePoints();
-        m_packetTimelineProjectionDirty = false;
     }
     if (m_packetTableProjectionDirty)
     {
@@ -1100,22 +1100,19 @@ void NetworkDock::refreshPacketTimelineRange()
     {
         return;
     }
-    m_packetTimelineWidget->setCaptureRange(rangeStart100ns, rangeEnd100ns);
-    m_packetTimelineSelectionStart100ns = m_packetTimelineWidget->selectionStart100ns();
-    m_packetTimelineSelectionEnd100ns = m_packetTimelineWidget->selectionEnd100ns();
+    // The visible range is committed with its worker-prepared events and rates.
+    // Canonical full-range filtering still follows acquisition immediately.
+    if (!m_packetTimelineUserSelectionActive)
+    {
+        m_packetTimelineSelectionStart100ns = rangeStart100ns;
+        m_packetTimelineSelectionEnd100ns = rangeEnd100ns;
+    }
 }
 
 void NetworkDock::refreshPacketTimelinePoints()
 {
-    if (!isPacketProjectionVisible())
-    {
-        m_packetTimelineProjectionDirty = true;
-        return;
-    }
-    // The existing widget API still owns/copies its complete raw event vector.
-    // Keep every event and its category; changing that API is a separate shared-widget step.
-    if (m_packetTimelineWidget != nullptr)
-        m_packetTimelineWidget->setEventPoints(m_packetTimelineEventPoints);
+    // Events, rate values and range are one complete projection snapshot.
+    refreshPacketTimelineRatePoints();
 }
 
 void NetworkDock::refreshPacketTimelineRatePoints()
@@ -1128,103 +1125,192 @@ void NetworkDock::refreshPacketTimelineRatePoints()
     QTimer::singleShot(0, this, [self]()
     {
         if (!self) return;
-        self->m_packetTimelineProjectionQueued = false;
-        if (!self->isPacketProjectionVisible() || self->m_packetTimelineWidget == nullptr) return;
-        if (self->m_packetTimelineRangeEnd100ns <= self->m_packetTimelineRangeStart100ns)
+        if (!self->isPacketProjectionVisible() || self->m_packetTimelineWidget == nullptr)
         {
-            self->m_packetTimelineRangeStart100ns = 0;
-            self->m_packetTimelineRangeEnd100ns = std::max(
-                self->currentPacketTimelineEnd100ns(), kFallbackTimelineRange100ns);
+            self->m_packetTimelineProjectionQueued = false;
+            return;
         }
+        struct Sample
+        {
+            ProcessTraceTimelineEventPoint point;
+            std::uint64_t uploadBytes = 0;
+            std::uint64_t downloadBytes = 0;
+        };
         struct Input
         {
-            std::unordered_map<std::uint64_t, PacketTimelineRateBucket> buckets;
-            std::uint64_t endSecond = 0;
+            std::vector<Sample> samples;
+            ProcessTraceTimelineWidget::EventProjectionParameters projection;
             std::uint64_t epoch = 0;
             std::uint64_t monitorGeneration = 0;
+            std::uint64_t firstSequence = 0;
+            std::uint64_t lastSequence = 0;
+            std::size_t count = 0;
         };
         struct Output
         {
+            ProcessTraceTimelineWidget::PreparedEventPoints events;
             ProcessTraceTimelineWidget::PreparedRateOverlay rates;
-            std::uint64_t epoch = 0;
-            std::uint64_t monitorGeneration = 0;
         };
-        Input input;
-        input.buckets = self->m_packetTimelineRateBucketBySecond;
-        input.endSecond = self->m_packetTimelineRangeEnd100ns / kTimelineSecond100ns;
-        input.epoch = self->m_packetTimelineProjectionEpoch;
-        input.monitorGeneration = self->m_monitorGeneration.load();
-        if (self->m_packetTimelineProjectionOperation == nullptr)
-            self->m_packetTimelineProjectionOperation = new ks::ui::AsyncOperation(self.data());
-        self->m_packetTimelineProjectionOperation->submit<Input, std::shared_ptr<const Output>>(std::move(input),
-            [](const Input& value, const ks::ui::AsyncOperationToken& token) -> std::shared_ptr<const Output>
+        auto owner = std::make_shared<Input>();
+        // The mutable alias is used only by GUI capture. Publishing below hands
+        // the same complete value to AsyncOperation without a second vector copy.
+        auto input = std::shared_ptr<Input>(ks::ui::RetainCompleteExportSnapshot(
+            std::shared_ptr<const Input>(owner)), owner.get());
+        owner.reset();
+        self->refreshPacketTimelineRange();
+        input->projection = self->m_packetTimelineWidget->eventProjectionParameters(
+            self->m_packetTimelineRangeStart100ns, self->m_packetTimelineRangeEnd100ns);
+        input->epoch = self->m_packetTimelineProjectionEpoch;
+        input->monitorGeneration = self->m_monitorGeneration.load();
+        input->count = self->m_packetTimelineEventPoints.size();
+        if (!self->m_packetSequenceOrder.empty())
+        {
+            input->firstSequence = self->m_packetSequenceOrder.front();
+            input->lastSequence = self->m_packetSequenceOrder.back();
+        }
+        input->samples.reserve(input->count);
+        const QPointer<ProcessTraceTimelineWidget> timeline(self->m_packetTimelineWidget);
+        const auto sourceMatches = [self, timeline, input]()
+        {
+            return self && timeline && self->m_packetTimelineWidget == timeline
+                && input->epoch == self->m_packetTimelineProjectionEpoch
+                && input->monitorGeneration == self->m_monitorGeneration.load()
+                && self->m_packetSequenceOrder.size() >= input->count
+                && self->m_packetTimelineEventPoints.size() >= input->count
+                && (input->count == 0 || (self->m_packetSequenceOrder.front() == input->firstSequence
+                    && self->m_packetSequenceOrder[input->count - 1] == input->lastSequence));
+        };
+        // A weak continuation owns no cycle. Every queued slice retains its
+        // complete partial value through the existing off-GUI retirement lane.
+        auto capture = std::make_shared<std::function<void()>>();
+        const std::weak_ptr<std::function<void()>> nextCapture(capture);
+        *capture = [self, timeline, input, sourceMatches, nextCapture]()
+        {
+            if (!self) return;
+            const auto retry = [self]()
             {
-                Output output;
-                output.epoch = value.epoch;
-                output.monitorGeneration = value.monitorGeneration;
-                if (token.isCanceled()) return std::make_shared<Output>(std::move(output));
-                std::vector<std::uint64_t> seconds;
-                seconds.reserve(value.buckets.size() * 3 + 2);
-                for (const auto& bucket : value.buckets)
+                if (!self) return;
+                self->m_packetTimelineProjectionQueued = false;
+                self->refreshPacketTimelineRatePoints();
+            };
+            if (!sourceMatches() || !self->isPacketProjectionVisible())
+            {
+                retry();
+                return;
+            }
+            QElapsedTimer budget;
+            budget.start();
+            const std::size_t stop = std::min(input->count, input->samples.size() + 256);
+            while (input->samples.size() < stop)
+            {
+                const auto index = input->samples.size();
+                const auto found = self->m_packetBySequence.find(self->m_packetSequenceOrder[index]);
+                if (found == self->m_packetBySequence.end()) { retry(); return; }
+                Sample sample;
+                sample.point = self->m_packetTimelineEventPoints[index];
+                if (found->second.direction == ks::network::PacketDirection::Outbound)
+                    sample.uploadBytes = found->second.totalPacketSize;
+                else if (found->second.direction == ks::network::PacketDirection::Inbound)
+                    sample.downloadBytes = found->second.totalPacketSize;
+                input->samples.push_back(std::move(sample));
+                if (budget.elapsed() >= 3) break;
+            }
+            if (input->samples.size() != input->count)
+            {
+                if (const auto next = nextCapture.lock())
+                    QTimer::singleShot(0, self.data(), [next]() { (*next)(); });
+                return;
+            }
+            self->m_packetTimelineProjectionQueued = false;
+            if (self->m_packetTimelineProjectionOperation == nullptr)
+                self->m_packetTimelineProjectionOperation = new ks::ui::AsyncOperation(self.data());
+            self->m_packetTimelineProjectionOperation->submit<std::shared_ptr<const Input>,
+                std::shared_ptr<const Output>>(input,
+                [](const std::shared_ptr<const Input>& value,
+                    const ks::ui::AsyncOperationToken& token) -> std::shared_ptr<const Output>
                 {
-                    if (token.isCanceled()) return std::make_shared<Output>();
-                    const auto second = bucket.first;
-                    seconds.push_back(second);
-                    if (second > 0) seconds.push_back(second - 1);
-                    if (second < value.endSecond) seconds.push_back(second + 1);
-                }
-                seconds.push_back(0);
-                seconds.push_back(value.endSecond);
-                std::sort(seconds.begin(), seconds.end());
-                seconds.erase(std::unique(seconds.begin(), seconds.end()), seconds.end());
-                std::vector<ProcessTraceTimelineRatePoint> rates;
-                rates.reserve(seconds.size());
-                for (const auto second : seconds)
-                {
-                    if (token.isCanceled()) return std::make_shared<Output>();
-                    const auto found = value.buckets.find(second);
-                    ProcessTraceTimelineRatePoint point;
-                    point.time100ns = second * kTimelineSecond100ns;
-                    if (found != value.buckets.end())
+                    Output output;
+                    std::vector<ProcessTraceTimelineEventPoint> points;
+                    std::unordered_map<std::uint64_t, PacketTimelineRateBucket> buckets;
+                    points.reserve(value->samples.size());
+                    for (const auto& sample : value->samples)
                     {
-                        point.uploadBytesPerSecond = static_cast<double>(found->second.uploadBytes);
-                        point.downloadBytesPerSecond = static_cast<double>(found->second.downloadBytes);
+                        if (token.isCanceled()) return {};
+                        points.push_back(sample.point);
+                        auto& bucket = buckets[sample.point.time100ns / kTimelineSecond100ns];
+                        bucket.uploadBytes += sample.uploadBytes;
+                        bucket.downloadBytes += sample.downloadBytes;
                     }
-                    rates.push_back(point);
-                }
-                output.rates = ProcessTraceTimelineWidget::prepareRateOverlayPoints(std::move(rates));
-                return std::make_shared<Output>(std::move(output));
-            },
-            [self](const std::shared_ptr<const Output>& output, const std::uint64_t ticket)
-            {
-                if (!self) return true;
-                const auto apply = [self](const Output& value)
-                {
-                    if (!self || value.epoch != self->m_packetTimelineProjectionEpoch
-                        || value.monitorGeneration != self->m_monitorGeneration.load()) return;
-                    if (!self->isPacketProjectionVisible())
+                    output.events = ProcessTraceTimelineWidget::prepareEventPoints(
+                        std::move(points), value->projection);
+                    const auto endSecond = value->projection.end100ns / kTimelineSecond100ns;
+                    std::vector<std::uint64_t> seconds;
+                    seconds.reserve(buckets.size() * 3 + 2);
+                    for (const auto& bucket : buckets)
                     {
-                        self->m_packetTimelineProjectionDirty = true;
-                        return;
+                        if (token.isCanceled()) return {};
+                        const auto second = bucket.first;
+                        seconds.push_back(second);
+                        if (second > 0) seconds.push_back(second - 1);
+                        if (second < endSecond) seconds.push_back(second + 1);
                     }
-                    self->m_packetTimelineWidget->applyRateOverlayPoints(value.rates);
-                };
-                const auto pending = output; // Already an immutable worker value; no GUI vector copy.
-                if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self.data(),
-                    QStringLiteral("network-packet-timeline"), {self->m_packetTable},
-                    [self, pending, ticket, apply]()
+                    seconds.push_back(0);
+                    seconds.push_back(endSecond);
+                    std::sort(seconds.begin(), seconds.end());
+                    seconds.erase(std::unique(seconds.begin(), seconds.end()), seconds.end());
+                    std::vector<ProcessTraceTimelineRatePoint> rates;
+                    rates.reserve(seconds.size());
+                    for (const auto second : seconds)
                     {
-                        if (!self || self->m_packetTimelineProjectionOperation == nullptr) return;
-                        if (self->m_packetTimelineProjectionOperation->isCurrent(ticket)) apply(*pending);
-                        self->m_packetTimelineProjectionOperation->completeDeferred(ticket);
-                    })) return false;
-                apply(*output);
-                return true;
-            },
-            [self](std::exception_ptr)
-            {
-                if (self) self->m_packetTimelineProjectionDirty = true;
-            });
+                        if (token.isCanceled()) return {};
+                        const auto found = buckets.find(second);
+                        ProcessTraceTimelineRatePoint point;
+                        point.time100ns = second * kTimelineSecond100ns;
+                        if (found != buckets.end())
+                        {
+                            point.uploadBytesPerSecond = static_cast<double>(found->second.uploadBytes);
+                            point.downloadBytesPerSecond = static_cast<double>(found->second.downloadBytes);
+                        }
+                        rates.push_back(point);
+                    }
+                    output.rates = ProcessTraceTimelineWidget::prepareRateOverlayPoints(std::move(rates));
+                    return std::make_shared<Output>(std::move(output));
+                },
+                [self, timeline, input, sourceMatches](const std::shared_ptr<const Output>& output,
+                    const std::uint64_t ticket)
+                {
+                    if (!self || !output) return true;
+                    const auto apply = [self, timeline, input, sourceMatches](const Output& value)
+                    {
+                        if (!self || !timeline) return;
+                        if (!sourceMatches() || !self->isPacketProjectionVisible()
+                            || !timeline->applyPreparedEventPoints(value.events))
+                        {
+                            self->refreshPacketTimelineRatePoints();
+                            return;
+                        }
+                        timeline->applyRateOverlayPoints(value.rates);
+                        self->m_packetTimelineSelectionStart100ns = timeline->selectionStart100ns();
+                        self->m_packetTimelineSelectionEnd100ns = timeline->selectionEnd100ns();
+                        self->m_packetTimelineProjectionDirty = false;
+                    };
+                    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self.data(),
+                        QStringLiteral("network-packet-timeline"), {self->m_packetTable},
+                        [self, output, ticket, apply]()
+                        {
+                            if (!self || self->m_packetTimelineProjectionOperation == nullptr) return;
+                            if (self->m_packetTimelineProjectionOperation->isCurrent(ticket)) apply(*output);
+                            self->m_packetTimelineProjectionOperation->completeDeferred(ticket);
+                        })) return false;
+                    apply(*output);
+                    return true;
+                },
+                [self](std::exception_ptr)
+                {
+                    if (self) self->m_packetTimelineProjectionDirty = true;
+                });
+        };
+        (*capture)();
     });
 }
 
