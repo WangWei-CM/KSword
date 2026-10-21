@@ -1389,10 +1389,12 @@ private:
     QSet<quint32> m_connectionPidFilterSet;          // 进程页“转到网络”注入的独立 PID 筛选。
 
     // ========================= Tab4：防火墙 ====================
-    NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙页容器。
+    QWidget* m_firewallTabPage = nullptr; // 稳定顶层Tab壳；实际控制器按需创建。
+    NetworkFirewallPage* m_firewallPage = nullptr;   // 防火墙实际页面/控制器。
 
     // ========================= Tab4：网络审计 ====================
-    NetworkAuditPage* m_networkAuditPage = nullptr;  // 网络审计页容器。
+    QWidget* m_networkAuditTabPage = nullptr; // 稳定顶层Tab壳，PID跳转也先完成此工厂。
+    NetworkAuditPage* m_networkAuditPage = nullptr;  // 网络审计实际页面。
 
     // ========================= Tab5：请求构造 ====================
     QWidget* m_manualRequestPage = nullptr;          // 请求构造页容器。

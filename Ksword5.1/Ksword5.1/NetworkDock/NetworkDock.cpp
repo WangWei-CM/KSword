@@ -4,6 +4,7 @@
 #include "NetworkDock.InternalCommon.h"
 #include "HttpsProxyService.h"
 #include "NetworkAuditPage.h"
+#include "NetworkFirewallPage.h"
 #include "../ArkDriverClient/ArkDriverClient.h"
 
 #include <QMessageBox>
@@ -247,7 +248,13 @@ void NetworkDock::showEvent(QShowEvent* event)
         if (m_networkAuditPage != nullptr) m_networkAuditPage->requestInitialRefresh();
         return;
     }
+    const QPointer<NetworkDock> owner(this);
     ensureVisibleNetworkToolPage();
+    if (!owner) return;
+    QWidget* const currentPage = m_sideTabWidget ? m_sideTabWidget->currentWidget() : nullptr;
+    if (currentPage == m_firewallTabPage && m_firewallPage) m_firewallPage->requestInitialRefresh();
+    else if (currentPage == m_networkAuditTabPage && m_networkAuditPage) m_networkAuditPage->requestInitialRefresh();
+    if (!owner) return;
     initializeVisibleDiagnosticPage();
     synchronizeVisiblePacketProjection();
     synchronizeVisibleNidsProjection();
@@ -302,7 +309,26 @@ ks::ui::PageNavigationCatalog NetworkDock::navigationCatalog(const NetworkDock* 
         page.visible = definition.exposed;
         if (existing != nullptr)
         {
-            const auto target = existing->m_navigationTargets.constFind(page.id);
+            auto target = existing->m_navigationTargets.constFind(page.id);
+            bool inheritedColdHost = false;
+            if (target == existing->m_navigationTargets.cend() || !target->tabs || !target->page)
+            {
+                // A cold descendant remains a real catalog entry. Resolve only
+                // its existing shell's visibility; catalog reads never build UI.
+                const auto* parent = network_navigation_detail::Find(page.parentId);
+                while (parent != nullptr)
+                {
+                    const auto ancestor = existing->m_navigationTargets.constFind(QString::fromLatin1(parent->id));
+                    if (ancestor != existing->m_navigationTargets.cend() && ancestor->tabs && ancestor->page
+                        && existing->m_coldNetworkToolFactories.contains(ancestor->page))
+                    {
+                        target = ancestor;
+                        inheritedColdHost = true;
+                        break;
+                    }
+                    parent = network_navigation_detail::Find(QString::fromLatin1(parent->parent));
+                }
+            }
             if (target == existing->m_navigationTargets.cend() || !target->tabs || !target->page)
             {
                 page.visible = false;
@@ -311,10 +337,10 @@ ks::ui::PageNavigationCatalog NetworkDock::navigationCatalog(const NetworkDock* 
             else
             {
                 const int index = target->tabs->indexOf(target->page);
-                page.visible = index >= 0 && target->tabs->isTabVisible(index);
-                page.enabled = index >= 0 && target->tabs->isTabEnabled(index);
-                page.current = index >= 0 && target->tabs->currentIndex() == index;
-                if (index >= 0) page.title = target->tabs->tabText(index);
+                page.visible = definition.exposed && index >= 0 && target->tabs->isTabVisible(index);
+                page.enabled = definition.exposed && index >= 0 && target->tabs->isTabEnabled(index);
+                page.current = !inheritedColdHost && index >= 0 && target->tabs->currentIndex() == index;
+                if (!inheritedColdHost && index >= 0) page.title = target->tabs->tabText(index);
             }
         }
         catalog.push_back(std::move(page));
@@ -326,32 +352,37 @@ QWidget* NetworkDock::activateNavigationDescriptor(const QString& id)
 {
     const QPointer<NetworkDock> guard(this);
     const auto* definition = network_navigation_detail::Find(id);
-    if (definition == nullptr) return nullptr;
-    QVector<NavigationTarget> path;
+    if (definition == nullptr || !definition->exposed) return nullptr;
+    QVector<QString> ids;
     while (definition != nullptr)
     {
-        const auto target = m_navigationTargets.constFind(QString::fromLatin1(definition->id));
-        if (target == m_navigationTargets.cend() || !target->tabs || !target->page) return nullptr;
-        const int index = target->tabs->indexOf(target->page);
-        if (index < 0 || !target->tabs->isTabVisible(index) || !target->tabs->isTabEnabled(index)) return nullptr;
-        path.prepend(*target);
+        ids.prepend(QString::fromLatin1(definition->id));
         if (*definition->parent == '\0') definition = nullptr;
         else
         {
             definition = network_navigation_detail::Find(QString::fromLatin1(definition->parent));
-            if (definition == nullptr) return nullptr;
+            if (definition == nullptr || !definition->exposed) return nullptr;
         }
     }
+    QVector<NavigationTarget> path;
     QPointer<QWidget> targetPage;
-    for (const auto& target : path)
+    for (const auto& targetId : ids)
     {
+        if (!guard) return nullptr;
+        // Resolve after the previous actual ancestor factory has registered its
+        // children; never retain a QHash iterator through a factory callback.
+        const auto found = m_navigationTargets.constFind(targetId);
+        if (found == m_navigationTargets.cend()) return nullptr;
+        const NavigationTarget target = *found;
         if (!guard || !target.tabs || !target.page) return nullptr;
         const int index = target.tabs->indexOf(target.page);
         if (index < 0 || !target.tabs->isTabVisible(index) || !target.tabs->isTabEnabled(index)) return nullptr;
         target.tabs->setCurrentWidget(target.page);
         if (!guard || !target.tabs || !target.page) return nullptr;
+        if (!ensureNetworkToolPage(target.page) || !guard || !target.tabs || !target.page) return nullptr;
         ks::ui::PrepareWidgetThemeBindingsForShow(target.page);
         if (!guard || !target.tabs || !target.page || target.tabs->currentWidget() != target.page) return nullptr;
+        path.push_back(target);
         targetPage = target.page;
     }
     for (const auto& target : path)

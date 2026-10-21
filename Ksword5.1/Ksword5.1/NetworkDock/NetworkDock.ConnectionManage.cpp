@@ -17,9 +17,12 @@ void NetworkDock::focusConnectionsByPids(const QVector<quint32>& processIds)
         }
     }
 
-    if (m_sideTabWidget != nullptr && m_networkAuditPage != nullptr)
+    const QPointer<NetworkDock> owner(this);
+    if (m_sideTabWidget != nullptr && m_networkAuditTabPage != nullptr)
     {
-        m_sideTabWidget->setCurrentWidget(m_networkAuditPage);
+        if (!ensureNetworkToolPage(m_networkAuditTabPage) || !owner) return;
+        m_sideTabWidget->setCurrentWidget(m_networkAuditTabPage);
+        if (!owner) return;
     }
     if (m_networkAuditPage != nullptr)
     {
@@ -36,16 +39,18 @@ void NetworkDock::setProcessDetailConnectionScope()
         return;
     }
 
+    const QPointer<NetworkDock> owner(this);
+    if (!ensureNetworkToolPage(m_networkAuditTabPage) || !owner) return;
     for (int tabIndex = 0; tabIndex < m_sideTabWidget->count(); ++tabIndex)
     {
         m_sideTabWidget->setTabVisible(
             tabIndex,
-            m_sideTabWidget->widget(tabIndex) == m_networkAuditPage);
+            m_sideTabWidget->widget(tabIndex) == m_networkAuditTabPage);
     }
 
     if (m_networkAuditPage != nullptr)
     {
-        m_sideTabWidget->setCurrentWidget(m_networkAuditPage);
+        m_sideTabWidget->setCurrentWidget(m_networkAuditTabPage);
         m_networkAuditPage->activateCrossView();
     }
     // 详情中只剩一个外层页签，隐藏重复的“网络审计”入口，保留内部各视角。

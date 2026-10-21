@@ -47,17 +47,19 @@ void NetworkDock::initializeUi()
     // target process, which is too coarse for a user-facing network dock tab.
     // Keep initializeRateLimitTab() compiled for now so the backend/UI code can
     // be restored later if a cleaner enforcement model replaces it.
-    initializeFirewallTab();
-    initializeNetworkAuditTab();
     // Canonical background capture/NIDS/download/proxy owners remain alive.
-    // Independent tools keep their original tab QWidget identity and build only
-    // the first selected branch, before its diagnostic query or user action.
+    // Every cold tab keeps one stable QWidget shell/index; first materialization
+    // adds content to that shell before its diagnostic query or user action.
     const auto cold = [this](QWidget*& page, const QString& id, const QIcon& icon, std::function<void()> factory)
     {
         page = new QWidget(m_sideTabWidget);
         m_coldNetworkToolFactories.insert(page, std::move(factory));
         network_navigation_detail::AddTab(m_sideTabWidget, page, id, icon);
     };
+    cold(m_firewallTabPage, QStringLiteral("firewall"), QIcon(QStringLiteral(":/Icon/process_critical.svg")),
+        [this]() { initializeFirewallTab(); });
+    cold(m_networkAuditTabPage, QStringLiteral("audit"), QIcon(QStringLiteral(":/Icon/process_details.svg")),
+        [this]() { initializeNetworkAuditTab(); });
     QWidget* portPage = nullptr;
     cold(portPage, QStringLiteral("port-diagnostics"), QIcon(QStringLiteral(":/Icon/process_details.svg")), {});
     m_coldNetworkToolFactories[portPage] = [portPage]()
@@ -515,8 +517,18 @@ void NetworkDock::initializeFirewallTab()
     // - 输入：无，页面内部动态加载 fwpuclnt.dll 并管理 WFP engine；
     // - 处理：独立展示历史/实时防火墙事件，不复用流量抓包管线；
     // - 返回：无，作为 NetworkDock 顶层 Tab 呈现。
-    m_firewallPage = new NetworkFirewallPage(this);
-    network_navigation_detail::AddTab(m_sideTabWidget, m_firewallPage, QStringLiteral("firewall"), QIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    if (m_firewallPage != nullptr) return;
+    if (m_firewallTabPage == nullptr)
+    {
+        m_firewallTabPage = new QWidget(m_sideTabWidget);
+        network_navigation_detail::AddTab(m_sideTabWidget, m_firewallTabPage,
+            QStringLiteral("firewall"), QIcon(QStringLiteral(":/Icon/process_critical.svg")));
+    }
+    auto* layout = new QVBoxLayout(m_firewallTabPage);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_firewallPage = new NetworkFirewallPage(m_firewallTabPage);
+    layout->addWidget(m_firewallPage);
 
 }
 
@@ -526,7 +538,18 @@ void NetworkDock::initializeNetworkAuditTab()
     // - TCP/UDP Cross-View 接管原连接管理页的操作能力；
     // - AFD、WFP、NDIS 和 NSI 分区仍保持只读；
     // - 独立“连接管理”顶层入口不再创建，避免功能重复。
-    m_networkAuditPage = new NetworkAuditPage(this);
+    if (m_networkAuditPage != nullptr) return;
+    if (m_networkAuditTabPage == nullptr)
+    {
+        m_networkAuditTabPage = new QWidget(m_sideTabWidget);
+        network_navigation_detail::AddTab(m_sideTabWidget, m_networkAuditTabPage,
+            QStringLiteral("audit"), QIcon(QStringLiteral(":/Icon/process_details.svg")));
+    }
+    auto* layout = new QVBoxLayout(m_networkAuditTabPage);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_networkAuditPage = new NetworkAuditPage(m_networkAuditTabPage);
+    layout->addWidget(m_networkAuditPage);
     m_networkAuditPage->setTrackProcessHandler([this](const std::uint32_t processId)
     {
         // The explicit action retains the old hidden monitor-filter behavior;
@@ -572,18 +595,24 @@ void NetworkDock::initializeNetworkAuditTab()
     {
         // Rule prefill remains available on explicit request, using the same
         // existing firewall page/controller rather than a second implementation.
-        if (m_constructScope == ConstructScope::ProcessConnections && m_firewallPage == nullptr)
+        const QPointer<NetworkDock> owner(this);
+        if (m_firewallPage == nullptr)
         {
-            const QSignalBlocker blockTabs(m_sideTabWidget);
-            initializeFirewallTab();
-            m_sideTabWidget->setTabVisible(m_sideTabWidget->indexOf(m_firewallPage), false);
+            if (m_constructScope == ConstructScope::ProcessConnections)
+            {
+                const QSignalBlocker blockTabs(m_sideTabWidget);
+                ks::ui::ScopedWidgetThemePreparation prepare(this);
+                initializeFirewallTab();
+                m_sideTabWidget->setTabVisible(m_sideTabWidget->indexOf(m_firewallTabPage), false);
+            }
+            else if (!ensureNetworkToolPage(m_firewallTabPage)) return;
         }
+        if (!owner) return;
         if (m_firewallPage != nullptr)
         {
             m_firewallPage->addUdpEndpointBlockRuleFromEvidence(localEndpointText, processId);
         }
     });
-    network_navigation_detail::AddTab(m_sideTabWidget, m_networkAuditPage, QStringLiteral("audit"), QIcon(QStringLiteral(":/Icon/process_details.svg")));
 
 }
 
@@ -808,7 +837,20 @@ void NetworkDock::ensureVisibleNetworkToolPage()
     QWidget* selected = m_sideTabWidget->currentWidget();
     while (selected != nullptr)
     {
+        // The unchanged NIDS context menu uses the existing firewall pointer.
+        // Complete that dependency on first NIDS exposure, not on Dock cold open.
+        if (selected == m_nidsPage && m_firewallPage == nullptr)
+        {
+            if (!ensureNetworkToolPage(m_firewallTabPage) || !guard || !isVisible()) return;
+            if (m_sideTabWidget->currentWidget() != selected)
+            {
+                selected = m_sideTabWidget->currentWidget();
+                continue;
+            }
+        }
         if (!ensureNetworkToolPage(selected) || !guard || !isVisible()) return;
+        ks::ui::PrepareWidgetThemeBindingsForShow(selected);
+        if (!guard || !isVisible()) return;
         QWidget* current = m_sideTabWidget->currentWidget();
         if (current == selected) return;
         selected = current;

@@ -170,17 +170,19 @@ void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
         {
+            const QPointer<NetworkDock> owner(this);
             ensureVisibleNetworkToolPage();
+            if (!owner) return;
             initializeVisibleDiagnosticPage();
             synchronizeVisiblePacketProjection();
             synchronizeVisibleNidsProjection();
             synchronizeVisibleHttpsProjection();
             QWidget* currentPage = m_sideTabWidget != nullptr ? m_sideTabWidget->currentWidget() : nullptr;
-            if (currentPage == m_firewallPage && m_firewallPage != nullptr)
+            if (currentPage == m_firewallTabPage && m_firewallPage != nullptr)
             {
                 m_firewallPage->requestInitialRefresh();
             }
-            else if (currentPage == m_networkAuditPage && m_networkAuditPage != nullptr)
+            else if (currentPage == m_networkAuditTabPage && m_networkAuditPage != nullptr)
             {
                 m_networkAuditPage->requestInitialRefresh();
             }
@@ -839,7 +841,7 @@ void NetworkDock::initializeConnections()
             QAction* addBlockRuleAction = contextMenu.addAction(
                 QIcon(QStringLiteral(":/Icon/process_terminate.svg")),
                 QStringLiteral("预填阻断规则"));
-            addBlockRuleAction->setEnabled(m_firewallPage != nullptr);
+            addBlockRuleAction->setEnabled(m_firewallTabPage != nullptr);
             QAction* copyRowAction = contextMenu.addAction(QIcon(":/Icon/process_copy_row.svg"), QStringLiteral("复制行"));
             // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
             ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
@@ -919,10 +921,9 @@ void NetworkDock::initializeConnections()
             {
                 const std::vector<std::uint64_t> sequenceList = collectSequenceListByRows(
                     anchorRow >= 0 ? std::vector<int>{ anchorRow } : std::vector<int>{});
-                if (sequenceList.empty() || m_firewallPage == nullptr)
-                {
-                    return;
-                }
+                if (sequenceList.empty()) return;
+                const QPointer<NetworkDock> owner(this);
+                if (!ensureNetworkToolPage(m_firewallTabPage) || !owner || m_firewallPage == nullptr) return;
 
                 const auto packetIt = m_packetBySequence.find(sequenceList.front());
                 if (packetIt == m_packetBySequence.end())
