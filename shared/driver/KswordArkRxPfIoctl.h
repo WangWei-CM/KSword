@@ -36,7 +36,12 @@
  * 不受 VTL1 SHA-512 hash enforcement），所以不存在 "字节与 digest 不符导致 restore
  * 被拒" 的问题。
  */
-#define KSWORD_ARK_IOCTL_FUNCTION_RXPF_EXEC_PROOF 0x926UL
+/*
+ * 原 0x926：实证返回 win32=998 (ERROR_NOACCESS) + bytesReturned=0，handler sentinel 从未写入。
+ * ATOMIC_COMMIT 0x925 走同样 dispatcher 工作正常。换成 0x930（远离 0x925），排除 function
+ * code 相邻性或 0x926 被某个 undocumented filter 识别的可能。
+ */
+#define KSWORD_ARK_IOCTL_FUNCTION_RXPF_EXEC_PROOF 0x930UL
 
 #define IOCTL_KSWORD_ARK_RXPF_QUERY_SUPPORT \
     CTL_CODE(KSWORD_ARK_IOCTL_DEVICE_TYPE, KSWORD_ARK_IOCTL_FUNCTION_RXPF_QUERY_SUPPORT, METHOD_BUFFERED, FILE_WRITE_ACCESS)

@@ -58,7 +58,13 @@ namespace ks::cli
             std::memcpy(request.bytes, payload.data(), payload.size());
 
             // 响应：workerCount + returnedValue + faultsObserved + verdict + 诊断字段。
-            KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE response{};
+            // 显式 16-byte 对齐规避 I/O manager ProbeForWrite 的对齐检查。
+            alignas(16) KSWORD_ARK_RXPF_EXEC_PROOF_RESPONSE response{};
+            // 诊断：打印 request/response 指针与 size + 实际 CTL_CODE。
+            std::fwprintf(stderr, L"[diag] CTL_CODE=0x%08X &request=%p sizeof(request)=%zu &response=%p sizeof(response)=%zu\n",
+                static_cast<unsigned int>(IOCTL_KSWORD_ARK_RXPF_EXEC_PROOF),
+                static_cast<void*>(&request), sizeof(request),
+                static_cast<void*>(&response), sizeof(response));
 
             const ksword::ark::DriverClient client;
             const auto io = client.deviceIoControl(

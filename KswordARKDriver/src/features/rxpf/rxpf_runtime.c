@@ -1177,16 +1177,21 @@ KswRxpfRuntimeExecProof(
     /* call rcx 的 SEH 捕获码，0 表示无异常。 */
     NTSTATUS executionException = STATUS_SUCCESS;
 
+    /* ========== TEMP DIAG: unique sentinel (date+marker) to prove this build is loaded. ========== */
+    /* 不管 Request/Response 哪个 NULL，先 attempt 写 sentinel —— 如果 Response 可写就能看到。
+     * 换成 unique 值而不是 0xDEAD/0xBEEF，确保 CLI 看到的是本次 build 的 handler，
+     * 不是旧 build 的 cached dispatch。 */
+    if (Response != NULL) {
+        Response->version = 0xC0DECAFEUL;
+        Response->size = 0x20261020UL;
+    }
     /* 基本参数校验：Request/Response 非空。 */
     if (Request == NULL || Response == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    /* 响应结构清零为 0，保证未填字段为 0。 */
-    RtlZeroMemory(Response, sizeof(*Response));
-    /* 版本号来自协议常量，供 R3 做兼容性比对。 */
-    Response->version = KSWORD_ARK_RXPF_PROTOCOL_VERSION;
-    /* 响应 struct 真实字节数，R3 可据此断言 ABI 一致。 */
-    Response->size = sizeof(*Response);
+    /* 响应结构其余部分清零。 */
+    RtlZeroMemory(((UCHAR*)Response) + sizeof(ULONG) * 2,
+        sizeof(*Response) - sizeof(ULONG) * 2);
     /* 预先把期望 RAX 写入响应，便于 R3 不解析请求也能回放。 */
     Response->expectedReturnValue = Request->expectedReturnValue;
     /* 预先把 targetKind 和 length 写入响应，与请求对齐。 */
