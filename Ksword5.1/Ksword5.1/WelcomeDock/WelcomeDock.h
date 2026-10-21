@@ -97,4 +97,11 @@ public:
 
 private:
     bool m_themeRefreshScheduled = false; // 当前事件轮只排队一次主题刷新。
+    bool m_themeRefreshDirty = true; // 隐藏只记dirty，Show在首帧前消费。
+    bool m_themeRefreshInProgress = false;
+    quint64 m_appliedThemeSeed = 0;
+    qint64 m_appliedPaletteKey = 0;
+    QString m_appliedLanguageStyle;
+    QString m_appliedActionStyle;
+    QString m_appliedCollapseStyle;
 };

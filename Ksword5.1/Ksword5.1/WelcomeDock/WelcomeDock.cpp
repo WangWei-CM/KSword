@@ -3,6 +3,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/PageControlStyle.h"
+#include "../UI/ThemeBinding.h"
 
 #include "../HardwareDock/HardwareDock.h"
 #include "../Internationalization/LanguageManager.h"
@@ -24,6 +25,8 @@
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QPushButton>
+#include <QPointer>
+#include <QApplication>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QStorageInfo>
@@ -192,7 +195,6 @@ WelcomeDock::WelcomeDock(QWidget* parent)
     m_languageSettingsBtn->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     m_languageSettingsBtn->setCursor(Qt::PointingHandCursor);
     initializeLanguageButtonStyle();
-    ks::ui::NormalizeToolbarControl(m_languageSettingsBtn);
 
     m_copyright = new QLabel(this);
     m_copyright->setWordWrap(true);
@@ -679,41 +681,79 @@ void WelcomeDock::updateSystemInfoFromHardwareFields(const ks::ui::FieldDocument
 
 void WelcomeDock::initializeLanguageButtonStyle()
 {
-    if (m_languageSettingsBtn == nullptr)
-    {
-        return;
-    }
-    // 语言入口作为辅助操作保留清晰底面，不抢占性能与系统摘要的视觉重点。
-    m_languageSettingsBtn->setStyleSheet(ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
+    if (m_languageSettingsBtn == nullptr) return;
+    // Compare the complete existing color + font + toolbar geometry result.
+    // NormalizeToolbarControl must never strip/reappend geometry on every Show.
+    const QString style = ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral,
         ks::ui::FlatButtonAppearance::Solid)
-        + QStringLiteral("QPushButton{font-weight:600;}"));
-    ks::ui::NormalizeToolbarControl(m_languageSettingsBtn);
+        + QStringLiteral("QPushButton{font-weight:600;}")
+        + ks::ui::ToolbarControlGeometryStyle();
+    const int height = std::max(28, QFontMetrics(m_languageSettingsBtn->font()).height() + 12);
+    const bool toolbarMissing = !m_languageSettingsBtn->property("ksword_toolbar_control").toBool();
+    const bool normalize = m_languageSettingsBtn->styleSheet() != style
+        || toolbarMissing
+        || m_languageSettingsBtn->minimumHeight() != height || m_languageSettingsBtn->maximumHeight() != height
+        || m_languageSettingsBtn->iconSize() != QSize(16, 16);
+    const QPointer<QPushButton> button(m_languageSettingsBtn);
+    if (toolbarMissing) button->setProperty("ksword_toolbar_control", true);
+    if (button && (button->styleSheet() != style || toolbarMissing)) button->setStyleSheet(style);
+    if (button && normalize) ks::ui::NormalizeToolbarControl(button.data());
 }
 
 void WelcomeDock::refreshThemeColors()
 {
+    if (m_themeRefreshInProgress) return;
+    const auto seedGeneration = KswordTheme::ThemeSeedGeneration;
+    const auto paletteKey = QApplication::palette().cacheKey();
+    const int languageHeight = m_languageSettingsBtn
+        ? std::max(28, QFontMetrics(m_languageSettingsBtn->font()).height() + 12) : 0;
+    bool stylesUnchanged = m_languageSettingsBtn
+        && m_languageSettingsBtn->styleSheet() == m_appliedLanguageStyle
+        && m_languageSettingsBtn->property("ksword_toolbar_control").toBool()
+        && m_languageSettingsBtn->minimumHeight() == languageHeight
+        && m_languageSettingsBtn->maximumHeight() == languageHeight
+        && m_languageSettingsBtn->iconSize() == QSize(16, 16);
+    for (const auto* button : {m_githubBtn, m_qqBtn, m_pplControlBtn, m_systemInformerBtn, m_skt64Btn})
+        stylesUnchanged = stylesUnchanged && button && button->styleSheet() == m_appliedActionStyle;
+    for (const auto* button : {m_contributorsCollapse, m_donorsCollapse})
+        stylesUnchanged = stylesUnchanged && button && button->styleSheet() == m_appliedCollapseStyle;
+    // A redundant palette/language notification is dirty only until its exact
+    // color inputs and complete applied QSS/metrics have been checked.
+    if (m_appliedThemeSeed == seedGeneration && m_appliedPaletteKey == paletteKey && stylesUnchanged)
+    {
+        m_themeRefreshDirty = false;
+        return;
+    }
+    m_themeRefreshInProgress = true;
+    const QPointer<WelcomeDock> owner(this);
     // 原对象保留，避免主题刷新改变折叠状态、焦点、翻译文本或采样连接。
     if (m_languageSettingsBtn != nullptr)
     {
         initializeLanguageButtonStyle();
+        if (!owner) return;
+        m_appliedLanguageStyle = m_languageSettingsBtn->styleSheet();
         m_languageSettingsBtn->update();
     }
-    const QString outlineStyle = welcomeActionButtonStyle();
+    const QString outlineStyle = welcomeActionButtonStyle() + ks::ui::ToolbarControlGeometryStyle();
     for (QPushButton* button : {m_githubBtn, m_qqBtn, m_pplControlBtn, m_systemInformerBtn, m_skt64Btn})
     {
         if (button != nullptr && button->styleSheet() != outlineStyle)
         {
             button->setStyleSheet(outlineStyle);
+            if (!owner) return;
         }
     }
-    const QString collapseStyle = welcomeCollapseButtonStyle();
+    m_appliedActionStyle = outlineStyle;
+    const QString collapseStyle = welcomeCollapseButtonStyle() + ks::ui::ToolbarControlGeometryStyle();
     for (QToolButton* button : {m_contributorsCollapse, m_donorsCollapse})
     {
         if (button != nullptr && button->styleSheet() != collapseStyle)
         {
             button->setStyleSheet(collapseStyle);
+            if (!owner) return;
         }
     }
+    m_appliedCollapseStyle = collapseStyle;
     // 颜色角色顺序与 initializePerformanceCards 一致，不请求新硬件数据。
     const std::array<KswordTheme::PerformanceRole, 5> roles = {{
         KswordTheme::PerformanceRole::Cpu, KswordTheme::PerformanceRole::Memory,
@@ -726,18 +766,23 @@ void WelcomeDock::refreshThemeColors()
         m_performanceCards[index]->setAccentColor(
             KswordTheme::PerformanceColor(roles[static_cast<std::size_t>(index)]));
     }
+    m_appliedThemeSeed = seedGeneration;
+    m_appliedPaletteKey = paletteKey;
+    m_themeRefreshDirty = seedGeneration != KswordTheme::ThemeSeedGeneration
+        || paletteKey != QApplication::palette().cacheKey();
+    m_themeRefreshInProgress = false;
+    if (m_themeRefreshDirty) scheduleThemeRefresh();
 }
 
 void WelcomeDock::scheduleThemeRefresh()
 {
-    if (m_themeRefreshScheduled)
-    {
-        return;
-    }
+    if (m_themeRefreshInProgress) return;
+    m_themeRefreshDirty = true;
+    if (!isVisible() || m_themeRefreshScheduled) return;
     m_themeRefreshScheduled = true;
     QTimer::singleShot(0, this, [this]() {
-        refreshThemeColors();
         m_themeRefreshScheduled = false;
+        if (isVisible()) refreshThemeColors(); // Hidden keeps dirty until the actual Show.
     });
 }
 
@@ -747,9 +792,11 @@ void WelcomeDock::changeEvent(QEvent* event)
     if (event != nullptr && event->type() == QEvent::LanguageChange)
     {
         retranslateUi();
+        scheduleThemeRefresh();
     }
     if (event != nullptr && (event->type() == QEvent::PaletteChange
-        || event->type() == QEvent::ApplicationPaletteChange))
+        || event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::StyleChange
+        || event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange))
     {
         scheduleThemeRefresh();
     }
@@ -758,7 +805,9 @@ void WelcomeDock::changeEvent(QEvent* event)
 void WelcomeDock::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    scheduleThemeRefresh();
+    const QPointer<WelcomeDock> owner(this);
+    ks::ui::PrepareWidgetThemeBindingsForShow(this);
+    if (owner) refreshThemeColors(); // Consume the current branch before its first paint.
 }
 
 void WelcomeDock::retranslateUi()
