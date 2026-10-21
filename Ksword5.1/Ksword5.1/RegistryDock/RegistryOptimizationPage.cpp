@@ -56,6 +56,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -302,7 +303,7 @@ namespace
     // - 作用：判断动作是否属于会阻塞调用线程的 ExplorerNotify 广播（AssocChanged / Custom）；
     // - 入参 actionObject：单条优化动作的 JSON 对象；
     // - 返回：true 表示必须放到后台线程执行，否则 UI 会被顶层窗口的应答超时拖住。
-    bool actionUsesBlockingBroadcast(const QJsonObject& actionObject)
+    [[maybe_unused]] bool actionUsesBlockingBroadcast(const QJsonObject& actionObject)
     {
         const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
             jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
@@ -932,12 +933,18 @@ RegistryOptimizationPage::RegistryOptimizationPage(QWidget* parent)
     : QWidget(parent)
 {
     m_profileOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_ordinaryOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_ordinaryOperation->setStateChangedCallback([this] {
+        if (m_stateApplyInProgress && !m_ordinaryOperation->isBusy() && !m_ordinaryReceipt)
+            cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+    });
     initializeUi();
     initializeConnections();
 }
 
 RegistryOptimizationPage::~RegistryOptimizationPage()
 {
+    m_ordinaryOperation->close();
     m_profileOperation->close();
     cancelStateApply();
 }
@@ -1117,6 +1124,7 @@ void RegistryOptimizationPage::loadOptimizationProfile()
     m_profileRequested = true;
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为优化配置已重新加载。"));
+    if (m_stateApplyInProgress) { m_deferredProfileReload = true; return; }
     if (m_filterDebounceTimer != nullptr) m_filterDebounceTimer->stop();
     m_itemList.clear();
     m_visibleRows.clear();
@@ -1277,6 +1285,7 @@ void RegistryOptimizationPage::rebuildItemTable()
 
     cancelStateRefresh();
     cancelStateApply(QStringLiteral("已取消正在进行的应用，因为筛选结果已改变。"));
+    if (m_stateApplyInProgress) { m_deferredItemRebuild = true; return; }
     m_rebuildingTable = true;
     QSignalBlocker blocker(m_itemTable);
     const bool updatesEnabled = m_itemTable->updatesEnabled();
@@ -1745,6 +1754,8 @@ void RegistryOptimizationPage::beginStateApply(
     const OptimizationState& state)
 {
     m_stateApplyInProgress = true;
+    m_stateApplyCancelRequested = false;
+    m_stateApplyCancelReason.clear();
     m_stateApplyTableRow = tableRow;
     m_stateApplyItemName = item.itemNameText;
     m_stateApplyTargetLabel = state.labelText;
@@ -1777,7 +1788,8 @@ void RegistryOptimizationPage::beginStateApply(
 
 void RegistryOptimizationPage::continueStateApply()
 {
-    if (!m_stateApplyInProgress || m_stateApplyProcess != nullptr) return;
+    if (!m_stateApplyInProgress || m_stateApplyProcess != nullptr
+        || m_ordinaryOperation->isBusy() || !m_stateApplyActiveAction.isEmpty()) return;
 
     if (m_stateApplyNextActionIndex >= m_stateApplyActions.size())
     {
@@ -1802,41 +1814,106 @@ void RegistryOptimizationPage::continueStateApply()
         return;
     }
 
-    // ExplorerNotify 广播会对 HWND_BROADCAST 逐个顶层窗口等待应答，繁忙窗口各自等满超时，
-    // 留在 UI 线程会造成数秒冻结；这里改成后台线程执行，完成后回投继续推进动作序列。
-    if (actionUsesBlockingBroadcast(m_stateApplyActiveAction))
-    {
-        const QJsonObject broadcastAction = m_stateApplyActiveAction;
-        const QPointer<RegistryOptimizationPage> guardedSelf(this);
-        const quint64 requestGeneration = property(kStateApplyGenerationProperty).toULongLong();
-        QThreadPool::globalInstance()->start(
-            [guardedSelf, broadcastAction, requestGeneration]()
+    const QString family = jsonString(m_stateApplyActiveAction, QStringLiteral("action_family"),
+        jsonString(m_stateApplyActiveAction, QStringLiteral("action_tag"))).trimmed();
+    if ((family.compare(QStringLiteral("RegWrite"), Qt::CaseInsensitive) == 0
+            || family.compare(QStringLiteral("RegExist"), Qt::CaseInsensitive) == 0)
+        && jsonString(m_stateApplyActiveAction, QStringLiteral("Data")) == QStringLiteral("?ColorDialog()"))
+        prepareColorAction(m_stateApplyActiveAction);
+    else
+        submitOrdinaryAction(m_stateApplyActiveAction);
+}
+
+void RegistryOptimizationPage::submitOrdinaryAction(const QJsonObject& action, const RegistryValueState* original)
+{
+    struct Request { QJsonObject action; RegistryValueState original; bool hasOriginal = false; };
+    const Request request{action, original ? *original : RegistryValueState{}, original != nullptr};
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_ordinaryReceipt = false;
+    const auto ticket = m_ordinaryOperation->submitTransaction<Request, OrdinaryActionResult>(request,
+        [](const Request& value) {
+            OrdinaryActionResult result;
+            result.ok = executeAction(value.action, &result.details, &result.restartExplorer, value.hasOriginal ? &value.original : nullptr);
+            return result;
+        }, [this, generation](const OrdinaryActionResult& result, std::uint64_t) {
+            acceptOrdinaryAction(result, generation);
+            return true;
+        }, [this](std::exception_ptr) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0, this, [this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
+        });
+    if (!ticket) cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。"));
+}
+
+void RegistryOptimizationPage::prepareColorAction(const QJsonObject& action)
+{
+    struct Result { RegistryValueState original; QString error; bool ok = false; };
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_ordinaryReceipt = false;
+    m_ordinaryOperation->submit<QJsonObject, Result>(action, [](const QJsonObject& value, const ks::ui::AsyncOperationToken&) {
+        Result result;
+        const QString key = jsonString(value, QStringLiteral("Key"));
+        const RegistryAccessContext context{actionRegistryViewFlags(value) == KEY_WOW64_32KEY ? 32 : 0, false};
+        if (!RegistryWorkbenchAccess::read(key, jsonString(value, QStringLiteral("Value")), context, &result.original, &result.error)
+            || !result.original.complete) return result;
+        if (key.isEmpty()) { result.error = QStringLiteral("RegWrite 缺少 Key。"); return result; }
+        DWORD type = REG_NONE;
+        const QString typeText = jsonString(value, QStringLiteral("Type"), QStringLiteral("REG_DWORD"));
+        if (!parseRegistryType(typeText, &type)) { result.error = QStringLiteral("不支持注册表类型：%1").arg(typeText); return result; }
+        result.ok = true;
+        return result;
+    }, [this, action, generation](const Result& result, std::uint64_t) {
+        m_ordinaryReceipt = true;
+        QTimer::singleShot(0, this, [this, action, generation, result] {
+            if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+            if (m_stateApplyCancelRequested) { cancelStateApply(m_stateApplyCancelReason); return; }
+            if (!result.ok)
             {
-                const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(broadcastAction, true);
+                OrdinaryActionResult outcome;
+                outcome.ok = describeActionResult(action, false, result.error, &outcome.details, &outcome.restartExplorer);
+                acceptOrdinaryAction(outcome, generation);
+                return;
+            }
+            const QPointer<RegistryOptimizationPage> alive(this);
+            const QColor color = QColorDialog::getColor(Qt::white, this, QStringLiteral("选择注册表颜色值"));
+            if (!alive || !m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+            if (!color.isValid())
+            {
+                OrdinaryActionResult outcome;
+                outcome.ok = describeActionResult(action, false, QStringLiteral("用户取消颜色选择。"), &outcome.details, &outcome.restartExplorer);
+                acceptOrdinaryAction(outcome, generation);
+                return;
+            }
+            const quint32 colorValue = 0xFF000000U | (static_cast<quint32>(color.blue()) << 16)
+                | (static_cast<quint32>(color.green()) << 8) | static_cast<quint32>(color.red());
+            auto resolved = action;
+            if (!action.value(QStringLiteral("summary")).isString())
+                resolved.insert(QStringLiteral("summary"), QString::fromUtf8(QJsonDocument(action).toJson(QJsonDocument::Compact)));
+            resolved.insert(QStringLiteral("Data"), QStringLiteral("%1").arg(colorValue, 8, 16, QLatin1Char('0')).toUpper());
+            submitOrdinaryAction(resolved, &result.original);
+        });
+        return true;
+    }, [this](std::exception_ptr) {
+        m_ordinaryReceipt = true;
+        QTimer::singleShot(0, this, [this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
+    });
+}
 
-                QCoreApplication* const appInstance = QCoreApplication::instance();
-                if (appInstance == nullptr) { return; }
-
-                QMetaObject::invokeMethod(appInstance,
-                    [guardedSelf, requestGeneration, outcome]()
-                    {
-                        if (guardedSelf.isNull()) { return; }
-                        if (guardedSelf->property(kStateApplyGenerationProperty).toULongLong() != requestGeneration) { return; }
-                        guardedSelf->completePendingAction(outcome.succeeded, outcome.errorTextValue);
-                    });
-            });
-        return;
-    }
-
-    ks::ui::FieldDocument actionDetailLines;
-    bool actionRestartExplorer = false;
-    const bool actionOk = executeAction(m_stateApplyActiveAction, &actionDetailLines, &actionRestartExplorer);
-    m_stateApplyRestartExplorer = m_stateApplyRestartExplorer || actionRestartExplorer;
-    m_stateApplyAllOk = m_stateApplyAllOk && actionOk;
-    m_stateApplyDetailLines.nodes += actionDetailLines.nodes;
+void RegistryOptimizationPage::acceptOrdinaryAction(const OrdinaryActionResult& result, const quint64 generation)
+{
+    m_ordinaryReceipt = true;
+    if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+    m_stateApplyRestartExplorer = m_stateApplyRestartExplorer || result.restartExplorer;
+    m_stateApplyAllOk = m_stateApplyAllOk && result.ok;
+    m_stateApplyDetailLines.nodes += result.details.nodes;
+    m_stateApplyActiveAction = {};
     ++m_stateApplyNextActionIndex;
     m_detailText->setDocument(m_stateApplyDetailLines);
-    QTimer::singleShot(0, this, [this]() { continueStateApply(); });
+    QTimer::singleShot(0, this, [this, generation] {
+        if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong() != generation) return;
+        if (m_stateApplyCancelRequested) cancelStateApply(m_stateApplyCancelReason);
+        else continueStateApply();
+    });
 }
 
 void RegistryOptimizationPage::completePendingAction(const bool actionOk, const QString& errorText)
@@ -1905,6 +1982,14 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
 {
     if (!m_stateApplyInProgress) return;
 
+    if (m_ordinaryOperation->isBusy())
+    {
+        m_stateApplyCancelRequested = true;
+        m_stateApplyCancelReason = reasonText;
+        updateStatusText(QStringLiteral("系统优化：已请求取消，将在当前动作完成并取得回执后停止。"));
+        return;
+    }
+
     // 序列代次自增：仍在后台阻塞的广播动作完成后不再推进这一轮（或下一轮）序列。
     setProperty(kStateApplyGenerationProperty, property(kStateApplyGenerationProperty).toULongLong() + 1);
 
@@ -1930,6 +2015,12 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
     m_stateApplyActiveAction = QJsonObject();
     m_stateApplyNextActionIndex = 0;
     setApplyControlsEnabled(true);
+    m_stateApplyCancelRequested = false;
+    m_stateApplyCancelReason.clear();
+    const bool reload = std::exchange(m_deferredProfileReload, false);
+    const bool rebuild = std::exchange(m_deferredItemRebuild, false);
+    if (reload) QTimer::singleShot(0, this, [this] { loadOptimizationProfile(); });
+    else if (rebuild) QTimer::singleShot(0, this, [this] { rebuildItemTable(); });
 }
 
 void RegistryOptimizationPage::setApplyControlsEnabled(const bool enabled)
@@ -2115,20 +2206,18 @@ bool RegistryOptimizationPage::startExternalAction(const QJsonObject& actionObje
 bool RegistryOptimizationPage::executeAction(
     const QJsonObject& actionObject,
     ks::ui::FieldDocument* detailLinesOut,
-    bool* restartExplorerOut)
+    bool* restartExplorerOut, const RegistryValueState* original)
 {
     if (restartExplorerOut != nullptr) *restartExplorerOut = false;
     const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
         jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
-    const QString summaryText = jsonString(actionObject, QStringLiteral("summary"),
-        QString::fromUtf8(QJsonDocument(actionObject).toJson(QJsonDocument::Compact)));
     QString errorText;
     bool ok = false;
 
     if (familyText.compare(QStringLiteral("RegWrite"), Qt::CaseInsensitive) == 0 ||
         familyText.compare(QStringLiteral("RegExist"), Qt::CaseInsensitive) == 0)
     {
-        ok = executeRegistryWriteAction(actionObject, &errorText);
+        ok = executeRegistryWriteAction(actionObject, &errorText, original);
     }
     else if (familyText.compare(QStringLiteral("RegDelete"), Qt::CaseInsensitive) == 0 ||
         familyText.compare(QStringLiteral("RegDetete"), Qt::CaseInsensitive) == 0)
@@ -2158,6 +2247,14 @@ bool RegistryOptimizationPage::executeAction(
         ok = false;
     }
 
+    return describeActionResult(actionObject, ok, errorText, detailLinesOut, restartExplorerOut);
+}
+
+bool RegistryOptimizationPage::describeActionResult(const QJsonObject& actionObject, const bool ok, const QString& errorText,
+    ks::ui::FieldDocument* detailLinesOut, bool* restartExplorerOut)
+{
+    const QString summaryText = jsonString(actionObject, QStringLiteral("summary"),
+        QString::fromUtf8(QJsonDocument(actionObject).toJson(QJsonDocument::Compact)));
     const QString restartText = jsonString(actionObject, QStringLiteral("activate_restart"));
     if (restartExplorerOut != nullptr && restartText.contains(QStringLiteral("Explorer"), Qt::CaseInsensitive))
     {
@@ -2177,7 +2274,7 @@ bool RegistryOptimizationPage::executeAction(
     return ok;
 }
 
-bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut)
+bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut, const RegistryValueState* capturedOriginal)
 {
     if (errorTextOut != nullptr) errorTextOut->clear();
     const QString keyPath = jsonString(actionObject, QStringLiteral("Key"));
@@ -2188,8 +2285,9 @@ bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& act
     const REGSAM viewFlags = actionRegistryViewFlags(actionObject);
     const RegistryAccessContext context{viewFlags == KEY_WOW64_32KEY ? 32 : 0, false}; // 固定配置来源。
     RegistryValueState original; // 模态/运算前的完整原始值，用于提交前冲突检查。
-    if (!RegistryWorkbenchAccess::read(keyPath, valueName, context, &original, errorTextOut)
-        || !original.complete) return false;
+    if (capturedOriginal) original = *capturedOriginal;
+    else if (!RegistryWorkbenchAccess::read(keyPath, valueName, context, &original, errorTextOut)) return false;
+    if (!original.complete) return false;
 
     if (keyPath.isEmpty())
     {
@@ -2202,21 +2300,6 @@ bool RegistryOptimizationPage::executeRegistryWriteAction(const QJsonObject& act
     {
         if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("不支持注册表类型：%1").arg(typeText);
         return false;
-    }
-
-    if (dataText == QStringLiteral("?ColorDialog()"))
-    {
-        const QColor color = QColorDialog::getColor(Qt::white, this, QStringLiteral("选择注册表颜色值"));
-        if (!color.isValid())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("用户取消颜色选择。");
-            return false;
-        }
-        const quint32 colorValue = 0xFF000000U |
-            (static_cast<quint32>(color.blue()) << 16) |
-            (static_cast<quint32>(color.green()) << 8) |
-            static_cast<quint32>(color.red());
-        dataText = QStringLiteral("%1").arg(colorValue, 8, 16, QLatin1Char('0')).toUpper();
     }
 
     QByteArray newData;
@@ -2380,7 +2463,7 @@ bool RegistryOptimizationPage::executeExplorerNotifyAction(const QJsonObject& ac
 
     // AssocChanged / Custom 的正常路径已由 continueStateApply 改走后台线程；
     // 这里只保留同步兜底（不重复初始化 COM，UI 线程套间由 Qt 负责）。
-    const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(actionObject, false);
+    const ExplorerNotifyOutcome outcome = runExplorerNotifyBroadcast(actionObject, true);
     if (!outcome.succeeded && errorTextOut != nullptr)
     {
         *errorTextOut = outcome.errorTextValue;

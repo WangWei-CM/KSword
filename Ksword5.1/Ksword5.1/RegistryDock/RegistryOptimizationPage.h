@@ -9,6 +9,7 @@
 // 3) Apply selected registry/service/explorer actions with explicit confirmation.
 // ============================================================
 
+#include "RegistryWorkbenchAccess.h"
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -149,16 +150,27 @@ private:
     void setApplyControlsEnabled(bool enabled);
     bool startExternalAction(const QJsonObject& actionObject, QString* errorTextOut);
     static bool actionRequiresExternalProcess(const QJsonObject& actionObject);
-    bool executeAction(
+    struct OrdinaryActionResult
+    {
+        bool ok = false;
+        bool restartExplorer = false;
+        ks::ui::FieldDocument details;
+    };
+    void submitOrdinaryAction(const QJsonObject& action, const RegistryValueState* original = nullptr);
+    void prepareColorAction(const QJsonObject& action);
+    void acceptOrdinaryAction(const OrdinaryActionResult& result, quint64 generation);
+    static bool describeActionResult(const QJsonObject& action, bool ok, const QString& error,
+        ks::ui::FieldDocument* detailLinesOut, bool* restartExplorerOut);
+    static bool executeAction(
         const QJsonObject& actionObject,
         ks::ui::FieldDocument* detailLinesOut,
-        bool* restartExplorerOut);
+        bool* restartExplorerOut, const RegistryValueState* original = nullptr);
 
-    bool executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeRegistryDeleteAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeRegistryMoveAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeServiceStartAction(const QJsonObject& actionObject, QString* errorTextOut);
-    bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeRegistryWriteAction(const QJsonObject& actionObject, QString* errorTextOut, const RegistryValueState* capturedOriginal = nullptr);
+    static bool executeRegistryDeleteAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeRegistryMoveAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeServiceStartAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static bool executeExplorerNotifyAction(const QJsonObject& actionObject, QString* errorTextOut);
 
     static bool evaluateConditionText(const QString& conditionText);
 
@@ -177,6 +189,12 @@ private:
     QLabel* m_statusLabel = nullptr;             // Profile load/apply status.
 
     std::unique_ptr<ks::ui::AsyncOperation> m_profileOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_ordinaryOperation;
+    bool m_ordinaryReceipt = false;
+    bool m_stateApplyCancelRequested = false;
+    QString m_stateApplyCancelReason;
+    bool m_deferredProfileReload = false;
+    bool m_deferredItemRebuild = false;
     bool m_profileRequested = false;
     bool m_profilePresentationDirty = false;
     QString m_loadedProfilePath;                 // Actual JSON path selected from candidates.
