@@ -1,4 +1,6 @@
 #include "ProcessDock.h"
+#include <map>
+#include <stdexcept>
 #include "ProcessActivitySeriesCache.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/RetainedCleanupJob.h"
@@ -652,14 +654,29 @@ namespace
     constexpr std::size_t ProcessTableHeaderKeyCount =
         sizeof(ProcessTableHeaderKeys) / sizeof(ProcessTableHeaderKeys[0]);
 
+    thread_local const ks::i18n::SourceTextSnapshot* processExportTranslator = nullptr;
+    thread_local const QLocale* processExportLocale = nullptr;
+    struct ScopedProcessExportText final
+    {
+        const ks::i18n::SourceTextSnapshot* previousTranslator;
+        const QLocale* previousLocale;
+        ScopedProcessExportText(const ks::i18n::SourceTextSnapshot& translator, const QLocale& locale)
+            : previousTranslator(processExportTranslator), previousLocale(processExportLocale)
+        { processExportTranslator = &translator; processExportLocale = &locale; }
+        ~ScopedProcessExportText()
+        { processExportTranslator = previousTranslator; processExportLocale = previousLocale; }
+    };
+
     QString processContextText(const char* const key, const QString& sourceText)
     {
-        return ks::i18n::contextText(QString::fromLatin1(key), sourceText);
+        return processExportTranslator ? processExportTranslator->contextText(QString::fromLatin1(key), sourceText)
+            : ks::i18n::contextText(QString::fromLatin1(key), sourceText);
     }
 
     QString processContextText(const QString& key, const QString& sourceText)
     {
-        return ks::i18n::contextText(key, sourceText);
+        return processExportTranslator ? processExportTranslator->contextText(key, sourceText)
+            : ks::i18n::contextText(key, sourceText);
     }
 
     // 注入面列的文本。硬规则：非 Screened 一律显示状态词，
@@ -722,7 +739,7 @@ namespace
     // processGroupedNumberText 作用：按当前区域设置给整数加千位分隔符。
     QString processGroupedNumberText(const std::uint64_t value)
     {
-        return QLocale::system().toString(static_cast<qulonglong>(value));
+        return (processExportLocale ? *processExportLocale : QLocale::system()).toString(static_cast<qulonglong>(value));
     }
 
     // processGroupedSignedNumberText 作用：
@@ -6263,6 +6280,12 @@ void ProcessDock::initializeProcessTable()
     m_processSortProxy->setSourceModel(m_processTableModel);
     static_cast<ProcessTableSortProxy*>(m_processSortProxy)->setHeaderTexts(ProcessTableHeaders);
     m_processTable->setModel(m_processSortProxy);
+    // FlatTableModel already translates DisplayRole/headers on demand; its
+    // readonly cells must not be walked by runtime compatibility translation.
+    m_processTableModel->setProperty("ks_i18n_preserve_model_data", true);
+    m_processTable->setProperty("ks_i18n_preserve_model_data", true);
+    ks::ui::RegisterCompleteExportTableProducer(m_processTable, [guard = QPointer<ProcessDock>(this)]()
+    { return guard ? guard->makeProcessCompleteExportTable() : ks::ui::CompleteExportPublishedTable{}; });
 
     m_processTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     // 选择模式：
@@ -9263,7 +9286,7 @@ void ProcessDock::rebuildTable()
     // 右键菜单保存的是当前模型行。菜单关闭前禁止替换模型，
     // 否则周期刷新会让菜单动作落到另一进程。
     const QPointer<ProcessDock> safeThis(this);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
+    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(
         this,
         QStringLiteral("process-main-table-rebuild"),
         {m_processTable},
@@ -11637,6 +11660,70 @@ QVariant ProcessDock::processTableBrush(const ProcessTableRow& tableRow, TableCo
         return QBrush(usageRatioToHighlightColor(usageHighlightRatio));
     }
     return {};
+}
+
+ks::ui::CompleteExportPublishedTable ProcessDock::makeProcessCompleteExportTable()
+{
+    // The shared export capture lease keeps presentation at this exact version;
+    // ordinary sampling/cache/archive work continues. Copy one value row per
+    // queued capture unit, then format all requested DisplayRole cells on worker.
+    struct ExportRow
+    {
+        ks::process::ProcessRecord record;
+        ProcessTableRowKind kind;
+        FriendlyProcessGroupType group;
+        QString title;
+        int depth = 0;
+    };
+    struct Values
+    {
+        std::map<int, ExportRow> rows;
+        ks::i18n::SourceTextSnapshot translator;
+        QLocale locale;
+    };
+    ks::ui::CompleteExportPublishedTable result;
+    if (!m_processTable || !m_processTable->model()) return result;
+    auto storage = std::make_shared<Values>();
+    storage->translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    storage->locale = QLocale::system();
+    const auto retained = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const Values>(storage));
+    const auto writable = std::shared_ptr<Values>(retained, storage.get());
+    storage.reset();
+    result.values = retained;
+    result.rows = m_processTable->model()->rowCount(m_processTable->rootIndex());
+    result.columns = m_processTable->model()->columnCount(m_processTable->rootIndex());
+    result.sourceIdentity = QStringLiteral("process-list/%1").arg(reinterpret_cast<quintptr>(this), 0, 16);
+    result.sourceVersion = ++m_processCompleteExportVersion;
+    result.prepareRow = [guard = QPointer<ProcessDock>(this), writable](int row)
+    {
+        if (!guard || !guard->m_processTable || !guard->m_processTable->model())
+            throw std::runtime_error("process export source closed");
+        const auto viewIndex = guard->m_processTable->model()->index(row, 0, guard->m_processTable->rootIndex());
+        const auto* source = guard->processTableRowForViewIndex(viewIndex);
+        if (!source) throw std::runtime_error("process export source version changed");
+        writable->rows.emplace(row, ExportRow{ source->record, source->rowKind,
+            source->friendlyGroupType, source->syntheticTitle, source->depth });
+    };
+    result.cell = [](const void* value, int row, int column) -> QString
+    {
+        const auto& values = *static_cast<const Values*>(value);
+        const auto& source = values.rows.at(row);
+        const auto tableColumn = static_cast<TableColumn>(column);
+        ScopedProcessExportText frozen(values.translator, values.locale);
+        QString display;
+        if (source.kind == ProcessTableRowKind::GroupHeader)
+            display = tableColumn == TableColumn::Name ? source.title : QString();
+        else if (tableColumn == TableColumn::ProcessType)
+            display = friendlyGroupTypeName(source.group);
+        else if (source.kind == ProcessTableRowKind::ApplicationAggregate && tableColumn == TableColumn::Name)
+            display = source.title;
+        else
+            display = formatColumnText(source.record, tableColumn,
+                source.kind == ProcessTableRowKind::Process && tableColumn == TableColumn::Name ? 0 : source.depth);
+        // FlatTableModel applies normal sourceText after the original resolver.
+        return values.translator.sourceText(display);
+    };
+    return result;
 }
 
 const ProcessDock::ProcessTableRow* ProcessDock::processTableRowForViewIndex(const QModelIndex& viewIndex) const
@@ -14797,7 +14884,7 @@ void ProcessDock::dispatchProcessActionTargetsInParallel(
     }
 }
 
-QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processRecord, const TableColumn column, const int depth) const
+QString ProcessDock::formatColumnText(const ks::process::ProcessRecord& processRecord, const TableColumn column, const int depth)
 {
     switch (column)
     {

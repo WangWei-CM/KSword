@@ -1,4 +1,5 @@
 #pragma once
+#include "../UI/TableCompleteExport.h"
 
 // ============================================================
 // ProcessDock.h
@@ -1062,6 +1063,8 @@ private:
         const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& previousMaximums, bool cpuSnapshotChanged, bool cpuSizeChanged) const;
     QVariant processTableBrush(const ProcessTableRow& tableRow, TableColumn column, int role,
         const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& maximums) const;
+    ks::ui::CompleteExportPublishedTable makeProcessCompleteExportTable();
+    std::uint64_t m_processCompleteExportVersion = 0;
     const ProcessTableRow* processTableRowForViewIndex(const QModelIndex& viewIndex) const;
     QModelIndex processTableViewIndexForIdentityKey(const std::string& identityKey, int column) const;
     std::vector<QModelIndex> selectedProcessTableRowIndexes(bool includeCurrentFallback) const;
@@ -1097,7 +1100,7 @@ private:
     void clearThreadContextActionBinding();
     bool threadRecordMatchesSearch(const ks::process::SystemThreadRecord& threadRecord) const;
     bool threadRecordMatchesScope(const ks::process::SystemThreadRecord& threadRecord) const;
-    QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth) const;
+    static QString formatColumnText(const ks::process::ProcessRecord& processRecord, TableColumn column, int depth);
     QString formatThreadColumnText(const ks::process::SystemThreadRecord& threadRecord, ThreadTableColumn column) const;
     QString threadStateText(std::uint32_t stateValue) const;
     QString threadWaitReasonText(std::uint32_t waitReasonValue) const;
