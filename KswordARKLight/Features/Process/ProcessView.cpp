@@ -59,6 +59,7 @@ constexpr int kColumnChooserApplyId = 54080;
 constexpr int kColumnChooserCancelId = 54081;
 constexpr wchar_t kColumnChooserClass[] = L"KswordARKLight.ProcessColumnChooser";
 constexpr UINT_PTR kRefreshTimerId = 52008;
+constexpr UINT_PTR kPresentationTimerId=52009;
 constexpr UINT kMsgInitialRefresh = WM_APP + 520;
 constexpr UINT kMsgRequestRefresh = WM_APP + 521;
 constexpr UINT kMsgRefreshCompleted = WM_APP + 522;
@@ -117,7 +118,7 @@ struct ProcessPreparedPresentation {
     std::array<bool,3> collapsed{};
     std::wstring query;bool useRegex=false;std::uint64_t request=0;
     std::vector<std::size_t> visibleIndexes;
-    std::unordered_map<std::wstring,std::size_t> visibleItemByKey;
+    std::unordered_map<std::wstring,std::vector<std::size_t>> visibleItemByKey;
 };
 std::shared_ptr<ProcessPreparedPresentation> EmptyProcessPresentation(std::shared_ptr<const ProcessCanonicalSnapshot> source) {
     auto value=std::make_shared<ProcessPreparedPresentation>();value->source=std::move(source);
@@ -128,13 +129,11 @@ std::shared_ptr<ProcessPreparedPresentation> EmptyProcessPresentation(std::share
 // accepts it only when its display generation still matches the current list.
 struct ProcessFilterResult {
     std::shared_ptr<const ProcessPreparedPresentation> source;
-    std::unordered_map<std::wstring,std::size_t> visibleItemByKey;
+    std::unordered_map<std::wstring,std::vector<std::size_t>> visibleItemByKey;
     std::uint64_t displayGeneration = 0;
     std::wstring query;
     bool useRegex = false;
     std::vector<std::size_t> visibleIndexes;
-    std::vector<std::wstring> selectedStableKeys;
-    std::wstring topStableKey;
 };
 
 // ProcessViewActionResult crosses the worker/UI boundary for a context-menu
@@ -317,6 +316,19 @@ bool OpenProcessDetailWindow(HWND owner, DWORD processId, ULONGLONG expectedCrea
     return true;
 }
 
+// One pending physical ListView replacement. Capture and restore use the
+// native timer budget; all business/model/filter values were prepared earlier.
+struct ProcessViewCommit {
+    std::shared_ptr<ProcessPreparedPresentation> presentation;
+    std::shared_ptr<ProcessFilterResult> mapping;
+    std::vector<std::wstring> selectedKeys;
+    std::unordered_set<std::wstring> capturedKeys;
+    std::uint64_t selectionRevision=0;
+    int selectedCursor=-1,firstSelected=-1,topItem=-1;
+    std::size_t key=0,duplicate=0;
+    bool adopted=false,captured=false;
+};
+
 // ProcessViewState owns the controls and model for one process-list page.
 // Inputs are Win32 messages routed through ProcessViewWndProc. Processing keeps
 // the current snapshot, visible mode, icon cache, picker state, and selected
@@ -344,6 +356,9 @@ struct ProcessViewState {
     std::shared_ptr<const ProcessFilterResult> mapping=std::make_shared<const ProcessFilterResult>();
     std::array<bool,3> collapsedGroups{};
     std::uint64_t presentationRequest=0;bool presentationDirty=false;
+    std::shared_ptr<ProcessViewCommit> nativeCommit,pendingNativeCommit;
+    std::uint64_t selectionRevision=0;
+    unsigned contextMenuDepth=0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<ProcessPreparedPresentation>>> presentationTask;
     std::shared_ptr<ProcessTelemetryLifetime> telemetry = std::make_shared<ProcessTelemetryLifetime>();
     std::shared_ptr<Ksword::Ui::BackgroundCleanup> telemetryRetirement;
@@ -615,13 +630,12 @@ void RebuildColumns(ProcessViewState& state) {
 // a new immutable presentation must save process-instance selection and viewport
 // before replacing the owner-data row count.
 std::vector<DWORD> SelectedPids(ProcessViewState& state);
-std::vector<std::wstring> SelectedStableKeys(ProcessViewState& state);
 std::wstring StableKeyFromListItem(const ProcessViewState& state, int item);
-void ApplyProcessFilter(ProcessViewState& state,ProcessFilterResult result,
-    const ProcessPreparedPresentation* previousPresentation=nullptr,const ProcessFilterResult* previousMapping=nullptr);
+void QueueProcessCommit(ProcessViewState& state,std::shared_ptr<ProcessPreparedPresentation> presentation,ProcessFilterResult result);
+void PumpProcessCommit(ProcessViewState& state);
+void ApplyProcessFilter(ProcessViewState& state,ProcessFilterResult result);
 void RequestProcessPresentation(ProcessViewState& state,bool replaceParameters=true);
-void RequestProcessFilter(ProcessViewState& state,const std::wstring& query,
-    std::vector<std::wstring> selectedStableKeys,std::wstring topStableKey);
+void RequestProcessFilter(ProcessViewState& state,const std::wstring& query);
 
 // BuildPresentationRows converts the model into immutable owner-data rows once
 // per completed snapshot. Formatting is deliberately not performed by
@@ -725,21 +739,7 @@ std::vector<DWORD> SelectedPids(ProcessViewState& state) {
     return pids;
 }
 
-// SelectedStableKeys retains only real process rows and preserves their snapshot
-// identity across an asynchronous filter/rebuild cycle.
-std::vector<std::wstring> SelectedStableKeys(ProcessViewState& state) {
-    std::vector<std::wstring> stableKeys;
-    for (const int index : SelectedDisplayIndexes(state)) {
-        if (index < 0 || static_cast<std::size_t>(index) >= state.presentation->rows.size()) {
-            continue;
-        }
-        const ProcessPresentationRow& row = state.presentation->rows[static_cast<std::size_t>(index)];
-        if (row.processId != 0 && !row.stableKey.empty()) {
-            stableKeys.push_back(row.stableKey);
-        }
-    }
-    return stableKeys;
-}
+
 
 std::wstring StableKeyFromListItem(const ProcessViewState& state, const int item) {
     const int displayIndex = DisplayIndexFromListItem(state, item);
@@ -1009,109 +1009,110 @@ LRESULT HandleVirtualListDisplayInfo(ProcessViewState& state, NMLVDISPINFOW* dis
     return 0;
 }
 
-// PresentationRowsEqual reports whether two owner-data rows can retain the same
-// painted ListView item. Tree layout attributes participate because custom draw
-// uses them even when the column text happens to be unchanged.
-bool PresentationRowsEqual(const ProcessPresentationRow& left, const ProcessPresentationRow& right) {
-    return left.stableKey == right.stableKey &&
-        left.iconPath == right.iconPath &&
-        left.cells == right.cells &&
-        left.processId == right.processId &&
-        left.creationTime100ns == right.creationTime100ns &&
-        left.kernelOnly == right.kernelOnly &&
-        left.display.groupHeader == right.display.groupHeader &&
-        left.display.group == right.display.group &&
-        left.display.depth == right.display.depth;
-}
 
-// PresentationRowAtVisibleItem maps an owner-data item position through a
-// supplied snapshot. It is intentionally independent of ProcessViewState so a
-// refresh can compare the old and new snapshots before changing ListView state.
-const ProcessPresentationRow* PresentationRowAtVisibleItem(
-    const std::vector<ProcessPresentationRow>& presentationRows,
-    const std::vector<std::size_t>& visibleRowIndexes,
-    std::size_t item) {
-    if (item >= visibleRowIndexes.size()) {
-        return nullptr;
-    }
-    const std::size_t displayIndex = visibleRowIndexes[item];
-    return displayIndex < presentationRows.size() ? &presentationRows[displayIndex] : nullptr;
-}
 
-// AppendRedrawItem accumulates adjacent list positions into the smallest set of
-// ListView_RedrawItems calls. Inputs are an item position and mutable ranges;
-// processing appends or extends the tail range; no value is returned.
-void AppendRedrawItem(std::vector<std::pair<int, int>>& ranges, int item) {
-    if (item < 0) {
-        return;
-    }
-    if (!ranges.empty() && item <= ranges.back().second + 1) {
-        ranges.back().second = std::max(ranges.back().second, item);
-        return;
-    }
-    ranges.emplace_back(item, item);
-}
+
+
+
 
 // ApplyProcessFilter installs a filtered index map while preserving selection
 // and the top visible logical row. Refresh callers pass the outgoing snapshot,
 // allowing the virtual ListView to repaint only positions whose presentation
 // actually changed instead of blanking and invalidating the full table.
-void ApplyProcessFilter(ProcessViewState& state,ProcessFilterResult result,
-    const ProcessPreparedPresentation* previousPresentation,const ProcessFilterResult* previousMapping) {
+void ApplyProcessFilter(ProcessViewState& state,ProcessFilterResult result) {
     if(!state.listView || result.source!=state.presentation || result.displayGeneration!=state.displayGeneration ||
         result.query!=state.filterQuery || result.useRegex!=state.filterUseRegex){Ksword::Ui::RetireBackgroundValue(result);return;}
-    const auto& oldPresentation=previousPresentation?*previousPresentation:*state.presentation;
-    const auto& oldMapping=previousMapping?*previousMapping:*state.mapping;
-    const auto newCount=(std::min)(result.visibleIndexes.size(),static_cast<std::size_t>(INT_MAX));
-    const auto oldCount=(std::min)(oldMapping.visibleIndexes.size(),static_cast<std::size_t>(INT_MAX));
-    const auto top=(std::max)(0,ListView_GetTopIndex(state.listView));
-    const auto end=(std::min)(newCount,static_cast<std::size_t>(top+(std::max)(1,ListView_GetCountPerPage(state.listView))+1));
-    std::vector<std::pair<int,int>> redrawRanges;redrawRanges.reserve(8);
-    const auto visual=[](const ProcessPresentationRow* row,const ProcessCanonicalSnapshot& source) {
-        if(!row || row->processId==0 || row->display.groupHeader)return ProcessRowVisualState::Normal;
-        if(row->kernelOnly)return ProcessRowVisualState::KernelOnly;
-        const auto found=source.visualStates.find(row->stableKey);return found==source.visualStates.end()?ProcessRowVisualState::Normal:found->second;
-    };
-    // Owner-data controls ask for offscreen cells when they become visible.
-    // Compare only the actual viewport; never scan all N rows to invalidate it.
-    for(auto item=static_cast<std::size_t>(top);item<end;++item) {
-        const auto* before=PresentationRowAtVisibleItem(oldPresentation.rows,oldMapping.visibleIndexes,item);
-        const auto* after=PresentationRowAtVisibleItem(state.presentation->rows,result.visibleIndexes,item);
-        if(!before || !after || !PresentationRowsEqual(*before,*after) ||
-            visual(before,*oldPresentation.source)!=visual(after,*state.presentation->source))AppendRedrawItem(redrawRanges,static_cast<int>(item));
-    }
-    // Capture current user selection at commit, not the older worker request.
-    const auto selectedKeys=previousMapping?result.selectedStableKeys:SelectedStableKeys(state);
-    const auto topKey=previousMapping?result.topStableKey:StableKeyFromListItem(state,ListView_GetTopIndex(state.listView));
-    std::vector<int> selectedItems;selectedItems.reserve(selectedKeys.size());
-    for(const auto& key:selectedKeys) {
-        const auto found=result.visibleItemByKey.find(key);
-        if(found!=result.visibleItemByKey.end() && found->second<newCount)selectedItems.push_back(static_cast<int>(found->second));
-    }
-    const auto foundTop=result.visibleItemByKey.find(topKey);
-    const int topItem=foundTop!=result.visibleItemByKey.end() && foundTop->second<newCount?static_cast<int>(foundTop->second):-1;
-    auto old=std::move(state.mapping);state.mapping=std::make_shared<const ProcessFilterResult>(std::move(result));
-    {
-        Ksword::Ui::ScopedWindowRedrawLock redrawLock(state.listView,false);
-        if(oldCount!=newCount)ListView_SetItemCountEx(state.listView,static_cast<int>(newCount),LVSICF_NOINVALIDATEALL|LVSICF_NOSCROLL);
-        ListView_SetItemState(state.listView,-1,0,LVIS_SELECTED|LVIS_FOCUSED);
-        for(const auto item:selectedItems)ListView_SetItemState(state.listView,item,LVIS_SELECTED,LVIS_SELECTED);
-        if(!selectedItems.empty())ListView_SetItemState(state.listView,selectedItems.front(),LVIS_FOCUSED,LVIS_FOCUSED);
-        if(topItem>=0)ListView_EnsureVisible(state.listView,topItem,FALSE);
-        else if(!selectedItems.empty())ListView_EnsureVisible(state.listView,selectedItems.front(),FALSE);
-    }
-    for(const auto& range:redrawRanges)ListView_RedrawItems(state.listView,range.first,range.second);
-    if(!selectedItems.empty())ListView_RedrawItems(state.listView,selectedItems.front(),selectedItems.front());
-    if(!newCount && oldCount)::InvalidateRect(state.listView,nullptr,FALSE);
-    if(old)Ksword::Ui::RetireBackgroundValue(old);
+    QueueProcessCommit(state,{},std::move(result));
 }
+
+void QueueProcessCommit(ProcessViewState& state,std::shared_ptr<ProcessPreparedPresentation> presentation,ProcessFilterResult result) {
+    auto value=std::make_shared<ProcessViewCommit>();value->presentation=std::move(presentation);
+    value->mapping=std::make_shared<ProcessFilterResult>(std::move(result));value->selectionRevision=state.selectionRevision;
+    if(state.nativeCommit) {
+        if(state.pendingNativeCommit)Ksword::Ui::RetireBackgroundValue(state.pendingNativeCommit);
+        state.pendingNativeCommit=std::move(value);return;
+    }
+    state.nativeCommit=std::move(value);
+    if(::IsWindowVisible(state.hwnd))::SetTimer(state.hwnd,kPresentationTimerId,16,nullptr);
+}
+
+void PumpProcessCommit(ProcessViewState& state) {
+    if(!state.nativeCommit || !::IsWindowVisible(state.hwnd)){::KillTimer(state.hwnd,kPresentationTimerId);return;}
+    if(state.contextMenuDepth)return;
+    auto& commit=*state.nativeCommit;const auto started=::GetTickCount64();unsigned work=0;
+    if(!commit.adopted) {
+        const auto& prepared=commit.presentation;const auto& filter=*commit.mapping;
+        const bool valid=prepared
+            ? prepared->columns==state.activeColumns && prepared->collapsed==state.collapsedGroups && prepared->query==state.filterQuery && prepared->useRegex==state.filterUseRegex
+            : filter.source==state.presentation && filter.displayGeneration==state.displayGeneration && filter.query==state.filterQuery && filter.useRegex==state.filterUseRegex;
+        if(!valid){
+            Ksword::Ui::RetireBackgroundValue(state.nativeCommit);
+            if(state.pendingNativeCommit){state.nativeCommit=std::move(state.pendingNativeCommit);state.nativeCommit->selectionRevision=state.selectionRevision;}
+            else ::KillTimer(state.hwnd,kPresentationTimerId);
+            return;
+        }
+        if(commit.selectionRevision!=state.selectionRevision) {
+            if(!commit.selectedKeys.empty())Ksword::Ui::RetireBackgroundValue(commit.selectedKeys);
+            if(!commit.capturedKeys.empty())Ksword::Ui::RetireBackgroundValue(commit.capturedKeys);
+            commit.selectedCursor=-1;commit.captured=false;commit.selectionRevision=state.selectionRevision;
+        }
+        while(!commit.captured && work<128 && ::GetTickCount64()-started<4) {
+            commit.selectedCursor=ListView_GetNextItem(state.listView,commit.selectedCursor,LVNI_SELECTED);++work;
+            if(commit.selectedCursor<0){commit.captured=true;break;}
+            const auto* row=DisplayRowFromListItem(state,commit.selectedCursor);
+            if(row && row->processId && !row->stableKey.empty() && commit.capturedKeys.insert(row->stableKey).second)commit.selectedKeys.push_back(row->stableKey);
+        }
+        if(!commit.captured || work+3>128)return;
+        // No native content changed before the final selection revision check.
+        // A newer worker failure therefore leaves the complete old view usable.
+        if(commit.selectionRevision!=state.selectionRevision)return;
+        const auto topKey=StableKeyFromListItem(state,ListView_GetTopIndex(state.listView));++work;
+        ::EnableWindow(state.listView,FALSE);
+        auto previousPresentation=std::move(state.presentation);auto previousMapping=std::move(state.mapping);
+        const bool schemaChanged=prepared && prepared->columns!=previousPresentation->columns;
+        state.presentation=prepared?prepared:previousPresentation;
+        if(prepared)++state.displayGeneration;
+        commit.mapping->source=state.presentation;commit.mapping->displayGeneration=state.displayGeneration;
+        state.mapping=commit.mapping;
+        if(schemaChanged)RebuildColumns(state);
+        const auto count=(std::min)(state.mapping->visibleIndexes.size(),static_cast<std::size_t>(INT_MAX));
+        ListView_SetItemCountEx(state.listView,static_cast<int>(count),LVSICF_NOINVALIDATEALL|LVSICF_NOSCROLL);
+        ListView_SetItemState(state.listView,-1,0,LVIS_SELECTED|LVIS_FOCUSED);work+=2;
+        const auto top=state.mapping->visibleItemByKey.find(topKey);
+        if(top!=state.mapping->visibleItemByKey.end() && !top->second.empty() && top->second.front()<count)commit.topItem=static_cast<int>(top->second.front());
+        commit.adopted=true;
+        Ksword::Ui::RetireBackgroundValue(previousPresentation);Ksword::Ui::RetireBackgroundValue(previousMapping);
+        // All offscreen values are owner-data. One viewport invalidation asks
+        // only for visible cells; no all-N diff or per-selected-row repaint.
+        ::InvalidateRect(state.listView,nullptr,FALSE);
+    }
+    const auto count=(std::min)(state.mapping->visibleIndexes.size(),static_cast<std::size_t>(INT_MAX));
+    while(commit.key<commit.selectedKeys.size() && work<128 && ::GetTickCount64()-started<4) {
+        const auto found=state.mapping->visibleItemByKey.find(commit.selectedKeys[commit.key]);
+        if(found==state.mapping->visibleItemByKey.end() || commit.duplicate>=found->second.size()) {++commit.key;commit.duplicate=0;++work;continue;}
+        const auto item=found->second[commit.duplicate++];++work;
+        if(item>=count || item>=static_cast<std::size_t>(INT_MAX))continue;
+        ListView_SetItemState(state.listView,static_cast<int>(item),LVIS_SELECTED,LVIS_SELECTED);
+        if(commit.firstSelected<0 || static_cast<int>(item)<commit.firstSelected)commit.firstSelected=static_cast<int>(item);
+    }
+    if(commit.key<commit.selectedKeys.size() || work+2>128)return;
+    if(commit.firstSelected>=0)ListView_SetItemState(state.listView,commit.firstSelected,LVIS_FOCUSED,LVIS_FOCUSED);
+    if(commit.topItem>=0)ListView_EnsureVisible(state.listView,commit.topItem,FALSE);
+    else if(commit.firstSelected>=0)ListView_EnsureVisible(state.listView,commit.firstSelected,FALSE);
+    ::EnableWindow(state.listView,TRUE);::KillTimer(state.hwnd,kPresentationTimerId);
+    auto completed=std::move(state.nativeCommit);Ksword::Ui::RetireBackgroundValue(completed);
+    if(state.pendingNativeCommit) {
+        state.nativeCommit=std::move(state.pendingNativeCommit);state.nativeCommit->selectionRevision=state.selectionRevision;
+        ::SetTimer(state.hwnd,kPresentationTimerId,16,nullptr);
+    }
+}
+
 
 
 // RequestProcessFilter captures a shared, immutable text snapshot. Repeated
 // keystrokes coalesce in AsyncSnapshotTask and its generation check prevents a
 // stale background match from overwriting a newer query or process refresh.
-void RequestProcessFilter(ProcessViewState& state,const std::wstring& query,
-    std::vector<std::wstring>,std::wstring) {
+void RequestProcessFilter(ProcessViewState& state,const std::wstring& query) {
     state.filterQuery=query;state.filterUseRegex=Ksword::Ui::GetFilterBarRegexEnabled(state.filterBar);
     if(!::IsWindowVisible(state.hwnd)){state.presentationDirty=true;return;}
     // A pending schema/collapse/canonical change needs one complete worker
@@ -1123,7 +1124,7 @@ void RequestProcessFilter(ProcessViewState& state,const std::wstring& query,
     state.filterTask->request([source,generation,query,useRegex] {
         ProcessFilterResult result;result.source=source;result.displayGeneration=generation;result.query=query;result.useRegex=useRegex;
         result.visibleIndexes=Ksword::Ui::VirtualListView::FilterRowIndexes(*source->filterRows,query,useRegex);
-        for(std::size_t item=0;item<result.visibleIndexes.size();++item)result.visibleItemByKey.emplace(source->rows[result.visibleIndexes[item]].stableKey,item);
+        for(std::size_t item=0;item<result.visibleIndexes.size();++item)result.visibleItemByKey[source->rows[result.visibleIndexes[item]].stableKey].push_back(item);
         return result;
     },[&state](std::uint64_t,std::optional<ProcessFilterResult>&& result,std::exception_ptr error) {
         if(error || !result){TraceProcessStatus(L"进程筛选任务异常结束。已保留当前可见结果。");return;}
@@ -1777,7 +1778,7 @@ std::shared_ptr<ProcessPreparedPresentation> PrepareProcessPresentation(std::sha
     auto filters=std::make_shared<std::vector<Ksword::Ui::VirtualListRow>>();
     BuildPresentationRows(*value->model,value->columns,value->rows,*filters);value->filterRows=std::move(filters);
     value->visibleIndexes=Ksword::Ui::VirtualListView::FilterRowIndexes(*value->filterRows,value->query,useRegex);
-    for(std::size_t item=0;item<value->visibleIndexes.size();++item)value->visibleItemByKey.emplace(value->rows[value->visibleIndexes[item]].stableKey,item);
+    for(std::size_t item=0;item<value->visibleIndexes.size();++item)value->visibleItemByKey[value->rows[value->visibleIndexes[item]].stableKey].push_back(item);
     return value;
 }
 
@@ -1798,15 +1799,9 @@ void RequestProcessPresentation(ProcessViewState& state,bool replaceParameters) 
             if(!::IsWindowVisible(state.hwnd)){state.presentationDirty=true;return;}
             if(prepared->request!=state.presentationRequest || prepared->columns!=state.activeColumns || prepared->collapsed!=state.collapsedGroups ||
                 prepared->query!=state.filterQuery || prepared->useRegex!=state.filterUseRegex)return;
-            const auto selected=SelectedStableKeys(state);const auto top=StableKeyFromListItem(state,ListView_GetTopIndex(state.listView));
-            auto previous=std::move(state.presentation);auto previousMapping=state.mapping;
-            const bool schemaChanged=previous->columns!=prepared->columns;
-            state.presentation=prepared;++state.displayGeneration;
-            if(schemaChanged)RebuildColumns(state);
-            ProcessFilterResult filter;filter.source=prepared;filter.displayGeneration=state.displayGeneration;filter.query=prepared->query;filter.useRegex=prepared->useRegex;
-            filter.visibleIndexes=std::move(prepared->visibleIndexes);filter.visibleItemByKey=std::move(prepared->visibleItemByKey);filter.selectedStableKeys=selected;filter.topStableKey=top;
-            ApplyProcessFilter(state,std::move(filter),previous.get(),previousMapping.get());
-            Ksword::Ui::RetireBackgroundValue(previous);Ksword::Ui::RetireBackgroundValue(previousMapping);
+            ProcessFilterResult filter;filter.source=prepared;filter.query=prepared->query;filter.useRegex=prepared->useRegex;
+            filter.visibleIndexes=std::move(prepared->visibleIndexes);filter.visibleItemByKey=std::move(prepared->visibleItemByKey);
+            QueueProcessCommit(state,prepared,std::move(filter));
             if(state.presentationDirty || state.canonical!=prepared->source)RequestProcessPresentation(state,false);
         });
 }
@@ -2302,6 +2297,9 @@ void ExecuteMenuItem(ProcessViewState& state, ProcessActionId actionId) {
 // submenus so the full retained ProcessDock action surface stays usable without
 // a long root menu; selected command ids are mapped back to ProcessActionId.
 void ShowContextMenu(ProcessViewState& state, POINT screenPoint) {
+    if(state.nativeCommit && state.nativeCommit->adopted)return;
+    struct MenuScope {unsigned& depth;explicit MenuScope(unsigned& value):depth(value){++depth;}~MenuScope(){--depth;}} menuScope(state.contextMenuDepth);
+
     const std::vector<DWORD> pids = SelectedPids(state);
     const bool hasVisibleSelection = !SelectedDisplayIndexes(state).empty();
     const bool hasProcessSelection = !pids.empty();
@@ -2532,6 +2530,11 @@ NotifyResult HandleListNotify(ProcessViewState& state, NMHDR* header) {
         return { true, HandleVirtualListDisplayInfo(state, reinterpret_cast<NMLVDISPINFOW*>(header)) };
     }
 
+    if(header->code==LVN_ITEMCHANGED) {
+        const auto* change=reinterpret_cast<const NMLISTVIEW*>(header);
+        if((change->uChanged&LVIF_STATE) && ((change->uOldState^change->uNewState)&LVIS_SELECTED))++state.selectionRevision;
+    } else if(header->code==LVN_ODSTATECHANGED)++state.selectionRevision;
+
     if (header->code == NM_CUSTOMDRAW) {
         return { true, HandleListCustomDraw(state, reinterpret_cast<NMLVCUSTOMDRAW*>(header)) };
     }
@@ -2664,7 +2667,10 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if(state && state->presentationTask && state->presentationTask->consume(hwnd,wParam,lParam))return 0;
         break;
     case WM_SHOWWINDOW:
-        if(state && wParam)RequestProcessPresentation(*state);
+        if(state && wParam) {
+            if(state->nativeCommit)::SetTimer(hwnd,kPresentationTimerId,16,nullptr);
+            RequestProcessPresentation(*state);
+        } else if(state)::KillTimer(hwnd,kPresentationTimerId);
         return 0;
     case kMsgFilterCompleted:
         if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
@@ -2686,9 +2692,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_COMMAND:
         if (state && LOWORD(wParam) == kFilterBarId && HIWORD(wParam) == EN_CHANGE) {
             RequestProcessFilter(*state,
-                Ksword::Ui::GetFilterBarText(state->filterBar),
-                SelectedStableKeys(*state),
-                StableKeyFromListItem(*state, ListView_GetTopIndex(state->listView)));
+                Ksword::Ui::GetFilterBarText(state->filterBar));
             return 0;
         }
         if (state && HIWORD(wParam) == BN_CLICKED) {
@@ -2724,6 +2728,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         break;
     case WM_TIMER:
+        if(state && wParam==kPresentationTimerId){PumpProcessCommit(*state);return 0;}
         if (state && wParam == kRefreshTimerId) {
             if (state->telemetry->retiring.load() && state->telemetryRetirement && !state->telemetryRetirement->complete()) {
                 Ksword::Ui::BackgroundWorkRegistry::global().retry();
@@ -2819,6 +2824,9 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_NCDESTROY:
         if (state) {
             ::KillTimer(hwnd, kRefreshTimerId);
+            ::KillTimer(hwnd,kPresentationTimerId);
+            if(state->nativeCommit)Ksword::Ui::RetireBackgroundValue(state->nativeCommit);
+            if(state->pendingNativeCommit)Ksword::Ui::RetireBackgroundValue(state->pendingNativeCommit);
             if (!state->telemetry->retiring.exchange(true, std::memory_order_acq_rel)) {
                 const auto telemetry = state->telemetry;
                 state->telemetryRetirement = Ksword::Ui::RunBackgroundRetirement([telemetry] {
