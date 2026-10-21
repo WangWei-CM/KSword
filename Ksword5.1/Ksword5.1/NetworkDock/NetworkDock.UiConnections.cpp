@@ -9,6 +9,7 @@
 #include "../PluginHost.h"
 #include "../OnlineScan/SandboxUploadActions.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/RetainedCleanupJob.h"
 #include "../theme.h"
 
 #include <QCoreApplication>
