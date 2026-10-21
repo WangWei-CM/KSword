@@ -843,6 +843,7 @@ void NetworkDock::requestPacketTableProjection()
         std::vector<std::shared_ptr<const PacketMonitorRecord>> records;
         std::vector<MonitorFilterRuleGroupCompiled> groups;
         std::shared_ptr<const PacketMonitorValues> previous;
+        ks::i18n::SourceTextSnapshot language;
         std::uint64_t start = 0, end = 0, version = 0;
         bool timelineFilter = false;
         int sortColumn = -1;
@@ -857,6 +858,8 @@ void NetworkDock::requestPacketTableProjection()
     }
     input.groups = m_activeMonitorFilterGroupList;
     input.previous = m_packetTable->values();
+    input.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    const auto languageId = input.language.languageId();
     input.timelineFilter = isPacketTimelineFilterActive();
     input.start = m_packetTimelineSelectionStart100ns;
     input.end = m_packetTimelineSelectionEnd100ns;
@@ -893,15 +896,7 @@ void NetworkDock::requestPacketTableProjection()
                 if (!row || row->record != record)
                 {
                     auto value = std::make_shared<PacketMonitorRow>(); value->record = record;
-                    QString source = packet.sourceText.empty() ? QStringLiteral("R3") : toQString(packet.sourceText);
-                    if (packet.wfpAleEventNoPayload)
-                    {
-                        if ((packet.sourceFlags & KSWORD_ARK_NETWORK_WFP_EVENT_FLAG_BLOCKED) != 0UL)
-                            source = QStringLiteral("R0 WFP ALE 流事件（已阻断；无 packet payload）");
-                        else if ((packet.sourceFlags & KSWORD_ARK_NETWORK_WFP_EVENT_FLAG_ACTION_WRITE_UNAVAILABLE) != 0UL)
-                            source = QStringLiteral("R0 WFP ALE 流事件（仅观察；无 packet payload）");
-                        else source = QStringLiteral("R0 WFP ALE 流事件（已放行；无 packet payload）");
-                    }
+                    const QString source = packetSourceDisplayText(packet);
                     value->cells = {toQString(ks::network::FormatUnixTimestampMs(packet.captureTimestampMs, false)),
                         toQString(ks::network::PacketProtocolToString(packet.protocol)),
                         toQString(ks::network::PacketDirectionToString(packet.direction)), source,
@@ -931,7 +926,8 @@ void NetworkDock::requestPacketTableProjection()
             if (input.sortColumn >= 0 && input.sortColumn < 12)
                 std::stable_sort(next->rows.begin(), next->rows.end(), [&](const auto& left, const auto& right)
                 {
-                    const int compared = QString::localeAwareCompare(left->cells[input.sortColumn], right->cells[input.sortColumn]);
+                    const int compared = QString::localeAwareCompare(input.language.sourceText(left->cells[input.sortColumn]),
+                        input.language.sourceText(right->cells[input.sortColumn]));
                     if (compared != 0) return input.sortOrder == Qt::AscendingOrder ? compared < 0 : compared > 0;
                     if (!input.previous) return false;
                     const auto missing = static_cast<int>(input.previous->rows.size());
@@ -977,11 +973,12 @@ void NetworkDock::requestPacketTableProjection()
             result.reordered = finish(reordered); result.survivors = finish(survivors); result.appended = finish(appended);
             return result;
         },
-        [self, generation](PacketMonitorCommit& result, const ks::ui::AsyncOperationToken&)
+        [self, generation, languageId](PacketMonitorCommit& result, std::uint64_t)
         {
             if (!self) return true;
             auto& state = self->m_packetTableProjection;
-            if (!result.target || state.generation != generation || !self->isPacketProjectionVisible())
+            if (!result.target || state.generation != generation || !self->isPacketProjectionVisible()
+                || ks::i18n::LanguageManager::instance().currentLanguageId() != languageId)
             {
                 state.active = false;
                 self->m_packetTableProjectionDirty = true;
@@ -1025,7 +1022,7 @@ void NetworkDock::requestPacketTableProjection()
             self->requestPacketTableProjection();
             return true;
         },
-        [self](const QString&)
+        [self](std::exception_ptr)
         {
             if (!self) return;
             self->m_packetTableProjection.active = false;

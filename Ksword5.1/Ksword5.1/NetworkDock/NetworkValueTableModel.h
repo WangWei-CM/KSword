@@ -43,6 +43,7 @@ namespace network_value_detail
     {
         using Engine = ks::ui::FlatTableModel<Row>;
     public:
+        using RowType = Row;
         using ColumnSpec = typename Engine::ColumnSpec;
         using ColumnChange = typename Engine::ColumnChange;
         using DataResolver = typename Engine::DataResolver;
