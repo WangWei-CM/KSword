@@ -145,7 +145,13 @@ public:
     // 返回：无。
     static void scanFileAndAutoDelete(const QString& filePath, QWidget* dialogParent = nullptr);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
+    void prepareVisibleRawData(VtApiKind apiKind);
+    void projectVisibleResponses(VtApiKind apiKind);
+    void refreshDeferredReport(VtApiKind apiKind);
     // requestLargeUploadUrl 作用：
     // - 当样本超过 32MB 时请求 VirusTotal 一次性大文件上传 URL；
     // - 成功后继续调用 uploadFileToUrl。
@@ -598,7 +604,14 @@ private:
     QPointer<CodeEditorWidget> m_resultEditor;         // 实时结果原始数据编辑器，展示全部响应和错误文本。
     std::array<ApiPaneUi, kApiPaneCount> m_apiPanes;    // 多 API 一级 Tab 对应的 UI 控件。
     std::array<VtApiState, kApiPaneCount> m_apiStates{}; // 多 API 状态，默认均为 NotStarted。
-    std::array<QString, kApiPaneCount> m_apiRawText;    // 每个 API Tab 的原始文本。
+    std::array<std::unique_ptr<ks::ui::AsyncOperation>, kApiPaneCount> m_rawPreparationOperations;
+    std::array<qsizetype, kApiPaneCount> m_rawProjectedSections{};
+    std::array<qsizetype, kApiPaneCount> m_responseProjectedSections{};
+    std::array<bool, kApiPaneCount> m_rawPreparationActive{};
+    std::array<bool, kApiPaneCount> m_responseProjectionScheduled{};
+    std::array<bool, kApiPaneCount> m_reportProjectionDirty{};
+    QJsonObject m_latestAnalysisObject;
+    quint64 m_rawProjectionEpoch = 1;
     std::array<QJsonArray, kApiPaneCount> m_apiRawSections; // 每个 API Tab 的结构化原始响应。
     QString m_filePath;                                // 当前待上传的本地文件路径。
     QString m_sourceText;                              // 当前上传来源说明，用于结果窗口摘要和导出上下文。

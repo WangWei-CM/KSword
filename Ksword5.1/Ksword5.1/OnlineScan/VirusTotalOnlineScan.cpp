@@ -1292,6 +1292,20 @@ namespace
         return childItem;
     }
 
+    QString formatArchivedRawSection(const QJsonObject& section)
+    {
+        QString text = QStringLiteral("\n===== %1 | %2 =====\n")
+            .arg(section.value(QStringLiteral("timestamp_utc")).toString(), section.value(QStringLiteral("title")).toString());
+        const QJsonObject metadata = section.value(QStringLiteral("response_metadata")).toObject();
+        if (!metadata.isEmpty())
+            text += QStringLiteral("[HTTP] %1\n").arg(QString::fromUtf8(QJsonDocument(metadata).toJson(QJsonDocument::Compact)));
+        text += section.value(QStringLiteral("kind")).toString() == QStringLiteral("json")
+            ? ks::online_scan::formatJsonObject(section.value(QStringLiteral("body")).toObject())
+            : section.value(QStringLiteral("body")).toString();
+        text += QLatin1Char('\n');
+        return text;
+    }
+
     constexpr int kLazyResponseJsonRole = Qt::UserRole + 301;
     constexpr int kLazyResponseOffsetRole = Qt::UserRole + 302;
     constexpr int kLazyResponseMoreRole = Qt::UserRole + 303;
@@ -1431,6 +1445,7 @@ VirusTotalOnlineScan::VirusTotalOnlineScan(QObject* parent)
 
 VirusTotalOnlineScan::~VirusTotalOnlineScan()
 {
+    for (auto& operation : m_rawPreparationOperations) if (operation) operation->close();
     m_rawExportOperation->close();
 }
 
@@ -2886,10 +2901,14 @@ void VirusTotalOnlineScan::resetRuntimeState()
     {
         apiState = VtApiState::NotStarted;
     }
-    for (QString& rawText : m_apiRawText)
-    {
-        rawText.clear();
-    }
+    ++m_rawProjectionEpoch;
+    for (auto& operation : m_rawPreparationOperations) if (operation) operation->cancel();
+    m_rawProjectedSections.fill(0);
+    m_responseProjectedSections.fill(0);
+    m_rawPreparationActive.fill(false);
+    m_responseProjectionScheduled.fill(false);
+    m_reportProjectionDirty.fill(false);
+    m_latestAnalysisObject = {};
     for (QJsonArray& rawSections : m_apiRawSections)
     {
         rawSections = QJsonArray();
@@ -3274,6 +3293,11 @@ void VirusTotalOnlineScan::ensureResultDialog()
     m_resultEditor = shallowPane.rawEditor;
     for (const VtApiKind apiKind : paneApiKinds())
     {
+        auto& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(apiKind))];
+        if (pane.rawEditor) pane.rawEditor->installEventFilter(this);
+        if (pane.responseTree) pane.responseTree->installEventFilter(this);
+        if (pane.detailTabWidget && pane.detailTabWidget->count() > 0)
+            pane.detailTabWidget->widget(0)->installEventFilter(this);
         refreshApiPlaceholder(apiKind);
     }
     QObject::connect(resultDialog, &QObject::destroyed, this, [this]()
@@ -3281,6 +3305,13 @@ void VirusTotalOnlineScan::ensureResultDialog()
             // 输入：实时结果窗口 destroyed 信号。
             // 处理：清空弱指针，并在 scanFileAndAutoDelete 场景中释放扫描对象。
             // 返回：无；deleteLater 交给 Qt 事件循环执行。
+            ++m_rawProjectionEpoch;
+            for (auto& operation : m_rawPreparationOperations) if (operation) operation->cancel();
+            m_rawProjectedSections.fill(0);
+            m_responseProjectedSections.fill(0);
+            m_rawPreparationActive.fill(false);
+            m_responseProjectionScheduled.fill(false);
+            m_reportProjectionDirty.fill(true);
             m_resultDialog.clear();
             m_resultSummaryLabel.clear();
             m_resultTabWidget.clear();
@@ -3314,6 +3345,128 @@ void VirusTotalOnlineScan::ensureResultDialog()
     resultDialog->show();
     resultDialog->raise();
     resultDialog->activateWindow();
+}
+
+bool VirusTotalOnlineScan::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::Show)
+        for (const auto apiKind : paneApiKinds())
+        {
+            auto& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(apiKind))];
+            if (watched == pane.rawEditor.data()) prepareVisibleRawData(apiKind);
+            if (watched == pane.responseTree.data()) projectVisibleResponses(apiKind);
+            if (pane.detailTabWidget && watched == pane.detailTabWidget->widget(0))
+                QTimer::singleShot(0, this, [this, apiKind]() { refreshDeferredReport(apiKind); });
+        }
+    return QObject::eventFilter(watched, event);
+}
+
+void VirusTotalOnlineScan::refreshDeferredReport(const VtApiKind apiKind)
+{
+    const auto index = static_cast<std::size_t>(apiIndex(apiKind));
+    if (!m_reportProjectionDirty[index]) return;
+    if (apiKind == VtApiKind::ShallowAnalysis && !m_latestAnalysisObject.isEmpty()) refreshReadableResult(m_latestAnalysisObject);
+    else if (apiKind == VtApiKind::FileProfile && !m_fileProfileObject.isEmpty()) refreshFileProfileResult(m_fileProfileObject);
+    else if (apiKind == VtApiKind::Ioc && !m_iocRelationshipObjects.isEmpty()) refreshIocResult();
+    else if (apiKind == VtApiKind::Sandbox && (!m_sandboxSummaryObject.isEmpty()
+        || !m_sandboxBehavioursObject.isEmpty() || !m_sandboxHtmlReports.isEmpty())) refreshSandboxResult();
+}
+
+void VirusTotalOnlineScan::prepareVisibleRawData(const VtApiKind apiKind)
+{
+    const auto index = static_cast<std::size_t>(apiIndex(apiKind));
+    auto& pane = m_apiPanes[index];
+    if (!pane.rawEditor || !pane.rawEditor->isVisible()) return;
+    if (m_rawProjectedSections[index] >= m_apiRawSections[index].size())
+    {
+        pane.rawEditor->setEnabled(true);
+        pane.rawEditor->setToolTip({});
+        return;
+    }
+    auto& operation = m_rawPreparationOperations[index];
+    if (!operation)
+    {
+        operation = std::make_unique<ks::ui::AsyncOperation>(this);
+        operation->setStateChangedCallback([this, index]() {
+            if (m_rawPreparationActive[index] && !m_rawPreparationOperations[index]->isInFlight())
+            {
+                m_rawPreparationActive[index] = false;
+                if (m_apiPanes[index].rawEditor)
+                    m_apiPanes[index].rawEditor->setToolTip(ks::i18n::sourceText(QStringLiteral("原始数据准备失败；请切换页签重试，完整响应仍可导出。")));
+            }
+        });
+    }
+    if (operation->isInFlight()) return;
+    struct Request { QJsonArray sections; qsizetype first = 0; quint64 epoch = 0; };
+    struct Result { QString text; qsizetype first = 0, end = 0; quint64 epoch = 0; };
+    pane.rawEditor->setEnabled(false);
+    pane.rawEditor->setToolTip(ks::i18n::sourceText(QStringLiteral("正在准备原始响应...")));
+    m_rawPreparationActive[index] = true;
+    operation->submit<Request, Result>({m_apiRawSections[index], m_rawProjectedSections[index], m_rawProjectionEpoch},
+        [](const Request& input, const ks::ui::AsyncOperationToken&) {
+            Result result;
+            result.first = input.first;
+            result.end = input.sections.size();
+            result.epoch = input.epoch;
+            for (qsizetype offset = input.first; offset < input.sections.size(); ++offset)
+                result.text += formatArchivedRawSection(input.sections.at(offset).toObject());
+            return result;
+        }, [this, index, apiKind](const Result& result, std::uint64_t) {
+            m_rawPreparationActive[index] = false;
+            if (result.epoch != m_rawProjectionEpoch || result.first != m_rawProjectedSections[index]) return true;
+            auto& current = m_apiPanes[index];
+            if (!current.rawEditor || !current.rawEditor->isVisible()) return true;
+            // appendPlainText supplies one separator between chunks; keep the canonical spacing.
+            const QPointer<VirusTotalOnlineScan> guarded(this);
+            const QPointer<CodeEditorWidget> editor = current.rawEditor;
+            editor->appendRawText(result.first > 0 ? result.text.mid(1) : result.text);
+            if (!guarded || result.epoch != m_rawProjectionEpoch || current.rawEditor != editor) return true;
+            m_rawProjectedSections[index] = result.end;
+            current.rawEditor->setEnabled(result.end == m_apiRawSections[index].size());
+            current.rawEditor->setToolTip({});
+            QTimer::singleShot(0, this, [this, apiKind]() { prepareVisibleRawData(apiKind); });
+            return true;
+        }, [this, index, epoch = m_rawProjectionEpoch](std::exception_ptr) {
+            if (epoch != m_rawProjectionEpoch) return;
+            m_rawPreparationActive[index] = false;
+            if (m_apiPanes[index].rawEditor)
+                m_apiPanes[index].rawEditor->setToolTip(ks::i18n::sourceText(QStringLiteral("原始数据准备失败；请切换页签重试，完整响应仍可导出。")));
+        });
+}
+
+void VirusTotalOnlineScan::projectVisibleResponses(const VtApiKind apiKind)
+{
+    const auto index = static_cast<std::size_t>(apiIndex(apiKind));
+    auto& pane = m_apiPanes[index];
+    if (!pane.responseTree || !pane.responseTree->isVisible() || m_responseProjectionScheduled[index]) return;
+    const quint64 epoch = m_rawProjectionEpoch;
+    const qsizetype end = qMin(m_responseProjectedSections[index] + 24, m_apiRawSections[index].size());
+    const QPointer<VirusTotalOnlineScan> guarded(this);
+    const QPointer<QTreeWidget> tree = pane.responseTree;
+    while (m_responseProjectedSections[index] < end)
+    {
+        const QJsonObject section = m_apiRawSections[index].at(m_responseProjectedSections[index]++).toObject();
+        const QString title = section.value(QStringLiteral("title")).toString();
+        const QString timestamp = section.value(QStringLiteral("timestamp_utc")).toString();
+        if (section.value(QStringLiteral("kind")).toString() == QStringLiteral("json"))
+        {
+            QJsonObject body = section.value(QStringLiteral("body")).toObject();
+            const QJsonObject metadata = section.value(QStringLiteral("response_metadata")).toObject();
+            if (!metadata.isEmpty()) body.insert(QStringLiteral("_ksword_http"), metadata);
+            appendResponseTreeJsonSection(apiKind, title, timestamp, body);
+        }
+        else appendResponseTreeTextSection(apiKind, title, timestamp, section.value(QStringLiteral("body")).toString());
+        if (!guarded || epoch != m_rawProjectionEpoch || pane.responseTree != tree) return;
+    }
+    if (m_responseProjectedSections[index] < m_apiRawSections[index].size())
+    {
+        m_responseProjectionScheduled[index] = true;
+        QTimer::singleShot(0, this, [this, apiKind, index, epoch]() {
+            if (epoch != m_rawProjectionEpoch) return;
+            m_responseProjectionScheduled[index] = false;
+            projectVisibleResponses(apiKind);
+        });
+    }
 }
 
 void VirusTotalOnlineScan::appendRawJsonSection(const QString& titleText, const QJsonObject& jsonObject)
@@ -3358,26 +3511,8 @@ void VirusTotalOnlineScan::appendRawJsonSection(
     const int index = apiIndex(apiKind);
     m_apiRawSections[static_cast<std::size_t>(index)].append(sectionObject);
 
-    QString& rawText = m_apiRawText[static_cast<std::size_t>(index)];
-    rawText += QStringLiteral("\n===== %1 | %2 =====\n")
-        .arg(timestampText, titleText);
-    if (!responseMetadata.isEmpty())
-    {
-        rawText += QStringLiteral("[HTTP] %1\n").arg(QString::fromUtf8(QJsonDocument(responseMetadata).toJson(QJsonDocument::Compact)));
-    }
-    rawText += ks::online_scan::formatJsonObject(jsonObject);
-    rawText += QLatin1Char('\n');
-    ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(index)];
-    if (!pane.rawEditor.isNull())
-    {
-        pane.rawEditor->setRawText(rawText);
-    }
-    QJsonObject treeObject = jsonObject;
-    if (!responseMetadata.isEmpty())
-    {
-        treeObject.insert(QStringLiteral("_ksword_http"), responseMetadata);
-    }
-    appendResponseTreeJsonSection(apiKind, titleText, timestampText, treeObject);
+    prepareVisibleRawData(apiKind);
+    projectVisibleResponses(apiKind);
 }
 
 void VirusTotalOnlineScan::appendRawTextSection(const QString& titleText, const QString& detailText)
@@ -3422,21 +3557,8 @@ void VirusTotalOnlineScan::appendRawTextSection(
     const int index = apiIndex(apiKind);
     m_apiRawSections[static_cast<std::size_t>(index)].append(sectionObject);
 
-    QString& rawText = m_apiRawText[static_cast<std::size_t>(index)];
-    rawText += QStringLiteral("\n===== %1 | %2 =====\n")
-        .arg(timestampText, titleText);
-    if (!responseMetadata.isEmpty())
-    {
-        rawText += QStringLiteral("[HTTP] %1\n").arg(QString::fromUtf8(QJsonDocument(responseMetadata).toJson(QJsonDocument::Compact)));
-    }
-    rawText += detailText;
-    rawText += QLatin1Char('\n');
-    ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(index)];
-    if (!pane.rawEditor.isNull())
-    {
-        pane.rawEditor->setRawText(rawText);
-    }
-    appendResponseTreeTextSection(apiKind, titleText, timestampText, detailText);
+    prepareVisibleRawData(apiKind);
+    projectVisibleResponses(apiKind);
 }
 
 void VirusTotalOnlineScan::appendRawReplyBodySection(const QString& titleText, const QByteArray& bodyBytes)
@@ -3526,7 +3648,19 @@ void VirusTotalOnlineScan::exportAllRawResponses(QDialog* dialog)
     const auto ticket = m_rawExportOperation->submitTransaction<Request, Result>(std::move(request),
         [](const Request& input) {
             Result result;
-            const QByteArray bytes = QJsonDocument(input.root).toJson(QJsonDocument::Indented);
+            QJsonObject root = input.root;
+            QJsonObject apis = root.value(QStringLiteral("apis")).toObject();
+            for (auto it = apis.begin(); it != apis.end(); ++it)
+            {
+                QJsonObject api = it.value().toObject();
+                QString rawText;
+                for (const QJsonValue& value : api.value(QStringLiteral("responses")).toArray())
+                    rawText += formatArchivedRawSection(value.toObject());
+                api.insert(QStringLiteral("raw_text"), rawText);
+                it.value() = api;
+            }
+            root.insert(QStringLiteral("apis"), apis);
+            const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
             QSaveFile file(input.path);
             if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) { result.error = file.errorString(); return result; }
             if (file.write(bytes) != bytes.size()) { result.error = file.errorString(); file.cancelWriting(); return result; }
@@ -3578,7 +3712,7 @@ QJsonObject VirusTotalOnlineScan::buildRawExportObject() const
         apiObject.insert(QStringLiteral("title"), apiTitleText(apiKind));
         apiObject.insert(QStringLiteral("state"), apiStateText(m_apiStates[static_cast<std::size_t>(index)]));
         apiObject.insert(QStringLiteral("responses"), m_apiRawSections[static_cast<std::size_t>(index)]);
-        apiObject.insert(QStringLiteral("raw_text"), m_apiRawText[static_cast<std::size_t>(index)]);
+        // Complete raw_text is serialized from this same canonical archive on the export worker.
         apisObject.insert(apiExportKey(apiKind), apiObject);
     }
 
@@ -3662,6 +3796,13 @@ void VirusTotalOnlineScan::refreshReadableResult(const QJsonObject& analysisObje
     //      检出项按恶意/可疑优先排序，静态分析树保留可展开的关键原始字段。
     // 返回：无；只刷新已创建的报告页控件。
     ensureResultDialog();
+    m_latestAnalysisObject = analysisObject;
+    const auto projectionIndex = static_cast<std::size_t>(apiIndex(VtApiKind::ShallowAnalysis));
+    m_reportProjectionDirty[projectionIndex] = true;
+    const auto& projectionPane = m_apiPanes[projectionIndex];
+    if (!projectionPane.detailTabWidget || !projectionPane.detailTabWidget->isVisible()
+        || projectionPane.detailTabWidget->currentIndex() != 0) return;
+    m_reportProjectionDirty[projectionIndex] = false;
 
     const QList<QAbstractItemView*> itemViews{
         m_fileInfoTable.data(),
@@ -3869,6 +4010,13 @@ void VirusTotalOnlineScan::refreshReadableResult(const QJsonObject& analysisObje
 void VirusTotalOnlineScan::refreshFileProfileResult(const QJsonObject& fileObject)
 {
     ensureResultDialog();
+    m_fileProfileObject = fileObject;
+    const auto projectionIndex = static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile));
+    m_reportProjectionDirty[projectionIndex] = true;
+    const auto& projectionPane = m_apiPanes[projectionIndex];
+    if (!projectionPane.detailTabWidget || !projectionPane.detailTabWidget->isVisible()
+        || projectionPane.detailTabWidget->currentIndex() != 0) return;
+    m_reportProjectionDirty[projectionIndex] = false;
     ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
     QPointer<VirusTotalOnlineScan> safeThis(this);
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
@@ -3969,6 +4117,12 @@ void VirusTotalOnlineScan::refreshFileProfileResult(const QJsonObject& fileObjec
 void VirusTotalOnlineScan::refreshIocResult()
 {
     ensureResultDialog();
+    const auto projectionIndex = static_cast<std::size_t>(apiIndex(VtApiKind::Ioc));
+    m_reportProjectionDirty[projectionIndex] = true;
+    const auto& projectionPane = m_apiPanes[projectionIndex];
+    if (!projectionPane.detailTabWidget || !projectionPane.detailTabWidget->isVisible()
+        || projectionPane.detailTabWidget->currentIndex() != 0) return;
+    m_reportProjectionDirty[projectionIndex] = false;
     ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::Ioc))];
     QPointer<VirusTotalOnlineScan> safeThis(this);
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
@@ -4047,6 +4201,12 @@ void VirusTotalOnlineScan::refreshIocResult()
 void VirusTotalOnlineScan::refreshSandboxResult()
 {
     ensureResultDialog();
+    const auto projectionIndex = static_cast<std::size_t>(apiIndex(VtApiKind::Sandbox));
+    m_reportProjectionDirty[projectionIndex] = true;
+    const auto& projectionPane = m_apiPanes[projectionIndex];
+    if (!projectionPane.detailTabWidget || !projectionPane.detailTabWidget->isVisible()
+        || projectionPane.detailTabWidget->currentIndex() != 0) return;
+    m_reportProjectionDirty[projectionIndex] = false;
     ApiPaneUi& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::Sandbox))];
     QPointer<VirusTotalOnlineScan> safeThis(this);
     if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(
