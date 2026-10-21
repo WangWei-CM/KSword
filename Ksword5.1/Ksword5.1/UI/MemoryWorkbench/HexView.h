@@ -162,6 +162,7 @@
 #include <vector>
 
 class QMenu;
+class QShowEvent;
 class QShortcut;
 class QSplitter;
 class QVBoxLayout;
@@ -359,6 +360,10 @@ namespace ks::ui
         void showStatusMessage(HexViewStatusBar::Kind kind, const QString& text);
         bool runExport(hexexport::Kind kind, const QString& path, QString* messageOut = nullptr);
         void runExportWithDialog(hexexport::Kind kind);
+        bool captureExport(hexexport::Kind kind, hexexport::ExportSnapshot& value, QString& error) const;
+        bool startExport(std::shared_ptr<const hexexport::ExportSnapshot> value, const QString& path);
+        void finishExport(bool ok, const QString& message);
+        void showEvent(QShowEvent* event) override;
 
         // ---- 数据 ----
         std::uint64_t m_baseAddress = 0;                            // 缓冲起始地址
@@ -402,5 +407,17 @@ namespace ks::ui
         bool m_visibleValid = false;                                // 是否收到过画布的可见范围
         std::uint64_t m_visibleFirst = 0;                           // 画布最近一次报告的可见起点
         std::uint64_t m_visibleLast = 0;                            // 画布最近一次报告的可见终点
+
+        struct ExportState final
+        {
+            std::shared_ptr<hexexport::ExportControl> control;
+            std::unique_ptr<CompleteExportOperation> operation;
+            ~ExportState()
+            {
+                if (control) control->cancelPreparation();
+                if (operation) operation->close();
+            }
+        };
+        std::unique_ptr<ExportState> m_exportState; // Last member: cancel preparation/close delivery before buffer members.
     };
 }

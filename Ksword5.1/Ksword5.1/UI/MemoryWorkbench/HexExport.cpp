@@ -8,11 +8,14 @@
 #include "HexCanvasFormat.h"
 
 #include <QFile>
+#include <QSaveFile>
+#include <QByteArrayView>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QStringList>
 
 #include <algorithm>
+#include <functional>
 
 namespace ks::ui::hexexport
 {
@@ -141,6 +144,111 @@ namespace ks::ui::hexexport
     bool WriteTextFile(const QString& path, const QString& text, QString* errorOut)
     {
         return WriteFileImpl(path, QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text, text.toUtf8(), errorOut);
+    }
+
+    namespace
+    {
+        // Callback receives at most 64 KiB. Text uses the original row/byte
+        // formatters on bounded slices; no full QStringList/join/UTF8 copy exists.
+        bool streamSnapshot(const ExportSnapshot& value, const std::function<bool(QByteArrayView)>& write)
+        {
+            if (value.offset < 0 || value.length < 0 || value.offset > value.bytes.size()
+                || value.length > value.bytes.size() - value.offset) return false;
+            const auto canceled = [&value] {
+                return value.control && value.control->phase.load() == ExportControl::Phase::Canceled;
+            };
+            if (canceled()) return false;
+            if (value.kind == Kind::Binary)
+            {
+                constexpr qsizetype chunkSize = 64 * 1024;
+                for (qsizetype done = 0; done < value.length;)
+                {
+                    if (canceled()) return false;
+                    const auto count = (std::min)(chunkSize, value.length - done);
+                    if (!write(QByteArrayView(value.bytes.constData() + value.offset + done, count))) return false;
+                    done += count;
+                }
+            }
+            else if (value.kind == Kind::SelectedHex)
+            {
+                constexpr qsizetype chunkSize = 4096;
+                for (qsizetype done = 0; done < value.length;)
+                {
+                    if (canceled()) return false;
+                    const auto count = (std::min)(chunkSize, value.length - done);
+                    if (done != 0 && !write(QByteArrayView(" ", 1))) return false;
+                    const auto bytes = value.bytes.mid(value.offset + done, count);
+                    const auto text = FormatSelectedHex(bytes).toUtf8();
+                    if (!write(text)) return false;
+                    done += count;
+                }
+            }
+            else
+            {
+                QByteArray chunk;
+                chunk.reserve(64 * 1024);
+                for (qsizetype done = 0; done < value.length;)
+                {
+                    if (canceled()) return false;
+                    const auto count = (std::min)(static_cast<qsizetype>(kDumpBytesPerRow), value.length - done);
+                    const auto row = value.bytes.mid(value.offset + done, count);
+                    auto text = FormatDumpRow(value.baseAddress + static_cast<std::uint64_t>(value.offset + done), row, 0).toUtf8();
+                    if (done != 0) text.prepend('\n');
+                    if (chunk.size() + text.size() > 64 * 1024)
+                    {
+                        if (!write(chunk)) return false;
+                        chunk.clear();
+                    }
+                    chunk.append(text);
+                    done += count;
+                }
+                if (!chunk.isEmpty() && !write(chunk)) return false;
+            }
+            // This is the only admission to final flush/atomic replacement.
+            // Cancellation before it abandons the temp file; after it cannot cut an accepted commit short.
+            if (value.control)
+            {
+                auto expected = ExportControl::Phase::Preparing;
+                if (!value.control->phase.compare_exchange_strong(expected, ExportControl::Phase::Committing)) return false;
+            }
+            return true;
+        }
+    }
+
+    bool SerializeSnapshot(const ExportSnapshot& value, CompleteExportSink& sink)
+    {
+        return streamSnapshot(value, [&sink](QByteArrayView bytes) { return sink.writeUtf8(bytes); });
+    }
+
+    bool WriteSnapshotFile(const QString& path, const ExportSnapshot& value, QString* errorOut)
+    {
+        const auto fail = [errorOut](const QString& reason) {
+            if (errorOut) *errorOut = reason;
+            return false;
+        };
+        if (path.trimmed().isEmpty()) return fail(QStringLiteral("没有指定导出路径"));
+        QSaveFile file(path);
+        file.setDirectWriteFallback(false);
+        const auto mode = QIODevice::WriteOnly | (value.kind == Kind::Binary ? QIODevice::NotOpen : QIODevice::Text);
+        if (!file.open(mode)) return fail(QStringLiteral("无法写入文件：%1（%2）").arg(path, file.errorString()));
+        if (!streamSnapshot(value, [&file](QByteArrayView bytes) {
+            qint64 done = 0;
+            while (done < bytes.size())
+            {
+                const auto written = file.write(bytes.data() + done, bytes.size() - done);
+                if (written <= 0 || written > bytes.size() - done) return false;
+                done += written;
+            }
+            return true;
+        }))
+        {
+            const auto detail = file.errorString();
+            file.cancelWriting();
+            return fail(QStringLiteral("写入不完整：%1（%2）").arg(path, detail));
+        }
+        if (!file.flush() || !file.commit()) return fail(QStringLiteral("写入不完整：%1（%2）").arg(path, file.errorString()));
+        if (errorOut) errorOut->clear();
+        return true;
     }
 
     // 建议文件名。

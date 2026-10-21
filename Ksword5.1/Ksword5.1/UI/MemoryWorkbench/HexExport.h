@@ -40,6 +40,9 @@
 #include <QString>
 
 #include <cstdint>
+#include <atomic>
+#include <memory>
+#include "../CompleteExport.h"
 
 class QWidget;
 
@@ -80,6 +83,34 @@ namespace ks::ui::hexexport
 
     // WriteTextFile：把文本按 UTF-8 写入文件（覆盖，文本模式换行）。参数与返回同 WriteBinaryFile。
     bool WriteTextFile(const QString& path, const QString& text, QString* errorOut);
+
+    // One frozen, already acquired range. Capturing bytes is implicit-sharing;
+    // no provider, widget, target session or borrowed model enters the worker.
+    struct ExportControl final
+    {
+        enum class Phase { Preparing, Committing, Canceled };
+        std::atomic<Phase> phase{Phase::Preparing};
+        bool cancelPreparation()
+        {
+            auto expected = Phase::Preparing;
+            return phase.compare_exchange_strong(expected, Phase::Canceled);
+        }
+    };
+    struct ExportSnapshot
+    {
+        Kind kind = Kind::Binary;
+        QByteArray bytes;
+        std::uint64_t baseAddress = 0;
+        std::uint64_t sourceVersion = 0;
+        qsizetype offset = 0;
+        qsizetype length = 0;
+        std::shared_ptr<ExportControl> control;
+    };
+    // Bounded serializer used by the shared accepted-export/QSaveFile engine.
+    bool SerializeSnapshot(const ExportSnapshot& value, CompleteExportSink& sink);
+    // Synchronous compatibility API: still reports actual completion, using the
+    // same bounded serializer and atomic replacement, never a full formatted document.
+    bool WriteSnapshotFile(const QString& path, const ExportSnapshot& value, QString* errorOut);
 
     // SuggestedFileName：某种导出的建议文件名。
     QString SuggestedFileName(Kind kind);
