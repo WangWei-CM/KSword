@@ -18,8 +18,8 @@
 #include <QSet>
 #include <QWidget>
 
-#include <atomic>
-#include <array>   // std::atomic_bool：后台刷新运行状态。
+#include <atomic>   // std::atomic_bool：后台刷新运行状态。
+#include <array>
 #include <cstddef>  // std::size_t：分批落表进度坐标。
 #include <cstdint>  // std::uint32_t：PID、状态值与标识字段。
 #include <deque>    // std::deque：按枚举完成顺序缓存阶段结果。
@@ -142,18 +142,31 @@ private:
     {
         StartupCategory category = StartupCategory::All;
         QTableWidget* tableWidget = nullptr;
-        std::vector<int> visibleEntryIndexList;
+        std::deque<int> visibleEntryIndexList;
         std::size_t nextRowIndex = 0;
     };
 
     struct RegistryGroupRebuildTarget
     {
         QString locationText;
-        std::vector<int> totalEntryIndexList;
-        std::vector<int> visibleEntryIndexList;
+        std::deque<int> totalEntryIndexList;
+        std::deque<int> visibleEntryIndexList;
         QTreeWidgetItem* groupItem = nullptr;
         std::size_t nextEntryIndex = 0;
         bool initialized = false;
+    };
+
+    struct ProjectionPreparation
+    {
+        enum class Phase { Clear, Catalog, Scan, Groups, Ready };
+        Phase phase = Phase::Clear;
+        std::size_t nextEntry = 0, nextGroup = 0;
+        qsizetype nextCatalog = 0;
+        QStringList catalog;
+        std::deque<QString> locations;
+        QSet<QString> knownLocations;
+        QHash<QString, std::deque<int>> total, visible;
+        bool hideEmptyPaths = false;
     };
 
     struct RefreshStageResult
@@ -186,6 +199,8 @@ private:
     void ensureCurrentCategoryProjection();
     bool isCategoryProjectionReady(StartupCategory category) const;
     void scheduleFilterRefresh();
+    bool continueProjectionPreparation();
+    void retireProjectionIndices();
     void continueIncrementalTableRebuild();
     void finishIncrementalTableRebuild();
     void initializeRegistryTreeGroup(RegistryGroupRebuildTarget* target);
@@ -298,8 +313,9 @@ private:
     quint64 m_projectionBuildRevision = 0;
     bool m_projectionBuildActive = false;
     QTimer* m_tableRebuildTimer = nullptr;    // m_tableRebuildTimer：分时落表调度器。
+    std::shared_ptr<ProjectionPreparation> m_projectionPreparation;
     std::vector<TableRebuildTarget> m_tableRebuildTargets; // m_tableRebuildTargets：待分批填充的表格。
-    std::vector<RegistryGroupRebuildTarget> m_registryRebuildTargets; // m_registryRebuildTargets：待分批填充的注册表分组。
+    std::deque<RegistryGroupRebuildTarget> m_registryRebuildTargets; // m_registryRebuildTargets：待分批填充的注册表分组。
     std::size_t m_tableRebuildTargetIndex = 0; // m_tableRebuildTargetIndex：当前表格任务索引。
     std::size_t m_registryRebuildTargetIndex = 0; // m_registryRebuildTargetIndex：当前注册表分组索引。
     std::size_t m_tableRebuildCompletedUnits = 0; // m_tableRebuildCompletedUnits：已完成落表工作量。

@@ -1,6 +1,7 @@
 #include "StartupDock.Internal.h"
 
 #include <QElapsedTimer>
+#include <QThreadPool>
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
 #include "../UI/AsyncOperation.h"
@@ -388,8 +389,7 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
     m_tableRebuildProcessesRefreshStage =
         m_tableRebuildProcessesRefreshStage || processesRefreshStage;
     m_tableRebuildInProgress = true;
-    m_tableRebuildTargets.clear();
-    m_registryRebuildTargets.clear();
+    retireProjectionIndices();
     m_tableRebuildTargetIndex = 0;
     m_registryRebuildTargetIndex = 0;
     m_tableRebuildCompletedUnits = 0;
@@ -424,104 +424,19 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
         std::pair{ StartupCategory::Hidden, m_hiddenTable }
     };
     const StartupCategory visibleCategory = currentCategory();
-    const auto appendTableTarget = [this](
-        const StartupCategory category,
-        QTableWidget* const tableWidget)
-    {
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-        const auto duplicateIt = std::find_if(
-            m_tableRebuildTargets.cbegin(),
-            m_tableRebuildTargets.cend(),
-            [tableWidget](const TableRebuildTarget& target)
-            {
-                return target.tableWidget == tableWidget;
-            });
-        if (duplicateIt != m_tableRebuildTargets.cend())
-        {
-            return;
-        }
-
-        TableRebuildTarget target;
-        target.category = category;
-        target.tableWidget = tableWidget;
-        target.visibleEntryIndexList.reserve(m_entryList.size());
-        for (int entryIndex = 0; entryIndex < static_cast<int>(m_entryList.size()); ++entryIndex)
-        {
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-            if (category != StartupCategory::All && entry.category != category)
-            {
-                continue;
-            }
-            if (entryMatchesCurrentFilter(entry))
-            {
-                target.visibleEntryIndexList.push_back(entryIndex);
-            }
-        }
-
-        tableWidget->setEnabled(false);
-        tableWidget->setRowCount(0);
-        tableWidget->setRowCount(static_cast<int>(target.visibleEntryIndexList.size()));
-        m_tableRebuildTotalUnits += target.visibleEntryIndexList.size();
-        m_tableRebuildTargets.push_back(std::move(target));
-    };
-
-    // Only the selected category owns an item projection for this revision.
     for (const auto& [category, tableWidget] : allTableTargets)
     {
-        if (category == visibleCategory)
+        if (category == visibleCategory && tableWidget)
         {
-            appendTableTarget(category, tableWidget);
+            TableRebuildTarget target;
+            target.category = category;
+            target.tableWidget = tableWidget;
+            m_tableRebuildTargets.push_back(std::move(target));
             break;
         }
     }
-    if (m_registryTree != nullptr && visibleCategory == StartupCategory::Registry)
-    {
-        m_registryTree->setEnabled(false);
-        m_registryTree->clear();
-
-        QStringList knownLocationList = buildKnownStartupRegistryLocationList();
-        const bool hideEmptyPath = (m_hideEmptyPathCheck != nullptr) && m_hideEmptyPathCheck->isChecked();
-        QHash<QString, std::vector<int>> totalEntryIndexMap;
-        QHash<QString, std::vector<int>> visibleEntryIndexMap;
-        for (int entryIndex = 0; entryIndex < static_cast<int>(m_entryList.size()); ++entryIndex)
-        {
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-            if (!isRegistryBackedStartupEntry(entry))
-            {
-                continue;
-            }
-            const QString groupLocationText = entry.locationGroupText.trimmed().isEmpty()
-                ? entry.locationText
-                : entry.locationGroupText;
-            totalEntryIndexMap[groupLocationText].push_back(entryIndex);
-            if (!knownLocationList.contains(groupLocationText))
-            {
-                knownLocationList.push_back(groupLocationText);
-            }
-            if (entryMatchesCurrentFilter(entry))
-            {
-                visibleEntryIndexMap[groupLocationText].push_back(entryIndex);
-            }
-        }
-
-        m_registryRebuildTargets.reserve(static_cast<std::size_t>(knownLocationList.size()));
-        for (const QString& groupLocationText : knownLocationList)
-        {
-            RegistryGroupRebuildTarget target;
-            target.locationText = groupLocationText;
-            target.totalEntryIndexList = totalEntryIndexMap.value(groupLocationText);
-            target.visibleEntryIndexList = visibleEntryIndexMap.value(groupLocationText);
-            if (hideEmptyPath && target.totalEntryIndexList.empty())
-            {
-                continue;
-            }
-            m_tableRebuildTotalUnits += 1U + target.visibleEntryIndexList.size();
-            m_registryRebuildTargets.push_back(std::move(target));
-        }
-    }
+    m_projectionPreparation = std::make_shared<ProjectionPreparation>();
+    m_projectionPreparation->hideEmptyPaths = m_hideEmptyPathCheck && m_hideEmptyPathCheck->isChecked();
 
     if (m_statusLabel != nullptr)
     {
@@ -551,12 +466,131 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
         }
     }
 
-    if (m_tableRebuildTotalUnits == 0U)
-    {
-        finishIncrementalTableRebuild();
-        return;
-    }
     m_tableRebuildTimer->start(0);
+}
+
+void StartupDock::retireProjectionIndices()
+{
+    if (m_tableRebuildTargets.empty() && m_registryRebuildTargets.empty() && !m_projectionPreparation) return;
+    // Only value index buffers move to the pool. Nonowning view/item pointers are never accessed there.
+    auto preparation = std::move(m_projectionPreparation);
+    auto tables = std::make_shared<std::vector<TableRebuildTarget>>(std::move(m_tableRebuildTargets));
+    auto registry = std::make_shared<std::deque<RegistryGroupRebuildTarget>>(std::move(m_registryRebuildTargets));
+    QThreadPool::globalInstance()->start([preparation = std::move(preparation), tables, registry]() {});
+}
+
+bool StartupDock::continueProjectionPreparation()
+{
+    if (!m_projectionPreparation) return false;
+    ProjectionPreparation& preparation = *m_projectionPreparation;
+    while (true)
+    {
+        switch (preparation.phase)
+        {
+        case ProjectionPreparation::Phase::Clear:
+            if (m_projectionBuildCategory == StartupCategory::Registry)
+            {
+                if (m_registryTree && m_registryTree->topLevelItemCount() > 0)
+                {
+                    const int last = m_registryTree->topLevelItemCount() - 1;
+                    QTreeWidgetItem* group = m_registryTree->topLevelItem(last);
+                    if (group->childCount() > 0) delete group->takeChild(group->childCount() - 1);
+                    else delete m_registryTree->takeTopLevelItem(last);
+                    return true;
+                }
+                // This project resource catalog is fixed; variable entry/group work stays sliced below.
+                preparation.catalog = buildKnownStartupRegistryLocationList();
+                preparation.phase = ProjectionPreparation::Phase::Catalog;
+            }
+            else
+            {
+                if (!m_tableRebuildTargets.empty())
+                {
+                    QTableWidget* table = m_tableRebuildTargets.front().tableWidget;
+                    if (table && table->rowCount() > 0)
+                    {
+                        table->setRowCount(table->rowCount() - 1);
+                        return true;
+                    }
+                }
+                preparation.phase = ProjectionPreparation::Phase::Scan;
+            }
+            break;
+        case ProjectionPreparation::Phase::Catalog:
+            if (preparation.nextCatalog < preparation.catalog.size())
+            {
+                const QString location = preparation.catalog[preparation.nextCatalog++];
+                if (!preparation.knownLocations.contains(location))
+                {
+                    preparation.knownLocations.insert(location);
+                    preparation.locations.push_back(location);
+                }
+                return true;
+            }
+            preparation.phase = ProjectionPreparation::Phase::Scan;
+            break;
+        case ProjectionPreparation::Phase::Scan:
+            if (preparation.nextEntry < m_entryList.size())
+            {
+                const int entryIndex = static_cast<int>(preparation.nextEntry++);
+                const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
+                if (m_projectionBuildCategory == StartupCategory::Registry)
+                {
+                    if (isRegistryBackedStartupEntry(entry))
+                    {
+                        const QString location = entry.locationGroupText.trimmed().isEmpty()
+                            ? entry.locationText : entry.locationGroupText;
+                        preparation.total[location].push_back(entryIndex);
+                        if (!preparation.knownLocations.contains(location))
+                        {
+                            preparation.knownLocations.insert(location);
+                            preparation.locations.push_back(location);
+                        }
+                        if (entryMatchesCurrentFilter(entry)) preparation.visible[location].push_back(entryIndex);
+                    }
+                }
+                else if (!m_tableRebuildTargets.empty()
+                    && (m_projectionBuildCategory == StartupCategory::All || entry.category == m_projectionBuildCategory)
+                    && entryMatchesCurrentFilter(entry))
+                {
+                    m_tableRebuildTargets.front().visibleEntryIndexList.push_back(entryIndex);
+                    ++m_tableRebuildTotalUnits;
+                }
+                return true;
+            }
+            preparation.phase = m_projectionBuildCategory == StartupCategory::Registry
+                ? ProjectionPreparation::Phase::Groups : ProjectionPreparation::Phase::Ready;
+            break;
+        case ProjectionPreparation::Phase::Groups:
+            if (preparation.nextGroup < preparation.locations.size())
+            {
+                RegistryGroupRebuildTarget target;
+                target.locationText = preparation.locations[preparation.nextGroup++];
+                auto total = preparation.total.find(target.locationText);
+                if (total != preparation.total.end())
+                {
+                    target.totalEntryIndexList = std::move(total.value());
+                    preparation.total.erase(total);
+                }
+                auto visible = preparation.visible.find(target.locationText);
+                if (visible != preparation.visible.end())
+                {
+                    target.visibleEntryIndexList = std::move(visible.value());
+                    preparation.visible.erase(visible);
+                }
+                if (!preparation.hideEmptyPaths || !target.totalEntryIndexList.empty())
+                {
+                    m_tableRebuildTotalUnits += 1U + target.visibleEntryIndexList.size();
+                    m_registryRebuildTargets.push_back(std::move(target));
+                }
+                return true;
+            }
+            preparation.phase = ProjectionPreparation::Phase::Ready;
+            break;
+        case ProjectionPreparation::Phase::Ready:
+            return false;
+        }
+    }
 }
 
 void StartupDock::continueIncrementalTableRebuild()
@@ -592,6 +626,7 @@ void StartupDock::continueIncrementalTableRebuild()
                 && entryIndex >= 0
                 && entryIndex < static_cast<int>(m_entryList.size()))
             {
+                target.tableWidget->setRowCount(static_cast<int>(target.nextRowIndex) + 1);
                 appendEntryRow(
                     target.tableWidget,
                     static_cast<int>(target.nextRowIndex),
@@ -662,8 +697,8 @@ void StartupDock::continueIncrementalTableRebuild()
     while (sliceUnitCount < maximumUnitsPerSlice
         && (sliceUnitCount == 0U || sliceTimer.elapsed() < sliceBudgetMilliseconds))
     {
-        bool processedUnit = false;
-        if (m_rebuildRegistryFirst)
+        bool processedUnit = continueProjectionPreparation();
+        if (!processedUnit && m_rebuildRegistryFirst)
         {
             processedUnit = processOneRegistryUnit();
             if (!processedUnit)
@@ -686,7 +721,9 @@ void StartupDock::continueIncrementalTableRebuild()
         ++sliceUnitCount;
     }
 
-    if (m_tableRebuildProcessesRefreshStage
+    const bool preparationCompleted = !m_projectionPreparation
+        || m_projectionPreparation->phase == ProjectionPreparation::Phase::Ready;
+    if (preparationCompleted && m_tableRebuildProcessesRefreshStage
         && m_backendEnumerationCompleted
         && m_progressPid != 0
         && m_activeRefreshStageCount != 0U)
@@ -720,7 +757,7 @@ void StartupDock::continueIncrementalTableRebuild()
 
     const bool tablesCompleted = m_tableRebuildTargetIndex >= m_tableRebuildTargets.size();
     const bool registryCompleted = m_registryRebuildTargetIndex >= m_registryRebuildTargets.size();
-    if (tablesCompleted && registryCompleted)
+    if (preparationCompleted && tablesCompleted && registryCompleted)
     {
         finishIncrementalTableRebuild();
         return;
@@ -737,8 +774,7 @@ void StartupDock::finishIncrementalTableRebuild()
     m_projectionBuildActive = false;
     m_tableRebuildProcessesRefreshStage = false;
     m_rebuildRegistryFirst = false;
-    m_tableRebuildTargets.clear();
-    m_registryRebuildTargets.clear();
+    retireProjectionIndices();
 
     const std::array<std::pair<StartupCategory, QTableWidget*>, 8> tableList{
         std::pair{StartupCategory::All, m_allTable}, std::pair{StartupCategory::Logon, m_logonTable},

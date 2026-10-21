@@ -60,6 +60,7 @@ StartupDock::~StartupDock()
     {
         m_tableRebuildTimer->stop();
     }
+    retireProjectionIndices();
     m_actionOperation->close();
     if (m_refreshSession) m_refreshSession->stopping.store(true);
     m_refreshDrainTimer->stop();
