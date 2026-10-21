@@ -101,6 +101,20 @@ namespace ks::ui
         return m_history;
     }
 
+    void MetricChartBinding::setHistory(std::shared_ptr<MetricHistory> history)
+    {
+        if (!history || history == m_history)
+        {
+            return;
+        }
+        // Detach this source's revision token; existing mirrors keep their prior model
+        // until MirrorSeries explicitly reconnects them to the new source identity.
+        m_history = std::move(history);
+        m_historyRevision = std::make_shared<std::uint64_t>(0);
+        m_projectionDirty = true;
+        refreshSeries();
+    }
+
     // 共享数据只替换模型来源；镜像自身 palette、字体、比例与系列仍独立。
     void MetricChartBinding::shareHistoryFrom(const MetricChartBinding& source)
     {

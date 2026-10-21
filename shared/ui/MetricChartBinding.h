@@ -27,6 +27,10 @@ namespace ks::ui
         void setXMode(MetricXMode mode);
         MetricXMode xMode() const;
         std::shared_ptr<MetricHistory> history() const;
+        // Attach a value-owned history when a lazy chart is first created. Call only on
+        // the binding's owning thread; external history edits require refreshSeries().
+        // Null/same sources are no-ops, preserving existing mirror revision identity.
+        void setHistory(std::shared_ptr<MetricHistory> history);
         // 同进程镜像直接共享模型，HUD 在独立进程复用算法和自己的模型实例。
         void shareHistoryFrom(const MetricChartBinding& source);
         // 重绘数据不采样、不改主题、不替换系列，缺失值用 NaN 标记绘制断点。
