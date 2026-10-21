@@ -12,6 +12,8 @@
 #include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 #include "HttpsProxyService.h"
+#include "../UI/RetainedCleanupJob.h"
+#include "../UI/AsyncUiDispatcher.h"
 #include "../theme.h"
 
 #include <QApplication>
@@ -1045,6 +1047,12 @@ void NetworkDock::applyHttpsSystemProxy()
 
 void NetworkDock::clearHttpsSystemProxy()
 {
+    if (m_httpsRecoveryCleanup && m_httpsRecoveryCleanup->isCleanupRequested()
+        && !m_httpsRecoveryCleanup->isComplete())
+    {
+        m_httpsRecoveryCleanup->requestCleanup(); // Explicit user restore retries the same witness.
+        return;
+    }
     if (!m_httpsSystemProxySnapshotCaptured)
     {
         appendHttpsProxyLogLine(QStringLiteral("未发现由 HTTPS 解析页保存的系统代理快照，不修改当前系统代理。"));
@@ -1076,6 +1084,12 @@ bool NetworkDock::captureHttpsSystemProxySnapshot(QString* errorTextOut)
     if (m_httpsSystemProxySnapshotCaptured)
     {
         return true;
+    }
+
+    if (!ensureHttpsProxyRecoveryCleanup())
+    {
+        if (errorTextOut) *errorTextOut = QStringLiteral("存在尚未完成的 HTTPS 代理恢复事务，不能覆盖原始代理快照。");
+        return false;
     }
 
     std::optional<std::uint32_t> previousProxyEnable;
@@ -1122,13 +1136,10 @@ bool NetworkDock::captureHttpsSystemProxySnapshot(QString* errorTextOut)
     return true;
 }
 
-bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
+bool NetworkDock::restoreHttpsSystemProxySnapshotValues(
+    const HttpsSystemProxySnapshot& snapshot, QString* errorTextOut)
 {
-    if (!m_httpsSystemProxySnapshotCaptured)
-    {
-        return true;
-    }
-
+    if (!snapshot.captured) return true;
     QString errorText;
     const auto restoreDword = [&errorText](const wchar_t* valueName, const std::optional<std::uint32_t>& value) -> bool
         {
@@ -1143,11 +1154,11 @@ bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
                 : deleteInternetSetting(valueName, &errorText);
         };
 
-    if (!restoreDword(L"ProxyEnable", m_httpsPreviousProxyEnable)
-        || !restoreDword(L"AutoDetect", m_httpsPreviousAutoDetect)
-        || !restoreString(L"ProxyServer", m_httpsPreviousProxyServer)
-        || !restoreString(L"ProxyOverride", m_httpsPreviousProxyOverride)
-        || !restoreString(L"AutoConfigURL", m_httpsPreviousAutoConfigUrl))
+    if (!restoreDword(L"ProxyEnable", snapshot.proxyEnable)
+        || !restoreDword(L"AutoDetect", snapshot.autoDetect)
+        || !restoreString(L"ProxyServer", snapshot.proxyServer)
+        || !restoreString(L"ProxyOverride", snapshot.proxyOverride)
+        || !restoreString(L"AutoConfigURL", snapshot.autoConfigUrl))
     {
         if (errorTextOut != nullptr)
         {
@@ -1172,6 +1183,91 @@ bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
         }
         return false;
     }
+
+    return true;
+}
+
+bool NetworkDock::ensureHttpsProxyRecoveryCleanup()
+{
+    if (m_httpsRecoveryCleanup && !m_httpsRecoveryCleanup->isComplete())
+        return !m_httpsRecoveryCleanup->isCleanupRequested();
+    const auto state = std::make_shared<HttpsProxyRecoveryState>();
+    const auto dispatcher = m_trafficDispatcher;
+    const auto freeze = [this, state]()
+    {
+        if (m_httpsRecoveryState == state) retireHttpsProxyRecovery();
+    };
+    const auto restored = [this, state]()
+    {
+        if (m_httpsRecoveryState != state) return;
+        m_httpsPreviousProxyEnable.reset();
+        m_httpsPreviousAutoDetect.reset();
+        m_httpsPreviousProxyServer.reset();
+        m_httpsPreviousProxyOverride.reset();
+        m_httpsPreviousAutoConfigUrl.reset();
+        m_httpsSystemProxySnapshotCaptured = false;
+        m_httpsProxyRecoveryRequired = false;
+    };
+    const auto cleanup = ks::ui::RetainedCleanupJob::create(
+        [state, dispatcher, restored]()
+        {
+            QString error;
+            if (!restoreHttpsSystemProxySnapshotValues(state->snapshot, &error))
+            {
+                kLogEvent restoreEvent;
+                warn << restoreEvent << "[NetworkDock] HTTPS 系统代理恢复失败：" << error << eol;
+                return false;
+            }
+            dispatcher->post(restored);
+            return true;
+        }, 0, [state, dispatcher, freeze]()
+        {
+            state->stopRequested.store(true);
+            dispatcher->post(freeze);
+        },
+        [state]() { return state->ready.load(); });
+    if (!cleanup) return false;
+    state->ready.store(false);
+    m_httpsRecoveryState = state;
+    m_httpsRecoveryCleanup = cleanup;
+    if (state->stopRequested.load())
+    {
+        retireHttpsProxyRecovery();
+        return false;
+    }
+    return true;
+}
+
+void NetworkDock::retireHttpsProxyRecovery()
+{
+    const auto state = m_httpsRecoveryState;
+    const auto cleanup = m_httpsRecoveryCleanup;
+    if (!state || !cleanup || state->frozen) return;
+    state->frozen = true;
+    state->snapshot = {m_httpsSystemProxySnapshotCaptured,
+        m_httpsPreviousProxyEnable, m_httpsPreviousAutoDetect,
+        m_httpsPreviousProxyServer, m_httpsPreviousProxyOverride,
+        m_httpsPreviousAutoConfigUrl};
+    if (state->snapshot.captured) m_httpsProxyRecoveryRequired = true;
+    const auto nativeStopped = [state, cleanup]()
+    {
+        state->ready.store(true);
+        cleanup->notifyReadyToAttempt();
+    };
+    // Preserve teardown order: actual session STOP, then original proxy writes,
+    // WinINet refresh, and finally durable recovery-record removal.
+    if (m_httpsProxyService) m_httpsProxyService->stopAsync({}, nativeStopped);
+    else nativeStopped();
+    if (!cleanup->isCleanupRequested()) cleanup->requestCleanup();
+}
+
+bool NetworkDock::restoreHttpsSystemProxySnapshot(QString* errorTextOut)
+{
+    const HttpsSystemProxySnapshot snapshot{m_httpsSystemProxySnapshotCaptured,
+        m_httpsPreviousProxyEnable, m_httpsPreviousAutoDetect,
+        m_httpsPreviousProxyServer, m_httpsPreviousProxyOverride,
+        m_httpsPreviousAutoConfigUrl};
+    if (!restoreHttpsSystemProxySnapshotValues(snapshot, errorTextOut)) return false;
 
     m_httpsPreviousProxyEnable.reset();
     m_httpsPreviousAutoDetect.reset();

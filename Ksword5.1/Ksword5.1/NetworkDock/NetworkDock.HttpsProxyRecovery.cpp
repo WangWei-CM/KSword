@@ -572,7 +572,7 @@ bool NetworkDock::loadHttpsSystemProxyRecoveryTransaction(
 }
 
 bool NetworkDock::clearHttpsSystemProxyRecoveryTransaction(
-    QString* errorTextOut) const
+    QString* errorTextOut)
 {
     HKEY parentKey = nullptr;
     LONG resultCode = ::RegOpenKeyExW(

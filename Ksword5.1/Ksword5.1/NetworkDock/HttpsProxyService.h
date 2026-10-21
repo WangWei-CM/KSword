@@ -16,16 +16,17 @@
 #include <cstdint>    // std::uint*_t：会话编号、时间戳与端口。
 #include <functional> // std::function：UI 回调桥接。
 #include <memory>     // std::unique_ptr/shared_ptr：服务对象与证书状态生命周期托管。
-#include <thread>     // std::thread：会话收尾放到后台线程执行。
 
 class QSslCertificate;
 class QSslKey;
 class QTcpServer;
+namespace ks::ui { class RetainedCleanupJob; }
 
 namespace ks::network
 {
     class HttpsProxyCertificateStore;
     class HttpsProxyUiDispatcher;
+    struct HttpsProxyStopState;
 
     // HttpsProxyParsedEntry 作用：
     // - 描述一条 HTTPS 解析结果；
@@ -89,15 +90,15 @@ namespace ks::network
 
         // stop 作用：
         // - 停止本地 HTTPS 代理并断开会话；
-        // - 同步语义，供析构等停止监听并请求会话退出的场景使用；
-        // - 内部只做带超时的等待；超时会话保留独立证书状态，不再访问服务对象。
+        // - 调用线程只停止监听并请求会话退出；后台保留资源直到实际退出。
         void stop();
 
         // stopAsync 作用：
         // - 在调用线程（UI 线程）关闭监听套接字，把等待会话线程退出的耗时部分放到后台线程；
         // - 供 UI 的“停止代理”按钮使用，避免界面在会话线程收尾期间冻结。
         // 参数 completionCallback：收尾完成后的回调，固定在 UI 线程执行；服务析构会取消尚未执行的回调。
-        void stopAsync(std::function<void()> completionCallback);
+        void stopAsync(std::function<void()> completionCallback,
+            std::function<void()> nativeCleanupCompleted = {});
 
         // isRunning 作用：
         // - 返回代理是否处于监听状态。
@@ -167,15 +168,10 @@ namespace ks::network
         // - 在服务内部统一派发状态文本回调。
         void emitStatus(const QString& statusText) const;
 
-        // joinStopWorkerThread 作用：
-        // - 回收后台会话收尾线程，保证同一时刻只存在一个收尾线程；
-        // - 该线程内部的等待均带超时，因此此处 join 不会无限期阻塞。
-        void joinStopWorkerThread();
-
     private:
         std::unique_ptr<QTcpServer> m_server;  // m_server：本地代理监听服务器。
-        std::unique_ptr<std::thread> m_stopWorkerThread; // m_stopWorkerThread：后台执行会话线程收尾的工作线程。
-        std::function<void()> m_stopSessionWorkers; // m_stopSessionWorkers：停止并等待所有活动代理会话线程。
+        std::shared_ptr<ks::ui::RetainedCleanupJob> m_sessionCleanup;
+        std::shared_ptr<HttpsProxyStopState> m_stopState;
         ParsedCallback m_parsedCallback;       // m_parsedCallback：解析结果回调。
         StatusCallback m_statusCallback;       // m_statusCallback：状态文本回调。
         QHostAddress m_listenAddress;          // m_listenAddress：当前监听地址。

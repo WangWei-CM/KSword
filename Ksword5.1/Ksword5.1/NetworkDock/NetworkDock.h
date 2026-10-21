@@ -67,7 +67,60 @@ class MultiThreadDownloadSegmentBarWidget;
 class NetworkFirewallPage;
 class NetworkAuditPage;
 
-namespace ks::ui { class AsyncUiDispatcher; }
+namespace ks::ui { class AsyncUiDispatcher; class RetainedCleanupJob; }
+
+namespace network_dock_detail
+{
+    struct TrafficPacketMailbox
+    {
+        std::mutex mutex;
+        std::deque<ks::network::PacketRecord> packets;
+        std::uint64_t dropped = 0;
+        bool closed = false;
+    };
+    // One accepted capture epoch. Native calls and capture joins only run on workers.
+    struct TrafficCaptureLifetime
+    {
+        explicit TrafficCaptureLifetime(std::shared_ptr<ks::network::TrafficMonitorService> value)
+            : service(std::move(value)) {}
+        bool reserve();
+        void release(const std::shared_ptr<ks::ui::RetainedCleanupJob>& job);
+        void requestStop();
+        bool ready();
+        bool stopR0(QString* error = nullptr, bool rememberFailure = true);
+        bool finish(QString* error);
+        const std::shared_ptr<ks::network::TrafficMonitorService> service;
+        std::mutex gate;
+        std::size_t inFlight = 0;
+        bool closing = false;
+        std::atomic_bool r0Touched{false};
+        bool r0FailurePending = false; // Published by the last reservation's gate release.
+        QString r0Failure;
+        std::atomic_bool finished{false};
+    };
+    struct TrafficCaptureReservation
+    {
+        std::shared_ptr<TrafficCaptureLifetime> lifetime;
+        std::shared_ptr<ks::ui::RetainedCleanupJob> job;
+        ~TrafficCaptureReservation() { if (lifetime) lifetime->release(job); }
+    };
+    struct HttpsSystemProxySnapshot
+    {
+        bool captured = false;
+        std::optional<std::uint32_t> proxyEnable;
+        std::optional<std::uint32_t> autoDetect;
+        std::optional<QString> proxyServer;
+        std::optional<QString> proxyOverride;
+        std::optional<QString> autoConfigUrl;
+    };
+    struct HttpsProxyRecoveryState
+    {
+        HttpsSystemProxySnapshot snapshot;
+        bool frozen = false; // GUI-owned publication boundary.
+        std::atomic_bool ready{true}; // No write is accepted until create succeeds.
+        std::atomic_bool stopRequested{false};
+    };
+}
 
 namespace ks::ui { class AsyncOperation; }
 namespace network_dock_detail { class NidsAnalysisSession; struct NidsAnalysisBatch; }
@@ -458,6 +511,7 @@ private:
     // - 作用：请求后台服务启动抓包线程。
     // - 返回：无。
     void startTrafficMonitor();
+    bool ensureTrafficCaptureLifetime();
 
     // stopTrafficMonitor：
     // - 作用：请求后台服务停止抓包线程。
@@ -1166,7 +1220,7 @@ private:
     // clearHttpsSystemProxyRecoveryTransaction：
     // - 作用：仅在代理原值写回且 WinINet 刷新成功后删除持久化事务；
     // - 返回：true=删除并落盘成功或记录不存在；false=仍须保留事务。
-    bool clearHttpsSystemProxyRecoveryTransaction(QString* errorTextOut) const;
+    static bool clearHttpsSystemProxyRecoveryTransaction(QString* errorTextOut);
 
     // recoverPendingHttpsSystemProxyTransaction：
     // - 作用：启动时加载上次异常退出遗留的持久化事务并自动恢复系统代理；
@@ -1179,6 +1233,10 @@ private:
     // - 作用：恢复本页应用 HTTPS 代理前保存的当前用户代理项。
     // - 返回：true=恢复成功；false=恢复失败。
     bool restoreHttpsSystemProxySnapshot(QString* errorTextOut);
+    static bool restoreHttpsSystemProxySnapshotValues(
+        const network_dock_detail::HttpsSystemProxySnapshot& snapshot, QString* errorTextOut);
+    bool ensureHttpsProxyRecoveryCleanup();
+    void retireHttpsProxyRecovery();
 
     // onHttpsProxyParsedEntryArrived：
     // - 作用：接收代理层解析结果并写入表格。
@@ -1563,7 +1621,10 @@ private:
 
     // ========================= 后台服务与缓存 ====================
     const ConstructScope m_constructScope;
-    std::unique_ptr<ks::network::TrafficMonitorService> m_trafficService; // 抓包/限速后台服务对象。
+    std::shared_ptr<ks::network::TrafficMonitorService> m_trafficService; // Capture epoch cleanup retains the independent service.
+    std::shared_ptr<network_dock_detail::TrafficCaptureLifetime> m_trafficLifetime;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_trafficCleanup;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_trafficDispatcher;
     std::shared_ptr<network_dock_detail::NidsAnalysisSession> m_nidsAnalysisSession;
     ks::ui::AsyncOperation* m_nidsAnalysisOperation = nullptr;
     bool m_nidsAnalysisKickScheduled = false;
@@ -1580,6 +1641,8 @@ private:
     QTimer* m_connectionRefreshTimer = nullptr; // 连接快照轮询刷新定时器（TCP/UDP）。
     QTimer* m_multiDownloadRefreshTimer = nullptr; // 多线程下载页面刷新定时器（进度UI节流）。
     std::unique_ptr<ks::network::HttpsMitmProxyService> m_httpsProxyService; // HTTPS MITM 代理服务对象。
+    std::shared_ptr<network_dock_detail::HttpsProxyRecoveryState> m_httpsRecoveryState;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_httpsRecoveryCleanup;
     bool m_monitorRunning = false;             // 抓包运行状态缓存。
     enum class TrafficMonitorSource : std::uint8_t
     {
@@ -1601,7 +1664,6 @@ private:
     std::atomic_bool m_monitorStopInProgress{ false }; // 停止流程进行中，避免重复 stop 导致 UI 抖动。
     std::atomic_bool m_r0TrafficRefreshPending{ false }; // R0 逐包查询重入门控。
     std::atomic<std::uint64_t> m_monitorGeneration{ 0 }; // 启停代数，丢弃过期异步结果。
-    std::unique_ptr<std::thread> m_monitorStopThread;  // 异步 stop 的 join 线程，防止主线程等待卡顿。
 
     // 当前已应用过滤状态：
     // - m_monitorFilterRuleGroupUiList 保存“原始 UI 配置”；
@@ -1662,9 +1724,11 @@ private:
     bool m_packetTimelineSessionActive = false;            // 是否存在正在运行的时间轴监控会话。
 
     // 后台线程 -> UI 线程的报文暂存队列（只存数据，不碰 UI 控件）。
-    std::deque<ks::network::PacketRecord> m_pendingPacketQueue;
-    mutable std::mutex m_pendingPacketMutex;
-    std::uint64_t m_droppedPacketCount = 0; // 队列满时丢弃计数（用于状态提示）。
+    std::shared_ptr<network_dock_detail::TrafficPacketMailbox> m_packetMailbox =
+        std::make_shared<network_dock_detail::TrafficPacketMailbox>();
+    std::deque<ks::network::PacketRecord>& m_pendingPacketQueue = m_packetMailbox->packets;
+    std::mutex& m_pendingPacketMutex = m_packetMailbox->mutex;
+    std::uint64_t& m_droppedPacketCount = m_packetMailbox->dropped;
 
     static constexpr std::size_t kMaxNidsAlertCount = 2000; // NIDS 告警缓存上限。
     bool m_nidsProjectionNeedsRebuild = false;

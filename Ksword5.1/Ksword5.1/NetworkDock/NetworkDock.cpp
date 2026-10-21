@@ -9,6 +9,120 @@
 
 #include <QMessageBox>
 #include "../UI/AsyncOperation.h"
+#include "../UI/RetainedCleanupJob.h"
+
+bool network_dock_detail::TrafficCaptureLifetime::reserve()
+{
+    std::lock_guard<std::mutex> lock(gate);
+    if (closing) return false;
+    ++inFlight;
+    return true;
+}
+
+void network_dock_detail::TrafficCaptureLifetime::release(
+    const std::shared_ptr<ks::ui::RetainedCleanupJob>& job)
+{
+    { std::lock_guard<std::mutex> lock(gate); --inFlight; }
+    if (job) job->notifyReadyToAttempt();
+}
+
+void network_dock_detail::TrafficCaptureLifetime::requestStop()
+{
+    std::lock_guard<std::mutex> lock(gate);
+    closing = true;
+    service->RequestStopCapture();
+}
+
+bool network_dock_detail::TrafficCaptureLifetime::ready()
+{
+    std::lock_guard<std::mutex> lock(gate);
+    return closing && inFlight == 0;
+}
+
+bool network_dock_detail::TrafficCaptureLifetime::stopR0(QString* error, bool rememberFailure)
+{
+    if (!r0Touched.load()) return true;
+    const ksword::ark::DriverClient driverClient;
+    const auto stopped = driverClient.controlNetworkTrafficCapture(false);
+    const bool confirmed = stopped.unsupported || (stopped.io.ok
+        && stopped.response.status == KSWORD_ARK_NETWORK_STATUS_DISABLED
+        && stopped.response.enabled == 0UL);
+    if (confirmed) r0Touched.store(false);
+    else
+    {
+        if (rememberFailure)
+        {
+            r0FailurePending = true;
+            r0Failure = QString::fromStdString(stopped.io.message);
+        }
+        if (error) *error = QString::fromStdString(stopped.io.message);
+        kLogEvent failure;
+        warn << failure << "[NetworkDock] R0 逐包数据面停用失败: " << stopped.io.message << eol;
+    }
+    return confirmed;
+}
+
+bool network_dock_detail::TrafficCaptureLifetime::finish(QString* error)
+{
+    const bool r3Stopped = service->StopCapture();
+    bool r0Stopped = false;
+    if (r0FailurePending)
+    {
+        r0FailurePending = false;
+        if (error) *error = r0Failure;
+    }
+    else r0Stopped = stopR0(error, false);
+    const bool succeeded = r3Stopped && r0Stopped;
+    finished.store(succeeded);
+    return succeeded;
+}
+
+bool NetworkDock::ensureTrafficCaptureLifetime()
+{
+    if (m_trafficCleanup && !m_trafficCleanup->isComplete()
+        && (!m_trafficLifetime || !m_trafficLifetime->finished.load()))
+        return !m_trafficCleanup->isCleanupRequested();
+    const auto lifetime = std::make_shared<network_dock_detail::TrafficCaptureLifetime>(m_trafficService);
+    const auto dispatcher = m_trafficDispatcher;
+    const auto completed = [this, lifetime](const QString& error, bool succeeded)
+    {
+        if (m_trafficLifetime != lifetime) return;
+        m_monitorRunning = false;
+        m_monitorSource = TrafficMonitorSource::Stopped;
+        m_monitorStopInProgress.store(!succeeded);
+        if (m_r0TrafficRefreshTimer) m_r0TrafficRefreshTimer->stop();
+        if (m_packetTimelineSessionActive) endPacketTimelineMonitorSession();
+        if (m_monitorStatusLabel)
+            m_monitorStatusLabel->setText(!succeeded && error.isEmpty()
+                ? QStringLiteral("状态：停止中，请稍候...") : error.isEmpty()
+                ? QStringLiteral("状态：已停止")
+                : QStringLiteral("状态：界面已停止，但 R0 数据面停用失败：%1").arg(error));
+        updateMonitorButtonState();
+    };
+    const auto job = ks::ui::RetainedCleanupJob::create(
+        [lifetime, dispatcher, completed]()
+        {
+            QString error;
+            const bool succeeded = lifetime->finish(&error);
+            if (succeeded)
+            {
+                kLogEvent stopFinishedEvent;
+                info << stopFinishedEvent << "[NetworkDock] 后台停止流程完成，抓包线程已退出。" << eol;
+            }
+            dispatcher->post([completed, error, succeeded]() { completed(error, succeeded); });
+            return succeeded;
+        }, 0, [lifetime]() { lifetime->requestStop(); },
+        [lifetime]() { return lifetime->ready(); });
+    if (!job)
+    {
+        // create(null) can already own this old epoch's cleanup. Never reuse it.
+        m_trafficService.reset();
+        return false;
+    }
+    m_trafficLifetime = lifetime;
+    m_trafficCleanup = job;
+    return true;
+}
 
 // ============================================================
 // NetworkDock.cpp
@@ -36,7 +150,11 @@ NetworkDock::NetworkDock(QWidget* parent, const ConstructScope scope)
         &recoveryErrorText);
 
     // 创建后台服务对象：负责抓包、PID 映射、限速逻辑。
-    m_trafficService = std::make_unique<ks::network::TrafficMonitorService>();
+    m_trafficService = std::make_shared<ks::network::TrafficMonitorService>();
+    m_trafficDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
+    // A startup recovery failure still owns the inherited durable transaction;
+    // preserve the former destructor's restore attempt under an exit lease.
+    if (m_httpsSystemProxySnapshotCaptured) (void)ensureHttpsProxyRecoveryCleanup();
 
     // 初始化界面和连接逻辑。
     initializeUi();
@@ -122,33 +240,36 @@ NetworkDock::NetworkDock(QWidget* parent, const ConstructScope scope)
     m_multiDownloadRefreshTimer->start();
 
     // 把后台线程回调转发到 UI 线程，保证表格操作线程安全。
-    m_trafficService->SetPacketCallback([this](const ks::network::PacketRecord& packetRecord)
+    m_trafficService->SetPacketCallback([mailbox = m_packetMailbox](const ks::network::PacketRecord& packetRecord)
         {
             // 抓包线程仅执行“入队”轻量动作，不直接碰 UI 控件。
-            std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
-            if (m_pendingPacketQueue.size() >= kMaxPendingPacketQueueCount)
+            std::lock_guard<std::mutex> guard(mailbox->mutex);
+            if (mailbox->closed) return;
+            if (mailbox->packets.size() >= kMaxPendingPacketQueueCount)
             {
                 // 队列满时丢弃最旧报文，保持系统持续可用。
-                m_pendingPacketQueue.pop_front();
-                ++m_droppedPacketCount;
+                mailbox->packets.pop_front();
+                ++mailbox->dropped;
             }
-            m_pendingPacketQueue.push_back(packetRecord);
+            mailbox->packets.push_back(packetRecord);
         });
 
-    m_trafficService->SetStatusCallback([this](const std::string& statusText)
+    const auto deliverStatus = [this](const std::string& text) { onStatusMessageArrived(text); };
+    m_trafficService->SetStatusCallback([dispatcher = m_trafficDispatcher, deliverStatus](const std::string& statusText)
         {
-            QMetaObject::invokeMethod(this, [this, statusText]()
+            dispatcher->post([deliverStatus, statusText]()
                 {
-                    onStatusMessageArrived(statusText);
-                }, Qt::QueuedConnection);
+                    deliverStatus(statusText);
+                });
         });
 
-    m_trafficService->SetRateLimitActionCallback([this](const ks::network::RateLimitActionEvent& actionEvent)
+    const auto deliverAction = [this](const ks::network::RateLimitActionEvent& event) { onRateLimitActionArrived(event); };
+    m_trafficService->SetRateLimitActionCallback([dispatcher = m_trafficDispatcher, deliverAction](const ks::network::RateLimitActionEvent& actionEvent)
         {
-            QMetaObject::invokeMethod(this, [this, actionEvent]()
+            dispatcher->post([deliverAction, actionEvent]()
                 {
-                    onRateLimitActionArrived(actionEvent);
-                }, Qt::QueuedConnection);
+                    deliverAction(actionEvent);
+                });
         });
 
     // 初始化日志。
@@ -162,6 +283,10 @@ NetworkDock::~NetworkDock()
     // A scoped audit host never owned capture/proxy/download services. In
     // particular its teardown must not disable the global driver's capture.
     if (m_constructScope == ConstructScope::ProcessConnections) return;
+    retireHttpsProxyRecovery();
+    if (m_trafficDispatcher) m_trafficDispatcher->close();
+    { std::lock_guard<std::mutex> lock(m_packetMailbox->mutex); m_packetMailbox->closed = true; }
+    if (m_trafficCleanup && !m_trafficCleanup->isCleanupRequested()) m_trafficCleanup->requestCleanup();
     ++m_packetTableProjection.generation;
     if (m_packetTimelineProjectionOperation != nullptr) m_packetTimelineProjectionOperation->close();
     if (m_nidsIconOperation != nullptr) m_nidsIconOperation->close();
@@ -183,11 +308,6 @@ NetworkDock::~NetworkDock()
     if (m_dnsReadOperation != nullptr) m_dnsReadOperation->close();
     m_monitorGeneration.fetch_add(1);
     m_monitorSource = TrafficMonitorSource::Stopped;
-    // 析构必须先停用 R0 逐包数据面；仅停止轮询会让内核继续复制所有流量。
-    {
-        const ksword::ark::DriverClient driverClient;
-        (void)driverClient.controlNetworkTrafficCapture(false);
-    }
     if (m_r0TrafficRefreshTimer != nullptr)
     {
         m_r0TrafficRefreshTimer->stop();
@@ -212,33 +332,17 @@ NetworkDock::~NetworkDock()
         }
     }
 
-    // 若有异步停止线程在执行，析构时同步等待一次，确保服务对象仍然有效。
-    if (m_monitorStopThread != nullptr && m_monitorStopThread->joinable())
-    {
-        m_monitorStopThread->join();
-    }
-    m_monitorStopThread.reset();
-
-    // 窗口销毁前主动停止后台线程，避免析构后回调悬空。
-    if (m_trafficService != nullptr)
-    {
-        m_trafficService->StopCapture();
-    }
+    // The accepted capture epoch owns service/join/native STOP until completion.
+    m_trafficService.reset();
     // The service closes its QObject listener here and transfers only its
     // existing independent session registry to bounded background cleanup.
     m_httpsProxyService.reset();
-    if (m_httpsSystemProxySnapshotCaptured)
-    {
-        QString restoreErrorText;
-        if (!restoreHttpsSystemProxySnapshot(&restoreErrorText))
-        {
-            kLogEvent restoreEvent;
-            warn << restoreEvent << "[NetworkDock] HTTPS 系统代理恢复失败：" << restoreErrorText << eol;
-        }
-    }
 
-    kLogEvent destroyEvent;
-    info << destroyEvent << "[NetworkDock] 网络面板已析构，抓包线程已停止。" << eol;
+    if (!m_trafficLifetime || m_trafficLifetime->finished.load())
+    {
+        kLogEvent destroyEvent;
+        info << destroyEvent << "[NetworkDock] 网络面板已析构，抓包线程已停止。" << eol;
+    }
 }
 
 void NetworkDock::showEvent(QShowEvent* event)
@@ -285,6 +389,8 @@ void NetworkDock::showEvent(QShowEvent* event)
                         if (!owner) return;
                         if (!statusText.isEmpty())
                         {
+                            if (m_httpsProxyService && !m_httpsProxyService->isRunning())
+                                m_httpsProxyRunning = false;
                             updateHttpsProxyStatusLabel(statusText);
                         }
                     }, Qt::QueuedConnection);
