@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import subprocess
+import sys
 
 
 def declaration(source, signature):
@@ -25,6 +26,13 @@ def main():
     root=Path(__file__).resolve().parents[1]
     source=(args.source or root/"Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.cpp").read_text(encoding="utf-8-sig")
     header=(args.header or root/"Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.h").read_text(encoding="utf-8-sig")
+    # PPROC08 replaces the whole-history helper with the single-lane container.
+    # Keep the PPROC07 command usable against the final source, with its real interface.
+    if "ks::process::ProcessActivityHistory<ProcessActivitySample>" in header:
+        command=[sys.executable,str(Path(__file__).with_name("process_activity_retention_tests.py")),"--source",str(args.source or root/"Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.cpp"),"--header",str(args.header or root/"Ksword5.1/Ksword5.1/ProcessDock/ProcessDock.h"),"--qt",str(args.qt)]
+        if args.output is not None: command.extend(["--output",str(args.output)])
+        subprocess.run(command,check=True)
+        return
     output=args.output or root/".codex-build-logs/process-activity-retirement-tests"
     output.mkdir(parents=True,exist_ok=True)
     helper=declaration(source,"template<class Container>\n    void retireProcessActivityHistory(")

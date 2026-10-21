@@ -12,6 +12,7 @@
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../ksword/process/process_cpu_core_etw_monitor.h"
 #include "ProcessEtwCaptureLifecycle.h"
+#include "ProcessActivityHistory.h"
 
 #include <QColor>
 #include <QHash>
@@ -832,6 +833,9 @@ private:
         const std::string& identityKey) const;
     void appendCurrentPerformanceSamplesToDetailWindows();
     std::size_t trimProcessActivitySamples();
+    void scheduleProcessActivityHistoryRetirement();
+    void pumpProcessActivityHistoryRetirement();
+    void retireProcessActivityHistory(bool finalizing = false);
     void refreshProcessActivityTimeline(std::size_t removedSampleCount = 0);
     void refreshProcessActivityChart();
     void updateProcessActivityStatusLabel();
@@ -1216,7 +1220,10 @@ private:
     std::uint64_t m_activityNextSequence = 0;       // 记录样本序号。
     std::uint64_t m_activityRecordingStartTick100ns = 0; // 本次记录开始 steady tick。
     double m_activityTotalPhysicalMemoryMB = 0.0;    // 物理内存总量，用于把内存指标转换为百分比。
-    std::deque<ProcessActivitySample> m_activitySamples; // 有界双端记录缓存，淘汰旧样本时不搬移整个序列。
+    ks::process::ProcessActivityHistory<ProcessActivitySample> m_activitySamples; // canonical仅暴露已接受策略的精确范围，旧所有权延后在worker释放。
+    std::shared_ptr<ks::process::ProcessActivityHistoryRetirementLane<ProcessActivitySample>> m_activityHistoryRetirementLane =
+        std::make_shared<ks::process::ProcessActivityHistoryRetirementLane<ProcessActivitySample>>();
+    QTimer* m_activityHistoryRetirementTimer = nullptr;
     std::vector<ks::process::ProcessRecord> m_activityTableSnapshotRecords; // 历史样本映射出的进程表记录。
 
     // Tooltip 与摘要共用同一完整文档缓存；数据/身份/指标/语言变化均失效。

@@ -163,22 +163,6 @@
 
 namespace
 {
-    // Used only for already-authorized clear/owner teardown; never trims retained history.
-    // ProcessActivitySample owns only STL numbers/strings/vectors, with no Qt/OS object affinity.
-    template<class Container>
-    void retireProcessActivityHistory(Container& history)
-    {
-        if (history.empty()) return;
-        auto retired = std::make_shared<Container>();
-        history.swap(*retired);
-        QThreadPool::globalInstance()->start(QRunnable::create([retired]() {
-            {
-                Container obsolete;
-                obsolete.swap(*retired);
-            } // Complete destruction on worker, even if it runs before the GUI drops its shared_ptr.
-        }));
-    }
-
     template<typename Service, typename StartedCallback>
     void requestProcessEtwCapture(
         const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
@@ -4690,7 +4674,7 @@ ProcessDock::~ProcessDock()
         QApplication::instance()->removeEventFilter(this);
     }
     // Samples have no readers after the GUI-owned dock shuts down. Child chart caches retire separately.
-    retireProcessActivityHistory(m_activitySamples);
+    retireProcessActivityHistory(true);
 }
 
 QObject* ProcessDock::mainWindowActionReceiver() const
@@ -6824,7 +6808,7 @@ void ProcessDock::initializeConnections()
 
     // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
-        retireProcessActivityHistory(m_activitySamples);
+        retireProcessActivityHistory();
         if (m_activityChartWidget != nullptr) m_activityChartWidget->notifyHistoryReset();
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
@@ -6897,6 +6881,7 @@ void ProcessDock::initializeConnections()
     // 不记录历史保留已有样本；切换到最近 N 次或减少 N 时立即裁剪缓存。
     const auto applyActivityHistoryRetention = [this]() {
         m_activityHistoryMode = static_cast<ActivityHistoryMode>(m_activityHistoryModeCombo->currentData().toInt());
+        m_activitySamples.NotePolicyChange(); // Accepted policy generations never publish through worker results.
         m_activityHistoryLimitSpin->setVisible(m_activityHistoryMode == ActivityHistoryMode::Recent);
         const std::size_t removedSampleCount = trimProcessActivitySamples();
         refreshProcessActivityTimeline(removedSampleCount);
@@ -10005,6 +9990,51 @@ void ProcessDock::appendCurrentPerformanceSamplesToDetailWindows()
     }
 }
 
+void ProcessDock::scheduleProcessActivityHistoryRetirement()
+{
+    if (m_activitySamples.retiredSize() == 0) return;
+    if (m_activityHistoryRetirementTimer == nullptr)
+    {
+        m_activityHistoryRetirementTimer = new QTimer(this);
+        m_activityHistoryRetirementTimer->setInterval(16);
+        connect(m_activityHistoryRetirementTimer, &QTimer::timeout,
+            this, &ProcessDock::pumpProcessActivityHistoryRetirement);
+    }
+    if (!m_activityHistoryRetirementTimer->isActive()) m_activityHistoryRetirementTimer->start();
+    pumpProcessActivityHistoryRetirement();
+}
+
+void ProcessDock::pumpProcessActivityHistoryRetirement()
+{
+    // O(32) pointer handoff only: no process strings/vectors are copied or freed here.
+    const auto lane = m_activityHistoryRetirementLane;
+    if (lane->TryBegin(m_activitySamples, 32))
+    {
+        QThreadPool::globalInstance()->start(QRunnable::create([lane]() { lane->Drain(); }));
+    }
+    if (m_activitySamples.retiredSize() == 0 && m_activityHistoryRetirementTimer != nullptr)
+    {
+        m_activityHistoryRetirementTimer->stop();
+    }
+}
+
+void ProcessDock::retireProcessActivityHistory(const bool finalizing)
+{
+    if (finalizing)
+    {
+        if (m_activityHistoryRetirementTimer != nullptr) m_activityHistoryRetirementTimer->stop();
+        const auto lane = m_activityHistoryRetirementLane;
+        // One final O(1) backing swap. The active worker, if any, consumes it itself.
+        if (lane->Finalize(m_activitySamples))
+        {
+            QThreadPool::globalInstance()->start(QRunnable::create([lane]() { lane->Drain(); }));
+        }
+        return;
+    }
+    m_activitySamples.Clear();
+    scheduleProcessActivityHistoryRetirement();
+}
+
 std::size_t ProcessDock::trimProcessActivitySamples()
 {
     // 全量模式不淘汰；不记录模式保留已有历史，只停止后续采样。
@@ -10013,23 +10043,14 @@ std::size_t ProcessDock::trimProcessActivitySamples()
         return 0;
     }
     const std::size_t sampleLimit = static_cast<std::size_t>(m_activityHistoryLimitSpin->value());
-    if (m_activitySamples.size() <= sampleLimit)
-    {
-        return 0;
-    }
-    const std::size_t removeCount = m_activitySamples.size() - sampleLimit;
-    for (std::size_t removeIndex = 0; removeIndex < removeCount; ++removeIndex)
-    {
-        m_activitySamples.pop_front();
-    }
+    const std::size_t removeCount = m_activitySamples.TrimTo(sampleLimit);
     if (m_activityTableSnapshotIndex >= 0)
     {
-        m_activityTableSnapshotIndex -= static_cast<int>(removeCount);
-        if (m_activityTableSnapshotIndex < 0)
-        {
-            m_activityTableSnapshotIndex = -1;
-        }
+        const auto oldIndex = static_cast<std::size_t>(m_activityTableSnapshotIndex);
+        m_activityTableSnapshotIndex = oldIndex < removeCount
+            ? -1 : static_cast<int>(oldIndex - removeCount);
     }
+    scheduleProcessActivityHistoryRetirement();
     return removeCount;
 }
 
@@ -10042,8 +10063,9 @@ void ProcessDock::refreshProcessActivityTimeline(const std::size_t removedSample
 
     const bool oldUpdating = m_activityTimelineSliderUpdating;
     const int sampleCount = static_cast<int>(m_activitySamples.size());
+    const auto oldTimelineIndex = static_cast<std::size_t>(std::max(0, m_activityTimelineSlider->value()));
     const int previousValue = (removedSampleCount > 0 && !m_activityTimelinePinnedToLatest)
-        ? std::max(0, m_activityTimelineSlider->value() - static_cast<int>(removedSampleCount))
+        ? static_cast<int>(oldTimelineIndex > removedSampleCount ? oldTimelineIndex - removedSampleCount : 0)
         : m_activityTimelineSlider->value();
     const int previousMaximum = m_activityTimelineSlider->maximum();
     const bool snapshotActive = isProcessActivityTableSnapshotActive(); // 最新索引仍可能是已选快照。

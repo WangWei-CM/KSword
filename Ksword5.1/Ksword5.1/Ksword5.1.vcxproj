@@ -851,6 +851,7 @@
     <QtMoc Include="Framework\CustomTitleBar.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ProcessDock\ProcessActivityHistory.h" />
     <ClInclude Include="ProcessDock\ProcessEtwCaptureLifecycle.h" />
     <ClInclude Include="MonitorDock\MonitorTableExport.h" />
     <ClInclude Include="MonitorDock\MonitorCanonicalExport.h" />
