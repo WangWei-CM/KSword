@@ -9,6 +9,9 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QHash>
+#include <QSet>
+#include <QScrollBar>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -33,6 +36,8 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <functional>
 
 namespace
 {
@@ -55,7 +60,16 @@ namespace
             setFixedHeight(depth < 0 ? 34 : 25);
             setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         }
-        QString route;      // 服务端目录内的临时身份，不能解释为地址或命令。
+        bool updateContent(const QString& title, const QString& path, const int depth)
+        {
+            const bool searchChanged = searchPath != path;
+            if (text() != title) setText(title);
+            if (searchPath != path) { searchPath = path; setToolTip(path); }
+            if (m_depth != depth) { m_depth = depth; update(); }
+            return searchChanged;
+        }
+        bool searchMatch = false;
+        QString route;      // 服务端对象生命周期身份，不能解释为地址或命令。
         QString searchPath; // 包含父级标题的完整检索路径。
         qreal hue = 0.0;
         bool current = false;
@@ -103,6 +117,8 @@ namespace
         QVBoxLayout* layout;
         PageEntry* header;
         QList<PageEntry*> entries;
+        QHash<QString, PageEntry*> entriesByRoute;
+        int matches = 0;
         qreal hue = 0.0;
     protected:
         void paintEvent(QPaintEvent*) override
@@ -148,6 +164,20 @@ struct PageOverviewWindow::State
     QWidget* board = nullptr;
     QHBoxLayout* columnsLayout = nullptr;
     QList<PageColumn*> columns;
+    QHash<QString, PageColumn*> columnsByRoute;
+    QStringList incomingColumns;
+    QHash<QString, QString> incomingTitles;
+    QSet<QString> seenColumns;
+    QHash<QString, QSet<QString>> seenEntries;
+    QHash<QString, int> incomingPositions;
+    QString catalogInstance;
+    QString catalogRevision;
+    QString appliedQuery;
+    int totalMatches = 0;
+    std::deque<std::function<void()>> pending;
+    bool pumpScheduled = false;
+    quint64 pumpGeneration = 0;
+    QTimer* filterDelay = nullptr;
     QTimer* animation = nullptr;
     QTimer* timeout = nullptr;
     QTimer* startup = nullptr;
@@ -211,36 +241,86 @@ struct PageOverviewWindow::State
         timeout->start(15000);
     }
 
+    void updateFilterStatus()
+    {
+        if (!appliedQuery.isEmpty())
+        {
+            status->setText(totalMatches == 0 ? QStringLiteral("没有匹配页面，可尝试一级分类或页面名称。")
+                : QStringLiteral("找到 %1 个页面 · Enter 打开首项，Esc 收起").arg(totalMatches));
+        }
+        else if (!loading && !summary.isEmpty()) status->setText(summary);
+    }
+
+    void filterColumn(PageColumn* column)
+    {
+        const bool visible = appliedQuery.isEmpty() || column->matches != 0
+            || column->title.contains(appliedQuery, Qt::CaseInsensitive);
+        if (column->isHidden() == visible) column->setVisible(visible);
+    }
+
+    void filterEntry(PageColumn* column, PageEntry* entry)
+    {
+        const bool match = appliedQuery.isEmpty() || entry->searchPath.contains(appliedQuery, Qt::CaseInsensitive);
+        if (entry->searchMatch != match)
+        {
+            column->matches += match ? 1 : -1;
+            totalMatches += match ? 1 : -1;
+            entry->searchMatch = match;
+        }
+        if (entry->isHidden() == match) entry->setVisible(match);
+        filterColumn(column);
+    }
+
     void filter()
     {
-        const QString query = search->text().trimmed();
-        int matches = 0;
+        appliedQuery = search->text().trimmed();
+        totalMatches = 0;
         for (PageColumn* column : columns)
         {
-            bool any = query.isEmpty() || column->title.contains(query, Qt::CaseInsensitive);
+            column->matches = 0;
             for (PageEntry* entry : column->entries)
             {
-                const bool match = query.isEmpty() || entry->searchPath.contains(query, Qt::CaseInsensitive);
-                entry->setVisible(match);
-                any = any || match;
-                if (match) ++matches;
+                entry->searchMatch = false;
+                filterEntry(column, entry);
             }
-            column->setVisible(any);
+            filterColumn(column);
         }
-        if (!query.isEmpty())
+        updateFilterStatus();
+    }
+
+    void schedulePump()
+    {
+        if (pumpScheduled || pending.empty()) return;
+        pumpScheduled = true;
+        const auto generation = pumpGeneration;
+        QTimer::singleShot(0, owner, [this, generation]()
         {
-            status->setText(matches == 0 ? QStringLiteral("没有匹配页面，可尝试一级分类或页面名称。")
-                : QStringLiteral("找到 %1 个页面 · Enter 打开首项，Esc 收起").arg(matches));
-        }
-        else if (!loading && !summary.isEmpty())
-        {
-            status->setText(summary);
-        }
+            if (generation != pumpGeneration) return;
+            pumpScheduled = false;
+            if (!owner->isVisible()) return;
+            QElapsedTimer budget; budget.start();
+            int count = 0;
+            while (!pending.empty() && count < 24 && (count == 0 || budget.elapsed() < 4))
+            {
+                auto next = std::move(pending.front()); pending.pop_front();
+                next(); ++count;
+            }
+            updateFilterStatus();
+            schedulePump();
+        });
+    }
+
+    void cancelProjection()
+    {
+        ++pumpGeneration;
+        pumpScheduled = false;
+        pending.clear();
     }
 
     void refresh()
     {
         if (loading) send(QStringLiteral("cancel"));
+        cancelProjection();
         board->setEnabled(false);
         timeout->stop();
         server = findServer();
@@ -276,54 +356,132 @@ struct PageOverviewWindow::State
         if (type == QStringLiteral("begin"))
         {
             board->setEnabled(true);
-            qDeleteAll(columns);
-            columns.clear();
+            seenColumns.clear(); seenEntries.clear(); incomingColumns.clear(); incomingTitles.clear(); incomingPositions.clear();
+            const QString instance = message.value(QStringLiteral("catalog_instance")).toString();
             const QJsonArray groups = message.value(QStringLiteral("columns")).toArray();
             if (groups.size() > 64) return;
-            for (const QJsonValue& value : groups)
+            catalogInstance = instance;
+            for (int index = 0; index < groups.size(); ++index)
             {
-                const QJsonObject group = value.toObject();
-                auto* column = new PageColumn(group.value(QStringLiteral("title")).toString(), board);
-                column->hue = std::fmod(columns.size() * 0.067, 1.0);
-                column->header->hue = column->hue;
-                column->header->route = group.value(QStringLiteral("id")).toString();
-                QObject::connect(column->header, &QPushButton::clicked, owner,
-                    [this, column]() { navigate(column->header); });
-                columns.append(column);
-                columnsLayout->insertWidget(columnsLayout->count() - 1, column, 0, Qt::AlignTop);
+                const QJsonObject group = groups.at(index).toObject();
+                const QString id = group.value(QStringLiteral("id")).toString();
+                incomingColumns.append(id); seenColumns.insert(id);
+                incomingTitles.insert(id, group.value(QStringLiteral("title")).toString());
+                pending.push_back([this, group, id, index]()
+                {
+                    auto* column = columnsByRoute.value(id, nullptr);
+                    if (column == nullptr)
+                    {
+                        column = new PageColumn(group.value(QStringLiteral("title")).toString(), board);
+                        column->header->route = id;
+                        QObject::connect(column->header, &QPushButton::clicked, owner,
+                            [this, column]() { navigate(column->header); });
+                        columns.append(column); columnsByRoute.insert(id, column);
+                    }
+                    column->title = group.value(QStringLiteral("title")).toString();
+                    column->header->updateContent(column->title, column->title, -1);
+                    column->hue = std::fmod(index * 0.067, 1.0); column->header->hue = column->hue;
+                    if (columnsLayout->indexOf(column) != index)
+                    { columnsLayout->removeWidget(column); columnsLayout->insertWidget(index, column, 0, Qt::AlignTop); }
+                    filterColumn(column);
+                });
             }
         }
         else if (type == QStringLiteral("column"))
         {
             const int index = message.value(QStringLiteral("column")).toInt(-1);
-            if (index < 0 || index >= columns.size()) return;
-            PageColumn* column = columns[index];
+            if (index < 0 || index >= incomingColumns.size()) return;
+            const QString columnId = incomingColumns.at(index);
             const QJsonArray entries = message.value(QStringLiteral("entries")).toArray();
             if (entries.size() > 2048) return;
             for (const QJsonValue& value : entries)
             {
                 const QJsonObject row = value.toObject();
-                auto* entry = new PageEntry(row.value(QStringLiteral("title")).toString(),
-                    row.value(QStringLiteral("path")).toString(), row.value(QStringLiteral("depth")).toInt(), column);
-                entry->route = row.value(QStringLiteral("id")).toString();
-                entry->current = row.value(QStringLiteral("current")).toBool();
-                entry->hue = column->hue;
-                entry->setEnabled(row.value(QStringLiteral("enabled")).toBool());
-                column->layout->addWidget(entry);
-                column->entries.append(entry);
-                QObject::connect(entry, &QPushButton::clicked, owner, [this, entry]() { navigate(entry); });
+                const QString id = row.value(QStringLiteral("id")).toString();
+                if (seenEntries[columnId].contains(id)) continue;
+                seenEntries[columnId].insert(id);
+                const int position = incomingPositions[columnId]++;
+                pending.push_back([this, row, columnId, id, position]()
+                {
+                    auto* column = columnsByRoute.value(columnId, nullptr);
+                    if (column == nullptr) return;
+                    auto* entry = column->entriesByRoute.value(id, nullptr);
+                    bool changed = false;
+                    const bool created = entry == nullptr;
+                    if (entry == nullptr)
+                    {
+                        entry = new PageEntry(row.value(QStringLiteral("title")).toString(),
+                            row.value(QStringLiteral("path")).toString(), row.value(QStringLiteral("depth")).toInt(), column);
+                        entry->route = id;
+                        column->entries.append(entry); column->entriesByRoute.insert(id, entry);
+                        QObject::connect(entry, &QPushButton::clicked, owner, [this, entry]() { navigate(entry); });
+                        changed = true;
+                    }
+                    changed = entry->updateContent(row.value(QStringLiteral("title")).toString(),
+                        row.value(QStringLiteral("path")).toString(), row.value(QStringLiteral("depth")).toInt()) || changed;
+                    const bool current = row.value(QStringLiteral("current")).toBool();
+                    if (entry->current != current) { entry->current = current; entry->update(); }
+                    entry->hue = column->hue;
+                    const bool enabled = row.value(QStringLiteral("enabled")).toBool();
+                    if (entry->isEnabled() != enabled) entry->setEnabled(enabled);
+                    if (column->entries.value(position, nullptr) != entry)
+                    { column->entries.removeOne(entry); column->entries.insert(position, entry); }
+                    auto* item = column->layout->itemAt(position + 1);
+                    if (created || item == nullptr || item->widget() != entry)
+                    {
+                        if (!created) column->layout->removeWidget(entry);
+                        column->layout->insertWidget(position + 1, entry);
+                    }
+                    if (changed) filterEntry(column, entry);
+                });
             }
-            status->setText(QStringLiteral("正在整理页面：%1（%2/%3）").arg(column->title).arg(index + 1).arg(columns.size()));
+            status->setText(QStringLiteral("正在整理页面：%1（%2/%3）")
+                .arg(incomingTitles.value(columnId)).arg(index + 1).arg(incomingColumns.size()));
             timeout->start(60000);
         }
         else if (type == QStringLiteral("complete"))
         {
-            loading = false;
-            timeout->stop();
-            int pages = columns.size();
-            for (PageColumn* column : columns) pages += column->entries.size();
-            summary = QStringLiteral("%1 个分类 · %2 个页面 · 点击进入，Esc 收起").arg(columns.size()).arg(pages);
-            status->setText(summary);
+            const QString revision = message.value(QStringLiteral("revision")).toString();
+            const QString instance = message.value(QStringLiteral("catalog_instance")).toString();
+            pending.push_back([this, revision, instance]()
+            {
+                // 只在完整目录到齐后修剪旧身份；每个旧按钮也进入同一有预算队列。
+                for (PageColumn* column : columns)
+                {
+                    const QString id = column->header->route;
+                    for (PageEntry* entry : column->entries)
+                    {
+                        if (seenColumns.contains(id) && seenEntries.value(id).contains(entry->route)) continue;
+                        pending.push_back([this, column, entry]()
+                        {
+                            if (entry->searchMatch) { --column->matches; --totalMatches; }
+                            column->entries.removeOne(entry); column->entriesByRoute.remove(entry->route);
+                            column->layout->removeWidget(entry); delete entry;
+                        });
+                    }
+                    if (!seenColumns.contains(id))
+                    {
+                        pending.push_back([this, column, id]()
+                        {
+                            columns.removeOne(column); columnsByRoute.remove(id);
+                            columnsLayout->removeWidget(column); delete column;
+                        });
+                    }
+                }
+                pending.push_back([this, revision, instance]()
+                {
+                    QList<PageColumn*> ordered;
+                    for (const QString& id : incomingColumns)
+                        if (auto* column = columnsByRoute.value(id, nullptr)) { ordered.append(column); filterColumn(column); }
+                    columns = ordered;
+                    catalogRevision = revision; catalogInstance = instance;
+                    loading = false; timeout->stop();
+                    int pages = columns.size();
+                    for (PageColumn* column : columns) pages += column->entries.size();
+                    summary = QStringLiteral("%1 个分类 · %2 个页面 · 点击进入，Esc 收起").arg(columns.size()).arg(pages);
+                    status->setText(summary);
+                });
+            });
         }
         else if (type == QStringLiteral("activated"))
         {
@@ -337,7 +495,7 @@ struct PageOverviewWindow::State
             status->setText(QStringLiteral("页面已变化，请刷新目录后重新选择。"));
             return;
         }
-        filter();
+        schedulePump();
     }
 };
 
@@ -464,11 +622,16 @@ PageOverviewWindow::PageOverviewWindow(QWidget* owner)
     {
         if (m_state->loading) m_state->send(QStringLiteral("cancel"));
         m_state->loading = false;
+        m_state->cancelProjection();
         m_state->status->setText(QStringLiteral("目录加载或页面跳转超时，请稍后刷新。"));
     });
-    connect(m_state->search, &QLineEdit::textChanged, this, [this]() { m_state->filter(); });
+    m_state->filterDelay = new QTimer(this);
+    m_state->filterDelay->setSingleShot(true); m_state->filterDelay->setInterval(120);
+    connect(m_state->filterDelay, &QTimer::timeout, this, [this]() { m_state->filter(); });
+    connect(m_state->search, &QLineEdit::textChanged, this, [this]() { m_state->filterDelay->start(); });
     connect(m_state->search, &QLineEdit::returnPressed, this, [this]()
     {
+        m_state->filterDelay->stop(); m_state->filter();
         for (PageColumn* column : m_state->columns)
         {
             if (column->isHidden()) continue;
@@ -600,6 +763,7 @@ void PageOverviewWindow::showEvent(QShowEvent* event)
     BOOL animations = TRUE;
     ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
     if (animations) m_state->animation->start();
+    if (m_state->appliedQuery != m_state->search->text().trimmed()) m_state->filter();
     m_state->refresh();
 }
 
@@ -609,6 +773,8 @@ void PageOverviewWindow::hideEvent(QHideEvent* event)
     m_state->saveAppearance();
     if (m_state->loading) m_state->send(QStringLiteral("cancel"));
     m_state->loading = false;
+    m_state->cancelProjection();
+    m_state->filterDelay->stop();
     m_state->animation->stop();
     m_state->timeout->stop();
     m_state->startup->stop();
