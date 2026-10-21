@@ -7,6 +7,10 @@
 #include "UI/PageNavigationBridge.h"
 #include "UI/PageNavigationCatalog.h"
 #include "UI/PerfTrace.h"
+#if KSWORD_PERF_TRACE_ENABLED
+#include "UI/SmoothScrollSupport.h"
+#include <QJsonObject>
+#endif
 #include "UI/UiAnimationGate.h"
 #include "UI/CoordinatedApplicationQuit.h"
 #include "UI/RetainedCleanupJob.h"
@@ -157,6 +161,71 @@
 
 namespace
 {
+#if KSWORD_PERF_TRACE_ENABLED
+    void RecordPerformanceConditions(const QWidget* window,
+        const ks::settings::AppearanceSettings& settings, const bool backgroundReady)
+    {
+        try
+        {
+            QElapsedTimer captureTimer; captureTimer.start();
+            QJsonObject conditions{
+                {QStringLiteral("schema"), 1},
+                {QStringLiteral("window_width"), window->width()},
+                {QStringLiteral("window_height"), window->height()},
+                {QStringLiteral("window_visible"), window->isVisible()},
+                {QStringLiteral("window_dpr"), window->devicePixelRatioF()},
+                {QStringLiteral("qt_platform"), QGuiApplication::platformName()},
+                {QStringLiteral("qt_style"), QApplication::style()->objectName()},
+                {QStringLiteral("shared_gl_contexts"), QCoreApplication::testAttribute(Qt::AA_ShareOpenGLContexts)},
+                {QStringLiteral("theme_mode"), static_cast<int>(settings.themeMode)},
+                {QStringLiteral("effective_dark"), KswordTheme::IsDarkModeEnabled()},
+                {QStringLiteral("accent"), KswordTheme::PrimaryBlueColor.name()},
+                {QStringLiteral("main_background"), window->palette().color(QPalette::Window).name()},
+                {QStringLiteral("background_image"), settings.backgroundImagePath},
+                {QStringLiteral("background_ready"), backgroundReady},
+                {QStringLiteral("background_opacity_percent"), settings.backgroundOpacityPercent},
+                {QStringLiteral("background_transparency"), settings.backgroundTransparencyEnabled},
+                {QStringLiteral("background_material"), settings.backgroundTranslucencyMaterial},
+                {QStringLiteral("background_blur_percent"), settings.backgroundBlurRadiusPercent},
+                {QStringLiteral("animations_requested"), settings.uiAnimationsEnabled},
+                {QStringLiteral("animations_effective"), ks::ui::AreUiAnimationsEnabled()},
+                {QStringLiteral("smooth_scrolling_requested"), settings.smoothScrollingEnabled},
+                {QStringLiteral("smooth_scrolling_effective"), ks::ui::IsGlobalSmoothScrollingEnabled()},
+                {QStringLiteral("language_requested"), settings.uiLanguage},
+                {QStringLiteral("app_font_family"), QApplication::font().family()},
+                {QStringLiteral("app_font_point_size"), QApplication::font().pointSizeF()},
+                {QStringLiteral("app_font_pixel_size"), QApplication::font().pixelSize()},
+                {QStringLiteral("text_antialiasing_requested"), settings.textAntialiasingEnabled},
+                {QStringLiteral("data_quantity_coverage"), QStringLiteral("focused_view_only")}
+            };
+            if (const QScreen* screen = window->screen())
+            {
+                conditions.insert(QStringLiteral("screen_name"), screen->name());
+                conditions.insert(QStringLiteral("screen_logical_dpi"), screen->logicalDotsPerInch());
+                conditions.insert(QStringLiteral("screen_physical_dpi"), screen->physicalDotsPerInch());
+                conditions.insert(QStringLiteral("screen_reported_refresh_hz"), screen->refreshRate());
+                conditions.insert(QStringLiteral("screen_width"), screen->geometry().width());
+                conditions.insert(QStringLiteral("screen_height"), screen->geometry().height());
+            }
+            // This bounded ancestor walk never forces the other hidden models.
+            QWidget* focused = QApplication::focusWidget();
+            if (focused) conditions.insert(QStringLiteral("focus_class"), QString::fromUtf8(focused->metaObject()->className()));
+            for (int depth = 0; focused && depth < 16; ++depth, focused = focused->parentWidget())
+            {
+                const auto* view = qobject_cast<const QAbstractItemView*>(focused);
+                if (!view || !view->model()) continue;
+                conditions.insert(QStringLiteral("focused_model_rows"), view->model()->rowCount(view->rootIndex()));
+                conditions.insert(QStringLiteral("focused_model_columns"), view->model()->columnCount(view->rootIndex()));
+                conditions.insert(QStringLiteral("focused_model_class"), QString::fromUtf8(view->model()->metaObject()->className()));
+                break;
+            }
+            conditions.insert(QStringLiteral("probe_capture_ns"), static_cast<double>(captureTimer.nsecsElapsed()));
+            ks::ui::RecordPerfRuntimeConditions(conditions);
+        }
+        catch (...) {} // A diagnostic snapshot cannot change navigation or appearance.
+    }
+#endif
+
     constexpr wchar_t kKswordPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
     constexpr wchar_t kKswordEnableR0AfterElevationArgument[] = L"--ksword-enable-r0-after-elevation";
     constexpr wchar_t kKswordMainWindowPropertyName[] = L"KswordARK.MainWindow.Singleton.Release";
@@ -11814,18 +11883,21 @@ void MainWindow::setupDockLayout()
     };
     ks::ui::InitializePerfTrace();
 
-    const auto connectPerfDockArea = [describePerfDock](ads::CDockAreaWidget* area)
+    const auto recordEnvironment = [this]() { RecordPerformanceConditions(this, m_currentAppearanceSettings, m_backgroundImageReady); };
+    recordEnvironment();
+    const auto connectPerfDockArea = [this, describePerfDock, recordEnvironment](ads::CDockAreaWidget* area)
     {
         if (area == nullptr || area->property("ksword_perf_trace_connected").toBool())
         {
             return;
         }
         area->setProperty("ksword_perf_trace_connected", true);
-        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, area,
-            [area, describePerfDock](int)
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, this,
+            [area, describePerfDock, recordEnvironment](int)
             {
                 ks::ui::RecordPerfMark("perf_dock_focus",
                     describePerfDock(area->currentDockWidget()));
+                recordEnvironment();
             });
         if (area->currentDockWidget() != nullptr)
         {
@@ -11843,11 +11915,12 @@ void MainWindow::setupDockLayout()
             connectPerfDockArea(area);
         });
     connect(m_pDockManager, &ads::CDockManager::focusedDockWidgetChanged, this,
-        [describePerfDock](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
+        [describePerfDock, recordEnvironment](ads::CDockWidget* /*previousDock*/, ads::CDockWidget* currentDock)
         {
             if (currentDock != nullptr)
             {
                 ks::ui::RecordPerfMark("perf_dock_focus", describePerfDock(currentDock));
+                recordEnvironment();
             }
         });
 
@@ -13243,6 +13316,9 @@ void MainWindow::applyAppearanceSettings(
         << "，elapsedMs="
         << appearanceApplyTimer.elapsed()
         << eol;
+#if KSWORD_PERF_TRACE_ENABLED
+    RecordPerformanceConditions(this, m_currentAppearanceSettings, m_backgroundImageReady);
+#endif
 }
 
 void MainWindow::refreshThemeDependentVisuals(const bool darkModeEnabled)

@@ -505,3 +505,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 标题栏CurrentPage搜索的nested prepare必须与游标的visibleOnly范围一致。Memory/Misc的prepareNavigationPages(true)只准备当前选中根及当前工作台/调试视图，不置全局prepared；false默认仍保留完整兼容发现。搜索层传UiSearchScope，MainWindow只把CurrentPage映射为true，Taskbar及旧路由默认false；不通过改searchComplete伪造冷页正文索引。133项QtCore抽取实际方法/原路径对照证明全范围工厂调用顺序相同、当前页不调用其它工厂及重入销毁保护；实际GUI/可见正文/主题仍由用户验收，GN-009/FP-003全范围冷正文尚未完成。
 
 - 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。
+
+- 2026-10-21 诊断writer以实际EXE SHA匹配有大小上限的发行build-info，再记录commit/构建边界tracked dirty；没有匹配清单或旧清单没有dirty时明确unavailable，不从运行机器的Git猜身份。ADS记录实际DLL hash。运行条件仅在原Dock/外观事件记录值快照（窗口、DPI、系统报告刷新率、动画/主题/背景/字体与聚焦模型数量），不扫描隐藏页、不回调worker内UI；屏幕刷新率不是FPS，快照不是呈现或完整因果证明，普通宏0移除调用。

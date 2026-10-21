@@ -116,6 +116,22 @@ if ($VerifyArtifactOnly) {
     exit 0
 }
 
+function Write-KSwordSourceIdentity([string]$Boundary) {
+    $identityCommit = 'unavailable'
+    $identityDirty = 'unavailable'
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $identityHead = & git --no-optional-locks -C $resolvedRoot rev-parse --verify HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $identityHead -match '^[0-9a-fA-F]{40}$') {
+            $identityCommit = $identityHead
+            $identityStatus = @(& git --no-optional-locks -C $resolvedRoot status --porcelain --untracked-files=no 2>$null)
+            if ($LASTEXITCODE -eq 0) { $identityDirty = if ($identityStatus.Count) { 'true' } else { 'false' } }
+        }
+    }
+    Write-Output "BUILD_SOURCE_COMMIT_$Boundary=$identityCommit"
+    Write-Output "BUILD_SOURCE_DIRTY_$Boundary=$identityDirty"
+}
+Write-KSwordSourceIdentity 'BEGIN'
+
 $logDirectory = Join-Path $resolvedRoot '.codex-build-logs'
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $buildStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -236,6 +252,8 @@ finally {
         Remove-Item -LiteralPath $temporaryPropsPath -Force
     }
 }
+
+Write-KSwordSourceIdentity 'END'
 
 $rawText = if (Test-Path -LiteralPath $rawLogPath) {
     [System.IO.File]::ReadAllText($rawLogPath)

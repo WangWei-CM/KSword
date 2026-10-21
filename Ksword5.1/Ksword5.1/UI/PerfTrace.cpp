@@ -10,6 +10,7 @@
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
@@ -96,6 +97,7 @@ namespace
         quint64 actionId = 0, requestId = 0, parentRequestId = 0;
         quintptr threadId = 0;
         QString origin;
+        QJsonObject conditions;
         int eventType = -1;
         qint64 selfWallNs = -1, threadCycles = -1, selfThreadCycles = -1;
         qint64 threadCpu100ns = -1, selfThreadCpu100ns = -1;
@@ -120,6 +122,46 @@ namespace
         QString applicationVersion;
         QString utc;
     };
+
+    // This is an artifact association, not an attestation. Source identity is
+    // accepted only from a bounded sidecar whose main hash matches these bytes.
+    QJsonObject readBuildIdentity(const QString& executablePath, const QString& executableSha256)
+    {
+        if (executableSha256.isEmpty()) return {{QStringLiteral("status"), QStringLiteral("exe_hash_unavailable")}};
+        const QFileInfo executable(executablePath);
+        const QDir directory = executable.absoluteDir();
+        for (const QString& candidate : {directory.filePath(QStringLiteral("build-info.json")),
+                 directory.filePath(QStringLiteral("../build-info.json"))})
+        {
+            QFile sidecar(candidate);
+            if (!sidecar.open(QIODevice::ReadOnly) || sidecar.size() > 2 * 1024 * 1024) continue;
+            const QJsonObject info = QJsonDocument::fromJson(sidecar.read(2 * 1024 * 1024 + 1)).object();
+            const QString commit = info.value(QStringLiteral("source_commit")).toString();
+            const bool validCommit = commit.size() == 40 && std::all_of(commit.cbegin(), commit.cend(), [](QChar ch) {
+                return (ch >= QLatin1Char('0') && ch <= QLatin1Char('9'))
+                    || (ch >= QLatin1Char('a') && ch <= QLatin1Char('f'))
+                    || (ch >= QLatin1Char('A') && ch <= QLatin1Char('F'));
+            });
+            if (!validCommit) continue;
+            int mainEntries = 0;
+            bool matchingHash = false;
+            for (const QJsonValue& entry : info.value(QStringLiteral("files")).toArray())
+            {
+                const QJsonObject file = entry.toObject();
+                if (file.value(QStringLiteral("path")).toString() != executable.fileName()) continue;
+                ++mainEntries;
+                matchingHash = file.value(QStringLiteral("sha256")).toString().compare(executableSha256, Qt::CaseInsensitive) == 0;
+            }
+            if (mainEntries != 1 || !matchingHash) continue;
+            QJsonObject identity{{QStringLiteral("status"), QStringLiteral("artifact_sha256_matched")},
+                {QStringLiteral("commit"), commit}, {QStringLiteral("manifest_path"), QFileInfo(candidate).absoluteFilePath()},
+                {QStringLiteral("dirty_scope"), QStringLiteral("tracked_source_at_build_boundaries")}};
+            const QJsonValue dirty = info.value(QStringLiteral("source_dirty"));
+            identity.insert(QStringLiteral("dirty"), dirty.isBool() ? dirty : QJsonValue(QStringLiteral("unavailable")));
+            return identity;
+        }
+        return {{QStringLiteral("status"), QStringLiteral("matching_manifest_unavailable")}};
+    }
 
     // The existing trace gets one value-owned writer, not a second UI service.
     // It owns QFile/JSON/hash work. Normal dispatch never waits for disk; only
@@ -182,13 +224,25 @@ namespace
         session.insert(QStringLiteral("exe"), state->executable);
         session.insert(QStringLiteral("writer_thread"), QString::number(
             reinterpret_cast<quintptr>(QThread::currentThreadId())));
+        QString executableSha256;
         QFile executable(state->executable);
         if (executable.open(QIODevice::ReadOnly))
         {
             QCryptographicHash hash(QCryptographicHash::Sha256);
             if (hash.addData(&executable))
-                session.insert(QStringLiteral("exe_sha256"), QString::fromLatin1(hash.result().toHex()));
+            {
+                executableSha256 = QString::fromLatin1(hash.result().toHex());
+                session.insert(QStringLiteral("exe_sha256"), executableSha256);
+            }
         }
+        session.insert(QStringLiteral("source_identity"), readBuildIdentity(state->executable, executableSha256));
+        QFile ads(QFileInfo(state->executable).absoluteDir().filePath(QStringLiteral("qtadvanceddocking.dll")));
+        if (ads.open(QIODevice::ReadOnly))
+        {
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            if (hash.addData(&ads)) session.insert(QStringLiteral("ads_runtime_sha256"), QString::fromLatin1(hash.result().toHex()));
+        }
+        session.insert(QStringLiteral("physical_present_measured"), false);
         if (!writeRecord(session)) return false;
 
         quint64 writtenRecords = 0, droppedRecords = 0;
@@ -233,6 +287,7 @@ namespace
                 if (value.parentRequestId)
                     record.insert(QStringLiteral("parent_request_id"), QString::number(value.parentRequestId));
                 if (!value.origin.isEmpty()) record.insert(QStringLiteral("origin"), value.origin);
+                if (!value.conditions.isEmpty()) record.insert(QStringLiteral("conditions"), value.conditions);
                 if (!value.target.isEmpty())
                     record.insert(QStringLiteral("target"), value.target);
                 if (!value.context.isEmpty())
@@ -352,6 +407,13 @@ namespace ks::ui
                 m_cachedContext = target;
             }
             enqueue(makeRecord("mark", operation, target));
+        }
+
+        void recordConditions(const QJsonObject& conditions)
+        {
+            auto record = makeRecord("runtime_conditions", "perf_runtime_conditions", QString());
+            record.conditions = conditions;
+            enqueue(std::move(record));
         }
 
         quint64 nextNotifyId() { return m_nextScopeId.fetch_add(1, std::memory_order_relaxed); }
@@ -591,6 +653,12 @@ namespace ks::ui
     void RecordPerfMark(const char* operation, const QString& target)
     {
         PerfTrace::instance().recordMark(operation, target);
+    }
+
+    void RecordPerfRuntimeConditions(const QJsonObject& conditions) noexcept
+    {
+        try { PerfTrace::instance().recordConditions(conditions); }
+        catch (...) {} // Observability must not alter the original UI action.
     }
 
     qint64 PerfTraceNowMs() { return referenceClock().elapsed(); }

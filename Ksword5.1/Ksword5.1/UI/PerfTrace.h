@@ -5,6 +5,7 @@
 
 class QObject;
 class QEvent;
+class QJsonObject;
 
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
@@ -53,6 +54,10 @@ namespace ks::ui
 
     // 记录一个观察时间点；它不能为此前的心跳区间提供因果归因。
     void RecordPerfMark(const char* operationToken, const QString& targetLabel);
+
+    // GUI supplies an explicit value snapshot at an existing lifecycle signal;
+    // the writer never calls back into widgets or samples business services.
+    void RecordPerfRuntimeConditions(const QJsonObject& conditions) noexcept;
 
     // 获取全局单调时钟经过的毫秒数；分片计时需要与日志时间轴对齐时使用。
     qint64 PerfTraceNowMs();
@@ -127,6 +132,7 @@ namespace ks::ui
     inline void RecordPerfSpan(const char*, const QString&, qint64) {}
     inline void RecordPerfSpanWithCount(const char*, const QString&, qint64, qint64) {}
     inline void RecordPerfMark(const char*, const QString&) {}
+    inline void RecordPerfRuntimeConditions(const QJsonObject&) noexcept {}
     inline qint64 PerfTraceNowMs() { return 0; }
     inline qint64 PerfTraceNowNs() { return 0; }
     inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}
