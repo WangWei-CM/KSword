@@ -170,6 +170,7 @@ void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
         {
+            ensureVisibleNetworkToolPage();
             initializeVisibleDiagnosticPage();
             synchronizeVisiblePacketProjection();
             synchronizeVisibleNidsProjection();
@@ -688,70 +689,6 @@ void NetworkDock::initializeConnections()
             });
     }
 
-    // 请求构造控制连接：执行请求、重置表单、模式切换自动调整默认参数。
-    connect(m_manualExecuteButton, &QPushButton::clicked, this, [this]()
-        {
-            executeManualRequest();
-        });
-    connect(m_manualResetButton, &QPushButton::clicked, this, [this]()
-        {
-            kLogEvent resetClickEvent;
-            info << resetClickEvent << "[NetworkDock] 用户点击请求构造重置按钮。" << eol;
-            resetManualRequestForm();
-        });
-    connect(m_manualApiCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
-        {
-            if (m_manualApiCombo == nullptr)
-            {
-                return;
-            }
-
-            const ks::network::ManualNetworkApiKind apiKind =
-                static_cast<ks::network::ManualNetworkApiKind>(m_manualApiCombo->currentData().toInt());
-
-            // 模式切换时只更新推荐默认参数，不强行覆盖用户已勾选的“手动覆盖”语义。
-            if (m_manualOverrideSocketParameterCheck != nullptr &&
-                m_manualOverrideSocketParameterCheck->isChecked())
-            {
-                kLogEvent switchApiEvent;
-                dbg << switchApiEvent
-                    << "[NetworkDock] 请求构造 API 模式切换（保留手工参数）, api="
-                    << ks::network::ManualNetworkApiKindToString(apiKind)
-                    << eol;
-                return;
-            }
-
-            if (m_manualSocketTypeEdit == nullptr || m_manualProtocolEdit == nullptr)
-            {
-                return;
-            }
-
-            if (apiKind == ks::network::ManualNetworkApiKind::WinSockTcp)
-            {
-                m_manualSocketTypeEdit->setText(QStringLiteral("1")); // SOCK_STREAM
-                m_manualProtocolEdit->setText(QStringLiteral("6"));   // IPPROTO_TCP
-                if (m_manualConnectBeforeSendCheck != nullptr)
-                {
-                    m_manualConnectBeforeSendCheck->setChecked(true);
-                }
-            }
-            else
-            {
-                m_manualSocketTypeEdit->setText(QStringLiteral("2")); // SOCK_DGRAM
-                m_manualProtocolEdit->setText(QStringLiteral("17"));  // IPPROTO_UDP
-            }
-
-            const bool overrideSocketParameters = m_manualOverrideSocketParameterCheck != nullptr
-                && m_manualOverrideSocketParameterCheck->isChecked();
-            kLogEvent switchApiEvent;
-            dbg << switchApiEvent
-                << "[NetworkDock] 请求构造 API 模式切换, api="
-                << ks::network::ManualNetworkApiKindToString(apiKind)
-                << ", overrideSocket="
-                << (overrideSocketParameters ? "true" : "false")
-                << eol;
-        });
-
     // 多线程下载页连接：开始下载、选择目录、URL回车触发。
     connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
         {
@@ -1135,68 +1072,6 @@ void NetworkDock::initializeConnections()
             {
                 return;
             }
-        });
-
-    // ARP 缓存页控制连接。
-    connect(m_refreshArpButton, &QPushButton::clicked, this, [this]()
-        {
-            refreshArpCacheTable();
-        });
-    connect(m_addArpButton, &QPushButton::clicked, this, [this]()
-        {
-            addArpCacheEntry();
-        });
-    connect(m_removeArpButton, &QPushButton::clicked, this, [this]()
-        {
-            removeSelectedArpCacheEntry();
-        });
-    connect(m_flushArpButton, &QPushButton::clicked, this, [this]()
-        {
-            flushArpCache();
-        });
-
-    // DNS 缓存页控制连接。
-    connect(m_refreshDnsButton, &QPushButton::clicked, this, [this]()
-        {
-            refreshDnsCacheTable();
-        });
-    connect(m_removeDnsButton, &QPushButton::clicked, this, [this]()
-        {
-            removeDnsCacheEntry();
-        });
-    connect(m_flushDnsButton, &QPushButton::clicked, this, [this]()
-        {
-            flushDnsCache();
-        });
-    connect(m_dnsTable, &QTableWidget::itemSelectionChanged, this, [this]()
-        {
-            if (m_dnsEntryEdit == nullptr || m_dnsTable == nullptr)
-            {
-                return;
-            }
-
-            const QList<QTableWidgetItem*> selectedItemList = m_dnsTable->selectedItems();
-            if (selectedItemList.isEmpty())
-            {
-                return;
-            }
-
-            const int row = selectedItemList.first()->row();
-            QTableWidgetItem* hostItem = m_dnsTable->item(row, 0);
-            if (hostItem != nullptr)
-            {
-                m_dnsEntryEdit->setText(hostItem->text());
-            }
-        });
-
-    // 存活主机扫描页连接。
-    connect(m_startAliveScanButton, &QPushButton::clicked, this, [this]()
-        {
-            startAliveHostScan();
-        });
-    connect(m_stopAliveScanButton, &QPushButton::clicked, this, [this]()
-        {
-            stopAliveHostScan();
         });
 
     // 初始化按钮可用状态。
@@ -1690,3 +1565,145 @@ void NetworkDock::updateMonitorButtonState()
 
 
 
+
+void NetworkDock::initializeManualRequestConnections()
+{
+    // 请求构造控制连接：执行请求、重置表单、模式切换自动调整默认参数。
+    connect(m_manualExecuteButton, &QPushButton::clicked, this, [this]()
+        {
+            executeManualRequest();
+        });
+    connect(m_manualResetButton, &QPushButton::clicked, this, [this]()
+        {
+            kLogEvent resetClickEvent;
+            info << resetClickEvent << "[NetworkDock] 用户点击请求构造重置按钮。" << eol;
+            resetManualRequestForm();
+        });
+    connect(m_manualApiCombo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, [this](const int /*index*/)
+        {
+            if (m_manualApiCombo == nullptr)
+            {
+                return;
+            }
+
+            const ks::network::ManualNetworkApiKind apiKind =
+                static_cast<ks::network::ManualNetworkApiKind>(m_manualApiCombo->currentData().toInt());
+
+            // 模式切换时只更新推荐默认参数，不强行覆盖用户已勾选的“手动覆盖”语义。
+            if (m_manualOverrideSocketParameterCheck != nullptr &&
+                m_manualOverrideSocketParameterCheck->isChecked())
+            {
+                kLogEvent switchApiEvent;
+                dbg << switchApiEvent
+                    << "[NetworkDock] 请求构造 API 模式切换（保留手工参数）, api="
+                    << ks::network::ManualNetworkApiKindToString(apiKind)
+                    << eol;
+                return;
+            }
+
+            if (m_manualSocketTypeEdit == nullptr || m_manualProtocolEdit == nullptr)
+            {
+                return;
+            }
+
+            if (apiKind == ks::network::ManualNetworkApiKind::WinSockTcp)
+            {
+                m_manualSocketTypeEdit->setText(QStringLiteral("1")); // SOCK_STREAM
+                m_manualProtocolEdit->setText(QStringLiteral("6"));   // IPPROTO_TCP
+                if (m_manualConnectBeforeSendCheck != nullptr)
+                {
+                    m_manualConnectBeforeSendCheck->setChecked(true);
+                }
+            }
+            else
+            {
+                m_manualSocketTypeEdit->setText(QStringLiteral("2")); // SOCK_DGRAM
+                m_manualProtocolEdit->setText(QStringLiteral("17"));  // IPPROTO_UDP
+            }
+
+            const bool overrideSocketParameters = m_manualOverrideSocketParameterCheck != nullptr
+                && m_manualOverrideSocketParameterCheck->isChecked();
+            kLogEvent switchApiEvent;
+            dbg << switchApiEvent
+                << "[NetworkDock] 请求构造 API 模式切换, api="
+                << ks::network::ManualNetworkApiKindToString(apiKind)
+                << ", overrideSocket="
+                << (overrideSocketParameters ? "true" : "false")
+                << eol;
+        });
+
+}
+
+void NetworkDock::initializeArpCacheConnections()
+{
+    // ARP 缓存页控制连接。
+    connect(m_refreshArpButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshArpCacheTable();
+        });
+    connect(m_addArpButton, &QPushButton::clicked, this, [this]()
+        {
+            addArpCacheEntry();
+        });
+    connect(m_removeArpButton, &QPushButton::clicked, this, [this]()
+        {
+            removeSelectedArpCacheEntry();
+        });
+    connect(m_flushArpButton, &QPushButton::clicked, this, [this]()
+        {
+            flushArpCache();
+        });
+
+}
+
+void NetworkDock::initializeDnsCacheConnections()
+{
+    // DNS 缓存页控制连接。
+    connect(m_refreshDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            refreshDnsCacheTable();
+        });
+    connect(m_removeDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            removeDnsCacheEntry();
+        });
+    connect(m_flushDnsButton, &QPushButton::clicked, this, [this]()
+        {
+            flushDnsCache();
+        });
+    connect(m_dnsTable, &QTableWidget::itemSelectionChanged, this, [this]()
+        {
+            if (m_dnsEntryEdit == nullptr || m_dnsTable == nullptr)
+            {
+                return;
+            }
+
+            const QList<QTableWidgetItem*> selectedItemList = m_dnsTable->selectedItems();
+            if (selectedItemList.isEmpty())
+            {
+                return;
+            }
+
+            const int row = selectedItemList.first()->row();
+            QTableWidgetItem* hostItem = m_dnsTable->item(row, 0);
+            if (hostItem != nullptr)
+            {
+                m_dnsEntryEdit->setText(hostItem->text());
+            }
+        });
+
+}
+
+void NetworkDock::initializeAliveHostScanConnections()
+{
+    // 存活主机扫描页连接。
+    connect(m_startAliveScanButton, &QPushButton::clicked, this, [this]()
+        {
+            startAliveHostScan();
+        });
+    connect(m_stopAliveScanButton, &QPushButton::clicked, this, [this]()
+        {
+            stopAliveHostScan();
+        });
+
+}

@@ -73,8 +73,10 @@ namespace network_navigation_detail
         const Definition* definition = Find(id);
         Q_ASSERT(definition != nullptr);
         if (definition == nullptr || tabs == nullptr || page == nullptr) return -1;
-        const int index = tabs->addTab(page, icon, Title(*definition));
-        if (*definition->binding != '\0')
+        const int existing = tabs->indexOf(page);
+        const int index = existing >= 0 ? existing : tabs->addTab(page, icon, Title(*definition));
+        if (existing >= 0 && !icon.isNull()) tabs->setTabIcon(index, icon);
+        if (existing < 0 && *definition->binding != '\0')
             ks::i18n::LanguageManager::instance().bindTab(tabs, page,
                 QString::fromLatin1(definition->binding), QString::fromWCharArray(definition->sourceTitle));
         // Construction-only registration walks a short ancestor chain; providers

@@ -438,6 +438,13 @@ private:
     // - 作用：统一连接按钮、输入框、表格的信号槽。
     // - 返回：无。
     void initializeConnections();
+    bool ensureNetworkToolPage(QWidget* page);
+    void ensureVisibleNetworkToolPage();
+    void initializeManualRequestConnections();
+    void initializeArpCacheConnections();
+    void initializeDnsCacheConnections();
+    void initializeAliveHostScanConnections();
+    QHash<QWidget*, std::function<void()>> m_coldNetworkToolFactories;
 
     // ========================= 抓包控制 =========================
     // startTrafficMonitor：

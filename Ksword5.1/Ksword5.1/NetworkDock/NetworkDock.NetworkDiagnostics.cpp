@@ -438,7 +438,7 @@ void NetworkDock::initializeVisibleDiagnosticPage()
 
 void NetworkDock::initializeRouteTableTab()
 {
-    m_routeTablePage = new QWidget(this);
+    if (m_routeTablePage == nullptr) m_routeTablePage = new QWidget(this);
     m_routeTableLayout = new QVBoxLayout(m_routeTablePage);
     m_routeTableLayout->setContentsMargins(6, 6, 6, 6);
     m_routeTableLayout->setSpacing(6);
@@ -853,7 +853,7 @@ void NetworkDock::deleteSelectedRouteEntry()
 
 void NetworkDock::initializeArpCacheTab()
 {
-    m_arpCachePage = new QWidget(this);
+    if (m_arpCachePage == nullptr) m_arpCachePage = new QWidget(this);
     m_arpCacheLayout = new QVBoxLayout(m_arpCachePage);
     m_arpCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_arpCacheLayout->setSpacing(6);
@@ -928,7 +928,7 @@ void NetworkDock::initializeArpCacheTab()
 
 void NetworkDock::initializeDnsCacheTab()
 {
-    m_dnsCachePage = new QWidget(this);
+    if (m_dnsCachePage == nullptr) m_dnsCachePage = new QWidget(this);
     m_dnsCacheLayout = new QVBoxLayout(m_dnsCachePage);
     m_dnsCacheLayout->setContentsMargins(6, 6, 6, 6);
     m_dnsCacheLayout->setSpacing(6);
@@ -997,7 +997,7 @@ void NetworkDock::initializeDnsCacheTab()
 
 void NetworkDock::initializeAliveHostScanTab()
 {
-    m_aliveScanPage = new QWidget(this);
+    if (m_aliveScanPage == nullptr) m_aliveScanPage = new QWidget(this);
     m_aliveScanLayout = new QVBoxLayout(m_aliveScanPage);
     m_aliveScanLayout->setContentsMargins(0, 0, 0, 0);
     auto* workspace = new ks::ui::ParameterWorkspace(m_aliveScanPage, 360); // 扫描参数独立滚动。
@@ -1074,7 +1074,7 @@ void NetworkDock::initializeAliveHostScanTab()
 
 void NetworkDock::initializeHostsFileEditorTab()
 {
-    m_hostsFileEditorPage = new QWidget(this);
+    if (m_hostsFileEditorPage == nullptr) m_hostsFileEditorPage = new QWidget(this);
     m_hostsFileEditorLayout = new QVBoxLayout(m_hostsFileEditorPage);
     m_hostsFileEditorLayout->setContentsMargins(0, 0, 0, 0);
     m_hostsFileEditorLayout->setSpacing(0);

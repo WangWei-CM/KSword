@@ -251,6 +251,7 @@ void NetworkDock::executeManualRequest()
 
 void NetworkDock::replayPacketToManualRequestByTableRow(const int row)
 {
+    if (!ensureNetworkToolPage(m_manualRequestPage)) return;
     // replayEvent 用途：贯穿本次“抓包回放草稿生成”全流程的统一日志事件链。
     kLogEvent replayEvent;
 

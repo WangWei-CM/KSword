@@ -243,6 +243,7 @@ void NetworkDock::showEvent(QShowEvent* event)
         if (m_networkAuditPage != nullptr) m_networkAuditPage->requestInitialRefresh();
         return;
     }
+    ensureVisibleNetworkToolPage();
     initializeVisibleDiagnosticPage();
     synchronizeVisiblePacketProjection();
     synchronizeVisibleNidsProjection();

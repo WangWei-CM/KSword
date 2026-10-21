@@ -6,6 +6,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/ThemeBinding.h"
 #include "../UI/ParameterWorkspace.h"
 #include "NetworkFirewallPage.h"
 #include "NetworkAuditPage.h"
@@ -48,18 +49,32 @@ void NetworkDock::initializeUi()
     // be restored later if a cleaner enforcement model replaces it.
     initializeFirewallTab();
     initializeNetworkAuditTab();
-    // 端口诊断是独立工具页，避免把解除操作与抓包、审计刷新混在一起。
-    auto* portDiagnostics = new PortDiagnosticsPage(m_sideTabWidget);
-    network_navigation_detail::AddTab(m_sideTabWidget, portDiagnostics, QStringLiteral("port-diagnostics"), QIcon(QStringLiteral(":/Icon/process_details.svg")));
-
-    initializeManualRequestTab();
+    // Canonical background capture/NIDS/download/proxy owners remain alive.
+    // Independent tools keep their original tab QWidget identity and build only
+    // the first selected branch, before its diagnostic query or user action.
+    const auto cold = [this](QWidget*& page, const QString& id, const QIcon& icon, std::function<void()> factory)
+    {
+        page = new QWidget(m_sideTabWidget);
+        m_coldNetworkToolFactories.insert(page, std::move(factory));
+        network_navigation_detail::AddTab(m_sideTabWidget, page, id, icon);
+    };
+    QWidget* portPage = nullptr;
+    cold(portPage, QStringLiteral("port-diagnostics"), QIcon(QStringLiteral(":/Icon/process_details.svg")), {});
+    m_coldNetworkToolFactories[portPage] = [portPage]()
+    {
+        auto* layout = new QVBoxLayout(portPage);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(new PortDiagnosticsPage(portPage));
+    };
+    cold(m_manualRequestPage, QStringLiteral("manual-request"), QIcon(QStringLiteral(":/Icon/process_main.svg")),
+        [this]() { initializeManualRequestTab(); initializeManualRequestConnections(); });
     initializeMultiThreadDownloadTab();
     initializeHttpsAnalyzeTab();
-    initializeRouteTableTab();
-    initializeArpCacheTab();
-    initializeDnsCacheTab();
-    initializeAliveHostScanTab();
-    initializeHostsFileEditorTab();
+    cold(m_routeTablePage, QStringLiteral("route"), QIcon(QStringLiteral(":/Icon/process_tree.svg")), [this]() { initializeRouteTableTab(); });
+    cold(m_arpCachePage, QStringLiteral("arp"), QIcon(QStringLiteral(":/Icon/process_tree.svg")), [this]() { initializeArpCacheTab(); initializeArpCacheConnections(); });
+    cold(m_dnsCachePage, QStringLiteral("dns"), QIcon(QStringLiteral(":/Icon/process_list.svg")), [this]() { initializeDnsCacheTab(); initializeDnsCacheConnections(); });
+    cold(m_aliveScanPage, QStringLiteral("alive-hosts"), QIcon(QStringLiteral(":/Icon/process_main.svg")), [this]() { initializeAliveHostScanTab(); initializeAliveHostScanConnections(); });
+    cold(m_hostsFileEditorPage, QStringLiteral("hosts-editor"), QIcon(QStringLiteral(":/Icon/codeeditor_open.svg")), [this]() { initializeHostsFileEditorTab(); });
 }
 
 void NetworkDock::initializeTrafficMonitorTab()
@@ -575,7 +590,7 @@ void NetworkDock::initializeNetworkAuditTab()
 void NetworkDock::initializeManualRequestTab()
 {
     // 请求构造页采用“分组参数 + 执行结果”布局，风格对齐 CreateProcess 页。
-    m_manualRequestPage = new QWidget(this);
+    if (m_manualRequestPage == nullptr) m_manualRequestPage = new QWidget(this);
     m_manualRequestLayout = new QVBoxLayout(m_manualRequestPage);
     m_manualRequestLayout->setContentsMargins(6, 6, 6, 6);
     m_manualRequestLayout->setSpacing(6);
@@ -772,3 +787,30 @@ void NetworkDock::initializeManualRequestTab()
 
 
 
+
+bool NetworkDock::ensureNetworkToolPage(QWidget* page)
+{
+    if (m_constructScope != ConstructScope::Full || page == nullptr) return true;
+    auto factory = m_coldNetworkToolFactories.take(page);
+    if (!factory) return true;
+    const QPointer<NetworkDock> guard(this);
+    {
+        ks::ui::ScopedWidgetThemePreparation prepare(page);
+        factory();
+    }
+    return !guard.isNull();
+}
+
+void NetworkDock::ensureVisibleNetworkToolPage()
+{
+    if (!isVisible() || m_sideTabWidget == nullptr) return;
+    const QPointer<NetworkDock> guard(this);
+    QWidget* selected = m_sideTabWidget->currentWidget();
+    while (selected != nullptr)
+    {
+        if (!ensureNetworkToolPage(selected) || !guard || !isVisible()) return;
+        QWidget* current = m_sideTabWidget->currentWidget();
+        if (current == selected) return;
+        selected = current;
+    }
+}
