@@ -13,7 +13,7 @@ namespace ksword::ce_log
     {
         constexpr int kFirstToggleId = 7101, kApplyId = 7110, kRestoreId = 7111, kLimitId = 7112;
         struct Options { unsigned long mode = 0, shadow = 0, fallback = 1, context = 1, suspend = 1, limit = 32; };
-        HWND gLog = nullptr, gStatus = nullptr, gExplanation = nullptr;
+        HWND gParent = nullptr, gLog = nullptr, gStatus = nullptr, gExplanation = nullptr;
         HWND gApply = nullptr, gRestore = nullptr, gLimit = nullptr, gLimitLabel = nullptr;
         std::array<HWND, 6> gToggles{};
         HFONT gFont = nullptr;
@@ -24,6 +24,11 @@ namespace ksword::ce_log
         ULONGLONG gRequestAt = 0;
         unsigned long gRevision = 0, gAwaitingRevision = 0;
         Options gActual{}, gDraft{};
+        std::string gLastAckPacket;
+        std::wstring gDesiredStatus;
+        bool gStatusPending = false, gDraftProjectionPending = false, gApplyingDraft = false;
+        bool gHaveProjectedChecks = false;
+        std::array<bool, 6> gProjectedChecks{};
         std::wstring gControlPath, gStatePath;
         const wchar_t* text(const wchar_t* zh, const wchar_t* en) { return gEnglish ? en : zh; }
         COLORREF color(const wchar_t* name, COLORREF fallback)
@@ -90,22 +95,62 @@ namespace ksword::ce_log
             if ((item.itemState & ODS_FOCUS) != 0) DrawFocusRect(item.hDC, &caption);
             SelectObject(item.hDC, previous);
         }
+        void setEnabled(HWND child, bool enabled)
+        {
+            if (child != nullptr && (IsWindowEnabled(child) != FALSE) != enabled)
+                EnableWindow(child, enabled ? TRUE : FALSE);
+        }
         void enableControls()
         {
-            EnableWindow(gToggles[0], gAvailable && !gPending);
+            // State/log polling continues while hidden. Only the latest visual
+            // projection is applied before the surface is shown/painted again.
+            if (gParent == nullptr || !IsWindowVisible(gParent)) return;
+            if (gDraftProjectionPending && gLimit != nullptr)
+            {
+                const auto limit = std::to_wstring(gDraft.limit);
+                wchar_t current[16]{}; GetWindowTextW(gLimit, current, _countof(current));
+                gApplyingDraft = true;
+                if (limit != current) SetWindowTextW(gLimit, limit.c_str());
+                gApplyingDraft = false;
+                gDraftProjectionPending = false;
+            }
+            if (gStatusPending && gStatus != nullptr)
+            {
+                SetWindowTextW(gStatus, gDesiredStatus.c_str());
+                gStatusPending = false;
+            }
+            setEnabled(gToggles[0], gAvailable && !gPending);
             for (std::size_t index = 1; index < gToggles.size(); ++index)
-                EnableWindow(gToggles[index], gAvailable && gCanChange && !gPending && (index != 1 || gDraft.mode == 0));
-            EnableWindow(gLimit, gAvailable && gCanChange && !gPending);
-            EnableWindow(gApply, gAvailable && gCanChange && !gPending && gDirty);
-            EnableWindow(gRestore, gAvailable && !gPending);
+                setEnabled(gToggles[index], gAvailable && gCanChange && !gPending && (index != 1 || gDraft.mode == 0));
+            setEnabled(gLimit, gAvailable && gCanChange && !gPending);
+            setEnabled(gApply, gAvailable && gCanChange && !gPending && gDirty);
+            setEnabled(gRestore, gAvailable && !gPending);
+            for (std::size_t index = 0; index < gToggles.size(); ++index)
+            {
+                const bool value = checked(index);
+                if (!gHaveProjectedChecks || gProjectedChecks[index] != value)
+                    InvalidateRect(gToggles[index], nullptr, TRUE);
+                gProjectedChecks[index] = value;
+            }
+            gHaveProjectedChecks = true;
+        }
+        void setStatus(const std::wstring& value)
+        {
+            if (gDesiredStatus != value)
+            {
+                gDesiredStatus = value;
+                gStatusPending = true;
+            }
+            enableControls();
         }
         void request(unsigned long action)
         {
             if (gControlPath.empty() || gPending) return;
+            gLastAckPacket.clear();
             wchar_t limit[16]{}; GetWindowTextW(gLimit, limit, _countof(limit));
             wchar_t* end = nullptr; const unsigned long count = std::wcstoul(limit, &end, 10);
             if (action == 1 && (end == limit || *end != 0 || count < 1 || count > 32))
-            { SetWindowTextW(gStatus, text(L"Shadow 页上限必须为 1–32", L"Shadow page limit must be 1–32")); return; }
+            { setStatus(text(L"Shadow 页上限必须为 1–32", L"Shadow page limit must be 1–32")); return; }
             if (action == 1) gDraft.limit = count;
             const Options& options = action == 1 ? gDraft : gActual;
             std::ofstream output(gControlPath + L".new", std::ios::binary | std::ios::trunc);
@@ -113,18 +158,22 @@ namespace ksword::ce_log
                 << ' ' << options.mode << ' ' << options.shadow << ' ' << options.fallback << ' ' << options.context << ' ' << options.suspend << ' ' << options.limit << '\n';
             output.close();
             if (!output || !MoveFileExW((gControlPath + L".new").c_str(), gControlPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-            { SetWindowTextW(gStatus, text(L"后端请求写入失败", L"Cannot write backend request")); return; }
+            { setStatus(text(L"后端请求写入失败", L"Cannot write backend request")); return; }
             gPending = true; gAwaitingRevision = gRevision; gRequestAt = GetTickCount64(); enableControls();
-            SetWindowTextW(gStatus, text(L"等待后端确认；HVM 仍显示已确认状态…", L"Waiting for backend acknowledgement; HVM still shows its confirmed state..."));
+            setStatus(text(L"等待后端确认；HVM 仍显示已确认状态…", L"Waiting for backend acknowledgement; HVM still shows its confirmed state..."));
         }
         void updateDraft()
         {
-            gDraft = gActual; SetWindowTextW(gLimit, std::to_wstring(gDraft.limit).c_str()); gDirty = false;
-            for (HWND toggle : gToggles) InvalidateRect(toggle, nullptr, TRUE);
+            gDraft = gActual; gDirty = false;
+            gDraftProjectionPending = true;
+            enableControls();
         }
     }
     HWND create(HWND parent)
     {
+        gParent = parent;
+        gHaveProjectedChecks = false;
+        gLastAckPacket.clear();
         wchar_t language[32]{}; (void)GetEnvironmentVariableW(L"KSWORD_PLUGIN_LANGUAGE", language, _countof(language));
         gEnglish = std::wcsncmp(language, L"en", 2) == 0;
         gWindow = color(L"KSWORD_PLUGIN_COLOR_WINDOW", gWindow); gSurface = color(L"KSWORD_PLUGIN_COLOR_SURFACE", gSurface);
@@ -149,7 +198,9 @@ namespace ksword::ce_log
             L"影子执行页只改变代码执行；RX/RWX 页上的数字冻结不会改变数据读取。\n隐蔽模式强制 Shadow；每次回退均写日志，不隐藏 Windows 调试端口。",
             L"Shadow patches execution views only. Numeric freeze on RX/RWX pages does not change data reads.\nStealth forces Shadow. Every fallback is logged; the Windows debug port stays visible."),
             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 1, 1, parent, nullptr, module, nullptr);
-        gStatus = CreateWindowExW(0, L"STATIC", text(L"等待 CE 调试后端…", L"Waiting for the CE debugger backend..."), WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 1, 1, parent, nullptr, module, nullptr);
+        gDesiredStatus = text(L"等待 CE 调试后端…", L"Waiting for the CE debugger backend...");
+        gStatusPending = false;
+        gStatus = CreateWindowExW(0, L"STATIC", gDesiredStatus.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 1, 1, parent, nullptr, module, nullptr);
         gLog = CreateWindowExW(0, L"EDIT", text(L"CE 保持独立窗口；此页接收后端日志。\r\n", L"CE runs in its own window; this page receives backend logs.\r\n"),
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 1, 1, parent, nullptr, module, nullptr);
         if (gFont == nullptr || gLog == nullptr || gStatus == nullptr || gExplanation == nullptr || gApply == nullptr || gRestore == nullptr || gLimit == nullptr || gLimitLabel == nullptr) return nullptr;
@@ -206,24 +257,28 @@ namespace ksword::ce_log
             result = TRUE;
             return true;
         }
+        if (messageId == WM_SHOWWINDOW || messageId == WM_PAINT || messageId == WM_DRAWITEM)
+            enableControls();
         if (messageId == WM_COMMAND)
         {
             const int id = LOWORD(wParam);
+            if (id >= kFirstToggleId && id <= kLimitId && !gApplyingDraft) gLastAckPacket.clear();
             if (HIWORD(wParam) == BN_CLICKED && id >= kFirstToggleId && id < kFirstToggleId + 6)
             {
                 switch (id - kFirstToggleId)
                 {
                 case 0: request(0); result = 0; return true;
                 case 1: gDraft.shadow ^= 1; break; case 2: gDraft.fallback ^= 1; break;
-                case 3: gDraft.mode ^= 1; InvalidateRect(gToggles[1], nullptr, TRUE); break;
+                case 3: gDraft.mode ^= 1; break;
                 case 4: gDraft.context ^= 1; break; default: gDraft.suspend ^= 1; break;
                 }
-                gDirty = true; enableControls(); InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, TRUE);
-                SetWindowTextW(gStatus, text(L"选项待应用；后端仍使用已确认设置", L"Options pending Apply; backend still uses its acknowledged settings"));
+                gDirty = true; enableControls();
+                setStatus(text(L"选项待应用；后端仍使用已确认设置", L"Options pending Apply; backend still uses its acknowledged settings"));
                 result = 0; return true;
             }
             if (HIWORD(wParam) == BN_CLICKED && (id == kApplyId || id == kRestoreId)) { request(id == kApplyId ? 1UL : 2UL); result = 0; return true; }
-            if (id == kLimitId && HIWORD(wParam) == EN_CHANGE) { gDirty = true; enableControls(); result = 0; return true; }
+            if (id == kLimitId && HIWORD(wParam) == EN_CHANGE)
+            { if (!gApplyingDraft) { gDirty = true; enableControls(); } result = 0; return true; }
         }
         if (messageId == WM_DRAWITEM) { drawButton(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)); result = TRUE; return true; }
         if (messageId == WM_CTLCOLORSTATIC || messageId == WM_CTLCOLOREDIT)
@@ -238,9 +293,10 @@ namespace ksword::ce_log
     }
     void setSession(const std::wstring& logPath)
     {
+        gLastAckPacket.clear();
         gControlPath = logPath.empty() ? L"" : logPath + L".control"; gStatePath = logPath.empty() ? L"" : logPath + L".state";
         gRevision = 0; gAwaitingRevision = 0; gPending = false; gAvailable = false; gCanChange = false; gDirty = false; enableControls();
-        if (logPath.empty()) SetWindowTextW(gStatus, text(L"CE 已退出", L"CE has exited"));
+        if (logPath.empty()) setStatus(text(L"CE 已退出", L"CE has exited"));
     }
     void pollState()
     {
@@ -248,9 +304,14 @@ namespace ksword::ce_log
         if (gPending && GetTickCount64() - gRequestAt >= 5000)
         {
             gPending = false; enableControls();
-            SetWindowTextW(gStatus, text(L"后端确认超时；实际状态未变，可重试", L"Backend acknowledgement timed out; actual state unchanged; retry is available"));
+            setStatus(text(L"后端确认超时；实际状态未变，可重试", L"Backend acknowledgement timed out; actual state unchanged; retry is available"));
         }
-        std::string packet; if (!ksword::debugger::readControlPacket(gStatePath, packet)) return;
+        std::string packet;
+        if (!ksword::debugger::readControlPacket(gStatePath, packet)) { enableControls(); return; }
+        // Compare the complete validated packet, not revision alone: counters and
+        // capability can change without a new policy request/revision.
+        if (!gPending && !gLastAckPacket.empty() && packet == gLastAckPacket)
+        { enableControls(); return; }
         std::istringstream state(packet);
         unsigned long revision = 0, error = 0, selected = 0, window = 0, resident = 0, protocol = 0;
         if (!(state >> revision >> error >> selected >> window >> resident >> protocol) || revision < gRevision) return;
@@ -259,8 +320,9 @@ namespace ksword::ce_log
         if (!(state >> marker >> driver >> valid >> actual.mode >> actual.shadow >> actual.fallback >> actual.context >> actual.suspend >> actual.limit
             >> path >> pages >> breakpoints >> canChange >> fallbackCount >> fallbackError >> persistenceError))
         {
+            gLastAckPacket.clear();
             gAvailable = false; gPending = false; enableControls();
-            SetWindowTextW(gStatus, text(L"CE 选项后端不可用，查看日志", L"CE options backend unavailable; see log")); return;
+            setStatus(text(L"CE 选项后端不可用，查看日志", L"CE options backend unavailable; see log")); return;
         }
         if (marker != "CE2" || valid != 1 ||
             selected > 1 || driver > 1 || actual.mode > 1 || actual.shadow > 1 || actual.fallback > 1 || actual.context > 1 ||
@@ -281,12 +343,15 @@ namespace ksword::ce_log
         if (!gCanChange) status += text(L" | 先移除断点/恢复 Shadow 写入再改选项", L" | clear breakpoints/restore Shadow writes before changing options");
         if (persistenceError != 0) status += text(L" | 保存设置失败，查看日志", L" | settings save failed; see log");
         if (gDirty) status += text(L" | 有待应用选项", L" | options pending Apply");
-        SetWindowTextW(gStatus, status.c_str()); enableControls(); InvalidateRect(gToggles[0], nullptr, TRUE);
+        setStatus(status);
+        gLastAckPacket = packet;
     }
     void destroy()
     {
         if (gFont != nullptr) DeleteObject(gFont); if (gWindowBrush != nullptr) DeleteObject(gWindowBrush); if (gSurfaceBrush != nullptr) DeleteObject(gSurfaceBrush);
         gFont = nullptr; gWindowBrush = nullptr; gSurfaceBrush = nullptr; gToggles.fill(nullptr); gLog = nullptr; gStatus = nullptr;
+        gParent = nullptr; gLastAckPacket.clear(); gDesiredStatus.clear();
+        gStatusPending = false; gDraftProjectionPending = false; gHaveProjectedChecks = false;
         gExplanation = nullptr; gApply = nullptr; gRestore = nullptr; gLimit = nullptr; gLimitLabel = nullptr;
     }
 }
