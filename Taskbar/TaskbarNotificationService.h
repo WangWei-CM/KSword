@@ -5,6 +5,11 @@
 #include <QAbstractNativeEventFilter>
 #include <QObject>
 #include <QTimer>
+#include <atomic>
+#include <memory>
+
+struct TaskbarClipboardReceiverState;
+namespace ks::ui { class AsyncUiDispatcher; }
 
 class QWidget;
 
@@ -146,10 +151,11 @@ private:
     QTimer m_tickTimer;                           // 100ms 轮播和地震状态刷新时钟。
     TaskbarNotificationView m_currentNotification; // 所有屏幕共享的当前展示内容。
     struct QueuedNotification { TaskbarNotificationView notification; quint64 clipboardTicket = 0; };
-    struct ClipboardJob { quint64 ticket = 0; quint32 sequence = 0; TaskbarClipboardPreviewState state; };
+    struct ClipboardJob { quint64 ticket = 0; quint32 sequence = 0; std::shared_ptr<std::atomic_bool> canceled = std::make_shared<std::atomic_bool>(false); bool submitted = false; };
     QList<QueuedNotification> m_queue;       // 等待展示的剪贴板和设备接入消息。
     QList<ClipboardJob> m_clipboardJobs;
-    QTimer m_clipboardTimer;
+    std::shared_ptr<TaskbarClipboardReceiverState> m_clipboardReceiver;
+    std::shared_ptr<ks::ui::AsyncUiDispatcher> m_clipboardDispatcher;
     quint64 m_nextClipboardTicket = 0;
     qint64 m_currentNormalStartedMs = 0;          // 当前普通通知的单调时钟开始值。
     qint64 m_currentNormalDurationMs = 6000;      // 当前消息时长，包含 1 秒的中央区域过渡预算。

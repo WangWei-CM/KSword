@@ -1,4 +1,10 @@
 #include "TaskbarNotificationService.h"
+#include "../Ksword5.1/Ksword5.1/UI/AsyncUiDispatcher.h"
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <process.h>
+#include <thread>
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -171,10 +177,97 @@ namespace
     }
 }
 
+
+// This receiver owns only values and its native window. Service destruction closes
+// the dispatcher and cooperatively cancels requests without waiting for an external
+// delayed-render provider. At most one receiver and 32 queued values exist per service.
+struct TaskbarClipboardReceiverState
+{
+    struct Request
+    {
+        quint64 ticket = 0;
+        quint32 sequence = 0;
+        std::shared_ptr<std::atomic_bool> canceled;
+        std::function<void(const QString&)> complete;
+    };
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<Request> pending;
+    bool stopping = false;
+};
+
+namespace
+{
+    QString readClipboardPreview(HWND window, const TaskbarClipboardReceiverState::Request& request)
+    {
+        TaskbarClipboardPreviewState preview;
+        while (!preview.done && !request.canceled->load(std::memory_order_acquire))
+        {
+            bool available = false;
+            if (window != nullptr && ::GetClipboardSequenceNumber() == request.sequence && ::OpenClipboard(window) != FALSE)
+            {
+                struct Close { ~Close() { ::CloseClipboard(); } } close;
+                // GetClipboardData can synchronously wait for another application's
+                // WM_RENDERFORMAT. It runs only on this receiver's native thread.
+                const HANDLE data = ::GetClipboardData(CF_UNICODETEXT);
+                if (!request.canceled->load(std::memory_order_acquire)
+                    && ::GetClipboardSequenceNumber() == request.sequence)
+                {
+                    const SIZE_T bytes = data != nullptr ? ::GlobalSize(data) : 0;
+                    const wchar_t* source = data != nullptr ? static_cast<const wchar_t*>(::GlobalLock(data)) : nullptr;
+                    if (source != nullptr)
+                    {
+                        struct Unlock { HANDLE data; ~Unlock() { ::GlobalUnlock(data); } } unlock {data};
+                        const qsizetype characters = static_cast<qsizetype>(std::min<SIZE_T>(
+                            bytes / sizeof(wchar_t), static_cast<SIZE_T>((std::numeric_limits<qsizetype>::max)())));
+                        consumeClipboardPreview(preview,source,characters,kClipboardInputBudget);
+                        available = true;
+                    }
+                }
+            }
+            if (!available) return {};
+            // No HGLOBAL or borrowed pointer survives this turn. Release the clipboard
+            // between chunks so long leading whitespace cannot monopolize ownership.
+            std::this_thread::yield();
+        }
+        if (request.canceled->load(std::memory_order_acquire) || !preview.valid) return {};
+        return preview.text + (preview.truncated ? QStringLiteral("...") : QString());
+    }
+
+    unsigned __stdcall runClipboardReceiver(void* parameter)
+    {
+        std::unique_ptr<std::shared_ptr<TaskbarClipboardReceiverState>> argument(
+            static_cast<std::shared_ptr<TaskbarClipboardReceiverState>*>(parameter));
+        const auto state = *argument;
+        argument.reset();
+        // A native message-only owner avoids constructing or accessing Qt widgets
+        // from the receiver. Its creation/destruction and all clipboard APIs share a thread.
+        const HWND window = ::CreateWindowExW(0,L"STATIC",nullptr,0,0,0,0,0,
+            HWND_MESSAGE,nullptr,::GetModuleHandleW(nullptr),nullptr);
+        struct Destroy { HWND window; ~Destroy() { if (window != nullptr) ::DestroyWindow(window); } } destroy {window};
+        for (;;)
+        {
+            TaskbarClipboardReceiverState::Request request;
+            {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                state->ready.wait(lock,[&]() { return state->stopping || !state->pending.empty(); });
+                if (state->stopping) return 0;
+                request = std::move(state->pending.front()); state->pending.pop_front();
+            }
+            if (request.canceled->load(std::memory_order_acquire)) continue;
+            QString text;
+            try { text = readClipboardPreview(window,request); }
+            catch (...) { text.clear(); }
+            if (!request.canceled->load(std::memory_order_acquire)) request.complete(text);
+        }
+    }
+}
+
 TaskbarNotificationService::TaskbarNotificationService(TaskbarEarthquakeClient* earthquakeClient, QObject* parent)
     : QObject(parent)
     , m_earthquakeClient(earthquakeClient)
 {
+    m_clipboardDispatcher = std::make_shared<ks::ui::AsyncUiDispatcher>(this);
     // 读取一次持久化开关；这些设置是进程级，因此所有屏幕窗口天然共享同一份配置。
     loadSettings();
     if (m_earthquakeClient != nullptr)
@@ -209,16 +302,24 @@ TaskbarNotificationService::TaskbarNotificationService(TaskbarEarthquakeClient* 
     m_tickTimer.setInterval(100);
     connect(&m_tickTimer, &QTimer::timeout, this, &TaskbarNotificationService::advancePresentation);
     m_tickTimer.start();
-    m_clipboardTimer.setSingleShot(true);
-    m_clipboardTimer.setInterval(0);
-    connect(&m_clipboardTimer, &QTimer::timeout, this,
-        &TaskbarNotificationService::processClipboardPreviewChunk);
     refreshEarthquakePresentation();
 }
 
 TaskbarNotificationService::~TaskbarNotificationService()
 {
-    m_clipboardTimer.stop();
+    m_clipboardDispatcher->close();
+    for (const auto& job : m_clipboardJobs) job.canceled->store(true,std::memory_order_release);
+    if (m_clipboardReceiver != nullptr)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_clipboardReceiver->mutex);
+            m_clipboardReceiver->stopping = true;
+            m_clipboardReceiver->pending.clear();
+        }
+        m_clipboardReceiver->ready.notify_one();
+    }
+    // The value-owned receiver releases its native window after an outstanding OS
+    // provider returns. It cannot access this QObject, and GUI teardown never joins it.
     // 销毁时先移除原生过滤器，随后注销通知句柄，避免退出过程中回调到已析构服务。
     qApp->removeNativeEventFilter(this);
     unregisterDeviceNotifications();
@@ -283,7 +384,7 @@ void TaskbarNotificationService::setClipboardNotificationsEnabled(bool enabled)
     m_clipboardNotificationsEnabled = enabled;
     if (!enabled)
     {
-        m_clipboardTimer.stop();
+        for (const auto& job : m_clipboardJobs) job.canceled->store(true,std::memory_order_release);
         m_clipboardJobs.clear();
         m_queue.removeIf([](const QueuedNotification& entry) { return entry.clipboardTicket != 0; });
         if (!m_earthquakeActive && m_currentNotification.title.isEmpty())
@@ -407,54 +508,54 @@ void TaskbarNotificationService::enqueueClipboardText()
     const QPointer<TaskbarNotificationService> guard(this);
     enqueueNotification(notification, job.ticket);
     if (guard == nullptr) return;
-    if (!m_clipboardTimer.isActive()) m_clipboardTimer.start();
+    processClipboardPreviewChunk();
 }
 
 void TaskbarNotificationService::processClipboardPreviewChunk()
 {
     if (m_clipboardJobs.isEmpty()) return;
-    ClipboardJob job = m_clipboardJobs.first();
-    const QPointer<TaskbarNotificationService> guard(this);
-    const HWND window = m_messageWindow != nullptr ? reinterpret_cast<HWND>(m_messageWindow->winId()) : nullptr;
-    bool available = false;
-    if (m_clipboardNotificationsEnabled && window != nullptr &&
-        ::GetClipboardSequenceNumber() == job.sequence && ::OpenClipboard(window) != FALSE)
+    if (m_clipboardReceiver == nullptr)
     {
-        struct Close { ~Close() { ::CloseClipboard(); } } close;
-        // All clipboard APIs remain on the listener thread. Native provider wait
-        // is separate from the bounded normalization below and remains unmeasured.
-        const HANDLE data = ::GetClipboardData(CF_UNICODETEXT);
-        const SIZE_T bytes = data != nullptr ? ::GlobalSize(data) : 0;
-        const wchar_t* source = data != nullptr ? static_cast<const wchar_t*>(::GlobalLock(data)) : nullptr;
-        if (source != nullptr)
+        auto state = std::make_shared<TaskbarClipboardReceiverState>();
+        auto argument = std::make_unique<std::shared_ptr<TaskbarClipboardReceiverState>>(state);
+        const uintptr_t handle = ::_beginthreadex(nullptr,0,&runClipboardReceiver,argument.get(),0,nullptr);
+        if (handle == 0)
         {
-            struct Unlock { HANDLE data; ~Unlock() { ::GlobalUnlock(data); } } unlock {data};
-            const qsizetype characters = static_cast<qsizetype>(std::min<SIZE_T>(
-                bytes / sizeof(wchar_t), static_cast<SIZE_T>(std::numeric_limits<qsizetype>::max())));
-            if (::GetClipboardSequenceNumber() == job.sequence)
-            {
-                available = true;
-                consumeClipboardPreview(job.state, source, characters, kClipboardInputBudget);
-            }
+            // No worker accepted these replaceable previews. Release their FIFO tickets.
+            const auto jobs = m_clipboardJobs;
+            const QPointer<TaskbarNotificationService> guard(this);
+            for (const auto& job : jobs) { finishClipboardPreview(job.ticket,{}); if (guard == nullptr) return; }
+            return;
+        }
+        argument.release();
+        ::CloseHandle(reinterpret_cast<HANDLE>(handle));
+        m_clipboardReceiver = std::move(state);
+    }
+    const QPointer<TaskbarNotificationService> guard(this);
+    const auto dispatcher = m_clipboardDispatcher;
+    {
+        std::lock_guard<std::mutex> lock(m_clipboardReceiver->mutex);
+        auto& queue = m_clipboardReceiver->pending;
+        queue.erase(std::remove_if(queue.begin(),queue.end(),[](const auto& request) {
+            return request.canceled->load(std::memory_order_acquire);
+        }),queue.end());
+        for (auto& job : m_clipboardJobs)
+        {
+            if (job.submitted) continue;
+            TaskbarClipboardReceiverState::Request request;
+            request.ticket=job.ticket; request.sequence=job.sequence; request.canceled=job.canceled;
+            request.complete=[guard,dispatcher,ticket=job.ticket](const QString& text) {
+                dispatcher->post([guard,ticket,text]() { if (guard) guard->finishClipboardPreview(ticket,text); });
+            };
+            queue.push_back(std::move(request)); job.submitted=true;
         }
     }
-    if (guard == nullptr) return;
-    auto iterator = std::find_if(m_clipboardJobs.begin(), m_clipboardJobs.end(),
-        [ticket = job.ticket](const ClipboardJob& candidate) { return candidate.ticket == ticket; });
-    if (iterator == m_clipboardJobs.end()) return;
-    if (!available || job.state.done)
-    {
-        m_clipboardJobs.erase(iterator);
-        finishClipboardPreview(job.ticket, available && job.state.valid
-            ? job.state.text + (job.state.truncated ? QStringLiteral("...") : QString()) : QString());
-        if (guard == nullptr) return;
-    }
-    else *iterator = std::move(job);
-    if (!m_clipboardJobs.isEmpty()) m_clipboardTimer.start();
+    m_clipboardReceiver->ready.notify_one();
 }
 
 void TaskbarNotificationService::finishClipboardPreview(quint64 ticket, const QString& text)
 {
+    m_clipboardJobs.removeIf([ticket](const ClipboardJob& job) { return job.ticket == ticket; });
     auto iterator = std::find_if(m_queue.begin(), m_queue.end(),
         [ticket](const QueuedNotification& entry) { return entry.clipboardTicket == ticket; });
     if (iterator != m_queue.end())
@@ -504,7 +605,10 @@ void TaskbarNotificationService::enqueueNotification(const TaskbarNotificationVi
     {
         const quint64 retiredTicket = m_queue.takeFirst().clipboardTicket;
         if (retiredTicket != 0) m_clipboardJobs.removeIf(
-            [retiredTicket](const ClipboardJob& job) { return job.ticket == retiredTicket; });
+            [retiredTicket](const ClipboardJob& job) {
+                if (job.ticket != retiredTicket) return false;
+                job.canceled->store(true,std::memory_order_release); return true;
+            });
     }
     m_queue.push_back({notification, pendingClipboard});
     if (!m_earthquakeActive && !m_currentNotification.title.isEmpty())
