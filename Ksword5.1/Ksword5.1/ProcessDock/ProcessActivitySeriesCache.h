@@ -36,6 +36,15 @@ namespace ks::ui::activity
             ++m_revision;
         }
 
+        // Constant-time handoff; MSVC deque pop_front retains spare allocations until destruction.
+        void swap(SeriesCache& other) noexcept
+        {
+            m_points.swap(other.m_points);
+            m_levels.swap(other.m_levels);
+            std::swap(m_revision, other.m_revision);
+        }
+        bool storageEmpty() const { return m_points.empty() && m_levels.empty(); }
+
         bool empty() const { return m_points.empty(); }
         std::size_t size() const { return m_points.size(); }
         std::uint64_t revision() const { return m_revision; }

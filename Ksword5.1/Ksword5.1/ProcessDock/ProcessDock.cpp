@@ -1673,6 +1673,25 @@ public:
         });
     }
 
+    ~ProcessActivityChartWidget() override
+    {
+        // The worker owns only STL display data; widget close never waits or joins.
+        // QApplication/global thread-pool shutdown can still wait for accepted cleanup tasks.
+        retireAggregateCache();
+    }
+
+    // Explicitly notify hidden charts: their paint/preview empty branches may never execute.
+    void notifyHistoryReset()
+    {
+        retireAggregateCache();
+        m_retainedEdgeActive = false;
+        m_pendingPointActive = false;
+        m_rawRecordingTick = 0;
+        m_rawSelectionKeys.clear();
+        m_seriesDirty = true;
+        scheduleRetiredRelease();
+    }
+
     // setFocusedSampleIndex：
     // - sampleIndex：时间轴当前定位的样本下标，-1 表示无焦点；
     // - 函数只更新绘制光标，不修改宿主滑块。
@@ -1763,6 +1782,7 @@ protected:
 
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
+            notifyHistoryReset();
             painter.setPen(textColor);
             painter.drawText(
                 plotRect,
@@ -2058,6 +2078,50 @@ private:
         }
     }
 
+    struct RetiredAggregate
+    {
+        ks::ui::activity::SeriesCache cache;
+        std::atomic<bool> complete{false};
+    };
+
+    void retireAggregateCache()
+    {
+        if (!m_rawSamples.storageEmpty())
+        {
+            // Never build a second display generation while a previous one is still being freed.
+            Q_ASSERT(!m_retiredAggregate || m_retiredAggregate->complete.load(std::memory_order_acquire));
+            auto retired = std::make_shared<RetiredAggregate>();
+            retired->cache.swap(m_rawSamples);
+            m_retiredAggregate = retired;
+            QThreadPool::globalInstance()->start(QRunnable::create([retired]() {
+                {
+                    ks::ui::activity::SeriesCache obsolete;
+                    obsolete.swap(retired->cache);
+                } // Deque nodes, spare blocks and maps are all deallocated on this worker.
+                retired->complete.store(true, std::memory_order_release);
+            }));
+        }
+        m_cachedSeries.clear(); // At most two points per physical chart column/metric.
+        m_pendingPointActive = false;
+        m_seriesDirty = true;
+    }
+
+    void scheduleRetiredRelease()
+    {
+        if (m_retiredReleaseQueued || !m_retiredAggregate) return;
+        m_retiredReleaseQueued = true;
+        QTimer::singleShot(16, this, [this]() {
+            m_retiredReleaseQueued = false;
+            if (m_retiredAggregate && !m_retiredAggregate->complete.load(std::memory_order_acquire))
+            {
+                scheduleRetiredRelease();
+                return;
+            }
+            m_retiredAggregate.reset(); // Its cache is empty after the worker's release-store.
+            if (isVisible()) scheduleAggregateContinuation();
+        });
+    }
+
     void scheduleAggregatePublication()
     {
         if (m_aggregatePublicationQueued) return;
@@ -2103,8 +2167,7 @@ private:
     {
         if (m_ownerDock == nullptr || m_ownerDock->m_activitySamples.empty())
         {
-            m_rawSamples.clear();
-            m_pendingPointActive = false;
+            notifyHistoryReset();
             return true;
         }
         const auto& samples = m_ownerDock->m_activitySamples;
@@ -2118,12 +2181,45 @@ private:
                         samples.front().sequence - m_rawSamples.back().sequence > 1U)));
         if (replace)
         {
-            m_rawSamples.clear();
-            m_cachedSeries.clear();
-            m_pendingPointActive = false;
+            retireAggregateCache();
+            m_retainedEdgeActive = false;
         }
         m_rawRecordingTick = m_ownerDock->m_activityRecordingStartTick100ns;
         m_rawSelectionKeys = std::move(canonicalKeys);
+        const auto firstSequence = samples.front().sequence;
+        const auto retainFrom = firstSequence > 0U ? firstSequence - 1U : 0U;
+        if (!m_rawSamples.empty() && retainFrom > m_rawSamples.front().sequence &&
+            retainFrom - m_rawSamples.front().sequence > 256U)
+        {
+            // Large history-window changes retire the whole allocation graph, rather than paying
+            // an O(history) trim or deferred MSVC deque spare-block destruction in an input handler.
+            const bool keepEdge = retainFrom <= m_rawSamples.back().sequence;
+            const auto edge = keepEdge ? m_rawSamples.at(retainFrom)
+                : ks::ui::activity::SeriesCache::Point{};
+            retireAggregateCache();
+            m_retainedEdgeActive = keepEdge;
+            m_retainedEdgePoint = edge;
+        }
+        if (m_retiredAggregate)
+        {
+            if (!m_retiredAggregate->complete.load(std::memory_order_acquire))
+            {
+                m_aggregateWasPending = true;
+                scheduleRetiredRelease();
+                return false;
+            }
+            m_retiredAggregate.reset();
+        }
+        if (m_retainedEdgeActive)
+        {
+            if (m_retainedEdgePoint.sequence == retainFrom && retainFrom < firstSequence)
+            {
+                const bool appended = m_rawSamples.append(m_retainedEdgePoint);
+                Q_ASSERT(appended);
+                (void)appended;
+            }
+            m_retainedEdgeActive = false;
+        }
         auto first = samples.begin();
         if (!m_rawSamples.empty())
         {
@@ -2182,8 +2278,8 @@ private:
                 return false;
             }
         }
-        const auto firstSequence = samples.front().sequence;
-        m_rawSamples.trimBefore(firstSequence > 0U ? firstSequence - 1U : 0U);
+        // The large-drop path above detaches the generation; at most 256 rows can remain here.
+        m_rawSamples.trimBefore(retainFrom);
         if (m_aggregateWasPending)
         {
             m_aggregateWasPending = false;
@@ -2541,6 +2637,10 @@ private:
     std::uint64_t m_hoveredSequence = 0; // 合并同一采样的 tooltip 更新。
     bool m_seriesDirty = true; // 新样本触发重建，逐帧移动只使用缓存。
     ks::ui::activity::SeriesCache m_rawSamples;
+    std::shared_ptr<RetiredAggregate> m_retiredAggregate;
+    bool m_retiredReleaseQueued = false;
+    ks::ui::activity::SeriesCache::Point m_retainedEdgePoint{};
+    bool m_retainedEdgeActive = false;
     ks::ui::activity::SeriesCache::Point m_pendingPoint{};
     std::size_t m_pendingProcessIndex = 0;
     bool m_pendingPointActive = false;
@@ -6707,6 +6807,7 @@ void ProcessDock::initializeConnections()
     // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
         m_activitySamples.clear();
+        if (m_activityChartWidget != nullptr) m_activityChartWidget->notifyHistoryReset();
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
         m_activityTableSnapshotRecords.clear();
