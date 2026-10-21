@@ -1,3 +1,4 @@
+#include "MonitorCanonicalExport.h"
 #include "WinAPIDock.h"
 #include "MonitorEventFilterProjection.h"
 #include "../UI/ThemeStatusRole.h"
@@ -65,6 +66,7 @@ void WinAPIDock::changeEvent(QEvent* event)
 
 WinAPIDock::~WinAPIDock()
 {
+    if (m_eventExport) m_eventExport->close();
     if (m_eventFilterProjection) m_eventFilterProjection->close();
     if (m_sessionOperation) m_sessionOperation->close();
     if (m_coverageDispatcher) m_coverageDispatcher->close();
@@ -344,15 +346,7 @@ void WinAPIDock::updateActionState()
     {
         m_terminateHookButton->setEnabled(hasPid && (!running || currentPidValue == m_currentSessionPid));
     }
-    if (m_exportButton != nullptr)
-    {
-        // MTAPI010 replaces the legacy widget exporter with the canonical value
-        // snapshot. Until then a lagging/hidden mirror must not export stale rows.
-        const bool projectionReady = m_eventTable && m_eventTable->isVisible()
-            && !m_eventProjectionStale && m_eventProjectionQueue.empty() && m_expiredEventProjection.empty()
-            && (!m_eventFilterProjection || !m_eventFilterProjection->isPending());
-        m_exportButton->setEnabled(hasEvents && projectionReady);
-    }
+    updateEventExportAction();
     if (m_clearEventButton != nullptr)
     {
         m_clearEventButton->setEnabled(hasEvents && !running);

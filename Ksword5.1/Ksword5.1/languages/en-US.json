@@ -8,6 +8,9 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "monitor.export.preparing_hint": "Preparing the complete export; click again to cancel preparation.",
+    "monitor.export.not_accepted": "File writing did not start. Retry the export.",
+    "monitor.export.write_failed": "Export failed: %1",
     "hardware.utilization.device.offline_title": "%1 (offline, history retained)",
     "minidump.status.report_failed": "Report view generation failed: %1. Reopen the Report tab to retry.",
     "handle.filter.preparing": "● Preparing handle filter results...",
@@ -7052,6 +7055,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "正在准备完整导出；再次点击可取消准备。": "Preparing the complete export; click again to cancel preparation.",
+    "未开始写入文件，请重试导出。": "File writing did not start. Retry the export.",
     "%1（离线，保留历史）": "%1 (offline, history retained)",
     "正在检查 MCP 脚本路径…": "Checking the MCP script path…",
     "rehearsal view capacity": "rehearsal view capacity",

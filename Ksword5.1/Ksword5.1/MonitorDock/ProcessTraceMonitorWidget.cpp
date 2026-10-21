@@ -1,3 +1,4 @@
+#include "MonitorCanonicalExport.h"
 #include "ProcessTraceEventMetadata.h"
 #include "MonitorEventFilterProjection.h"
 #include "ProcessTraceMonitorWidget.h"
@@ -61,6 +62,7 @@ ProcessTraceMonitorWidget::ProcessTraceMonitorWidget(QWidget* parent)
 
 ProcessTraceMonitorWidget::~ProcessTraceMonitorWidget()
 {
+    if (m_eventExport) m_eventExport->close();
     if (m_eventFilterProjection) m_eventFilterProjection->close();
     if (m_targetLookup) m_targetLookup->close();
     m_uiDispatcher->close();
@@ -356,11 +358,7 @@ void ProcessTraceMonitorWidget::updateActionState()
         m_pauseButton->setIcon(QIcon(QStringLiteral(":/Icon/process_pause.svg")));
         m_pauseButton->setToolTip(QStringLiteral("暂停处理与目标进程相关的事件"));
     }
-    if (m_exportButton != nullptr)
-    {
-        m_exportButton->setEnabled(m_eventTable != nullptr && m_eventTable->rowCount() > 0 && !eventProjectionPending()
-            && (!m_eventFilterProjection || !m_eventFilterProjection->isPending()));
-    }
+    updateEventExportAction();
 }
 
 void ProcessTraceMonitorWidget::updateStatusLabel()

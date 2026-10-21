@@ -1,5 +1,7 @@
 #pragma once
 
+namespace ks::monitor { class MonitorCanonicalExport; }
+
 // ============================================================
 // ProcessTraceMonitorWidget.h
 // 作用：
@@ -284,6 +286,7 @@ private:
     void openEventDetailViewerForRow(int row) const;
     void showEventContextMenu(const QPoint& position);
     void exportVisibleRowsToTsv();
+    void updateEventExportAction();
 
     // ========================= 监控流程 ==========================
     void startMonitoring();
@@ -411,6 +414,7 @@ private:
     QPushButton* m_startButton = nullptr;                // m_startButton：开始监控按钮。
     QPushButton* m_stopButton = nullptr;                 // m_stopButton：停止监控按钮。
     QPushButton* m_pauseButton = nullptr;                // m_pauseButton：暂停/继续按钮。
+    ks::monitor::MonitorCanonicalExport* m_eventExport = nullptr;
     QPushButton* m_exportButton = nullptr;               // m_exportButton：导出事件按钮。
     QLabel* m_statusLabel = nullptr;                     // m_statusLabel：整体监控状态标签。
 

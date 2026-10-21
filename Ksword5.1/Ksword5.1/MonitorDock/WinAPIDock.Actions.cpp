@@ -1,3 +1,5 @@
+#include "MonitorCanonicalExport.h"
+#include <QPushButton>
 #include "../UI/StructuredFieldView.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/DetailDialogChrome.h"
@@ -1483,76 +1485,68 @@ void WinAPIDock::clearEventFilter()
     applyEventFilter();
 }
 
+void WinAPIDock::updateEventExportAction()
+{
+    if (!m_exportButton) return;
+    const bool preparing = m_eventExport && m_eventExport->isPreparing();
+    const bool busy = m_eventExport && m_eventExport->isBusy();
+    m_exportButton->setEnabled(preparing || (!busy && m_eventArchive.size() > 0));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_exportButton->setToolTip(preparing
+        ? language.text(QStringLiteral("monitor.export.preparing_hint"), QStringLiteral("正在准备完整导出；再次点击可取消准备。"))
+        : busy ? language.text(QStringLiteral("monitor.export.in_progress"), QStringLiteral("导出进行中"))
+        : ks::i18n::sourceText(QStringLiteral("导出当前可见事件为 TSV")));
+}
+
 void WinAPIDock::exportVisibleRowsToTsv()
 {
-    // MTAPI010 consumes canonical values. Until that consumer lands, reject
-    // every legacy exporter entry while the display mirror is hidden or stale.
-    if (!m_eventTable || !m_eventTable->isVisible() || m_eventProjectionStale || !m_eventProjectionQueue.empty() || !m_expiredEventProjection.empty() || (m_eventFilterProjection && m_eventFilterProjection->isPending())) return;
-    if (m_eventTable == nullptr || m_eventTable->rowCount() == 0)
-    {
-        QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前没有可导出的事件。"));
-        return;
-    }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        if (!m_eventTable->isRowHidden(row))
-        {
-            ++visibleCount;
-        }
-    }
-    if (visibleCount == 0)
-    {
-        QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前筛选结果为空。"));
-        return;
-    }
-
+    const QPointer<WinAPIDock> guard(this);
+    if (m_eventExport) m_eventExport->reconcile();
+    if (!guard) return;
+    if (m_eventExport && m_eventExport->isPreparing()) { m_eventExport->cancelPreparation(); return; }
+    if (m_eventExport && m_eventExport->isBusy()) return;
     const QString defaultFileName = QStringLiteral("winapi_events_%1.tsv")
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-    const QString exportPath = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出 WinAPI 事件"),
-        defaultFileName,
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出 WinAPI 事件"), defaultFileName,
         QStringLiteral("TSV 文件 (*.tsv);;文本文件 (*.txt)"));
-    if (exportPath.trimmed().isEmpty())
-    {
-        return;
-    }
-
-    QFile exportFile(exportPath);
-    if (!exportFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    {
-        QMessageBox::warning(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("无法写入文件：%1").arg(exportPath));
-        return;
-    }
-
-    QTextStream outputStream(&exportFile);
-    outputStream << QStringLiteral("# 仅导出当前表格中的可见记录；这不是完整调用轨迹。%1").arg(eventLossSummary()) << '\n';
-    QStringList headerTextList;
-    for (int column = 0; column < EventColumnCount; ++column)
-    {
-        QTableWidgetItem* headerItem = m_eventTable->horizontalHeaderItem(column);
-        headerTextList << (headerItem != nullptr ? headerItem->text() : QString());
-    }
-    outputStream << headerTextList.join('\t') << '\n';
-
-    for (int row = 0; row < m_eventTable->rowCount(); ++row)
-    {
-        if (m_eventTable->isRowHidden(row))
-        {
-            continue;
+    if (!guard || path.trimmed().isEmpty() || (m_eventExport && m_eventExport->isBusy())) return;
+    try {
+        const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(freezeVisibleEventRowsForExport());
+        if (!guard) return;
+        if (snapshot->rows.empty()) {
+            QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前没有可导出的事件。")); return;
         }
-
-        QStringList rowTextList;
-        for (int column = 0; column < EventColumnCount; ++column)
-        {
-            QTableWidgetItem* itemPointer = m_eventTable->item(row, column);
-            rowTextList << (itemPointer != nullptr ? itemPointer->text().replace('\t', ' ') : QString());
+        if (!m_eventExport) {
+            m_eventExport = new ks::monitor::MonitorCanonicalExport(this);
+            m_eventExport->setStateChangedCallback([guard]() { if (guard) guard->updateEventExportAction(); });
         }
-        outputStream << rowTextList.join('\t') << '\n';
+        const bool started = m_eventExport->start(snapshot, QStringLiteral("monitor/winapi/session-%1/pid-%2/retained-events").arg(snapshot->sessionGeneration).arg(snapshot->targetPid), path, QStringLiteral("# 仅导出当前表格中的可见记录；这不是完整调用轨迹。%1").arg(snapshot->lossSummary),
+            [guard](const ks::monitor::CanonicalExportOutcome& result) {
+                if (!guard || result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+                auto& language = ks::i18n::LanguageManager::instance();
+                if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                    QMessageBox::information(guard, QStringLiteral("导出 WinAPI 事件"), QStringLiteral("当前筛选结果为空。")); return;
+                }
+                if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                    QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"), language.text(QStringLiteral("monitor.export.not_accepted"),
+                        QStringLiteral("未开始写入文件，请重试导出。"))); return;
+                }
+                const auto& receipt = result.receipt;
+                if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                    QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                        language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+                }
+                if (!receipt.succeeded()) QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"),
+                    language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
+            });
+        if (!guard) return;
+        if (!started) QMessageBox::information(this, QStringLiteral("导出 WinAPI 事件"),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, QStringLiteral("导出 WinAPI 事件"),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-    exportFile.close();
+    if (guard) updateEventExportAction();
 }
 
 void WinAPIDock::showEventContextMenu(const QPoint& position)

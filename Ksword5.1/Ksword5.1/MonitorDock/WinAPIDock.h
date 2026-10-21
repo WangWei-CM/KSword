@@ -1,5 +1,7 @@
 #pragma once
 
+namespace ks::monitor { class MonitorCanonicalExport; }
+
 // ============================================================
 // WinAPIDock.h
 // 作用：
@@ -161,6 +163,7 @@ private:
     void applyEventFilter();
     void clearEventFilter();
     void exportVisibleRowsToTsv();
+    void updateEventExportAction();
     void showEventContextMenu(const QPoint& position);
     void showEventDetailDialog(int rowValue);
 
@@ -218,6 +221,7 @@ private:
     QPushButton* m_startButton = nullptr;              // m_startButton：启动 WinAPI 监控按钮。
     QPushButton* m_stopButton = nullptr;               // m_stopButton：停止 WinAPI 监控按钮。
     QPushButton* m_terminateHookButton = nullptr;      // m_terminateHookButton：手动终止目标进程 Hook 按钮。
+    ks::monitor::MonitorCanonicalExport* m_eventExport = nullptr;
     QPushButton* m_exportButton = nullptr;             // m_exportButton：导出当前可见事件按钮。
     QPushButton* m_clearEventButton = nullptr;         // m_clearEventButton：清空事件表按钮。
     QLabel* m_sessionStatusLabel = nullptr;            // m_sessionStatusLabel：会话状态文本。

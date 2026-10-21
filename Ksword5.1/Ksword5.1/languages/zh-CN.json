@@ -8,6 +8,9 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "monitor.export.preparing_hint": "正在准备完整导出；再次点击可取消准备。",
+    "monitor.export.not_accepted": "未开始写入文件，请重试导出。",
+    "monitor.export.write_failed": "导出失败：%1",
     "hardware.utilization.device.offline_title": "%1（离线，保留历史）",
     "minidump.status.report_failed": "报告视图生成失败：%1；重新打开报告页可重试。",
     "handle.filter.preparing": "● 正在准备句柄筛选结果...",
@@ -7052,6 +7055,8 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "正在准备完整导出；再次点击可取消准备。": "正在准备完整导出；再次点击可取消准备。",
+    "未开始写入文件，请重试导出。": "未开始写入文件，请重试导出。",
     "%1（离线，保留历史）": "%1（离线，保留历史）",
     "正在检查 MCP 脚本路径…": "正在检查 MCP 脚本路径…",
     "rehearsal view capacity": "rehearsal view capacity",
