@@ -19,6 +19,7 @@
 #include <deque>  // std::deque：实时事件队列按固定上限 O(1) 淘汰最旧项。
 #include <mutex>  // std::mutex：实时回调队列保护。
 #include <memory>
+#include <optional>
 #include <thread> // std::thread：可等待的历史/规则刷新线程。
 #include <vector> // std::vector：事件批量回投。
 
@@ -383,6 +384,10 @@ private:
     ks::ui::FlatTableModel<FirewallRuleEntry>* m_ruleValueModel = nullptr;
     ks::ui::AsyncOperation* m_eventFilterOperation = nullptr;
     ks::ui::AsyncOperation* m_ruleFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_eventDiffOperation = nullptr;
+    ks::ui::AsyncOperation* m_ruleDiffOperation = nullptr;
+    quint64 m_eventSourceRevision = 0, m_ruleSourceRevision = 0;
+    std::optional<quint64> m_eventDiffRequestedRevision, m_ruleDiffRequestedRevision;
     std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventFilterSource;
     std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleFilterSource;
     std::vector<FirewallEventEntry> m_eventEntryList;

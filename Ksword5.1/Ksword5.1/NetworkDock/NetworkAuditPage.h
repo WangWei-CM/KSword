@@ -118,7 +118,6 @@ private:
     };
     void configureCrossViewValueTable(QTableView* table, const QStringList& headers, bool tcp);
     using CrossViewValue = std::shared_ptr<const CrossViewValueRow>;
-    void publishCrossViewValueRows(QTableView* table, const std::vector<CrossViewValue>& rows);
 
     // CrossViewRow：TCP/UDP 交叉视图的一行聚合结果。
     struct CrossViewRow
@@ -543,6 +542,8 @@ private:
     QSet<quint32> m_processFilterSet; // 进程页带入的独立 PID 筛选。
     ks::ui::AsyncOperation* m_crossPreparation = nullptr;
     ks::ui::AsyncOperation* m_crossFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_crossDiffOperation = nullptr;
+    std::shared_ptr<const CrossViewPresentation> m_crossDiffRequestedSource;
     std::shared_ptr<const AuditSnapshot> m_crossPrepareRequestedSource;
     std::uint64_t m_crossSourceGeneration = 0;
     std::uint64_t m_crossLanguageGeneration = 0;

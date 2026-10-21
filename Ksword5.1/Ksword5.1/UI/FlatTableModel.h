@@ -78,6 +78,127 @@ namespace ks::ui
             Qt::Alignment alignment = Qt::AlignLeft | Qt::AlignVCenter;
         };
 
+        struct DataChangeRectangle
+        {
+            int firstRow = 0;
+            int lastRow = 0;
+            ColumnChange columns;
+        };
+
+        // Pure value protocol: callers must explicitly supply worker-safe key/delta
+        // functions. Never copies the model's potentially UI-borrowing resolvers.
+        struct PreparedRows
+        {
+            quint64 baseRevision = 0;
+            std::vector<RowType> rows;
+            std::vector<std::pair<int, int>> removals;
+            std::vector<std::size_t> insertions;
+            std::vector<int> targetRows;
+            std::vector<DataChangeRectangle> changes;
+            UpdateStats stats;
+            bool precise = false;
+        };
+
+        quint64 rowsRevision() const { return m_rowsRevision; }
+        bool canAcceptPreparedRows(quint64 revision) const
+        { return !m_updatingRows && m_rowsRevision == revision; }
+
+        static PreparedRows prepareRows(const std::vector<RowType>& oldRows,
+            std::vector<RowType> rows, int columns, KeyResolver key,
+            RowChangeResolver delta, quint64 revision)
+        {
+            PreparedRows prepared;
+            prepared.baseRevision = revision;
+            prepared.rows = std::move(rows);
+            prepared.precise = static_cast<bool>(delta);
+            std::vector<std::string> oldKeys, newKeys;
+            std::unordered_map<std::string, std::size_t> oldByKey, newByKey;
+            const auto collect = [&key](const auto& values, auto& keys, auto& positions) {
+                keys.reserve(values.size()); positions.reserve(values.size());
+                for (std::size_t i = 0; i < values.size(); ++i)
+                {
+                    auto value = key(values[i]);
+                    if (value.empty() || !positions.emplace(value, i).second) return false;
+                    keys.push_back(std::move(value));
+                }
+                return true;
+            };
+            if (!key || !collect(prepared.rows, newKeys, newByKey)
+                || !collect(oldRows, oldKeys, oldByKey))
+            {
+                prepared.stats.modelReset = true;
+                prepared.stats.updatedRowCount = static_cast<int>(prepared.rows.size());
+                return prepared;
+            }
+            for (int last = static_cast<int>(oldKeys.size()) - 1; last >= 0;)
+            {
+                if (newByKey.find(oldKeys[static_cast<std::size_t>(last)]) != newByKey.end())
+                { --last; continue; }
+                int first = last;
+                while (first > 0 && newByKey.find(oldKeys[static_cast<std::size_t>(first - 1)]) == newByKey.end()) --first;
+                prepared.removals.emplace_back(first, last);
+                prepared.stats.removedRowCount += last - first + 1;
+                last = first - 1;
+            }
+            for (const auto& value : oldKeys)
+            {
+                const auto found = newByKey.find(value);
+                if (found != newByKey.end()) prepared.targetRows.push_back(static_cast<int>(found->second));
+            }
+            std::vector<std::size_t> previous;
+            for (std::size_t row = 0; row < prepared.rows.size(); ++row)
+            {
+                const auto found = oldByKey.find(newKeys[row]);
+                std::vector<ColumnChange> changes;
+                if (found == oldByKey.end())
+                { prepared.insertions.push_back(row); prepared.targetRows.push_back(static_cast<int>(row)); }
+                else if (delta)
+                    changes = normalizeChanges(delta(oldRows[found->second], prepared.rows[row]), columns);
+                if (!changes.empty()) ++prepared.stats.updatedRowCount;
+                std::vector<std::size_t> current;
+                for (auto& change : changes)
+                {
+                    const auto match = std::find_if(previous.cbegin(), previous.cend(), [&](std::size_t i) {
+                        const auto& c = prepared.changes[i].columns;
+                        return c.firstColumn == change.firstColumn && c.lastColumn == change.lastColumn && c.roles == change.roles;
+                    });
+                    if (match != previous.cend())
+                    { prepared.changes[*match].lastRow = static_cast<int>(row); current.push_back(*match); }
+                    else
+                    { current.push_back(prepared.changes.size()); prepared.changes.push_back({static_cast<int>(row), static_cast<int>(row), std::move(change)}); }
+                }
+                previous = std::move(current);
+            }
+            prepared.stats.insertedRowCount = static_cast<int>(prepared.insertions.size());
+            for (std::size_t i = 0; i < prepared.targetRows.size(); ++i)
+                if (prepared.targetRows[i] != static_cast<int>(i)) { prepared.stats.orderChanged = true; break; }
+            if (!delta) prepared.stats.updatedRowCount = static_cast<int>(prepared.rows.size());
+            return prepared;
+        }
+
+        // Reject stale preparation rather than performing a second GUI-side diff.
+        bool setPreparedRows(PreparedRows prepared)
+        {
+            // Keep this opt-in path separate: ordinary setRows instantiations
+            // need neither the prepared commit code nor a PreparedRows local.
+            if (!canAcceptPreparedRows(prepared.baseRevision)) return false;
+            const QPointer<FlatTableModel> alive(this);
+            ++m_updateGeneration;
+            ++m_rowsRevision;
+            m_updatingRows = true;
+            auto rows = std::move(prepared.rows);
+            commitPreparedRows(std::move(rows), prepared, m_updateGeneration);
+            if (!alive) return true;
+            m_updatingRows = false;
+            if (m_pendingRows)
+            {
+                auto pending = std::move(*m_pendingRows);
+                m_pendingRows.reset();
+                submitRows(std::move(pending), m_pendingClear);
+            }
+            return true;
+        }
+
         // 构造函数作用：
         // - 接收固定列定义与数据解析回调；
         // - 返回：无，模型对象直接交给 QTableView 绑定。
@@ -113,6 +234,7 @@ namespace ks::ui
         void setRowChangeResolver(RowChangeResolver resolver)
         {
             m_rowChangeResolver = std::move(resolver);
+            ++m_rowsRevision;
         }
 
         // clearRows 作用：
@@ -253,6 +375,7 @@ namespace ks::ui
         // finish the current pair and drain it before the outer call returns.
         bool m_updatingRows = false;
         quint64 m_updateGeneration = 0;
+        quint64 m_rowsRevision = 0;
         std::optional<std::vector<RowType>> m_pendingRows;
         bool m_pendingClear = false;
 
@@ -260,6 +383,7 @@ namespace ks::ui
         {
             const QPointer<FlatTableModel> alive(this);
             ++m_updateGeneration;
+            ++m_rowsRevision;
             if (m_updatingRows)
             {
                 m_pendingRows = std::move(rows);
@@ -322,17 +446,9 @@ namespace ks::ui
             return true;
         }
 
-        struct DataChangeRectangle
-        {
-            int firstRow = 0;
-            int lastRow = 0;
-            ColumnChange columns;
-        };
-
         // 将重叠区间规范为互不相交的列段；roles 排序去重后才能合并相邻行。
-        std::vector<ColumnChange> normalizeChanges(std::vector<ColumnChange> changes) const
+        static std::vector<ColumnChange> normalizeChanges(std::vector<ColumnChange> changes, int columnTotal)
         {
-            const int columnTotal = static_cast<int>(m_columns.size());
             if (columnTotal == 0 || changes.empty()) return {};
             for (const ColumnChange& change : changes)
             {
@@ -416,7 +532,7 @@ namespace ks::ui
                 {
                     auto raw = resolver(m_rows[oldRow->second], rows[row]);
                     if (!alive || m_updateGeneration != generation) return {};
-                    changes = normalizeChanges(std::move(raw));
+                    changes = normalizeChanges(std::move(raw), static_cast<int>(m_columns.size()));
                 }
                 if (!changes.empty()) ++updatedRowCount;
                 std::vector<std::size_t> currentRowRectangles;
@@ -444,6 +560,59 @@ namespace ks::ui
                 previousRowRectangles = std::move(currentRowRectangles);
             }
             return rectangles;
+        }
+
+        UpdateStats commitPreparedRows(std::vector<RowType> rows, const PreparedRows& prepared, quint64 generation)
+        {
+            if (prepared.stats.modelReset) return resetRows(std::move(rows));
+            const QPointer<FlatTableModel> alive(this);
+            const auto current = [&] { return alive && m_updateGeneration == generation; };
+            const auto stats = prepared.stats;
+            for (const auto& range : prepared.removals)
+            {
+                beginRemoveRows({}, range.first, range.second);
+                if (!alive) return stats;
+                m_rows.erase(m_rows.begin() + range.first, m_rows.begin() + range.second + 1);
+                endRemoveRows();
+                if (!current()) return stats;
+            }
+            if (!prepared.insertions.empty())
+            {
+                const int first = static_cast<int>(m_rows.size());
+                beginInsertRows({}, first, first + static_cast<int>(prepared.insertions.size()) - 1);
+                if (!alive) return stats;
+                for (auto row : prepared.insertions) m_rows.push_back(rows[row]);
+                endInsertRows();
+                if (!current()) return stats;
+            }
+            if (stats.orderChanged)
+            {
+                emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+                if (!alive) return stats;
+                const auto before = persistentIndexList();
+                QModelIndexList after;
+                after.reserve(before.size());
+                for (const auto& index : before)
+                    after.push_back(index.isValid() && index.row() >= 0 && index.row() < static_cast<int>(prepared.targetRows.size())
+                        ? createIndex(prepared.targetRows[static_cast<std::size_t>(index.row())], index.column()) : QModelIndex());
+                m_rows = std::move(rows);
+                changePersistentIndexList(before, after);
+                emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+                if (!current()) return stats;
+            }
+            else m_rows = std::move(rows);
+            if (prepared.precise)
+            {
+                for (const auto& change : prepared.changes)
+                {
+                    emit dataChanged(index(change.firstRow, change.columns.firstColumn),
+                        index(change.lastRow, change.columns.lastColumn), change.columns.roles);
+                    if (!current()) return stats;
+                }
+            }
+            else if (!m_rows.empty() && !m_columns.empty())
+                emit dataChanged(index(0, 0), index(static_cast<int>(m_rows.size()) - 1, static_cast<int>(m_columns.size()) - 1));
+            return stats;
         }
 
         UpdateStats setRowsIncrementally(std::vector<RowType> rows, quint64 generation)

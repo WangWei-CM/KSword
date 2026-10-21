@@ -177,6 +177,29 @@ namespace
         return key;
     }
 
+    template<class Model>
+    typename Model::RowChangeResolver crossViewValueChanges(bool tcp)
+    {
+        return [tcp](const typename Model::RowType& left, const typename Model::RowType& right) {
+            const auto& a = *left;
+            const auto& b = *right;
+            std::vector<typename Model::ColumnChange> changes;
+            for (int column = 0; column < b.fields.size(); ++column)
+                if (a.fields.value(column) != b.fields.at(column))
+                    changes.push_back({column, column, {Qt::DisplayRole}});
+            if (a.searchFields != b.searchFields)
+                changes.push_back({0, 0, {Qt::UserRole + 170}});
+            if (a.processId != b.processId)
+            {
+                changes.push_back({0, 0, {Qt::UserRole + 171}});
+                changes.push_back({kAuditProcessNameColumn, kAuditProcessNameColumn, {Qt::DecorationRole}});
+            }
+            if (tcp && a.sourceIndex != b.sourceIndex)
+                changes.push_back({0, 0, {Qt::UserRole}});
+            return changes;
+        };
+    }
+
     // createReadOnlyCell 作用：
     // - 创建不可编辑的表格单元格；
     // - 输入 cellText 为待显示文本；
@@ -828,6 +851,7 @@ NetworkAuditPage::~NetworkAuditPage()
     m_asyncState->closing.store(true);
     if (m_crossPreparation) m_crossPreparation->close();
     if (m_crossFilterOperation) m_crossFilterOperation->close();
+    if (m_crossDiffOperation) m_crossDiffOperation->close();
     if (m_asyncState)
     {
         std::lock_guard<std::mutex> lock(m_asyncState->mutex);
@@ -1323,24 +1347,7 @@ void NetworkAuditPage::configureCrossViewValueTable(
             return {};
         }, table, Model::FlagsResolver{},
         [](const CrossViewValue& row) { return row->identity; },
-        [tcp](const CrossViewValue& left, const CrossViewValue& right) {
-            const auto& a = *left;
-            const auto& b = *right;
-            std::vector<Model::ColumnChange> changes;
-            for (int column = 0; column < b.fields.size(); ++column)
-                if (a.fields.value(column) != b.fields.at(column))
-                    changes.push_back({column, column, {Qt::DisplayRole}});
-            if (a.searchFields != b.searchFields)
-                changes.push_back({0, 0, {Qt::UserRole + 170}});
-            if (a.processId != b.processId)
-            {
-                changes.push_back({0, 0, {Qt::UserRole + 171}});
-                changes.push_back({kAuditProcessNameColumn, kAuditProcessNameColumn, {Qt::DecorationRole}});
-            }
-            if (tcp && a.sourceIndex != b.sourceIndex)
-                changes.push_back({0, 0, {Qt::UserRole}});
-            return changes;
-        });
+        crossViewValueChanges<Model>(tcp));
     auto* proxy = new QSortFilterProxyModel(table);
     proxy->setDynamicSortFilter(false);
     proxy->setSortLocaleAware(true);
@@ -1349,15 +1356,6 @@ void NetworkAuditPage::configureCrossViewValueTable(
     table->setModel(proxy);
     ks::ui::SetTableRowFilterBusinessOwnership(table,
         ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
-}
-
-void NetworkAuditPage::publishCrossViewValueRows(QTableView* table, const std::vector<CrossViewValue>& rows)
-{
-    if (!table) return;
-    using Model = ks::ui::FlatTableModel<CrossViewValue>;
-    auto* proxy = qobject_cast<QSortFilterProxyModel*>(table->model());
-    auto* model = proxy != nullptr ? dynamic_cast<Model*>(proxy->sourceModel()) : nullptr;
-    if (model) model->setRows(rows); // Pointer-vector copy/diff only; all text is worker-prepared.
 }
 
 void NetworkAuditPage::initializeCrossViewConnections()
@@ -2792,20 +2790,84 @@ const std::vector<NetworkAuditPage::TcpEndpointRow>& NetworkAuditPage::tcpEndpoi
 
 void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPresentation> prepared)
 {
-    if (!prepared) return;
+    if (!prepared || m_crossDiffRequestedSource == prepared) return;
+    using Model = ks::ui::FlatTableModel<CrossViewValue>;
+    struct Input { std::vector<CrossViewValue> oldRows, rows; quint64 revision; int columns; };
+    struct Request { std::shared_ptr<const CrossViewPresentation> source; std::array<Input, 3> tables; };
+    using Result = std::array<Model::PreparedRows, 3>;
+    Request request{prepared, {}};
+    const std::array<QTableView*, 3> tables{m_tcpTable, m_udpTable, m_crossSummaryTable};
+    const std::array<const std::vector<CrossViewValue>*, 3> rows{&prepared->tcpRows, &prepared->udpRows, &prepared->summaryRows};
+    std::array<QPointer<Model>, 3> models;
+    for (std::size_t i = 0; i < tables.size(); ++i)
+    {
+        auto* proxy = tables[i] ? qobject_cast<QSortFilterProxyModel*>(tables[i]->model()) : nullptr;
+        models[i] = proxy ? dynamic_cast<Model*>(proxy->sourceModel()) : nullptr;
+        if (!models[i] || !models[i]->canAcceptPreparedRows(models[i]->rowsRevision())) return;
+        request.tables[i] = {models[i]->rows(), *rows[i], models[i]->rowsRevision(), models[i]->columnCount()};
+    }
     const QPointer<NetworkAuditPage> owner(this);
-    m_displayedCrossView = prepared; // TCP UserRole and native records share this exact immutable source.
-    m_r0TcpStatusText = prepared->r0TcpStatusText;
-    m_r0UdpStatusText = prepared->r0UdpStatusText;
-    publishCrossViewValueRows(m_tcpTable, prepared->tcpRows);
-    if (!owner) return;
-    publishCrossViewValueRows(m_udpTable, prepared->udpRows);
-    if (!owner) return;
-    publishCrossViewValueRows(m_crossSummaryTable, prepared->summaryRows);
-    if (!owner) return;
-    applyCrossViewSearchFilter();
-    if (!owner) return;
-    updateCrossViewActionState();
+    if (!m_crossDiffOperation) m_crossDiffOperation = new ks::ui::AsyncOperation(this);
+    m_crossDiffRequestedSource = prepared;
+    m_crossDiffOperation->submit<Request, Result>(std::move(request),
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) {
+            Result result;
+            for (std::size_t i = 0; i < result.size(); ++i)
+            {
+                if (token.isCanceled()) return Result{};
+                const auto& input = value.tables[i];
+                result[i] = Model::prepareRows(input.oldRows, input.rows, input.columns,
+                    [](const CrossViewValue& row) { return row->identity; },
+                    crossViewValueChanges<Model>(i == 0), input.revision);
+            }
+            return result;
+        },
+        [owner, prepared, models](const Result& result, std::uint64_t ticket) {
+            if (!owner || !owner->m_crossDiffOperation->isCurrent(ticket)) return true;
+            owner->m_crossDiffRequestedSource.reset();
+            const auto retry = [owner]() {
+                if (!owner) return;
+                owner->m_dirtyAuditTables.insert(owner->m_tcpTable);
+                owner->m_dirtyAuditTables.insert(owner->m_udpTable);
+                owner->m_dirtyAuditTables.insert(owner->m_crossSummaryTable);
+                owner->presentVisibleSnapshot();
+            };
+            const auto current = [&]() {
+                return owner && owner->m_preparedCrossView == prepared
+                    && owner->m_latestAuditSnapshot == prepared->source
+                    && owner->m_crossSourceGeneration == prepared->sourceGeneration
+                    && owner->m_crossLanguageGeneration == prepared->languageGeneration;
+            };
+            if (!current() || !owner->m_crossViewPage->isVisible()) { retry(); return true; }
+            const std::array<QTableView*, 3> currentTables{owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable};
+            for (std::size_t i = 0; i < models.size(); ++i)
+            {
+                auto* proxy = currentTables[i] ? qobject_cast<QSortFilterProxyModel*>(currentTables[i]->model()) : nullptr;
+                if (!models[i] || !proxy || proxy->sourceModel() != models[i].data()
+                    || !models[i]->canAcceptPreparedRows(result[i].baseRevision)) { retry(); return true; }
+            }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("network-audit-visible-snapshot"),
+                {owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable}, retry)) return true;
+            owner->m_displayedCrossView = prepared;
+            owner->m_r0TcpStatusText = prepared->r0TcpStatusText;
+            owner->m_r0UdpStatusText = prepared->r0UdpStatusText;
+            for (std::size_t i = 0; i < models.size(); ++i)
+            {
+                if (!current() || !models[i] || !models[i]->setPreparedRows(result[i])) { retry(); return true; }
+            }
+            if (!current()) { retry(); return true; }
+            owner->applyCrossViewSearchFilter();
+            if (owner) owner->updateCrossViewActionState();
+            return true;
+        },
+        [owner](std::exception_ptr) {
+            if (!owner) return;
+            owner->m_crossDiffRequestedSource.reset();
+            owner->m_dirtyAuditTables.insert(owner->m_tcpTable);
+            owner->m_dirtyAuditTables.insert(owner->m_udpTable);
+            owner->m_dirtyAuditTables.insert(owner->m_crossSummaryTable);
+        });
 }
 
 void NetworkAuditPage::applyCrossViewSearchFilter()

@@ -2628,6 +2628,8 @@ NetworkFirewallPage::~NetworkFirewallPage()
     m_shuttingDown.store(true);
     if (m_eventFilterOperation) m_eventFilterOperation->close();
     if (m_ruleFilterOperation) m_ruleFilterOperation->close();
+    if (m_eventDiffOperation) m_eventDiffOperation->close();
+    if (m_ruleDiffOperation) m_ruleDiffOperation->close();
     if (m_eventTable) m_eventTable->removeEventFilter(this);
     if (m_ruleTable)
     {
@@ -3479,6 +3481,7 @@ void NetworkFirewallPage::appendEventsToTable(
             entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
         m_eventEntryList.push_back(std::move(entry));
     }
+    ++m_eventSourceRevision;
     m_eventProjectionDirty = true;
     m_eventFilterDirty = true;
     presentPendingFirewallValues();
@@ -3493,10 +3496,46 @@ void NetworkFirewallPage::presentPendingFirewallValues()
         if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
             QStringLiteral("firewall_event_value_projection"), {m_eventTable},
             [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return;
-        m_eventProjectionDirty = false;
-        m_eventValueModel->setRows(m_eventEntryList);
-        m_eventFilterSource.reset();
-        applyFilterToRows();
+        if (m_eventDiffRequestedRevision == m_eventSourceRevision
+            || !m_eventValueModel->canAcceptPreparedRows(m_eventValueModel->rowsRevision())) return;
+        using Model = FirewallEventModel;
+        struct Request { std::vector<FirewallEventEntry> oldRows, rows; quint64 revision, sourceRevision; int columns; };
+        const Request request{m_eventValueModel->rows(), m_eventEntryList,
+            m_eventValueModel->rowsRevision(), m_eventSourceRevision, m_eventValueModel->columnCount()};
+        const QPointer<Model> model(m_eventValueModel);
+        if (!m_eventDiffOperation) m_eventDiffOperation = new ks::ui::AsyncOperation(this);
+        m_eventDiffRequestedRevision = request.sourceRevision;
+        m_eventDiffOperation->submit<Request, Model::PreparedRows>(request,
+            [](const Request& value, const ks::ui::AsyncOperationToken&) {
+                return Model::prepareRows(value.oldRows, value.rows, value.columns,
+                    [](const FirewallEventEntry& row) { return std::to_string(row.displayIdentity); },
+                    [](const FirewallEventEntry& a, const FirewallEventEntry& b) {
+                        return sameFirewallEvent(a, b) ? std::vector<Model::ColumnChange>{}
+                            : std::vector<Model::ColumnChange>{{0, ColumnCount - 1, {}}};
+                    }, value.revision);
+            },
+            [owner, model, sourceRevision = request.sourceRevision](const Model::PreparedRows& result, std::uint64_t ticket) {
+                if (!owner || !owner->m_eventDiffOperation->isCurrent(ticket)) return true;
+                owner->m_eventDiffRequestedRevision.reset();
+                auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_eventTable->model());
+                if (!model || owner->m_eventValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
+                    || owner->m_eventSourceRevision != sourceRevision
+                    || !model->canAcceptPreparedRows(result.baseRevision))
+                { owner->presentPendingFirewallValues(); return true; }
+                if (!owner->m_eventTable->isVisible()) return true;
+                if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                    QStringLiteral("firewall_event_value_projection"), {owner->m_eventTable},
+                    [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
+                if (!owner->m_eventValueModel->setPreparedRows(result))
+                { owner->presentPendingFirewallValues(); return true; }
+                if (!owner) return true;
+                if (owner->m_eventSourceRevision != sourceRevision)
+                { owner->presentPendingFirewallValues(); return true; }
+                owner->m_eventProjectionDirty = false;
+                owner->m_eventFilterSource.reset();
+                owner->applyFilterToRows();
+                return true;
+            }, [owner](std::exception_ptr) { if (owner) owner->m_eventDiffRequestedRevision.reset(); });
     }
     if (m_ruleProjectionDirty && m_ruleTable && m_ruleTable->isVisible())
         appendRulesToTable(m_ruleEntryList, true);
@@ -3523,6 +3562,7 @@ void NetworkFirewallPage::applyResolvedHostnames(const QHash<QString, QString>& 
     }
     if (changed)
     {
+        ++m_eventSourceRevision;
         m_eventProjectionDirty = true;
         m_eventFilterDirty = true;
         presentPendingFirewallValues();
@@ -3754,13 +3794,9 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
 
                         if (errorText.isEmpty())
                         {
-                            const auto& old = deferredPagePointer->m_ruleEntryList;
-                            if (old.size() != ruleSnapshot.size()
-                                || !std::equal(old.cbegin(), old.cend(), ruleSnapshot.cbegin(), sameFirewallRule))
-                            {
-                                deferredPagePointer->m_ruleEntryList = std::move(ruleSnapshot);
-                                deferredPagePointer->appendRulesToTable(deferredPagePointer->m_ruleEntryList, true);
-                            }
+                            deferredPagePointer->m_ruleEntryList = std::move(ruleSnapshot);
+                            ++deferredPagePointer->m_ruleSourceRevision;
+                            deferredPagePointer->appendRulesToTable(deferredPagePointer->m_ruleEntryList, true);
                             deferredPagePointer->setStatusText(
                                 QStringLiteral("防火墙规则：%1 条，刷新：%2")
                                 .arg(static_cast<int>(deferredPagePointer->m_ruleEntryList.size()))
@@ -3821,18 +3857,65 @@ void NetworkFirewallPage::appendRulesToTable(
     if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
         QStringLiteral("firewall-rule-table-append"), {m_ruleTable},
         [owner]() { if (owner) owner->appendRulesToTable(owner->m_ruleEntryList, true); })) return;
-    const auto& published = m_ruleValueModel->rows();
-    if (published.size() != ruleList.size()
-        || !std::equal(published.cbegin(), published.cend(), ruleList.cbegin(), sameFirewallRule))
-    {
-        m_ruleValueModel->setRows(ruleList);
-        m_ruleFilterSource.reset();
-    }
-    m_ruleProjectionDirty = false;
-    m_ruleFilterDirty = true;
-    applyRuleFilterToRows();
-    updateRuleActionButtons();
-    updateRuleDetailEditor();
+    if (m_ruleDiffRequestedRevision == m_ruleSourceRevision
+        || !m_ruleValueModel->canAcceptPreparedRows(m_ruleValueModel->rowsRevision())) return;
+    using Model = FirewallRuleModel;
+    struct Request { std::vector<FirewallRuleEntry> oldRows, rows; quint64 revision, sourceRevision; int columns; };
+    struct Result { Model::PreparedRows plan; bool unchanged = false; };
+    const Request request{m_ruleValueModel->rows(), ruleList,
+        m_ruleValueModel->rowsRevision(), m_ruleSourceRevision, m_ruleValueModel->columnCount()};
+    const QPointer<Model> model(m_ruleValueModel);
+    if (!m_ruleDiffOperation) m_ruleDiffOperation = new ks::ui::AsyncOperation(this);
+    m_ruleDiffRequestedRevision = request.sourceRevision;
+    m_ruleDiffOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken&) {
+            // Preserve the page's original unchanged-snapshot fast path,
+            // including duplicate-key snapshots that must not gain a reset.
+            if (value.oldRows.size() == value.rows.size()
+                && std::equal(value.oldRows.cbegin(), value.oldRows.cend(), value.rows.cbegin(), sameFirewallRule))
+            {
+                Result result;
+                result.plan.baseRevision = value.revision;
+                result.unchanged = true;
+                return result;
+            }
+            return Result{Model::prepareRows(value.oldRows, value.rows, value.columns,
+                [](const FirewallRuleEntry& row) { return row.fingerprintText.toUtf8().toStdString(); },
+                [](const FirewallRuleEntry& a, const FirewallRuleEntry& b) {
+                    return sameFirewallRule(a, b) ? std::vector<Model::ColumnChange>{}
+                        : std::vector<Model::ColumnChange>{{0, RuleColumnCount - 1, {}}};
+                }, value.revision), false};
+        },
+        [owner, model, sourceRevision = request.sourceRevision](const Result& result, std::uint64_t ticket) {
+            if (!owner || !owner->m_ruleDiffOperation->isCurrent(ticket)) return true;
+            owner->m_ruleDiffRequestedRevision.reset();
+            auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_ruleTable->model());
+            if (!model || owner->m_ruleValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
+                || owner->m_ruleSourceRevision != sourceRevision
+                || !model->canAcceptPreparedRows(result.plan.baseRevision))
+            { owner->presentPendingFirewallValues(); return true; }
+            if (!owner->m_ruleTable->isVisible()) return true;
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall-rule-table-append"), {owner->m_ruleTable},
+                [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
+            if (!result.unchanged && !owner->m_ruleValueModel->setPreparedRows(result.plan))
+            { owner->presentPendingFirewallValues(); return true; }
+            if (!owner) return true;
+            if (owner->m_ruleSourceRevision != sourceRevision)
+            { owner->presentPendingFirewallValues(); return true; }
+            owner->m_ruleProjectionDirty = false;
+            if (!result.unchanged)
+            {
+                owner->m_ruleFilterSource.reset();
+                owner->m_ruleFilterDirty = true;
+            }
+            if (result.unchanged && !owner->m_ruleFilterDirty) return true;
+            owner->applyRuleFilterToRows();
+            if (!owner) return true;
+            owner->updateRuleActionButtons();
+            if (owner) owner->updateRuleDetailEditor();
+            return true;
+        }, [owner](std::exception_ptr) { if (owner) owner->m_ruleDiffRequestedRevision.reset(); });
 }
 
 void NetworkFirewallPage::applyRuleFilterToRows()
