@@ -19,6 +19,7 @@ class QLineEdit;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
 struct ScannerAsyncState;
 
 namespace ks::ui
@@ -94,7 +95,7 @@ private:
     QTableWidget* createReadOnlyTable(QWidget* parent = nullptr) const;
 
     // createStructuredTablePage 作用：为宽表建立互补 A/B/C 列组和表头列菜单。
-    QWidget* createStructuredTablePage(QTableWidget* table, int columnCount) const;
+    QWidget* createStructuredTablePage(QTableView* table, int columnCount) const;
 
     // createAttackPathPage 作用：展示规则结论、评分和逐条可复核证据。
     QWidget* createAttackPathPage(const ks::scanner::BinaryScanResult& result) const;

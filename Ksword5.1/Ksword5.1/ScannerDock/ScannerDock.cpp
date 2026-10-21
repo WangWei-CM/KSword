@@ -10,6 +10,10 @@
 #include "ksword/scanner/binary_scanner.h"
 
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QTableView>
+#include <functional>
 #include <QApplication>
 #include <QByteArray>
 #include <QCheckBox>
@@ -65,6 +69,42 @@ struct ScannerAsyncState
 
 namespace
 {
+    class ScannerTableModel final : public QAbstractTableModel
+    {
+    public:
+        using Value = std::function<QString(int, int)>;
+        using Header = std::function<QString(int)>;
+        ScannerTableModel(const int rows, const int columns, Value value, Header header, QObject* parent)
+            : QAbstractTableModel(parent), m_rows(rows), m_columns(columns),
+              m_value(std::move(value)), m_header(std::move(header)) {}
+        int rowCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : m_rows; }
+        int columnCount(const QModelIndex& parent = {}) const override
+        { return parent.isValid() ? 0 : m_columns; }
+        QVariant data(const QModelIndex& index, const int role) const override
+        {
+            if (!index.isValid() || index.row() >= m_rows || index.column() >= m_columns ||
+                (role != Qt::DisplayRole && role != Qt::ToolTipRole)) return {};
+            return m_value(index.row(), index.column());
+        }
+        QVariant headerData(const int section, const Qt::Orientation orientation, const int role) const override
+        {
+            return orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < m_columns
+                ? QVariant(m_header(section)) : QVariant();
+        }
+        void refreshLanguage()
+        {
+            if (m_columns > 0) emit headerDataChanged(Qt::Horizontal, 0, m_columns - 1);
+            if (m_rows > 0 && m_columns > 0)
+                emit dataChanged(index(0, 0), index(m_rows - 1, m_columns - 1), {Qt::DisplayRole, Qt::ToolTipRole});
+        }
+    private:
+        int m_rows;
+        int m_columns;
+        Value m_value;
+        Header m_header;
+    };
+
     // fromUtf8 作用：将扫描后端的 UTF-8 文本安全转换为 Qt 字符串。
     // 参数 value：后端文本；返回值：可直接显示的 QString。
     QString fromUtf8(const std::string& value)
@@ -615,56 +655,68 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
     headerTable->resizeColumnsToContents();
     addResultNavigationTab(headerTable, translated("scanner.result.headers", "文件头"));
 
-    for (const ks::scanner::BinaryTable& sourceTable : result.tables)
+    const auto snapshot = m_lastResult;
+    for (std::size_t tableIndex = 0; tableIndex < result.tables.size(); ++tableIndex)
     {
-        // table：按后端稳定列顺序创建，行数已由 ScanOptions 在后端限制。
-        auto* table = createReadOnlyTable(m_resultTabs);
-        table->setColumnCount(static_cast<int>(sourceTable.columns.size()));
-        QStringList columnTitles;
-        for (const std::string& column : sourceTable.columns)
-        {
-            columnTitles.push_back(localizedColumnTitle(column));
-        }
-        table->setHorizontalHeaderLabels(columnTitles);
-        table->setRowCount(static_cast<int>(sourceTable.rows.size()));
-        for (int row = 0; row < table->rowCount(); ++row)
-        {
-            const auto& sourceRow = sourceTable.rows[static_cast<std::size_t>(row)];
-            for (int column = 0; column < table->columnCount(); ++column)
-            {
-                const QString value = column < static_cast<int>(sourceRow.size())
-                    ? localizedTableValue(
-                        sourceTable.id,
-                        column,
-                        sourceRow[static_cast<std::size_t>(column)])
-                    : QString();
-                table->setItem(row, column, new QTableWidgetItem(value));
-            }
-        }
+        const auto& sourceTable = result.tables[tableIndex];
+        auto* table = new ks::ui::TableActionTableView(m_resultTabs);
+        ks::ui::SetTableActionBarMode(table, ks::ui::TableActionBarMode::Compact);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        table->setAlternatingRowColors(true);
+        table->setWordWrap(false);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setSectionsMovable(true);
+        table->horizontalHeader()->setStretchLastSection(true);
+        auto* model = new ScannerTableModel(static_cast<int>(sourceTable.rows.size()),
+            static_cast<int>(sourceTable.columns.size()),
+            [this, snapshot, tableIndex](const int row, const int column) {
+                const auto& source = snapshot->tables[tableIndex];
+                const auto& values = source.rows[static_cast<std::size_t>(row)];
+                return column < static_cast<int>(values.size())
+                    ? localizedTableValue(source.id, column, values[static_cast<std::size_t>(column)]) : QString();
+            },
+            [this, snapshot, tableIndex](const int column) {
+                return localizedColumnTitle(snapshot->tables[tableIndex].columns[static_cast<std::size_t>(column)]);
+            }, table);
+        auto* proxy = new QSortFilterProxyModel(table);
+        proxy->setSourceModel(model);
+        proxy->setDynamicSortFilter(false);
+        table->setModel(proxy);
+        table->horizontalHeader()->setSectionsClickable(true);
+        // A source row stays the same section after a user sort.
+        connect(table->horizontalHeader(), &QHeaderView::sectionClicked, table,
+            [table, proxy](const int column) {
+                const auto* header = table->horizontalHeader();
+                const auto order = proxy->sortColumn() == column &&
+                    header->sortIndicatorOrder() == Qt::AscendingOrder ? Qt::DescendingOrder : Qt::AscendingOrder;
+                proxy->sort(column, order);
+                table->horizontalHeader()->setSortIndicator(column, order);
+                table->horizontalHeader()->setSortIndicatorShown(true);
+            });
+        // Bound automatic measurement to a small sample; all rows remain available to copy/export.
+        table->horizontalHeader()->setResizeContentsPrecision(64);
         table->resizeColumnsToContents();
         if (sourceTable.id == "sections" &&
-            (result.format == ks::scanner::BinaryFormat::Pe32 ||
-             result.format == ks::scanner::BinaryFormat::Pe32Plus))
+            (result.format == ks::scanner::BinaryFormat::Pe32 || result.format == ks::scanner::BinaryFormat::Pe32Plus))
         {
-            // The rows correspond to PE sections; headers occupy region zero.
-            connect(table, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
-                if (!m_lastResult || row < 0) return;
-                const auto regionIndex = static_cast<std::size_t>(row) + 1;
-                if (regionIndex >= m_lastResult->mappedRegions.size()) return;
-                const auto& region = m_lastResult->mappedRegions[regionIndex];
+            connect(table, &QTableView::doubleClicked, this, [this, proxy, snapshot](const QModelIndex& index) {
+                if (snapshot != m_lastResult || !index.isValid()) return;
+                const auto sourceIndex = proxy->mapToSource(index);
+                const auto regionIndex = static_cast<std::size_t>(sourceIndex.row()) + 1;
+                if (regionIndex >= snapshot->mappedRegions.size()) return;
+                const auto& region = snapshot->mappedRegions[regionIndex];
                 if (region.fileSize != 0)
                     navigateAnalysisOffset(region.fileOffset,
-                        (region.characteristics & 0x20000000U) != 0 && m_lastResult->x86Compatible);
+                        (region.characteristics & 0x20000000U) != 0 && snapshot->x86Compatible);
             });
         }
         QString title = localizedTableTitle(sourceTable.id, sourceTable.title);
-        if (sourceTable.truncated)
-        {
-            title += translated("scanner.result.truncated_suffix", "（已截断）");
-        }
-        addResultNavigationTab(
-            createStructuredTablePage(table, table->columnCount()),
-            title);
+        if (sourceTable.truncated) title += translated("scanner.result.truncated_suffix", "（已截断）");
+        QWidget* page = createStructuredTablePage(table, static_cast<int>(sourceTable.columns.size()));
+        page->setProperty("scanner_source_table_index", static_cast<int>(tableIndex));
+        addResultNavigationTab(page, title);
     }
 
     auto* diagnosticsTable = createReadOnlyTable(m_resultTabs);
