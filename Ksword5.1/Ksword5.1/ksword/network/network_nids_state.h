@@ -26,7 +26,7 @@ namespace ks::network
             if (m_open("", &m_database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
                 | SQLITE_OPEN_PRIVATECACHE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) return;
             bool memoryOnly = false;
-            if (m_exec(m_database, "PRAGMA compile_options", [](void* context, int count, char** values, char**) {
+            if (m_exec(m_database, "PRAGMA compile_options;", [](void* context, int count, char** values, char**) {
                 if (count > 0 && values[0] && std::strcmp(values[0], "TEMP_STORE=3") == 0)
                     *static_cast<bool*>(context) = true;
                 return 0;
@@ -36,12 +36,12 @@ namespace ks::network
             // hash/offset index for every historical key. Do not alter global
             // SQLite settings or install a provider used by another component.
             if (m_exec(m_database,
-                "PRAGMA cache_size=64; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;"
-                "PRAGMA synchronous=OFF; PRAGMA journal_size_limit=0;"
-                "CREATE TABLE states(kind INTEGER NOT NULL,k BLOB NOT NULL,v BLOB NOT NULL,"
-                "PRIMARY KEY(kind,k)) WITHOUT ROWID;", nullptr, nullptr, nullptr) != SQLITE_OK) return;
-            if (m_prepare(m_database, "SELECT v FROM states WHERE kind=?1 AND k=?2", -1, &m_read, nullptr) != SQLITE_OK
-                || m_prepare(m_database, "INSERT OR REPLACE INTO states VALUES(?1,?2,?3)", -1, &m_write, nullptr) != SQLITE_OK) return;
+                R"SQL(PRAGMA cache_size=64; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;
+PRAGMA synchronous=OFF; PRAGMA journal_size_limit=0;
+CREATE TABLE states(kind INTEGER NOT NULL,k BLOB NOT NULL,v BLOB NOT NULL,
+PRIMARY KEY(kind,k)) WITHOUT ROWID;)SQL", nullptr, nullptr, nullptr) != SQLITE_OK) return;
+            if (m_prepare(m_database, "SELECT v FROM states WHERE kind=?1 AND k=?2;", -1, &m_read, nullptr) != SQLITE_OK
+                || m_prepare(m_database, "INSERT OR REPLACE INTO states VALUES(?1,?2,?3);", -1, &m_write, nullptr) != SQLITE_OK) return;
             m_ready = true;
         }
         ~StateStore()
@@ -61,13 +61,13 @@ namespace ks::network
             try {
                 if (m_bindInt(m_read, 1, kind) != SQLITE_OK ||
                     m_bindBlob(m_read, 2, key.data(), static_cast<int>(key.size()), SQLITE_STATIC) != SQLITE_OK)
-                    throw std::runtime_error("NIDS state lookup binding failed");
+                    throw std::runtime_error("NIDS_STATE_LOOKUP_BINDING_FAILED");
                 const int result = m_step(m_read);
                 if (result == SQLITE_DONE) { finish(m_read); return std::nullopt; }
-                if (result != SQLITE_ROW) throw std::runtime_error("NIDS state lookup failed");
+                if (result != SQLITE_ROW) throw std::runtime_error("NIDS_STATE_LOOKUP_FAILED");
                 const int size = m_bytes(m_read, 0);
                 const auto* bytes = static_cast<const std::uint8_t*>(m_blob(m_read, 0));
-                if (size <= 0 || !bytes) throw std::runtime_error("NIDS state value unavailable");
+                if (size <= 0 || !bytes) throw std::runtime_error("NIDS_STATE_VALUE_UNAVAILABLE");
                 std::vector<std::uint8_t> value(bytes, bytes + size);
                 finish(m_read);
                 return value;
@@ -183,7 +183,7 @@ namespace ks::network
             for (int i = 0; i < count; ++i) value |= static_cast<std::uint64_t>(bytes[offset++]) << (i * 8);
             return value;
         }
-        static void require(bool value) { if (!value) throw std::runtime_error("NIDS state value invalid"); }
+        static void require(bool value) { if (!value) throw std::runtime_error("NIDS_STATE_VALUE_INVALID"); }
         HMODULE m_library = nullptr;
         sqlite3* m_database = nullptr;
         sqlite3_stmt* m_read = nullptr;
