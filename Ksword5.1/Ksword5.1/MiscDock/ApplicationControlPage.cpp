@@ -539,6 +539,46 @@ namespace
         return QStringLiteral("事件");
     }
 
+    struct AppLockerXmlReadResult
+    {
+        bool ok = false;
+        QString xml;
+        QString diagnostic;
+    };
+    struct AppLockerXmlPrepared
+    {
+        bool valid = false;
+        QString parserError;
+        QString script;
+    };
+
+    AppLockerXmlPrepared prepareAppLockerXmlValue(const QString& original, const ks::ui::AsyncOperationToken& token)
+    {
+        if (token.isCanceled()) return {};
+        const QString xml = original.trimmed();
+        QXmlStreamReader reader(xml);
+        QString root;
+        while (!reader.atEnd())
+        {
+            reader.readNext();
+            if (root.isEmpty() && reader.isStartElement()) root = reader.name().toString();
+            if (token.isCanceled()) return {};
+        }
+        if (reader.hasError() || root.compare(QStringLiteral("AppLockerPolicy"), Qt::CaseInsensitive) != 0)
+            return {false, reader.hasError() ? reader.errorString() : QString(), {}};
+        const QString encoded = QString::fromLatin1(xml.toUtf8().toBase64());
+        if (token.isCanceled()) return {};
+        const QString script = appLockerPowerShellPrelude() + QStringLiteral(
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+            "try {"
+            "  $xml=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%1'));"
+            "  Set-AppLockerPolicy -XmlPolicy $xml -ErrorAction Stop;"
+            "  Write-Output '__OK__'"
+            "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
+            .arg(encoded);
+        return {true, {}, script};
+    }
+
     // collectElementSummary：
     // - 递归收集 XML 元素名称与属性摘要；
     // - reader 必须位于 StartElement 上；
@@ -650,9 +690,25 @@ namespace ks::misc
     ApplicationControlPage::ApplicationControlPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_appLockerXmlRead = new ks::ui::AsyncOperation(this);
+        m_appLockerXmlPrepare = new ks::ui::AsyncOperation(this);
         m_wdacXmlRead = new ks::ui::AsyncOperation(this);
         m_wdacXmlSave = new ks::ui::AsyncOperation(this);
         const QPointer<ApplicationControlPage> guard(this);
+        m_appLockerXmlRead->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_appLockerReadPending || guard->m_appLockerXmlRead->isBusy()) return;
+            guard->m_appLockerReadPending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("无法读取本地 AppLocker 策略。\n%1").arg(QStringLiteral("未返回额外错误信息。")));
+        });
+        m_appLockerXmlPrepare->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_appLockerPreparePending || guard->m_appLockerXmlPrepare->isBusy()) return;
+            guard->m_appLockerPreparePending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("策略验证未能完成，未提交更改。请重试。"));
+        });
         m_wdacXmlRead->setStateChangedCallback([guard]() {
             if (!guard || !guard->m_wdacReadPending || guard->m_wdacXmlRead->isBusy()) return;
             guard->m_wdacReadPending = false;
@@ -677,6 +733,8 @@ namespace ks::misc
     ApplicationControlPage::~ApplicationControlPage()
     {
         // Closing the GUI gate does not cancel an already accepted atomic save.
+        if (m_appLockerXmlRead) m_appLockerXmlRead->close();
+        if (m_appLockerXmlPrepare) m_appLockerXmlPrepare->close();
         if (m_wdacXmlRead) m_wdacXmlRead->close();
         if (m_wdacXmlSave) m_wdacXmlSave->close();
     }
@@ -1255,136 +1313,132 @@ namespace ks::misc
 
     void ApplicationControlPage::editAppLockerPolicy()
     {
-        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerEditButton == nullptr)
-        {
-            return;
-        }
-
-        m_appLockerEditButton->setEnabled(false);
-        const QPointer<ApplicationControlPage> guardThis(this);
-        std::thread([guardThis]() {
-            const QString queryScript = appLockerPowerShellPrelude() + QStringLiteral(
-                "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
-                "try {"
-                "  $xml=[string](Get-AppLockerPolicy -Local -Xml -ErrorAction Stop);"
-                "  if([string]::IsNullOrWhiteSpace($xml)){Write-Output '__NO_POLICY__'} else {Write-Output '__OK__'; Write-Output $xml}"
-                "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }");
-            QString errorText;
-            const QString outputText = runPowerShellCaptureText(queryScript, 15000, &errorText);
-
-            QMetaObject::invokeMethod(qApp, [guardThis, outputText, errorText]() {
-                if (guardThis.isNull())
-                {
-                    return;
-                }
-                if (guardThis->m_appLockerEditButton != nullptr)
-                {
-                    guardThis->m_appLockerEditButton->setEnabled(
-                        guardThis->m_appLockerModuleAvailable && guardThis->m_pendingMutationCount == 0);
-                }
-
-                QString policyXml;
-                if (outputText.contains(QStringLiteral("__OK__")))
-                {
-                    policyXml = outputText.section(QChar::LineFeed, 1);
-                }
-                else if (outputText.contains(QStringLiteral("__NO_POLICY__")))
-                {
-                    policyXml = QStringLiteral("<AppLockerPolicy Version=\"1\">\n</AppLockerPolicy>\n");
-                }
-                else
-                {
-                    QString diagnosticText = outputText;
-                    diagnosticText.remove(QStringLiteral("__ERROR__"));
-                    diagnosticText = diagnosticText.trimmed();
-                    if (!errorText.trimmed().isEmpty())
-                    {
-                        diagnosticText = diagnosticText.isEmpty()
-                            ? errorText.trimmed()
-                            : QStringLiteral("%1\n%2").arg(diagnosticText, errorText.trimmed());
-                    }
-                    QMessageBox::warning(
-                        guardThis.data(),
-                        QStringLiteral("编辑 AppLocker 策略"),
-                        QStringLiteral("无法读取本地 AppLocker 策略。\n%1")
-                            .arg(diagnosticText.isEmpty() ? QStringLiteral("未返回额外错误信息。") : diagnosticText));
-                    return;
-                }
-
-                QDialog dialog(guardThis.data());
-                dialog.setWindowTitle(QStringLiteral("编辑 AppLocker 策略 XML"));
-                ks::ui::StyleSecondaryWindow(&dialog);
-                dialog.resize(960, 680);
-                auto* layout = new QVBoxLayout(&dialog);
-                ks::ui::StyleSecondaryContentLayout(layout);
-                auto* hintLabel = new QLabel(
-                    QStringLiteral("仅编辑本地策略。保存将以 Replace 模式写回并覆盖当前本地 AppLocker 策略，组策略下发的规则仍由组策略管理。"),
-                    &dialog);
-                hintLabel->setWordWrap(true);
-                hintLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-                auto* editor = new CodeTextEdit(&dialog);
-                editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-                editor->setPlainText(policyXml);
-                editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-                auto* buttonBox = new QDialogButtonBox(&dialog);
-                QPushButton* applyButton = buttonBox->addButton(QStringLiteral("保存并应用"), QDialogButtonBox::AcceptRole);
-                buttonBox->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
-                layout->addWidget(hintLabel);
-                layout->addWidget(editor, 1);
-                // XML 编辑保持独立滚动，保存操作放在带细分界线的固定底栏。
-                ks::ui::StyleSecondaryButtonBox(buttonBox);
-                ks::ui::StyleSecondaryFooter(buttonBox);
-                layout->addWidget(buttonBox);
-                QObject::connect(applyButton, &QPushButton::clicked, &dialog, &QDialog::accept);
-                QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-                if (dialog.exec() != QDialog::Accepted)
-                {
-                    return;
-                }
-
-                const QString editedXml = editor->toPlainText().trimmed();
-                QXmlStreamReader xmlReader(editedXml);
-                QString rootElementName;
-                while (!xmlReader.atEnd())
-                {
-                    xmlReader.readNext();
-                    if (rootElementName.isEmpty() && xmlReader.isStartElement())
-                    {
-                        rootElementName = xmlReader.name().toString();
-                    }
-                }
-                if (xmlReader.hasError() || rootElementName.compare(QStringLiteral("AppLockerPolicy"), Qt::CaseInsensitive) != 0)
-                {
-                    QMessageBox::warning(
-                        guardThis.data(),
-                        QStringLiteral("编辑 AppLocker 策略"),
-                        QStringLiteral("策略 XML 无效。根元素必须为 AppLockerPolicy。%1")
-                            .arg(xmlReader.hasError() ? QStringLiteral("\n%1").arg(xmlReader.errorString()) : QString()));
-                    return;
-                }
-
-                if (QMessageBox::warning(
-                    guardThis.data(),
-                    QStringLiteral("确认应用 AppLocker 策略"),
-                    QStringLiteral("将覆盖当前本地 AppLocker 策略。错误策略可能导致应用或脚本无法启动。是否继续？"),
-                    QMessageBox::Yes | QMessageBox::Cancel,
-                    QMessageBox::Cancel) != QMessageBox::Yes)
-                {
-                    return;
-                }
-
-                const QString encodedXml = QString::fromLatin1(editedXml.toUtf8().toBase64());
-                const QString applyScript = appLockerPowerShellPrelude() + QStringLiteral(
+        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        const QPointer<ApplicationControlPage> guard(this);
+        setPolicyEditorBusy(true);
+        if (!guard) return;
+        m_appLockerReadPending = true;
+        const auto failed = [guard](std::exception_ptr) {
+            if (!guard) return;
+            guard->m_appLockerReadPending = false;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                QStringLiteral("无法读取本地 AppLocker 策略。\n%1").arg(QStringLiteral("未返回额外错误信息。")));
+        };
+        const auto ticket = m_appLockerXmlRead->submit<int, AppLockerXmlReadResult>(0,
+            [](const int&, const ks::ui::AsyncOperationToken& token) -> AppLockerXmlReadResult {
+                if (token.isCanceled()) return {};
+                const QString queryScript = appLockerPowerShellPrelude() + QStringLiteral(
                     "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
                     "try {"
-                    "  $xml=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%1'));"
-                    "  Set-AppLockerPolicy -XmlPolicy $xml -ErrorAction Stop;"
-                    "  Write-Output '__OK__'"
-                    "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
-                    .arg(encodedXml);
-                guardThis->runPowerShellMutationAsync(QStringLiteral("应用 AppLocker 策略"), applyScript);
-            }, Qt::QueuedConnection);
-        }).detach();
+                    "  $xml=[string](Get-AppLockerPolicy -Local -Xml -ErrorAction Stop);"
+                    "  if([string]::IsNullOrWhiteSpace($xml)){Write-Output '__NO_POLICY__'} else {Write-Output '__OK__'; Write-Output $xml}"
+                    "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }");
+                QString errorText;
+                const QString outputText = runPowerShellCaptureText(queryScript, 15000, &errorText);
+
+
+                if (token.isCanceled()) return {};
+                if (outputText.contains(QStringLiteral("__OK__")))
+                    return {true, outputText.section(QChar::LineFeed, 1), {}};
+                if (outputText.contains(QStringLiteral("__NO_POLICY__")))
+                    return {true, QStringLiteral("<AppLockerPolicy Version=\"1\">\n</AppLockerPolicy>\n"), {}};
+                QString diagnostic = outputText;
+                diagnostic.remove(QStringLiteral("__ERROR__"));
+                diagnostic = diagnostic.trimmed();
+                if (!errorText.trimmed().isEmpty())
+                    diagnostic = diagnostic.isEmpty() ? errorText.trimmed() : QStringLiteral("%1\n%2").arg(diagnostic, errorText.trimmed());
+                return {false, {}, diagnostic};
+            },
+            [guard](const AppLockerXmlReadResult& result, std::uint64_t) {
+                if (!guard) return true;
+                guard->m_appLockerReadPending = false;
+                if (!result.ok)
+                {
+                    guard->setPolicyEditorBusy(false);
+                    if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                        QStringLiteral("无法读取本地 AppLocker 策略。\n%1")
+                            .arg(result.diagnostic.isEmpty() ? QStringLiteral("未返回额外错误信息。") : result.diagnostic));
+                    return true;
+                }
+                guard->showAppLockerPolicyEditor(result.xml);
+                return true;
+            }, failed);
+        if (ticket == 0) failed({});
+    }
+
+    void ApplicationControlPage::showAppLockerPolicyEditor(const QString& originalXml)
+    {
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("编辑 AppLocker 策略 XML"));
+        ks::ui::StyleSecondaryWindow(dialog);
+        dialog->resize(960, 680);
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* hint = new QLabel(QStringLiteral("仅编辑本地策略。保存将以 Replace 模式写回并覆盖当前本地 AppLocker 策略，组策略下发的规则仍由组策略管理。"), dialog);
+        hint->setWordWrap(true);
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* editor = new CodeTextEdit(dialog);
+        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
+        editor->setPlainText(originalXml);
+        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* buttons = new QDialogButtonBox(dialog);
+        auto* apply = buttons->addButton(QStringLiteral("保存并应用"), QDialogButtonBox::AcceptRole);
+        buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
+        layout->addWidget(hint);
+        layout->addWidget(editor, 1);
+        ks::ui::StyleSecondaryButtonBox(buttons);
+        ks::ui::StyleSecondaryFooter(buttons);
+        layout->addWidget(buttons);
+        connect(apply, &QPushButton::clicked, dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        const QPointer<ApplicationControlPage> guard(this);
+        const QPointer<CodeTextEdit> safeEditor(editor);
+        connect(dialog, &QDialog::finished, this, [guard, safeEditor](int code) {
+            if (!guard) return;
+            if (code != QDialog::Accepted || !safeEditor)
+            {
+                guard->setPolicyEditorBusy(false);
+                return;
+            }
+            const QString xml = safeEditor->toPlainText(); // Only GUI extracts the complete accepted document.
+            guard->m_appLockerPreparePending = true;
+            const auto failed = [guard](std::exception_ptr) {
+                if (!guard) return;
+                guard->m_appLockerPreparePending = false;
+                guard->setPolicyEditorBusy(false);
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                    QStringLiteral("策略验证未能完成，未提交更改。请重试。"));
+            };
+            const auto ticket = guard->m_appLockerXmlPrepare->submit<QString, AppLockerXmlPrepared>(xml, prepareAppLockerXmlValue,
+                [guard](const AppLockerXmlPrepared& result, std::uint64_t) {
+                    if (!guard) return true;
+                    guard->m_appLockerPreparePending = false;
+                    if (!result.valid)
+                    {
+                        guard->setPolicyEditorBusy(false);
+                        if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 AppLocker 策略"),
+                            QStringLiteral("策略 XML 无效。根元素必须为 AppLockerPolicy。%1")
+                                .arg(result.parserError.isEmpty() ? QString() : QStringLiteral("\n%1").arg(result.parserError)));
+                        return true;
+                    }
+                    if (QMessageBox::warning(guard, QStringLiteral("确认应用 AppLocker 策略"),
+                        QStringLiteral("将覆盖当前本地 AppLocker 策略。错误策略可能导致应用或脚本无法启动。是否继续？"),
+                        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+                    {
+                        if (guard) guard->setPolicyEditorBusy(false);
+                        return true;
+                    }
+                    if (!guard) return true;
+                    // Existing accepted mutation is not latest-only. The script contains the exact validated XML.
+                    guard->runPowerShellMutationAsync(QStringLiteral("应用 AppLocker 策略"), result.script);
+                    if (guard) guard->setPolicyEditorBusy(false);
+                    return true;
+                }, failed);
+            if (ticket == 0) failed({});
+        });
+        dialog->open();
     }
 
     void ApplicationControlPage::addAppLockerRule()

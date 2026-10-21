@@ -146,6 +146,11 @@ namespace ks::misc
         // - 读取本地 AppLocker XML 策略，在编辑器中确认后以 Replace 模式写回；
         // - 无输入参数，无返回值。
         void editAppLockerPolicy();
+        void showAppLockerPolicyEditor(const QString& originalXml);
+        ks::ui::AsyncOperation* m_appLockerXmlRead = nullptr;
+        ks::ui::AsyncOperation* m_appLockerXmlPrepare = nullptr;
+        bool m_appLockerReadPending = false;
+        bool m_appLockerPreparePending = false;
 
         // editWdacPolicy：
         // - 编辑用户选择的 WDAC 源 XML；可选编译并通过 CiTool 部署；
