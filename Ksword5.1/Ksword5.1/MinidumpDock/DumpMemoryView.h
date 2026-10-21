@@ -13,6 +13,7 @@
 // ============================================================
 
 #include <QWidget>
+#include "../UI/PageNavigationCatalog.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <cstdint>
@@ -48,6 +49,9 @@ namespace ks::minidump
 class DumpMemoryView final : public QWidget
 {
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const DumpMemoryView* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数作用：创建地址输入、分页工具条、说明区与统一十六进制控件。
     explicit DumpMemoryView(QWidget* parent = nullptr);
     ~DumpMemoryView() override;

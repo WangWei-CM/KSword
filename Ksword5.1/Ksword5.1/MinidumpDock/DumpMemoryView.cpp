@@ -824,3 +824,17 @@ QString DumpMemoryView::formatHex(const std::uint64_t value)
 {
     return QStringLiteral("0x%1").arg(QString::number(value, 16).toUpper());
 }
+
+ks::ui::PageNavigationCatalog DumpMemoryView::navigationCatalog(const DumpMemoryView* existing)
+{
+    return ks::ui::SnapshotWorkbenchWidget::navigationCatalog(existing ? existing->m_memoryEditor : nullptr);
+}
+QWidget* DumpMemoryView::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<DumpMemoryView> self(this);
+    const QPointer<ks::ui::SnapshotWorkbenchWidget> editor(m_memoryEditor);
+    if (!editor) return nullptr;
+    const QPointer<QWidget> target(editor->activateNavigationDescriptor(id));
+    if (!self || !editor || !target || self->m_memoryEditor != editor || editor->parentWidget() != self) return nullptr;
+    return target.data();
+}

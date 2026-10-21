@@ -1613,6 +1613,17 @@ ks::ui::PageNavigationCatalog MinidumpDock::navigationCatalog(const MinidumpDock
         catalog.append({id, {}, existing->m_resultTabs->tabText(index), {},
             existing->m_resultTabs->isTabVisible(index), existing->m_resultTabs->isTabEnabled(index),
             existing->m_resultTabs->currentIndex() == index});
+        if (id == QStringLiteral("minidump.tab.memory_view"))
+        {
+            auto children = DumpMemoryView::navigationCatalog(existing->m_memoryView);
+            const QString prefix = id + QStringLiteral("/snapshot:");
+            for (auto child : children)
+            {
+                child.id.prepend(prefix);
+                child.parentId = child.parentId.isEmpty() ? id : prefix + child.parentId;
+                catalog.append(std::move(child));
+            }
+        }
         if (id == rawId) hasRaw = true;
     }
     if (hasRaw && existing->m_lastResult)
@@ -1634,12 +1645,68 @@ ks::ui::PageNavigationCatalog MinidumpDock::navigationCatalog(const MinidumpDock
                 }
             }
             catalog.append(std::move(descriptor));
+            if (existing->m_lastResult->byteBlocks[index].hasVirtualAddress)
+            {
+                const auto* page = existing->m_rawMemoryTabs && index < static_cast<std::size_t>(existing->m_rawMemoryTabs->count())
+                    ? existing->m_rawMemoryTabs->widget(static_cast<int>(index)) : nullptr;
+                const auto* editor = page ? page->findChild<ks::ui::SnapshotWorkbenchWidget*>(QString(), Qt::FindDirectChildrenOnly) : nullptr;
+                auto children = ks::ui::SnapshotWorkbenchWidget::navigationCatalog(editor);
+                const QString prefix = id + QStringLiteral("/snapshot:");
+                for (auto child : children)
+                {
+                    child.id.prepend(prefix);
+                    child.parentId = child.parentId.isEmpty() ? id : prefix + child.parentId;
+                    catalog.append(std::move(child));
+                }
+            }
         }
     }
     return catalog;
 }
 QWidget* MinidumpDock::activateNavigationDescriptor(const QString& id)
 {
+    const QString marker = QStringLiteral("/snapshot:");
+    const qsizetype markerAt = id.indexOf(marker);
+    if (markerAt >= 0)
+    {
+        const QPointer<MinidumpDock> self(this);
+        const auto resultGeneration = m_resultProjectionGeneration;
+        const auto permitted = [self, &id](bool current) {
+            if (!self) return false;
+            const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+            if (!resolved) return false;
+            for (const auto& page : *resolved)
+                if (page.page.id == id) return page.page.visible && page.page.enabled && (!current || page.page.current);
+            return false;
+        };
+        if (!permitted(false)) return nullptr;
+        const QString ownerId = id.left(markerAt);
+        const QString childId = id.mid(markerAt + marker.size());
+        const QPointer<QWidget> ownerPage(activateNavigationDescriptor(ownerId));
+        if (!self || !ownerPage || self->m_resultProjectionGeneration != resultGeneration || !permitted(false)) return nullptr;
+        const QPointer<DumpMemoryView> memoryView(self->m_memoryView);
+        QPointer<ks::ui::SnapshotWorkbenchWidget> rawEditor;
+        QPointer<QWidget> target;
+        if (ownerId == QStringLiteral("minidump.tab.memory_view"))
+        {
+            if (!memoryView || ownerPage != memoryView) return nullptr;
+            target = memoryView->activateNavigationDescriptor(childId);
+        }
+        else
+        {
+            rawEditor = ownerPage->findChild<ks::ui::SnapshotWorkbenchWidget*>(QString(), Qt::FindDirectChildrenOnly);
+            if (!rawEditor) return nullptr;
+            target = rawEditor->activateNavigationDescriptor(childId);
+        }
+        if (!self || !ownerPage || !target || self->m_resultProjectionGeneration != resultGeneration || !permitted(true)) return nullptr;
+        if (ownerId == QStringLiteral("minidump.tab.memory_view"))
+        {
+            if (!memoryView || self->m_memoryView != memoryView || ownerPage != memoryView) return nullptr;
+        }
+        else if (!rawEditor || rawEditor->parentWidget() != ownerPage
+            || ownerPage->findChild<ks::ui::SnapshotWorkbenchWidget*>(QString(), Qt::FindDirectChildrenOnly) != rawEditor) return nullptr;
+        return target.data();
+    }
     const QPointer<MinidumpDock> self(this);
     const auto permitted = [self, &id]() -> std::optional<QString> {
         if (!self) return std::nullopt;
@@ -1670,11 +1737,13 @@ QWidget* MinidumpDock::activateNavigationDescriptor(const QString& id)
         ks::ui::PrepareWidgetThemeBindingsForShow(page);
         return valid() && tabs->currentWidget() == page;
     };
+    const auto stableGeneration = m_resultProjectionGeneration;
     QPointer<QTabWidget> rootTabs = m_resultTabs;
     QPointer<QWidget> rootPage = findPage(rootTabs, parent->isEmpty() ? id : *parent);
     if (!selectPage(rootTabs, rootPage) || !self) return nullptr;
     renderCurrentResultPage(); // 只接受具体目标后，沿原lazy投影入口准备目标结果壳。
-    if (!self || !rootTabs || !rootPage || rootTabs->currentWidget() != rootPage || !permitted()) return nullptr;
+    if (!self || !rootTabs || !rootPage || self->m_resultTabs != rootTabs || self->m_resultProjectionGeneration != stableGeneration
+        || rootTabs->currentWidget() != rootPage || !permitted()) return nullptr;
     QPointer<QWidget> target = rootPage;
     QPointer<QTabWidget> rawTabs;
     if (!parent->isEmpty())
@@ -1683,8 +1752,9 @@ QWidget* MinidumpDock::activateNavigationDescriptor(const QString& id)
         target = findPage(rawTabs, id);
         if (!selectPage(rawTabs, target) || !self) return nullptr;
     }
-    if (!self || !rootTabs || !rootPage || !target || rootTabs->currentWidget() != rootPage
-        || (!parent->isEmpty() && (!rawTabs || rawTabs->currentWidget() != target)) || !permitted()) return nullptr;
+    if (!self || !rootTabs || !rootPage || !target || self->m_resultTabs != rootTabs
+        || self->m_resultProjectionGeneration != stableGeneration || rootTabs->currentWidget() != rootPage
+        || (!parent->isEmpty() && (!rawTabs || self->m_rawMemoryTabs != rawTabs || rawTabs->currentWidget() != target)) || !permitted()) return nullptr;
     return target.data();
 }
 namespace { const bool kMinidumpNavigationRegistered =
