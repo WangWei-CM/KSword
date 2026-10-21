@@ -82,8 +82,6 @@ namespace
             case QEvent::ParentAboutToChange:
             case QEvent::ParentChange:
             case QEvent::Polish:
-            case QEvent::ChildAdded:
-            case QEvent::ChildRemoved:
             case QEvent::WinIdChange:
                 break;
             case QEvent::FontChange:
@@ -105,7 +103,13 @@ namespace
             default:
                 return;
             }
-            if (!qobject_cast<QWidget*>(object)) return;
+            const auto* changedWidget = qobject_cast<QWidget*>(object);
+            // Cached boundaries require this widget and every ancestor to be
+            // polished. Construction noise cannot invalidate a stable entry;
+            // unstable chains are deliberately rechecked on their next query.
+            // Child additions/removals do not change an existing ancestor chain;
+            // real moves are still covered by the moved widget's parent events.
+            if (!changedWidget || !changedWidget->testAttribute(Qt::WA_WState_Polished)) return;
             if (++m_boundaryGeneration == 0)
             {
                 // 代次溢出也不复用旧身份；不删除条目，保留唯一的销毁连接。
