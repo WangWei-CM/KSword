@@ -1,6 +1,7 @@
 
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/ThemeItemForeground.h"
 
@@ -320,44 +321,52 @@ void KernelDock::refreshAtomTableAsync()
                 return;
             }
 
-            guardThis->m_atomRefreshRunning.store(false);
-            guardThis->m_refreshAtomButton->setEnabled(true);
+            auto commitResult = [guardThis, success, errorText,
+                resultRows = std::move(resultRows)]() mutable {
+                if (guardThis == nullptr) return;
+                guardThis->m_atomRefreshRunning.store(false);
+                guardThis->m_refreshAtomButton->setEnabled(true);
 
-            if (!success)
-            {
-                guardThis->m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.failed", QStringLiteral("状态：刷新失败")));
-                guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
-                guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
+                if (!success)
+                {
+                    guardThis->m_atomStatusLabel->setText(kernelText("kernel.runtime.atom.status.failed", QStringLiteral("状态：刷新失败")));
+                    guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
+                    guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
 
-                kLogEvent failEvent;
-                err << failEvent
-                    << "[KernelDock] 原子表刷新失败: "
-                    << errorText.toStdString()
+                    kLogEvent failEvent;
+                    err << failEvent
+                        << "[KernelDock] 原子表刷新失败: "
+                        << errorText.toStdString()
+                        << eol;
+                    return;
+                }
+
+                guardThis->m_atomRows = std::move(resultRows);
+                guardThis->rebuildAtomTable(true);
+                guardThis->m_atomStatusLabel->setText(
+                    kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
+                    .arg(guardThis->m_atomRows.size()));
+                guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
+
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_atomTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_atomTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.atom.empty", QStringLiteral("当前环境未发现可见原子记录。"))));
+                }
+
+                kLogEvent doneEvent;
+                info << doneEvent
+                    << "[KernelDock] 原子表刷新完成, count="
+                    << guardThis->m_atomRows.size()
                     << eol;
-                return;
-            }
-
-            guardThis->m_atomRows = std::move(resultRows);
-            guardThis->rebuildAtomTable(guardThis->m_atomFilterEdit->text().trimmed());
-            guardThis->m_atomStatusLabel->setText(
-                kernelText("kernel.runtime.atom.status.summary", QStringLiteral("状态：已刷新 %1 项"))
-                .arg(guardThis->m_atomRows.size()));
-            guardThis->m_atomStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::SuccessHex()));
-
-            if (guardThis->m_atomTable->rowCount() > 0)
-            {
-                guardThis->m_atomTable->setCurrentCell(0, 0);
-            }
-            else
-            {
-                guardThis->m_atomDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.atom.empty", QStringLiteral("当前环境未发现可见原子记录。"))));
-            }
-
-            kLogEvent doneEvent;
-            info << doneEvent
-                << "[KernelDock] 原子表刷新完成, count="
-                << guardThis->m_atomRows.size()
-                << eol;
+            };
+            if (ks::ui::DeferTableUiCommitIfContextMenuOpen(guardThis.data(),
+                QStringLiteral("kernel_atom_snapshot_apply"), {guardThis->m_atomTable}, commitResult)) return;
+            commitResult();
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -738,14 +747,36 @@ void KernelDock::selectFirstObjectNamespaceEntryItem()
     m_objectNamespaceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.object_namespace.empty.tree", QStringLiteral("当前对象命名空间树为空。"))));
 }
 
-void KernelDock::rebuildAtomTable(const QString& filterKeyword)
+void KernelDock::rebuildAtomTable(const bool sourceChanged)
 {
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
     if (m_atomTable == nullptr)
     {
         return;
     }
 
+    const auto searchFields = [](const KernelAtomEntry& entry) {
+        return QStringList{QString::number(entry.atomValue), QStringLiteral("0x%1").arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0')).toUpper(), entry.atomNameText, entry.sourceText, entry.statusText};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged)
+    {
+        if (m_atomTable->property(KernelSearchLanguageProperty).toString() != language)
+        {
+            for (int row = 0; row < m_atomTable->rowCount(); ++row)
+            {
+                auto* item = m_atomTable->item(row, 0);
+                if (item == nullptr) continue;
+                const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
+                if (sourceIndex < m_atomRows.size())
+                    item->setData(KernelSearchFieldsRole, searchFields(m_atomRows[sourceIndex]));
+            }
+            m_atomTable->setProperty(KernelSearchLanguageProperty, language);
+        }
+        applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
+        return;
+    }
+
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
     m_atomTable->setSortingEnabled(false);
     m_atomTable->setRowCount(0);
 
@@ -757,22 +788,12 @@ void KernelDock::rebuildAtomTable(const QString& filterKeyword)
             .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
             .toUpper();
 
-        const bool matched = filterKeyword.isEmpty()
-            || valueText.contains(filterKeyword, Qt::CaseInsensitive)
-            || hexText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.atomNameText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.sourceText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.statusText.contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
         const int rowIndex = m_atomTable->rowCount();
         m_atomTable->insertRow(rowIndex);
 
         auto* valueItem = new QTableWidgetItem(valueText);
         valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+        valueItem->setData(KernelSearchFieldsRole, searchFields(entry));
         auto* hexItem = new QTableWidgetItem(hexText);
         auto* nameItem = new QTableWidgetItem(entry.atomNameText);
         auto* sourceItem = new QTableWidgetItem(entry.sourceText);
@@ -797,6 +818,8 @@ void KernelDock::rebuildAtomTable(const QString& filterKeyword)
     }
 
     m_atomTable->setSortingEnabled(true);
+    m_atomTable->setProperty(KernelSearchLanguageProperty, language);
+    applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
 }
 
 void KernelDock::rebuildNtQueryTable()
@@ -880,7 +903,7 @@ bool KernelDock::currentAtomSourceIndex(std::size_t& sourceIndexOut) const
     }
 
     const int currentRow = m_atomTable->currentRow();
-    if (currentRow < 0)
+    if (currentRow < 0 || ks::ui::IsTableRowExcludedByFilter(m_atomTable, currentRow))
     {
         return false;
     }

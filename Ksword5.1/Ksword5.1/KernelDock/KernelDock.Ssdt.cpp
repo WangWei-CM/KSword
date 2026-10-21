@@ -4,6 +4,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 
 #include <memory>
 #include "../UI/VisibleTableWidget.h"
@@ -25,6 +26,7 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QTimer>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -241,9 +243,12 @@ void KernelDock::initializeSsdtTab()
     connect(m_restoreSsdtButton, &QPushButton::clicked, this, [this]() {
         restoreSelectedSsdtBaseline();
     });
-    connect(m_ssdtFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildSsdtTable(filterText.trimmed());
-    });
+    auto* ssdtFilterTimer = new QTimer(m_ssdtFilterEdit);
+    ssdtFilterTimer->setSingleShot(true);
+    ssdtFilterTimer->setInterval(120);
+    connect(m_ssdtFilterEdit, &QLineEdit::textChanged, ssdtFilterTimer,
+        [ssdtFilterTimer]() { ssdtFilterTimer->start(); });
+    connect(ssdtFilterTimer, &QTimer::timeout, this, [this]() { rebuildSsdtTable(); });
     connect(m_ssdtTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showSsdtDetailByCurrentRow();
         const KernelSsdtEntry* entry = currentSsdtEntry();
@@ -275,7 +280,7 @@ void KernelDock::initializeSsdtTab()
             kernelText("kernel.ssdt.menu.copy_row", QStringLiteral("复制当前行")));
         // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-        copyRowAction->setEnabled(currentRow >= 0);
+        copyRowAction->setEnabled(currentRow >= 0 && !ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow));
 
         /*
          * 监视这一项**槽位本身**的写入，不是它指向的服务例程。
@@ -343,7 +348,8 @@ void KernelDock::initializeSsdtTab()
             ks::ui::openHvmWatch(this, request);
             return;
         }
-        if (selectedAction != copyRowAction || currentRow < 0)
+        if (selectedAction != copyRowAction || currentRow < 0
+            || ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow))
         {
             return;
         }
@@ -399,7 +405,7 @@ void KernelDock::refreshSsdtAsync()
             }
 
             guardThis->m_ssdtRows = std::move(resultRows);
-            guardThis->rebuildSsdtTable(guardThis->m_ssdtFilterEdit->text().trimmed());
+            guardThis->rebuildSsdtTable(true);
 
             std::size_t unresolvedCount = 0U;
             for (const KernelSsdtEntry& entry : guardThis->m_ssdtRows)
@@ -417,9 +423,10 @@ void KernelDock::refreshSsdtAsync()
             guardThis->m_ssdtStatusLabel->setStyleSheet(
                 statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
-            if (guardThis->m_ssdtTable->rowCount() > 0)
+            const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_ssdtTable);
+            if (firstVisibleRow >= 0)
             {
-                guardThis->m_ssdtTable->setCurrentCell(0, 0);
+                guardThis->m_ssdtTable->setCurrentCell(firstVisibleRow, 0);
             }
             else
             {
@@ -444,15 +451,37 @@ void KernelDock::refreshSsdtAsync()
     }).detach();
 }
 
-void KernelDock::rebuildSsdtTable(const QString& filterKeyword)
+void KernelDock::rebuildSsdtTable(const bool sourceChanged)
 {
     if (m_ssdtTable == nullptr)
     {
         return;
     }
 
-    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
 
+    const auto searchFields = [](const KernelSsdtEntry& entry) {
+        return QStringList{entry.indexResolved ? QString::number(entry.serviceIndex) : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>")), entry.serviceNameText, formatAddressHex(entry.zwRoutineAddress), formatAddressHex(entry.serviceRoutineAddress), formatAddressHex(entry.tableEntryAddress), entry.moduleNameText};
+    };
+    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
+    if (!sourceChanged)
+    {
+        if (m_ssdtTable->property(KernelSearchLanguageProperty).toString() != language)
+        {
+            for (int row = 0; row < m_ssdtTable->rowCount(); ++row)
+            {
+                auto* item = m_ssdtTable->item(row, 0);
+                if (item == nullptr) continue;
+                const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
+                if (sourceIndex < m_ssdtRows.size())
+                    item->setData(KernelSearchFieldsRole, searchFields(m_ssdtRows[sourceIndex]));
+            }
+            m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
+        }
+        applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
+        return;
+    }
+
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
     m_ssdtTable->setSortingEnabled(false);
     m_ssdtTable->setRowCount(0);
 
@@ -467,23 +496,12 @@ void KernelDock::rebuildSsdtTable(const QString& filterKeyword)
         const QString slotAddressText =
             formatAddressHex(entry.tableEntryAddress);
 
-        const bool matched = filterKeyword.isEmpty()
-            || indexText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.serviceNameText.contains(filterKeyword, Qt::CaseInsensitive)
-            || zwAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || serviceAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || slotAddressText.contains(filterKeyword, Qt::CaseInsensitive)
-            || entry.moduleNameText.contains(filterKeyword, Qt::CaseInsensitive);
-        if (!matched)
-        {
-            continue;
-        }
-
         const int rowIndex = m_ssdtTable->rowCount();
         m_ssdtTable->insertRow(rowIndex);
 
         auto* indexItem = new QTableWidgetItem(indexText);
         indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+        indexItem->setData(KernelSearchFieldsRole, searchFields(entry));
         auto* serviceNameItem = new QTableWidgetItem(safeText(entry.serviceNameText));
         auto* zwAddressItem = new QTableWidgetItem(zwAddressText);
         auto* serviceAddressItem = new QTableWidgetItem(serviceAddressText);
@@ -506,6 +524,8 @@ void KernelDock::rebuildSsdtTable(const QString& filterKeyword)
     }
 
     m_ssdtTable->setSortingEnabled(true);
+    m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
+    applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
 }
 
 void KernelDock::restoreSelectedSsdtBaseline()
@@ -661,7 +681,7 @@ bool KernelDock::currentSsdtSourceIndex(std::size_t& sourceIndexOut) const
     }
 
     const int currentRow = m_ssdtTable->currentRow();
-    if (currentRow < 0)
+    if (currentRow < 0 || ks::ui::IsTableRowExcludedByFilter(m_ssdtTable, currentRow))
     {
         return false;
     }

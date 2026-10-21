@@ -798,18 +798,24 @@ private:
     void updateTabIconContrast();
 
     // rebuildAtomTable：
-    // - 作用：根据筛选关键词重建原子表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildAtomTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildAtomTable(bool sourceChanged = false);
+    // Cached search belongs to the current source snapshot and language. Business
+    // exclusions use TS05 identities, so sorting and shared search/freeze compose.
+    static constexpr int KernelSearchFieldsRole = Qt::UserRole + 171;
+    static constexpr auto KernelSearchLanguageProperty = "ksword_kernel_search_language";
+    void applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, int separatorRow = -1);
+    int firstKernelResultRow(const QTableWidget* table) const;
 
     // rebuildNtQueryTable：
     // - 作用：重建历史 NtQuery 结果表格。
     void rebuildNtQueryTable();
 
     // rebuildSsdtTable：
-    // - 作用：根据筛选关键词重建 SSDT 结果表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildSsdtTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildSsdtTable(bool sourceChanged = false);
 
     // rebuildDynDataFieldTable：
     // - 作用：根据筛选关键词重建动态偏移字段表。

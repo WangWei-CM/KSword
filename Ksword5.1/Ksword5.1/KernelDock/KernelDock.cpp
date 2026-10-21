@@ -2,6 +2,8 @@
 #include "KernelDock.h"
 #include "KernelNavigationCatalog.h"
 #include "../UI/TableContextMenu.h"
+#include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/LazyPageContent.h"
 #include "../UI/ToolbarMetrics.h"
@@ -59,6 +61,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -165,10 +168,11 @@ namespace
             kernelText("kernel.main.menu.copy_row", QStringLiteral("复制当前行")));
         // 声明业务菜单已提供此能力，避免共享表格菜单追加重复项。
         ks::ui::SetTableContextActionRole(copyRowAction, ks::ui::TableContextActionRole::CopyRows);
-        copyRowAction->setEnabled(rowIndex >= 0);
+        copyRowAction->setEnabled(rowIndex >= 0 && !ks::ui::IsTableRowExcludedByFilter(tableWidget, rowIndex));
 
         const QAction* selectedAction = contextMenu.exec(tableWidget->viewport()->mapToGlobal(localPosition));
-        if (selectedAction != copyRowAction || rowIndex < 0)
+        if (selectedAction != copyRowAction || rowIndex < 0
+            || ks::ui::IsTableRowExcludedByFilter(tableWidget, rowIndex))
         {
             return;
         }
@@ -376,6 +380,70 @@ bool KernelDock::eventFilter(QObject* watched, QEvent* event)
         ensureSelfDriverCurrentTabRefreshed();
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void KernelDock::applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, const int separatorRow)
+{
+    if (table == nullptr || edit == nullptr) return;
+    const QPointer<KernelDock> owner(this);
+    const QPointer<QTableWidget> tableGuard(table);
+    const QPointer<QLineEdit> editGuard(edit);
+    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(table,
+        QStringLiteral("kernel_result_filter"), {table},
+        [owner, tableGuard, editGuard, separatorRow]() {
+            if (owner && tableGuard && editGuard)
+                owner->applyKernelResultFilter(tableGuard, editGuard, separatorRow);
+        })) return;
+
+    const QString keyword = edit->text().trimmed();
+    QSet<QPersistentModelIndex> excluded;
+    bool hasDeferredMatch = keyword.isEmpty() && separatorRow >= 0
+        && separatorRow + 1 < table->rowCount();
+    if (!keyword.isEmpty()) excluded.reserve(table->rowCount());
+    for (int row = 0; !keyword.isEmpty() && row < table->rowCount(); ++row)
+    {
+        if (row == separatorRow) continue;
+        const auto* item = table->item(row, 0);
+        bool matched = keyword.isEmpty();
+        if (!matched && item != nullptr)
+        {
+            const QStringList fields = item->data(KernelSearchFieldsRole).toStringList();
+            matched = std::any_of(fields.cbegin(), fields.cend(), [&keyword](const QString& field) {
+                return field.contains(keyword, Qt::CaseInsensitive);
+            });
+        }
+        if (!matched) excluded.insert(QPersistentModelIndex(table->model()->index(row, 0)));
+        else if (separatorRow >= 0 && row > separatorRow) hasDeferredMatch = true;
+    }
+    if (separatorRow >= 0 && !hasDeferredMatch)
+        excluded.insert(QPersistentModelIndex(table->model()->index(separatorRow, 0)));
+    ks::ui::SetTableRowFilterBusinessOwnership(table,
+        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+    ks::ui::ApplyTableRowFilterIncrementally(table, excluded);
+
+    // Canonical filtering is immediate even while its visual projection yields.
+    // Do not let a now-filtered selection retain a copy/mutation target.
+    if (auto* selection = table->selectionModel())
+    {
+        QItemSelection deselect;
+        for (const QModelIndex& index : selection->selectedRows())
+        {
+            if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
+                deselect.select(table->model()->index(index.row(), 0),
+                    table->model()->index(index.row(), table->columnCount() - 1));
+        }
+        if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
+        if (ks::ui::IsTableRowExcludedByFilter(table, table->currentRow()))
+            selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+    }
+}
+
+int KernelDock::firstKernelResultRow(const QTableWidget* table) const
+{
+    if (table != nullptr)
+        for (int row = 0; row < table->rowCount(); ++row)
+            if (!ks::ui::IsTableRowExcludedByFilter(table, row)) return row;
+    return -1;
 }
 
 void KernelDock::changeEvent(QEvent* event)
@@ -1294,9 +1362,12 @@ void KernelDock::initializeAtomTableTab()
     connect(m_refreshAtomButton, &QPushButton::clicked, this, [this]() {
         refreshAtomTableAsync();
     });
-    connect(m_atomFilterEdit, &QLineEdit::textChanged, this, [this](const QString& filterText) {
-        rebuildAtomTable(filterText.trimmed());
-    });
+    auto* atomFilterTimer = new QTimer(m_atomFilterEdit);
+    atomFilterTimer->setSingleShot(true);
+    atomFilterTimer->setInterval(120);
+    connect(m_atomFilterEdit, &QLineEdit::textChanged, atomFilterTimer,
+        [atomFilterTimer]() { atomFilterTimer->start(); });
+    connect(atomFilterTimer, &QTimer::timeout, this, [this]() { rebuildAtomTable(); });
     connect(m_atomTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
         showAtomDetailByCurrentRow();
     });
