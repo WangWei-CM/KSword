@@ -1191,7 +1191,7 @@ private:
     // - 作用：按关键字与事件类型过滤 HTTPS 解析表，仅影响显示结果。
     // - 返回：无。
     void applyHttpsParsedTableFilter();
-    bool applyHttpsParsedFilterToRow(int row, const QString& keyword, const QString& eventType);
+    void synchronizeVisibleHttpsProjection();
     void adjustHttpsParsedEventCount(const QString& eventType, int delta);
 
     // clearHttpsParsedEntries：
@@ -1523,13 +1523,19 @@ private:
     QPushButton* m_httpsExportParsedButton = nullptr;// HTTPS解析结果导出按钮。
     QCheckBox* m_httpsAutoScrollCheck = nullptr;    // HTTPS解析表自动滚动开关。
     QLabel* m_httpsParsedSummaryLabel = nullptr;    // HTTPS解析表统计标签。
-    QTableWidget* m_httpsParsedTable = nullptr;     // HTTPS解析结果表格。
+    QTableView* m_httpsParsedTable = nullptr;
+    class HttpsParsedModel;
+    class HttpsParsedProxy;
+    HttpsParsedModel* m_httpsParsedModel = nullptr;
+    HttpsParsedProxy* m_httpsParsedProxy = nullptr;
+    bool m_httpsProjectionDirty = false;
+    bool m_httpsProjectionInProgress = false;     // HTTPS解析结果表格。
     QPlainTextEdit* m_httpsProxyLogOutput = nullptr;// HTTPS代理日志输出框。
     int m_httpsParsedVisibleCount = 0;
     int m_httpsParsedRequestCount = 0;
     int m_httpsParsedResponseCount = 0;
     int m_httpsParsedErrorCount = 0;
-    std::vector<ks::network::HttpsProxyParsedEntry> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
+    std::deque<std::shared_ptr<const ks::network::HttpsProxyParsedEntry>> m_httpsParsedEntryCache; // HTTPS解析结果缓存，行号与表格一一对应。
 
     // ========================= Tab10：hosts文件编辑 ====================
     QWidget* m_hostsFileEditorPage = nullptr;       // hosts文件编辑页容器。

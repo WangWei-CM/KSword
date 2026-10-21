@@ -84,6 +84,7 @@ NetworkDock::NetworkDock(QWidget* parent, const ConstructScope scope)
     connect(m_packetFlushTimer, &QTimer::timeout, this, [this]()
         {
             flushPendingPacketsToUi();
+            synchronizeVisibleHttpsProjection();
         });
     m_packetFlushTimer->start();
 
@@ -245,6 +246,7 @@ void NetworkDock::showEvent(QShowEvent* event)
     initializeVisibleDiagnosticPage();
     synchronizeVisiblePacketProjection();
     synchronizeVisibleNidsProjection();
+    synchronizeVisibleHttpsProjection();
 
     if (m_httpsProxyServiceInitialized)
     {
