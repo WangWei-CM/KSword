@@ -83,8 +83,14 @@ namespace
     }
 }
 
-CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& configDocument)
+CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& configDocument,
+    const ks::i18n::SourceTextSnapshot* translator)
 {
+    const auto kernelText = [translator](const char* key, const QString& source) {
+        return translator ? translator->contextText(QString::fromLatin1(key), source)
+            : ksword::kernel_dock_internal::kernelText(key, source);
+    };
+
     CallbackValidationResult result;
     QSet<quint32> groupIdSet;
     QSet<quint32> ruleIdSet;
@@ -163,9 +169,9 @@ CallbackValidationResult validateCallbackConfig(const CallbackConfigDocument& co
             result.errorList.push_back(
                 kernelText("kernel.callback.rules.validation.invalid_action_combo", QStringLiteral("规则 %1 动作组合非法：%2 + %3 + %4。"))
                 .arg(ruleModel.ruleId)
-                .arg(callbackTypeToDisplayText(ruleModel.callbackType))
-                .arg(callbackActionToDisplayText(ruleModel.action))
-                .arg(callbackMatchModeToDisplayText(ruleModel.matchMode)));
+                .arg(callbackTypeToDisplayText(ruleModel.callbackType, translator))
+                .arg(callbackActionToDisplayText(ruleModel.action, translator))
+                .arg(callbackMatchModeToDisplayText(ruleModel.matchMode, translator)));
         }
 
         if (ruleModel.matchMode == KSWORD_ARK_MATCH_MODE_REGEX &&

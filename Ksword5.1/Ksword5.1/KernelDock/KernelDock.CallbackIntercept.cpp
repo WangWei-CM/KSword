@@ -1746,9 +1746,28 @@ public:
     {
         m_runtimeQuery = new ks::ui::AsyncOperation(this);
         m_controlOperation = new ks::ui::AsyncOperation(this);
+        m_importOperation = new ks::ui::AsyncOperation(this);
         initializeUi();
         initializeConnections();
         m_controlOperation->setStateChangedCallback([this]() { updateControlActions(); });
+        m_importOperation->setStateChangedCallback([this]() {
+            if (m_importOperation->isBusy())
+            {
+                // Preserve the old import's atomic replacement of the draft,
+                // while allowing the rest of the window to keep responding.
+                if (!m_hostPage->testAttribute(Qt::WA_ForceDisabled))
+                {
+                    m_importDisabledHost = true;
+                    m_hostPage->setEnabled(false);
+                }
+            }
+            else if (m_importDisabledHost)
+            {
+                m_importDisabledHost = false;
+                m_hostPage->setEnabled(true);
+            }
+            updateControlActions();
+        });
         updateControlActions();
 
         m_ruleProjectionTimer = new QTimer(this);
@@ -1777,6 +1796,7 @@ public:
 
     ~CallbackInterceptController() override
     {
+        if (m_importOperation != nullptr) m_importOperation->close();
         if (m_controlOperation != nullptr) m_controlOperation->close();
         if (m_runtimeQuery != nullptr) m_runtimeQuery->close();
     }
@@ -1784,12 +1804,13 @@ public:
 private:
     void updateControlActions()
     {
-        const bool ready = !m_controlOperation->isBusy();
+        const bool ready = !m_controlOperation->isBusy() && !m_importOperation->isBusy();
         for (auto* button : {m_applyButton, m_minifilterBypassApplyButton, m_minifilterBypassClearButton,
             m_minifilterBypassRefreshButton, m_processProtectApplyButton, m_processProtectClearButton,
             m_processProtectRefreshButton, m_startFileMonitorFsctlButton})
             if (button != nullptr) button->setEnabled(ready);
         if (m_reloadStateButton != nullptr) m_reloadStateButton->setEnabled(ready && !m_runtimeQuery->isBusy());
+        if (m_importButton != nullptr) m_importButton->setEnabled(ready);
         // Successful protect writes read back the canonical driver configuration.
         // Keep this local draft stable until that accepted receipt is presented.
         if (m_processProtectPage != nullptr) m_processProtectPage->setEnabled(ready);
@@ -6364,62 +6385,82 @@ private:
 
     void importConfigFromFile()
     {
+        if (m_importOperation->isBusy() || m_controlOperation->isBusy()) return;
+        const QPointer<CallbackInterceptController> owner(this);
         const QString filePath = QFileDialog::getOpenFileName(
             m_hostPage,
             kernelText("kernel.callback.intercept.import.dialog_title", QStringLiteral("导入回调规则")),
             QString(),
             QStringLiteral("Ksword Rule File (*.kswrules);;JSON (*.json);;All Files (*)"));
-        if (filePath.trimmed().isEmpty())
-        {
-            return;
-        }
+        if (!owner || filePath.trimmed().isEmpty()) return;
+        if (m_importOperation->isBusy() || m_controlOperation->isBusy()) return;
 
-        QFile inputFile(filePath);
-        if (!inputFile.open(QIODevice::ReadOnly))
+        struct Request
         {
-            const QString errorText = kernelText("kernel.callback.intercept.import.open_failed", QStringLiteral("打开文件失败：%1")).arg(inputFile.errorString());
-            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
-            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
-            return;
-        }
-
-        const QByteArray jsonBytes = inputFile.readAll();
-        inputFile.close();
-
-        CallbackConfigDocument importedDocument;
-        QStringList warningList;
-        QString errorText;
-        if (!importCallbackConfigFromJson(jsonBytes, &importedDocument, &warningList, &errorText))
+            QString filePath;
+            ks::i18n::SourceTextSnapshot language;
+        };
+        struct Result
         {
-            QMessageBox::warning(m_hostPage, kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), errorText);
-            appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(errorText));
-            return;
-        }
-
-        const CallbackValidationResult validationResult = validateCallbackConfig(importedDocument);
-        if (!validationResult.success)
-        {
-            const QString validateError = validationResult.errorList.join(QStringLiteral("；"));
-            QMessageBox::warning(m_hostPage,
-                kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
-                kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
-            appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(validateError));
-            return;
-        }
-
-        for (const QString& warningText : warningList)
-        {
-            appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warningText));
-        }
-        for (const QString& warningText : validationResult.warningList)
-        {
-            appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warningText));
-        }
-
-        populateUiFromConfig(importedDocument);
-        m_nextRuleVersion = std::max(m_nextRuleVersion, importedDocument.ruleVersion + 1ULL);
-        setDirtyState(true);
-        appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
+            bool parsed = false;
+            CallbackConfigDocument document;
+            CallbackValidationResult validation;
+            QStringList warnings;
+            QString error;
+        };
+        Request request{filePath, ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
+        m_importOperation->submit<Request, Result>(std::move(request),
+            [](const Request& input, const ks::ui::AsyncOperationToken& token) {
+                Result result;
+                QFile file(input.filePath);
+                if (!file.open(QIODevice::ReadOnly))
+                {
+                    result.error = input.language.contextText(
+                        QStringLiteral("kernel.callback.intercept.import.open_failed"),
+                        QStringLiteral("打开文件失败：%1")).arg(file.errorString());
+                    return result;
+                }
+                const QByteArray bytes = file.readAll();
+                file.close();
+                if (token.isCanceled()) return result;
+                result.parsed = importCallbackConfigFromJson(bytes, &result.document,
+                    &result.warnings, &result.error, &input.language);
+                if (result.parsed && !token.isCanceled())
+                    result.validation = validateCallbackConfig(result.document, &input.language);
+                return result;
+            },
+            [owner, filePath](Result result) {
+                if (!owner) return;
+                if (!result.parsed)
+                {
+                    QMessageBox::warning(owner->m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), result.error);
+                    if (!owner) return;
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(result.error));
+                    return;
+                }
+                if (!result.validation.success)
+                {
+                    const QString error = result.validation.errorList.join(QStringLiteral("；"));
+                    QMessageBox::warning(owner->m_hostPage,
+                        kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
+                        kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
+                    if (!owner) return;
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
+                    return;
+                }
+                for (const QString& warning : result.warnings)
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warning));
+                for (const QString& warning : result.validation.warningList)
+                    owner->appendAppLog(kernelText("kernel.callback.intercept.config.warning", QStringLiteral("配置警告：%1")).arg(warning));
+                owner->populateUiFromConfig(result.document);
+                owner->m_nextRuleVersion = std::max(owner->m_nextRuleVersion, result.document.ruleVersion + 1ULL);
+                owner->setDirtyState(true);
+                owner->appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
+            },
+            [owner](std::exception_ptr) {
+                if (owner) owner->controlOperationFailed();
+            });
     }
 
     void exportConfigToFile()
@@ -6542,6 +6583,8 @@ private:
     QPushButton* m_reloadStateButton = nullptr;
     ks::ui::AsyncOperation* m_runtimeQuery = nullptr;
     ks::ui::AsyncOperation* m_controlOperation = nullptr;
+    ks::ui::AsyncOperation* m_importOperation = nullptr;
+    bool m_importDisabledHost = false;
     QWidget* m_processProtectPage = nullptr;
     QWidget* m_minifilterBypassPage = nullptr;
     QPushButton* m_importButton = nullptr;
