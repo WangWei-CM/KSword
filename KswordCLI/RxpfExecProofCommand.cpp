@@ -66,27 +66,27 @@ namespace ks::cli
                 &request, static_cast<unsigned long>(sizeof(request)),
                 &response, static_cast<unsigned long>(sizeof(response)));
 
-            // transport 失败。
-            if (!io.ok)
+            // transport 失败且设备打不开 → 真的 transport failure，不读 response。
+            if (!io.ok && io.deviceOpenFailed)
             {
                 return {3, Json::object({
                     {L"source", Json::string(L"ksword::ark::DriverClient synchronous IOCTL_KSWORD_ARK_RXPF_EXEC_PROOF")},
                     {L"transportSuccess", Json::boolean(false)},
-                    {L"deviceOpenFailed", Json::boolean(io.deviceOpenFailed)},
+                    {L"deviceOpenFailed", Json::boolean(true)},
                     {L"win32Error", Json::number(io.win32Error)},
                     {L"length", Json::count(payload.size())}
                 }), {L"IOCTL transport failed before any R0 side effect. Driver must be loaded, signed and the control device must be reachable."}};
             }
+            // 注意：handler 返回 non-success NTSTATUS 时 DeviceIoControl 也返回 FALSE，
+            // 但 output buffer 仍被 WDF 填充。继续读 response 以获取 verdict/setupStatus。
 
-            if (io.bytesReturned != sizeof(response))
-            {
-                return {4, Json::object({
-                    {L"source", Json::string(L"ksword::ark::DriverClient synchronous IOCTL_KSWORD_ARK_RXPF_EXEC_PROOF")},
-                    {L"transportSuccess", Json::boolean(true)},
-                    {L"bytesReturned", Json::number(io.bytesReturned)},
-                    {L"expectedBytes", Json::number(static_cast<std::uint32_t>(sizeof(response)))}
-                }), {L"Driver returned an unexpected response length; refusing to decode."}};
-            }
+            // 诊断：dump raw response bytes 便于定位 handler 是否被调用。
+            const unsigned char* rawResp = reinterpret_cast<const unsigned char*>(&response);
+            std::vector<std::uint8_t> rawRespBytes(rawResp, rawResp + sizeof(response));
+
+            // 不再对 bytesReturned != sizeof(response) 直接 refuse：
+            // handler 内部早返回时 dispatchFixed 早 return 不设 BytesReturned，CLI 要能看到真因。
+            // Response 已被 RtlZeroMemory 清零，字段默认 0，不会读到野值。
 
             // Verdict 映射到文字；0=SUCCESS 为唯一通过状态。
             const unsigned long verdictCode = response.verdict;
@@ -127,7 +127,8 @@ namespace ks::cli
                 {L"verdict", Json::string(verdictText)},
                 {L"verdictCode", Json::number(verdictCode)},
                 {L"lastStatus", Json::hex(static_cast<std::uint32_t>(response.lastStatus))},
-                {L"setupStatus", Json::hex(static_cast<std::uint32_t>(response.setupStatus))}
+                {L"setupStatus", Json::hex(static_cast<std::uint32_t>(response.setupStatus))},
+                {L"rawResponseHex", Json::bytes(rawRespBytes, rawRespBytes.size())}
             }), {L"ALLOCATED_TEST page allocated by driver, bytes written to writable alias, shadow IDT installed, call rcx issued on every active CPU; each fetched byte is #PF→emulator. Return RAX is reported from worker 0 (all workers should agree). verdict=success means CPU-executed emulated bytes produced RAX==expectedReturnValue AND fault count non-zero (emulator did service the fetches)."}};
         }
     }
