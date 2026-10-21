@@ -2498,7 +2498,8 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     {
         QObject* dirtyAncestor = nullptr;
         QObject* managedAncestor = runtimeManagedAncestor(watched, &dirtyAncestor);
-        if (event->type() == QEvent::Show && dirtyAncestor != nullptr)
+        if (event->type() == QEvent::Show && dirtyAncestor != nullptr
+            && managedAncestor != nullptr)
         {
             const QPointer<QObject> guardedWatched(watched);
             applyRuntimeTranslations(dirtyAncestor, true);
@@ -2522,10 +2523,32 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     }
     case QEvent::Show:
     {
-        // Prepare this newly visible branch before its first paint. Hidden
-        // sibling pages are not part of a local Show event.
+        // Qt sends Show to each newly visible child before the parent's Show.
+        // Prepare each receiver once rather than walk all those children again.
+        // Explicit managed/dirty branches keep the complete path above. Unknown
+        // hidden receivers consume their own deferred bit; their children have
+        // their own Show and paint/help checks. An already queued explicit pass
+        // remains queued and still traverses its full declared subtree.
         const QPointer<QObject> guardedWatched(watched);
-        applyRuntimeTranslations(watched, true);
+        if (watched->property(kRuntimeDirtyProperty).toBool())
+            watched->setProperty(kRuntimeDirtyProperty, QVariant());
+        if (!guardedWatched) return true;
+        applyRuntimeTranslations(watched, true, false);
+        if (!guardedWatched) return true;
+        if (auto* widget = qobject_cast<QWidget*>(watched))
+        {
+            // Actions have no Show event. Prepare the actions actually exposed
+            // by this widget (including externally owned menu actions) before
+            // its first frame instead of relying on a queued ActionAdded pass.
+            QList<QPointer<QAction>> actions;
+            for (QAction* action : widget->actions()) actions.append(action);
+            for (const QPointer<QAction>& action : actions)
+            {
+                if (action && runtimeManagedAncestor(action.data()) == nullptr)
+                    applyRuntimeTranslations(action.data(), true, false);
+                if (!guardedWatched) return true;
+            }
+        }
         return guardedWatched.isNull();
     }
     case QEvent::PolishRequest:

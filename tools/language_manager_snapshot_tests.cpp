@@ -523,6 +523,36 @@ namespace
             runtimeVisited.size() == 3
             && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &grandchild) != runtimeVisited.cend()
             && !unknown.property("ks_i18n_runtime_dirty_subtree").toBool());
+        runtimeVisited.clear();
+        unknown.setProperty("ks_i18n_runtime_dirty_subtree", true);
+        QCoreApplication::sendEvent(&unknown, &show);
+        requireTrue(QStringLiteral("unknown Show prepares only its receiver and consumes its deferred bit"),
+            runtimeVisited.size() == 1 && runtimeVisited.front() == &unknown
+            && !unknown.property("ks_i18n_runtime_dirty_subtree").toBool());
+        child.installEventFilter(&manager);
+        grandchild.installEventFilter(&manager);
+        runtimeVisited.clear();
+        // Mirror Qt 6.9.3 show_helper/showChildren ordering with QObject events;
+        // this verifies the production filter without creating a GUI fixture.
+        QCoreApplication::sendEvent(&grandchild, &show);
+        QCoreApplication::sendEvent(&child, &show);
+        QCoreApplication::sendEvent(&unknown, &show);
+        drain();
+        requireTrue(QStringLiteral("child-first Show prepares each unknown receiver once"),
+            runtimeVisited.size() == 3
+            && std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &unknown) == 1
+            && std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &child) == 1
+            && std::count(runtimeVisited.cbegin(), runtimeVisited.cend(), &grandchild) == 1);
+        runtimeVisited.clear();
+        manager.markRuntimeTranslationDirty(&unknown);
+        QCoreApplication::sendEvent(&unknown, &show);
+        runtimeVisited.clear();
+        drain();
+        requireTrue(QStringLiteral("local Show does not swallow an already queued explicit subtree"),
+            runtimeVisited.size() == 3
+            && std::find(runtimeVisited.cbegin(), runtimeVisited.cend(), &grandchild) != runtimeVisited.cend());
+        grandchild.removeEventFilter(&manager);
+        child.removeEventFilter(&manager);
         manager.setRuntimeTranslationManaged(&unknown);
         runtimeVisited.clear();
         QCoreApplication::sendEvent(&unknown, &paint);

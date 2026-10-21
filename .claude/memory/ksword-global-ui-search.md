@@ -38,8 +38,8 @@
 - 组合文本按整串查词条：按钮文本 "搜索 ▾"/"CMD ▾" 是完整键，不能只登记 "搜索"。
 - 审计器会同时提取 C++ 相邻字符串字面量的编译后完整值；拆开的每段都有词条但完整值缺失时，`audit` 必须失败。
 - `text/contextText/translated/bind*` 等调用点引用的语义键必须真实存在于两份语言包；审计器会从源码反向校验，不能再依赖中文 fallback 蒙混通过。
-- LanguageManager 有运行时全树翻译（app eventFilter 监听 ChildAdded/Show/UpdateRequest 等），
-  代码里直接写中文字面量即可，动态 setText/setPlaceholderText 后也会被自动重翻。
+- LanguageManager 的非中文兼容翻译按实际对象接入：普通 UpdateRequest/LayoutRequest 不再调度子树；Paint/help 与普通 Show 只处理接收对象及明确所属控件。Qt 6.9.3 的 `show_helper/showChildren` 向可见子控件先分别发送 Show，再发父 Show，不能在每个 Show 重扫其后代。QAction 没有 Show，须在暴露它的 QWidget 首显时补处理实际 actions，并保留其 managed/preserve 边界。
+- 动态 setText/setPlaceholderText 仍经绘制前兼容翻译；模型保留原通知/root 代次。ChildAdded/Polish、显式 dirty 和受管 dirty 的首帧准备仍有效；局部 Paint 不得清掉已排队的子树 dirty。真正换语言前必须用旧语言包完整捕获隐藏控件规范源文，再广播 LanguageChange，不能只为减少遍历删掉此步骤。上述性能改动完成源码/QtCore 检查，实际主程序首帧、菜单与语言组合仍须用户 GUI 验收。
 - source template 的 `%1` 等捕获值会再做一次源文本翻译，使外层英文模板不会夹带“安全模式”等稳定中文枚举；动态多行报告仍应逐行翻译后再 join，不能对最终整块只调用一次 sourceText。
 - 语言包两文件键序逐行对齐（同键同行号），插入词条必须两包同锚点成对插入；
   用“整行内容锚点 + 行插入”脚本定点编辑，禁止 json.load/dump 重写。
