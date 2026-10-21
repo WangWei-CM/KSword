@@ -16,6 +16,8 @@
 #include <QWidget>
 #include <QJsonValue>
 #include <QSet>
+#include <QStringList>
+#include <string>
 
 #include <atomic> // std::atomic_bool：防止并发刷新重入。
 #include <functional> // std::function：把原连接管理页的进程动作回调给 NetworkDock。
@@ -29,6 +31,7 @@ class QPoint;
 class QPushButton;
 class QSplitter;
 class QShowEvent;
+class QEvent;
 class QTabWidget;
 class QTableWidget;
 class QTableView;
@@ -96,8 +99,22 @@ public:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
+    // One value row, not a second model/framework. The complete source snapshots
+    // and TCP control records remain in their existing canonical caches.
+    struct CrossViewValueRow
+    {
+        std::string identity;
+        QStringList fields;
+        QStringList searchFields;
+        quint32 processId = 0;
+        qulonglong sourceIndex = 0;
+    };
+    void configureCrossViewValueTable(QTableView* table, const QStringList& headers, bool tcp);
+    void publishCrossViewValueRows(QTableView* table, std::vector<CrossViewValueRow> rows);
+
     // CrossViewRow：TCP/UDP 交叉视图的一行聚合结果。
     struct CrossViewRow
     {
@@ -341,7 +358,7 @@ private:
     // - 为 TCP/UDP 表提供复制、刷新、进程跟踪、进程详情、扫描、终止和清除 PID 筛选；
     // - 菜单显式应用主题样式；
     // - 返回：无。
-    void showCrossViewContextMenu(QTableWidget* tableWidget, const QPoint& localPosition);
+    void showCrossViewContextMenu(QTableView* tableWidget, const QPoint& localPosition);
 
     // resolveProcessIcon 作用：
     // - 只读取 PID 图标缓存，绝不在建表主链路里做 OpenProcess / Shell 图标提取；
@@ -453,14 +470,16 @@ private:
     QSplitter* m_crossViewSplitter = nullptr;
     QSplitter* m_crossViewTopSplitter = nullptr;
     QHBoxLayout* m_crossControlLayout = nullptr;
+    QTimer* m_crossSearchTimer = nullptr;
+    bool m_crossFilterDirty = false;
     QLineEdit* m_crossSearchEdit = nullptr;        // m_crossSearchEdit：Cross-View 三张表的实时文本筛选。
     QPushButton* m_crossAutoRefreshButton = nullptr;
     QPushButton* m_crossTerminateButton = nullptr;
     QPushButton* m_clearProcessFilterButton = nullptr;
     QLabel* m_crossFilterLabel = nullptr;
-    QTableWidget* m_tcpTable = nullptr;
-    QTableWidget* m_udpTable = nullptr;
-    QTableWidget* m_crossSummaryTable = nullptr;
+    QTableView* m_tcpTable = nullptr;
+    QTableView* m_udpTable = nullptr;
+    QTableView* m_crossSummaryTable = nullptr;
 
     // AFD view.
     QWidget* m_afdPage = nullptr;
