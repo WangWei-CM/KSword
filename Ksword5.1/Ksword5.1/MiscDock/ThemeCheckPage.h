@@ -15,6 +15,7 @@ namespace ks::misc
     class ThemeCheckPage final : public QWidget
     {
     public:
+        static QStringList navigationRootSearchTexts();
         static ks::ui::PageNavigationCatalog navigationCatalog(const ThemeCheckPage* existing = nullptr);
         QWidget* activateNavigationDescriptor(const QString& id);
 

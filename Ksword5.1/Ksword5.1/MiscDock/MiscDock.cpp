@@ -792,6 +792,7 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
     if (existing) main = existing->m_navigationTabs.describe(std::move(main));
     else main[4].visible = false; // MainWindow以相同配置/会话状态修正尚未构造的入口。
     ks::ui::PageNavigationCatalog schema;
