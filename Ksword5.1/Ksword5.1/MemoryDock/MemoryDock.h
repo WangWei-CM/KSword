@@ -10,6 +10,7 @@
 
 #include "../Framework.h"
 #include "MemoryDock.ReadOnlyModels.h"
+#include "../UI/AsyncCleanupRegistry.h"
 #include "../UI/StructuredFieldView.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../UI/KernelDisassemblyDialog.h" // ks::ui::DisassemblyRow：驱动读写页反汇编视图的行缓存需要完整类型。
@@ -726,10 +727,10 @@ private:
     // - 返回：无。
     void cancelCurrentScan();
 
-    // cancelAndWaitForMemoryScanTasks：
-    // - 作用：请求所有内存扫描停止，并在关闭句柄或析构前等待后台任务退出。
+    // cancelMemoryScanTasks：
+    // - 作用：请求所有内存扫描停止，解绑 UI 后由物理任务独立完成资源收尾。
     // - 返回：无。
-    void cancelAndWaitForMemoryScanTasks();
+    void cancelMemoryScanTasks();
 
     // rebuildSearchResultTable：
     // - 作用：按 m_searchResultCache 重建结果表格。
@@ -742,7 +743,7 @@ private:
     // - 参数 pattern：本轮匹配模式。
     // - 返回：无。
     void scanMemoryRegionsInBackground(
-        const std::vector<RegionEntry>& scanRegions,
+        std::vector<RegionEntry> scanRegions,
         const ParsedSearchPattern& pattern, const FirstScanOptions& options);
 
 private:
@@ -1073,14 +1074,24 @@ private:
     // ========================================================
 
     // MemoryScanTaskState：
-    // - 作用：独立保存扫描任务计数与等待条件，避免 detached worker 依赖 QWidget 生命周期；
+    // - 作用：独立保存扫描取消、进度与物理完成状态，避免 detached worker 依赖 QWidget 生命周期；
     // - 生命周期：MemoryDock 与所有已启动扫描任务共同持有。
     struct MemoryScanTaskState
     {
-        std::mutex mutex;                         // mutex：保护 activeTaskCount 的读写。
-        std::condition_variable completion;       // completion：最后一个任务退出时唤醒关闭路径。
-        std::size_t activeTaskCount = 0;          // activeTaskCount：当前尚未退出的扫描协调线程数。
+        std::atomic_bool cancelRequested{false}, done{false};
+        std::atomic<std::size_t> progressDone{0}, progressTotal{0};
+        std::atomic_int progressPercent{-1};
+        std::shared_ptr<void> processLease;
+        std::shared_ptr<ks::ui::AsyncCleanupRegistry::Lease> cleanupLease;
+        std::shared_ptr<const std::vector<SearchResultEntry>> results;
+        std::uint64_t elapsedMs = 0, skippedBytes = 0, skippedEntries = 0;
+        QString firstReadFailure, failureText;
+        bool next = false, cancelled = false;
     };
+    std::function<void()> m_scanCompletion;
+    int m_scanLastProgress = -1;
+    void pollMemoryScanTask();
+
 
     HANDLE m_attachedProcessHandle = nullptr; // 当前附加的目标进程句柄。
     std::uint32_t m_attachedPid = 0;          // 当前附加 PID。
@@ -1110,7 +1121,7 @@ private:
     std::atomic<bool> m_scanInProgress{ false };       // 当前是否正在扫描。
     std::atomic<bool> m_scanCancelRequested{ false };  // 扫描取消标志。
     std::shared_ptr<MemoryScanTaskState> m_scanTaskState = std::make_shared<MemoryScanTaskState>();
-                                                        // m_scanTaskState：跨线程存活的扫描任务计数器。
+                                                        // m_scanTaskState：跨线程存活的扫描值任务。
     std::uint32_t m_scanThreadCount = 4;               // 扫描线程数（设置可调）。
     std::uint32_t m_scanChunkSizeKB = 1024;            // 单次读取块大小（KB，设置可调）。
 

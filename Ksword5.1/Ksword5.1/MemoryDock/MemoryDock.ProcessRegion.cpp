@@ -1473,9 +1473,9 @@ void MemoryDock::detachProcess()
     // 需要在句柄关闭之前还原；视图未创建时是空操作）。
     workbenchOnAboutToDetach();
 
-    // 先取消并等待所有扫描协调线程退出，再关闭进程句柄，
-    // 防止后台 ReadProcessMemory 使用已关闭或已复用的 HANDLE。
-    cancelAndWaitForMemoryScanTasks();
+    // 先取消扫描并解绑 UI；后台任务保留各自复制的进程句柄，
+    // 直到物理任务结束再释放，不在界面线程等待。
+    cancelMemoryScanTasks();
 
     // 先使所有基于旧附加上下文的异步快照失效。PTE/证据任务持有的是复制句柄，
     // 可以安全完成系统调用，但其结果不得再写回新的附加进程。
@@ -2514,6 +2514,8 @@ void MemoryDock::publishCoreProjection(const std::shared_ptr<CoreProjectionData>
 void MemoryDock::pollCoreProjection()
 {
     const QPointer<MemoryDock> owner(this);
+    pollMemoryScanTask();
+    if (!owner) { return; }
     pollFirstScanPreparation();
     if (!owner) { return; }
     pollRegionRefresh();
@@ -2547,7 +2549,7 @@ void MemoryDock::pollCoreProjection()
     if (!owner) { return; }
     if (m_searchResultTable && m_searchResultTable->isVisible()) { requestCoreProjection(CoreKind::SearchResults, false); }
     if (!owner) { return; }
-    if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation) { m_coreProjectionPoll->stop(); }
+    if (owner && !m_coreProjectionJob && !m_regionRefreshJob && !m_regionRefreshPendingJob && !m_firstScanPreparation && !m_scanInProgress.load() && !m_scanCompletion) { m_coreProjectionPoll->stop(); }
 }
 
 bool MemoryDock::coreProjectionIsCurrent(const CoreKind kind) const
