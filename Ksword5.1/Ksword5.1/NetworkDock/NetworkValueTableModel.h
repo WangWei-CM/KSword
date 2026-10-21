@@ -53,68 +53,15 @@ namespace network_value_detail
         using Rows = std::vector<Row>;
         using RowsHandle = std::shared_ptr<const Rows>;
     private:
-        // Persistent range tree. Deleting a range splits only its boundary paths;
-        // leaves borrow immutable row arrays. No Row copy/erase/shift runs in a
-        // begin/end pair. Final publication returns to one contiguous leaf.
-        struct Node;
-        using Root = std::shared_ptr<const Node>;
-        struct Node
-        {
-            Root left, right;
-            RowsHandle rows;
-            int offset = 0, count = 0, height = 1;
-        };
-        static Root leaf(RowsHandle rows, int offset, int count)
-        { return count ? std::make_shared<const Node>(Node{{}, {}, std::move(rows), offset, count}) : Root{}; }
-        static int size(const Root& root) { return root ? root->count : 0; }
-        static int height(const Root& root) { return root ? root->height : 0; }
-        static Root branch(Root left, Root right)
-        {
-            const int count = size(left) + size(right), depth = std::max(height(left), height(right)) + 1;
-            return std::make_shared<const Node>(Node{std::move(left), std::move(right), {}, 0, count, depth});
-        }
-        static Root balanced(Root left, Root right)
-        {
-            if (height(left) > height(right) + 1)
-            {
-                if (height(left->left) >= height(left->right)) return branch(left->left, branch(left->right, right));
-                return branch(branch(left->left, left->right->left), branch(left->right->right, right));
-            }
-            if (height(right) > height(left) + 1)
-            {
-                if (height(right->right) >= height(right->left)) return branch(branch(left, right->left), right->right);
-                return branch(branch(left, right->left->left), branch(right->left->right, right->right));
-            }
-            return branch(std::move(left), std::move(right));
-        }
-        static Root join(Root left, Root right)
-        {
-            if (!left) return right;
-            if (!right) return left;
-            if (height(left) > height(right) + 1) return balanced(left->left, join(left->right, std::move(right)));
-            if (height(right) > height(left) + 1) return balanced(join(std::move(left), right->left), right->right);
-            return branch(std::move(left), std::move(right));
-        }
-        static std::pair<Root, Root> split(const Root& root, int row)
-        {
-            if (!root || row <= 0) return {{}, root};
-            if (row >= size(root)) return {root, {}};
-            if (root->rows) return {leaf(root->rows, root->offset, row),
-                leaf(root->rows, root->offset + row, root->count - row)};
-            const int leftCount = size(root->left);
-            if (row < leftCount)
-            { auto pair = split(root->left, row); return {pair.first, join(pair.second, root->right)}; }
-            auto pair = split(root->right, row - leftCount);
-            return {join(root->left, pair.first), pair.second};
-        }
-        static Root retained(Root root) { return ks::ui::RetainCompleteExportSnapshot(root); }
     public:
         struct PreparedData
         {
             typename Engine::PreparedRows delta;
-            RowsHandle rows;
-            std::vector<Root> removalRoots;
-            Root insertedRoot, finalRoot;
+            RowsHandle rows, reordered, inserted;
+            std::vector<int> oldTargetRows;
+            int kept = 0;
+            bool reorderOld = false, changed = false;
+            int firstRow = 0, lastRow = 0, firstColumn = 0, lastColumn = 0;
         };
         struct PreparedRows
         {
@@ -126,6 +73,7 @@ namespace network_value_detail
             : QAbstractTableModel(parent), m_columns(std::move(columns)), m_resolve(std::move(resolve)), m_flags(std::move(flags))
         {
             m_rows = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const Rows>());
+            m_current = m_rows;
         }
         quint64 rowsRevision() const { return m_revision; }
         bool canAcceptPreparedRows(quint64 revision) const { return !m_updating && revision == m_revision; }
@@ -137,32 +85,58 @@ namespace network_value_detail
             auto data = std::make_shared<PreparedData>();
             data->delta = Engine::prepareRows(*oldRows, std::move(rows), columns, std::move(key), std::move(changes), revision);
             data->rows = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const Rows>(std::move(data->delta.rows)));
-            Root root = leaf(oldRows, 0, static_cast<int>(oldRows->size()));
-            for (const auto& range : data->delta.removals)
+            if (!data->delta.stats.modelReset)
             {
-                auto after = split(root, range.second + 1);
-                auto before = split(after.first, range.first);
-                root = join(before.first, after.second);
-                data->removalRoots.push_back(retained(root));
+                std::vector<bool> removed(oldRows->size(), false);
+                for (const auto& range : data->delta.removals)
+                    for (int row = range.first; row <= range.second; ++row) removed[static_cast<std::size_t>(row)] = true;
+                std::vector<int> order; order.reserve(oldRows->size());
+                for (std::size_t i = 0; i < oldRows->size(); ++i) if (!removed[i]) order.push_back(static_cast<int>(i));
+                data->kept = static_cast<int>(order.size());
+                for (std::size_t i = 0; i < oldRows->size(); ++i) if (removed[i]) order.push_back(static_cast<int>(i));
+                data->oldTargetRows.resize(order.size());
+                for (std::size_t i = 0; i < order.size(); ++i)
+                {
+                    data->oldTargetRows[static_cast<std::size_t>(order[i])] = static_cast<int>(i);
+                    if (order[i] != static_cast<int>(i)) data->reorderOld = true;
+                }
+                data->reordered = oldRows;
+                if (data->reorderOld)
+                {
+                    Rows values; values.reserve(order.size());
+                    for (const int row : order) values.push_back((*oldRows)[static_cast<std::size_t>(row)]);
+                    data->reordered = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const Rows>(std::move(values)));
+                }
+                data->inserted = data->reordered;
+                if (!data->delta.insertions.empty())
+                {
+                    if (!data->kept) data->inserted = data->rows;
+                    else
+                    {
+                        Rows values; values.reserve(static_cast<std::size_t>(data->kept) + data->delta.insertions.size());
+                        values.insert(values.end(), data->reordered->begin(), data->reordered->begin() + data->kept);
+                        for (const auto row : data->delta.insertions) values.push_back((*data->rows)[row]);
+                        data->inserted = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const Rows>(std::move(values)));
+                    }
+                }
+                // One conservative rectangle covers all real field/flag changes.
+                // Current values remain exact; unchanged cells inside it are safe.
+                for (const auto& change : data->delta.changes)
+                {
+                    if (!data->changed)
+                    {
+                        data->firstRow = change.firstRow; data->lastRow = change.lastRow;
+                        data->firstColumn = change.columns.firstColumn; data->lastColumn = change.columns.lastColumn;
+                    }
+                    else
+                    {
+                        data->firstRow = std::min(data->firstRow, change.firstRow); data->lastRow = std::max(data->lastRow, change.lastRow);
+                        data->firstColumn = std::min(data->firstColumn, change.columns.firstColumn);
+                        data->lastColumn = std::max(data->lastColumn, change.columns.lastColumn);
+                    }
+                    data->changed = true;
+                }
             }
-            // Inserted values form runs into the final array; build a balanced
-            // tree on the worker rather than push_back/copying rows on GUI.
-            std::vector<Root> runs;
-            for (std::size_t i = 0; i < data->delta.insertions.size();)
-            {
-                const auto first = data->delta.insertions[i]; std::size_t end = i + 1;
-                while (end < data->delta.insertions.size() && data->delta.insertions[end] == first + end - i) ++end;
-                runs.push_back(leaf(data->rows, static_cast<int>(first), static_cast<int>(end - i))); i = end;
-            }
-            while (runs.size() > 1)
-            {
-                std::vector<Root> next;
-                for (std::size_t i = 0; i < runs.size(); i += 2)
-                    next.push_back(i + 1 < runs.size() ? join(runs[i], runs[i + 1]) : runs[i]);
-                runs = std::move(next);
-            }
-            data->insertedRoot = retained(join(root, runs.empty() ? Root{} : runs.front()));
-            data->finalRoot = retained(leaf(data->rows, 0, static_cast<int>(data->rows->size())));
             return {revision, ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const PreparedData>(std::move(data)))};
         }
         bool setPreparedRows(PreparedRows prepared)
@@ -174,44 +148,34 @@ namespace network_value_detail
             m_updating = true; ++m_revision;
             if (delta.stats.modelReset)
             {
-                // Preserve only the pre-existing invalid/duplicate-key fallback.
                 beginResetModel(); if (!alive) return true;
-                m_root = value->finalRoot; m_rows = value->rows;
+                m_current = m_rows = value->rows; m_count = static_cast<int>(m_rows->size());
                 endResetModel(); if (!alive) return true;
             }
             else
             {
-                for (std::size_t i = 0; i < delta.removals.size(); ++i)
+                if (value->reorderOld && !publishLayout(value->reordered, rowCount(), value->oldTargetRows, false)) return true;
+                if (rowCount() > value->kept)
                 {
-                    const auto& range = delta.removals[i];
-                    beginRemoveRows({}, range.first, range.second); if (!alive) return true;
-                    m_root = value->removalRoots[i];
+                    beginRemoveRows({}, value->kept, rowCount() - 1); if (!alive) return true;
+                    m_current = value->reordered; m_count = value->kept;
                     endRemoveRows(); if (!alive) return true;
                 }
                 if (!delta.insertions.empty())
                 {
                     const int first = rowCount();
                     beginInsertRows({}, first, first + static_cast<int>(delta.insertions.size()) - 1); if (!alive) return true;
-                    m_root = value->insertedRoot;
+                    m_current = value->inserted; m_count += static_cast<int>(delta.insertions.size());
                     endInsertRows(); if (!alive) return true;
                 }
                 if (delta.stats.orderChanged)
                 {
-                    emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint); if (!alive) return true;
-                    const auto before = persistentIndexList();
-                    QModelIndexList after; after.reserve(before.size());
-                    for (const auto& item : before)
-                        after.push_back(item.isValid() && item.row() >= 0 && item.row() < static_cast<int>(delta.targetRows.size())
-                            ? createIndex(delta.targetRows[static_cast<std::size_t>(item.row())], item.column()) : QModelIndex());
-                    m_root = value->finalRoot; m_rows = value->rows;
-                    changePersistentIndexList(before, after);
-                    emit layoutChanged({}, QAbstractItemModel::VerticalSortHint); if (!alive) return true;
+                    if (!publishLayout(value->rows, static_cast<int>(value->rows->size()), delta.targetRows, true)) return true;
                 }
-                else { m_root = value->finalRoot; m_rows = value->rows; }
-                for (const auto& change : delta.changes)
+                else { m_current = m_rows = value->rows; m_count = static_cast<int>(m_rows->size()); }
+                if (value->changed)
                 {
-                    emit dataChanged(index(change.firstRow, change.columns.firstColumn),
-                        index(change.lastRow, change.columns.lastColumn), change.columns.roles);
+                    emit dataChanged(index(value->firstRow, value->firstColumn), index(value->lastRow, value->lastColumn), {});
                     if (!alive) return true;
                 }
             }
@@ -219,18 +183,8 @@ namespace network_value_detail
             return true;
         }
         const Row* rowAt(int row) const
-        {
-            auto* node = m_root.get();
-            if (row < 0 || row >= size(m_root)) return nullptr;
-            while (node && !node->rows)
-            {
-                const int count = size(node->left);
-                if (row < count) node = node->left.get();
-                else { row -= count; node = node->right.get(); }
-            }
-            return node ? &(*node->rows)[static_cast<std::size_t>(node->offset + row)] : nullptr;
-        }
-        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : size(m_root); }
+        { return row >= 0 && row < m_count ? &(*m_current)[static_cast<std::size_t>(row)] : nullptr; }
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_count; }
         int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_columns.size()); }
         QVariant data(const QModelIndex& index, int role) const override
         {
@@ -255,8 +209,23 @@ namespace network_value_detail
         std::vector<ColumnSpec> m_columns;
         DataResolver m_resolve;
         FlagsResolver m_flags;
-        RowsHandle m_rows;
-        Root m_root;
+        RowsHandle m_rows, m_current;
+        int m_count = 0;
+        bool publishLayout(RowsHandle rows, int count, const std::vector<int>& mapping, bool final)
+        {
+            const QPointer<Model> alive(this);
+            emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint); if (!alive) return false;
+            const auto before = persistentIndexList();
+            QModelIndexList after; after.reserve(before.size());
+            for (const auto& item : before)
+                after.push_back(item.isValid() && item.row() >= 0 && item.row() < static_cast<int>(mapping.size())
+                    ? createIndex(mapping[static_cast<std::size_t>(item.row())], item.column()) : QModelIndex());
+            m_current = std::move(rows); m_count = count;
+            if (final) m_rows = m_current;
+            changePersistentIndexList(before, after);
+            emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+            return !alive.isNull();
+        }
         quint64 m_revision = 0;
         bool m_updating = false;
     };

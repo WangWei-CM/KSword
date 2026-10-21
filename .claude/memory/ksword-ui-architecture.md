@@ -489,3 +489,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 网络审计/防火墙完整值模型接纳使用worker预备的持久范围树，使原begin/end增删通知内不再erase/shift/copy整个Row数组；最终回到连续根，固定模型/identity proxy保留persistent索引。排序比较在worker按实际显示QString和当前语言进行，切列时同值必须沿原Qt proxy的先前显示顺序稳定排列，不能每次从canonical顺序重排。root的真实QSortFilterProxyModel三次切列对照发现并纠正了此差异。必要Qt通知/真实persistent映射仍随规模增长，不能宣称常量时间。
 
 - 抓包主表的展示版本与规范缓存必须共享同一个PacketRecord负载所有者，不能为后台格式化再深拷贝packetBytes；R0/R3已消费批次move到该所有者。remoteDomain只在GUI更新，后台只读独立捕获的PacketMonitorRecord::domain，不能从后台读/复制可变的remoteDomain成员。展示快照/元数据COW只复制句柄和QString，旧值沿既有退役lane释放；真实复制/内存峰值仍须区分canonical、采集队列、NIDS独立队列与实际视图。root受控1MiB负载检查证明规范/展示字节缓冲身份相同，未量测实际应用峰值内存。
+
+- 网络值接纳后续已简化：用worker预备的连续值阶段替代持久范围树，先按稳定身份把待删行转到尾部，再一次尾删/尾插，最后按原target映射恢复顺序；正常路径最多两次layout、一批remove、一批insert和一个覆盖全部真实变化的dataChanged矩形，不能对5000个离散删除在GUI发5000组通知。公开模型和persistent身份保持，重复/无效键才用原reset回退；所有Row复制及阶段/旧值退役在后台。QtCore10000行/5000离散删除仍0次GUI Row复制，通知收敛到1次删除、2次layout；必要persistent remap仍在GUI，不宣称恒定时延。此前范围树段落为已替代历史。
