@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/FlatButtonTheme.h"
@@ -724,7 +725,7 @@ void StartupDock::finishIncrementalTableRebuild()
     }
     if (m_exportButton != nullptr)
     {
-        m_exportButton->setEnabled(true);
+        m_exportButton->setEnabled(!m_exportOperation->isInFlight());
     }
     if (m_copyButton != nullptr)
     {

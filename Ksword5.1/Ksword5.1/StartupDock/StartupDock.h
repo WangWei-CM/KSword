@@ -204,6 +204,8 @@ private:
     void deleteStartupEntry(StartupEntry entry);
     void deleteStartupEntries(std::vector<StartupEntry> entryList);
     void exportCurrentView();
+    void reconcileExportReceipt();
+    void settleExportReceipt(const QString& errorText);
     void applyFilterAndRefresh();
 
     // ===================== 工具 =====================
@@ -262,6 +264,9 @@ private:
 
     // ===================== 数据缓存 =====================
     std::vector<StartupEntry> m_entryList;    // m_entryList：全部启动项缓存。
+    std::unique_ptr<ks::ui::AsyncOperation> m_exportOperation;
+    bool m_exportPendingReceipt = false;
+    QString m_exportReceiptPath;
     std::unique_ptr<ks::ui::AsyncOperation> m_iconOperation;
     QHash<QString, QString> m_pendingIconPaths;
     QStringList m_activeIconKeys;

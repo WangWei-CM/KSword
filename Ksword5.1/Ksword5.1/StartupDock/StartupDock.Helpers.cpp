@@ -69,28 +69,35 @@ namespace startup_dock_detail
             : startupText("startup.value.disabled", QStringLiteral("禁用"));
     }
 
-    QString buildStatusText(const ks::startup::StartupEntry& entry)
+    QString formatStartupStatusText(const ks::startup::StartupActionKind kind,
+        const ks::startup::StartupScmStartMode mode, const bool enabled, const StartupContextResolver& contextText)
     {
-        if (entry.actionKind != ks::startup::StartupActionKind::ScmStartType)
+        if (kind != ks::startup::StartupActionKind::ScmStartType)
         {
-            return buildStatusText(entry.enabled);
+            return enabled ? contextText("startup.value.enabled", QStringLiteral("启用")) : contextText("startup.value.disabled", QStringLiteral("禁用"));
         }
-        switch (entry.actionLocator.serviceStartMode)
+        switch (mode)
         {
         case ks::startup::StartupScmStartMode::Boot:
-            return startupText("startup.value.scm.boot", QStringLiteral("引导启动"));
+            return contextText("startup.value.scm.boot", QStringLiteral("引导启动"));
         case ks::startup::StartupScmStartMode::System:
-            return startupText("startup.value.scm.system", QStringLiteral("系统启动"));
+            return contextText("startup.value.scm.system", QStringLiteral("系统启动"));
         case ks::startup::StartupScmStartMode::Automatic:
-            return startupText("startup.value.scm.automatic", QStringLiteral("自动启动"));
+            return contextText("startup.value.scm.automatic", QStringLiteral("自动启动"));
         case ks::startup::StartupScmStartMode::Manual:
-            return startupText("startup.value.scm.manual", QStringLiteral("手动启动"));
+            return contextText("startup.value.scm.manual", QStringLiteral("手动启动"));
         case ks::startup::StartupScmStartMode::Disabled:
-            return startupText("startup.value.scm.disabled", QStringLiteral("已禁用"));
+            return contextText("startup.value.scm.disabled", QStringLiteral("已禁用"));
         case ks::startup::StartupScmStartMode::None:
         default:
-            return buildStatusText(entry.enabled);
+            return enabled ? contextText("startup.value.enabled", QStringLiteral("启用")) : contextText("startup.value.disabled", QStringLiteral("禁用"));
         }
+    }
+
+    QString buildStatusText(const ks::startup::StartupEntry& entry)
+    {
+        return formatStartupStatusText(entry.actionKind, entry.actionLocator.serviceStartMode, entry.enabled,
+            [](const char* key, const QString& source) { return startupText(key, source); });
     }
 
     QString startupRiskReasonText(const ks::startup::StartupEntry& backendEntry)
@@ -114,7 +121,8 @@ namespace startup_dock_detail
         return startupText(translationKey.c_str(), fallbackText);
     }
 
-    QString startupLocalizedDetailText(const QString& detailText)
+    QString formatStartupDetailText(const QString& detailText,
+        const StartupContextResolver& contextText, const StartupSourceResolver& sourceText)
     {
         const QString taskStatePrefix = QStringLiteral("状态=");
         const QString taskTriggerSeparator = QStringLiteral("；触发器=");
@@ -136,7 +144,7 @@ namespace startup_dock_detail
                 descriptionIndex - triggerValueStart);
             const QString descriptionText = detailText.sliced(
                 descriptionIndex + taskDescriptionSeparator.size());
-            return startupText(
+            return contextText(
                 "startup.detail.scheduled_task",
                 QStringLiteral("状态：%1；触发器：%2；描述：%3"))
                 .arg(stateText)
@@ -147,7 +155,7 @@ namespace startup_dock_detail
         const QString backupPrefix = QStringLiteral("KSword 备份=");
         if (detailText.startsWith(backupPrefix))
         {
-            return startupText(
+            return contextText(
                 "startup.detail.backup_record",
                 QStringLiteral("KSword 备份记录：%1"))
                 .arg(detailText.sliced(backupPrefix.size()));
@@ -156,12 +164,19 @@ namespace startup_dock_detail
         const QString parkingPrefix = QStringLiteral("KSword 暂存=");
         if (detailText.startsWith(parkingPrefix))
         {
-            return startupText(
+            return contextText(
                 "startup.detail.parking_path",
                 QStringLiteral("KSword 暂存路径：%1"))
                 .arg(detailText.sliced(parkingPrefix.size()));
         }
-        return ks::i18n::sourceText(detailText);
+        return sourceText(detailText);
+    }
+
+    QString startupLocalizedDetailText(const QString& detailText)
+    {
+        return formatStartupDetailText(detailText,
+            [](const char* key, const QString& source) { return startupText(key, source); },
+            [](const QString& source) { return ks::i18n::sourceText(source); });
     }
 
     QStringList parseCsvLine(const QString& csvLineText)

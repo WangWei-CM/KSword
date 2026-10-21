@@ -115,6 +115,14 @@ namespace startup_dock_detail
     // - 其它静态说明继续交给 sourceText 处理。
     QString startupLocalizedDetailText(const QString& detailText);
 
+    using StartupContextResolver = std::function<QString(const char*, const QString&)>;
+    using StartupSourceResolver = std::function<QString(const QString&)>;
+    QString formatStartupStatusText(ks::startup::StartupActionKind kind,
+        ks::startup::StartupScmStartMode mode, bool enabled, const StartupContextResolver& contextText);
+    QString formatStartupDetailText(const QString& detailText,
+        const StartupContextResolver& contextText, const StartupSourceResolver& sourceText);
+
+
     // parseCsvLine 作用：
     // - 解析一行 CSV 文本，支持引号转义；
     // - 供 `schtasks` 输出解析复用。

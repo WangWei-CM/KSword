@@ -4,6 +4,9 @@
 #include "../Framework/PrivilegeElevationPrompt.h"
 
 #include <QMetaObject>
+#include <QSaveFile>
+#include "../UI/AsyncOperation.h"
+#include "../UI/TableRowFilterSupport.h"
 
 using namespace startup_dock_detail;
 
@@ -803,81 +806,132 @@ void StartupDock::copySelectedRow(const StartupCategory category, QTableWidget* 
     QApplication::clipboard()->setText(startupEntryTsvRow(entry));
 }
 
+void StartupDock::settleExportReceipt(const QString& errorText)
+{
+    m_exportPendingReceipt = false;
+    m_exportReceiptPath.clear();
+    if (m_exportButton) m_exportButton->setEnabled(!m_tableRebuildInProgress && !m_exportOperation->isInFlight());
+    if (!errorText.isEmpty())
+        QMessageBox::warning(this, startupText("startup.dialog.title", QStringLiteral("启动项")), errorText);
+}
+
+void StartupDock::reconcileExportReceipt()
+{
+    if (m_exportButton) m_exportButton->setEnabled(!m_tableRebuildInProgress && !m_exportOperation->isInFlight());
+    if (m_exportPendingReceipt && !m_exportOperation->isInFlight())
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。"))
+            + QLatin1Char('\n') + m_exportReceiptPath);
+}
+
 void StartupDock::exportCurrentView()
 {
-    const QString outputPath = QFileDialog::getSaveFileName(
-        this,
-        startupText("startup.dialog.export.title", QStringLiteral("导出启动项")),
-        QStringLiteral("StartupEntries.txt"),
+    const QPointer<StartupDock> guarded(this);
+    reconcileExportReceipt();
+    if (!guarded || m_tableRebuildInProgress || m_exportOperation->isInFlight()) return;
+    const QString outputPath = QFileDialog::getSaveFileName(this,
+        startupText("startup.dialog.export.title", QStringLiteral("导出启动项")), QStringLiteral("StartupEntries.txt"),
         QStringLiteral("Text Files (*.txt);;All Files (*.*)"));
-    if (outputPath.trimmed().isEmpty())
+    if (!guarded || outputPath.trimmed().isEmpty()) return;
+    reconcileExportReceipt();
+    if (!guarded) return;
+    if (m_tableRebuildInProgress || m_exportOperation->isInFlight())
     {
+        QMessageBox::warning(this, startupText("startup.dialog.title", QStringLiteral("启动项")),
+            ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
         return;
     }
-
-    QFile outputFile(outputPath);
-    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text))
+    struct ExportRow {
+        QString name, publisher, image, command, location, user, source, detail;
+        ks::startup::StartupActionKind kind;
+        ks::startup::StartupScmStartMode mode;
+        bool enabled;
+    };
+    struct Request {
+        QString path; QStringList headers; std::vector<ExportRow> rows;
+        QHash<QString, QString> texts; ks::i18n::SourceTextSnapshot language;
+    } request;
+    request.path = outputPath;
+    request.headers = startupTableHeaders();
+    request.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    const auto captureText = [&request](const char* key, const QString& source) {
+        request.texts.insert(QString::fromLatin1(key), startupText(key, source));
+    };
+    captureText("startup.value.enabled", QStringLiteral("启用"));
+    captureText("startup.value.disabled", QStringLiteral("禁用"));
+    captureText("startup.value.scm.boot", QStringLiteral("引导启动"));
+    captureText("startup.value.scm.system", QStringLiteral("系统启动"));
+    captureText("startup.value.scm.automatic", QStringLiteral("自动启动"));
+    captureText("startup.value.scm.manual", QStringLiteral("手动启动"));
+    captureText("startup.value.scm.disabled", QStringLiteral("已禁用"));
+    captureText("startup.detail.scheduled_task", QStringLiteral("状态：%1；触发器：%2；描述：%3"));
+    captureText("startup.detail.backup_record", QStringLiteral("KSword 备份记录：%1"));
+    captureText("startup.detail.parking_path", QStringLiteral("KSword 暂存路径：%1"));
+    const auto appendEntry = [this, &request](const int index) {
+        if (index < 0 || index >= static_cast<int>(m_entryList.size())) return;
+        const auto& entry = m_entryList[static_cast<std::size_t>(index)];
+        request.rows.push_back({entry.itemNameText, entry.publisherText, entry.imagePathText, entry.commandText,
+            entry.locationText, entry.userText, entry.sourceTypeText, entry.detailText,
+            entry.backendEntry.actionKind, entry.backendEntry.actionLocator.serviceStartMode, entry.backendEntry.enabled});
+    };
+    const auto category = currentCategory();
+    if (category == StartupCategory::Registry)
     {
-        QMessageBox::warning(
-            this,
-            startupText("startup.dialog.title", QStringLiteral("启动项")),
-            startupText("startup.dialog.export.failed", QStringLiteral("导出失败：%1"))
-                .arg(outputFile.errorString()));
-        return;
-    }
-
-    QTextStream outputStream(&outputFile);
-    outputStream.setEncoding(QStringConverter::Utf8);
-    outputStream << startupTableHeaders().join(QChar('\t')) << '\n';
-    if (currentCategory() == StartupCategory::Registry)
-    {
-        if (m_registryTree == nullptr)
+        if (!m_registryTree) return;
+        for (int root = 0; root < m_registryTree->topLevelItemCount(); ++root)
         {
-            return;
-        }
-
-        for (int rootIndex = 0; rootIndex < m_registryTree->topLevelItemCount(); ++rootIndex)
-        {
-            QTreeWidgetItem* groupItem = m_registryTree->topLevelItem(rootIndex);
-            if (groupItem == nullptr)
-            {
-                continue;
-            }
-
-            for (int childIndex = 0; childIndex < groupItem->childCount(); ++childIndex)
-            {
-                QTreeWidgetItem* childItem = groupItem->child(childIndex);
-                const int entryIndex = findEntryIndexByRegistryTreeItem(childItem);
-                if (entryIndex < 0 || entryIndex >= static_cast<int>(m_entryList.size()))
-                {
-                    continue;
-                }
-
-                const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-                outputStream << startupEntryTsvRow(entry) << '\n';
-            }
+            const auto* group = m_registryTree->topLevelItem(root);
+            if (!group) continue;
+            for (int child = 0; child < group->childCount(); ++child)
+                appendEntry(findEntryIndexByRegistryTreeItem(group->child(child)));
         }
     }
     else
     {
-        QTableWidget* tableWidget = currentCategoryTable();
-        if (tableWidget == nullptr)
-        {
-            return;
-        }
-
-        for (int rowIndex = 0; rowIndex < tableWidget->rowCount(); ++rowIndex)
-        {
-            const int entryIndex = findEntryIndexByTableRow(currentCategory(), rowIndex);
-            if (entryIndex < 0 || entryIndex >= static_cast<int>(m_entryList.size()))
-            {
-                continue;
-            }
-
-            const StartupEntry& entry = m_entryList[static_cast<std::size_t>(entryIndex)];
-            outputStream << startupEntryTsvRow(entry) << '\n';
-        }
+        const auto* table = currentCategoryTable();
+        if (!table) return;
+        request.rows.reserve(static_cast<std::size_t>(table->rowCount()));
+        for (int row = 0; row < table->rowCount(); ++row)
+            if (!ks::ui::IsTableRowExcludedByFilter(table, row))
+                appendEntry(findEntryIndexByTableRow(category, row));
     }
+    struct Result { bool committed = false; QString error; };
+    m_exportPendingReceipt = true;
+    m_exportReceiptPath = outputPath;
+    const auto ticket = m_exportOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            QSaveFile file(input.path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) { result.error = file.errorString(); return result; }
+            QTextStream stream(&file);
+            stream.setEncoding(QStringConverter::Utf8);
+            stream << input.headers.join(QChar('\t')) << '\n';
+            const StartupContextResolver context = [&input](const char* key, const QString& source) {
+                return input.texts.value(QString::fromLatin1(key), source);
+            };
+            const StartupSourceResolver source = [&input](const QString& value) { return input.language.sourceText(value); };
+            for (const auto& row : input.rows)
+            {
+                QStringList fields{row.name, row.publisher, row.image, row.command, row.location,
+                    source(row.user), formatStartupStatusText(row.kind, row.mode, row.enabled, context),
+                    source(row.source), formatStartupDetailText(row.detail, context, source)};
+                for (QString& field : fields) field = startupTsvField(field);
+                stream << fields.join(QChar('\t')) << '\n';
+            }
+            stream.flush();
+            if (stream.status() != QTextStream::Ok) { result.error = file.errorString(); file.cancelWriting(); return result; }
+            result.committed = file.commit();
+            if (!result.committed) result.error = file.errorString();
+            return result;
+        },
+        [this](const Result& result, std::uint64_t) {
+            settleExportReceipt(result.committed ? QString() : startupText("startup.dialog.export.failed", QStringLiteral("导出失败：%1")).arg(result.error));
+            return true;
+        },
+        [this, outputPath](std::exception_ptr) {
+            settleExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。")) + QLatin1Char('\n') + outputPath);
+        });
+    if (!ticket && guarded && m_exportPendingReceipt)
+        settleExportReceipt(ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
 }
 
 void StartupDock::applyFilterAndRefresh()

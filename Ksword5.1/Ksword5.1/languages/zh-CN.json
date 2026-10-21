@@ -387,6 +387,8 @@
     "privilege.workbench.sessions.type_remote": "远程交互（RDP）",
     "privilege.workbench.sessions.type_cached": "缓存交互",
     "privilege.workbench.sessions.type_cached_remote": "缓存远程交互",
+    "startup.export.receipt_missing": "导出未返回有效回执，请检查目标文件后再重试。",
+    "startup.export.not_submitted": "本次导出请求未提交，请稍后重试。",
     "privilege.workbench.sessions.type_cached_unlock": "缓存解锁",
     "privilege.workbench.sessions.refresh": "刷新登录会话",
     "privilege.workbench.sessions.search": "搜索账号、SID 或登录 LUID",

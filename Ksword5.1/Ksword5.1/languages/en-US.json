@@ -387,6 +387,8 @@
     "privilege.workbench.sessions.type_remote": "Remote interactive (RDP)",
     "privilege.workbench.sessions.type_cached": "Cached interactive",
     "privilege.workbench.sessions.type_cached_remote": "Cached remote interactive",
+    "startup.export.receipt_missing": "The export returned no valid receipt. Check the destination file before trying again.",
+    "startup.export.not_submitted": "This export request was not submitted. Try again later.",
     "privilege.workbench.sessions.type_cached_unlock": "Cached unlock",
     "privilege.workbench.sessions.refresh": "Refresh logon sessions",
     "privilege.workbench.sessions.search": "Search accounts, SIDs or logon LUIDs",
