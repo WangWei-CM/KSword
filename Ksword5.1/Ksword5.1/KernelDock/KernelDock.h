@@ -838,21 +838,21 @@ private:
     void rebuildCallbackEnumTable(const QString& filterKeyword);
 
     // rebuildShadowSsdtTable：
-    // - 作用：根据筛选关键词重建 SSSDT 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildShadowSsdtTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildShadowSsdtTable(bool sourceChanged = false);
 
     // rebuildInlineHookTable：
-    // - 作用：根据筛选关键词重建 Inline Hook 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildInlineHookTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildInlineHookTable(bool sourceChanged = false);
 
     // rebuildIatEatHookTable：
-    // - 作用：根据筛选关键词重建 IAT/EAT Hook 表格。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildIatEatHookTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildIatEatHookTable(bool sourceChanged = false);
 
-    void rebuildTimerDpcTable(const QString& filterKeyword);
+    void rebuildTimerDpcTable(bool sourceChanged = false);
 
     // ==================== 详情联动 ====================
     // showObjectNamespaceDetailByCurrentRow：
