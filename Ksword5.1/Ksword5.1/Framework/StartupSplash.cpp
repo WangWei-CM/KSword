@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -152,9 +153,11 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (m_email == email && m_buildDate == buildDate && m_repository == repository) return;
             m_email = email;
             m_buildDate = buildDate;
             m_repository = repository;
+            ++m_stateRevision;
         }
         requestRedraw();
     }
@@ -165,6 +168,7 @@ public:
             std::lock_guard<std::mutex> lock(m_stateMutex);
             if (m_mode == mode) return;
             m_mode = mode;
+            ++m_stateRevision;
         }
         const HWND window = m_window.load();
         if (window != nullptr) PostMessageW(window, kResetAnimationMessage, 0, 0);
@@ -174,7 +178,10 @@ public:
     {
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
-            m_accentRgb = rgb & 0x00FFFFFFU;
+            const unsigned int accent = rgb & 0x00FFFFFFU;
+            if (m_accentRgb == accent) return;
+            m_accentRgb = accent;
+            ++m_stateRevision;
         }
         requestRedraw();
     }
@@ -186,6 +193,7 @@ public:
             std::lock_guard<std::mutex> lock(m_stateMutex);
             m_status = status.empty() ? L"Ksword" : status;
             m_percent = 0;
+            ++m_stateRevision;
         }
         if (!m_thread.joinable())
         {
@@ -224,8 +232,11 @@ public:
         const std::wstring status = utf8ToWide(operationName);
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
+            const int clamped = std::clamp(percent, 0, 100);
+            if ((status.empty() || m_status == status) && m_percent == clamped) return;
             if (!status.empty()) m_status = status;
-            m_percent = std::clamp(percent, 0, 100);
+            m_percent = clamped;
+            ++m_stateRevision;
         }
         requestRedraw();
     }
@@ -317,6 +328,8 @@ private:
             : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
         MONITORINFO info = {sizeof(info)};
         if (!GetMonitorInfoW(monitor, &info)) return;
+        const int oldX = m_x, oldY = m_y, oldWidth = m_width, oldHeight = m_height;
+        const UINT oldDpi = m_dpi;
         m_dpi = windowDpi(window);
         m_scale = static_cast<float>(m_dpi) / 96.0f;
         m_width = MulDiv(kBaseWidth, static_cast<int>(m_dpi), 96);
@@ -325,6 +338,8 @@ private:
         m_canvasHeight = m_height / m_scale;
         m_x = info.rcMonitor.left + ((info.rcMonitor.right - info.rcMonitor.left) - m_width) / 2;
         m_y = info.rcMonitor.top + ((info.rcMonitor.bottom - info.rcMonitor.top) - m_height) / 2;
+        if (oldX != m_x || oldY != m_y || oldWidth != m_width || oldHeight != m_height || oldDpi != m_dpi)
+            ++m_geometryRevision;
         if (window != nullptr)
             SetWindowPos(window, HWND_TOPMOST, m_x, m_y, m_width, m_height,
                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -333,13 +348,33 @@ private:
     void requestRedraw()
     {
         const HWND window = m_window.load();
-        if (window != nullptr) PostMessageW(window, kRedrawMessage, 0, 0);
+        if (window != nullptr && !m_redrawQueued.exchange(true))
+        {
+            if (!PostMessageW(window, kRedrawMessage, 0, 0)) m_redrawQueued.store(false);
+        }
     }
 
-    bool redraw()
+    void updateAnimationTimer(bool visible)
     {
         const HWND window = m_window.load();
-        return window != nullptr && paint(nullptr);
+        SplashProgressMode mode;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            mode = m_mode;
+        }
+        if (window != nullptr)
+        {
+            if (visible && mode == SplashProgressMode::Indeterminate)
+                SetTimer(window, 1, 16, nullptr);
+            else
+                KillTimer(window, 1);
+        }
+    }
+
+    bool redraw(bool force = false)
+    {
+        const HWND window = m_window.load();
+        return window != nullptr && paint(nullptr, force);
     }
 
     Gdiplus::Color backgroundTextColor(const void* pixels, const Gdiplus::RectF& area) const
@@ -367,7 +402,7 @@ private:
             ? Gdiplus::Color(255, 0, 0, 0) : Gdiplus::Color(255, 255, 255, 255);
     }
 
-    bool paint(HDC target)
+    bool paint(HDC target, bool force = false)
     {
         std::wstring status;
         std::wstring email;
@@ -376,6 +411,7 @@ private:
         SplashProgressMode mode;
         unsigned int accentRgb;
         int percent;
+        std::uint64_t revision;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             status = m_status;
@@ -385,7 +421,13 @@ private:
             mode = m_mode;
             accentRgb = m_accentRgb;
             percent = m_percent;
+            revision = m_stateRevision;
         }
+        // Layered windows retain their submitted pixels. Repeated state messages
+        // and WM_PAINT do not require resubmitting an unchanged determinate frame.
+        if (!force && target == nullptr && mode == SplashProgressMode::Determinate &&
+            revision == m_paintedRevision && m_geometryRevision == m_paintedGeometryRevision)
+            return true;
 
         HDC memory = CreateCompatibleDC(target);
         if (memory == nullptr) return false;
@@ -521,6 +563,11 @@ private:
         SelectObject(memory, oldBitmap);
         DeleteObject(bitmap);
         DeleteDC(memory);
+        if (submitted)
+        {
+            m_paintedRevision = revision;
+            m_paintedGeometryRevision = m_geometryRevision;
+        }
         return submitted;
     }
 
@@ -540,10 +587,10 @@ private:
             {
                 self->m_animationStart = GetTickCount64();
                 self->layout();
-                if (self->redraw())
+                if (self->redraw(true))
                 {
-                    SetTimer(window, 1, 16, nullptr);
                     ShowWindow(window, SW_SHOWNOACTIVATE);
+                    self->updateAnimationTimer(true);
                 }
             }
             return 0;
@@ -555,14 +602,20 @@ private:
             if (self != nullptr)
             {
                 self->m_animationStart = GetTickCount64();
-                self->redraw();
+                const bool visible = IsWindowVisible(window) != FALSE;
+                self->updateAnimationTimer(visible);
+                if (visible) self->redraw();
             }
             return 0;
         case kRedrawMessage:
-            if (self != nullptr) self->redraw();
+            if (self != nullptr)
+            {
+                self->m_redrawQueued.store(false);
+                if (IsWindowVisible(window)) self->redraw();
+            }
             return 0;
         case WM_TIMER:
-            if (self != nullptr && IsWindowVisible(window)) self->redraw();
+            if (wParam == 1 && self != nullptr && IsWindowVisible(window)) self->redraw();
             return 0;
         case WM_ERASEBKGND:
             return 1;
@@ -571,7 +624,7 @@ private:
             {
                 PAINTSTRUCT paint = {};
                 BeginPaint(window, &paint);
-                self->paint(nullptr);
+                if (IsWindowVisible(window)) self->paint(nullptr);
                 EndPaint(window, &paint);
                 return 0;
             }
@@ -581,7 +634,7 @@ private:
             if (self != nullptr)
             {
                 self->layout();
-                self->redraw();
+                if (IsWindowVisible(window)) self->redraw(true);
             }
             return 0;
         case WM_CLOSE:
@@ -597,6 +650,7 @@ private:
     std::thread m_thread;
     HDESK m_desktop = nullptr; // Borrowed from caller for UI thread startup.
     std::atomic<HWND> m_window{nullptr};
+    std::atomic<bool> m_redrawQueued{false};
     mutable std::mutex m_stateMutex;
     std::condition_variable m_created;
     bool m_threadReady = false;
@@ -609,6 +663,10 @@ private:
     SplashProgressMode m_mode = SplashProgressMode::Determinate;
     unsigned int m_accentRgb = 0x43A0FFU;
     int m_percent = 0;
+    std::uint64_t m_stateRevision = 1; // Protected by m_stateMutex.
+    std::uint64_t m_paintedRevision = 0; // Splash UI thread only.
+    std::uint64_t m_geometryRevision = 1;
+    std::uint64_t m_paintedGeometryRevision = 0;
 
     ULONG_PTR m_gdiplusToken = 0;
     std::unique_ptr<Gdiplus::Image> m_image;
