@@ -60,6 +60,7 @@ namespace ks::ui
     // 控制器必须在页面析构第一步 close()；成员析构再删除 QObject 子对象。
     class AsyncOperation final : public QObject
     {
+        struct Job;
     public:
         using Cleanup = std::function<void(AsyncOperationOutcome)>;
         explicit AsyncOperation(QObject* owner);
@@ -72,8 +73,15 @@ namespace ks::ui
         std::uint64_t submit(Request request, Worker worker, Apply apply,
             Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
-            return submitImpl<Request, Result>(std::move(request), std::move(worker),
-                std::move(apply), std::move(failure), std::move(cleanup), workerPriority, false);
+            Job job;
+            job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
+            {
+                const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
+                return apply(*result, ticket);
+            };
+            job.failure = std::move(failure);
+            return submitImpl<false, Request, Result>(std::move(request), std::move(worker),
+                std::move(job), std::move(cleanup), workerPriority);
         }
 
         // 已接受的副作用事务不合并、不取消；忙/关闭返回0，worker只接值请求。
@@ -82,41 +90,45 @@ namespace ks::ui
         std::uint64_t submitTransaction(Request request, Worker worker, Apply apply,
             Failure failure, Cleanup cleanup = {}, int workerPriority = 0)
         {
-            return submitImpl<Request, Result>(std::move(request),
-                [worker = std::move(worker)](const Request& value, const AsyncOperationToken&)
-                {
-                    return worker(value);
-                }, std::move(apply), std::move(failure), std::move(cleanup), workerPriority, true);
-        }
-
-    private:
-        template<class Request, class Result, class Worker, class Apply, class Failure>
-        std::uint64_t submitImpl(Request request, Worker worker, Apply apply,
-            Failure failure, Cleanup cleanup, int workerPriority, bool transaction)
-        {
-            Job job; // 主线程保存应用回调，后台任务不捕获它们。
-            job.transaction = transaction;
+            Job job;
             job.apply = [apply = std::move(apply)](const std::any& payload, std::uint64_t ticket)
             {
                 const auto& result = std::any_cast<const std::shared_ptr<Result>&>(payload);
                 return apply(*result, ticket);
             };
             job.failure = std::move(failure);
-            job.launch = [request = std::move(request), worker = std::move(worker), workerPriority, transaction](
+            return submitImpl<true, Request, Result>(std::move(request), std::move(worker),
+                std::move(job), std::move(cleanup), workerPriority);
+        }
+
+    private:
+        // GUI回调已经由Job拥有；后台启动器不再把Apply/Failure类型嵌入每层实例，
+        // 事务直接调用原worker，省去再包一层带全部回调类型的适配lambda。
+        template<bool Transaction, class Request, class Result, class Worker>
+        std::uint64_t submitImpl(Request request, Worker worker, Job job,
+            Cleanup cleanup, int workerPriority)
+        {
+            job.transaction = Transaction;
+            job.launch = [request = std::move(request), worker = std::move(worker), workerPriority](
                 const AsyncOperationToken& token)
             {
                 // worker 不持页面守卫；业务查询仍使用既有全局 Qt 线程池。
-                auto* task = QRunnable::create([request, worker, token, transaction]()
+                auto* task = QRunnable::create([request, worker, token]()
                 {
                     try
                     {
-                        if (!transaction && token.isCanceled())
+                        if constexpr (!Transaction)
                         {
-                            token.deliver({});
-                            return;
+                            if (token.isCanceled())
+                            {
+                                token.deliver({});
+                                return;
+                            }
                         }
-                        auto result = std::make_shared<Result>(worker(request, token));
-                        token.deliver(std::move(result));
+                        if constexpr (Transaction)
+                            token.deliver(std::make_shared<Result>(worker(request)));
+                        else
+                            token.deliver(std::make_shared<Result>(worker(request, token)));
                     }
                     catch (...)
                     {
