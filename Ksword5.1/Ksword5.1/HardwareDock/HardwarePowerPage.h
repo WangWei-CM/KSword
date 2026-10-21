@@ -60,6 +60,10 @@ private:
     bool m_transactionPending = false;
     bool m_confirming = false;
     bool m_restorePreparing = false;
+    QString m_powerSchemeEnumerationError;
+    QString m_statusText;
+    bool m_statusIsError = false;
+
     bool m_loadedOnce = false;                        // m_loadedOnce：首次显示时自动刷新一次。
     bool m_hasSnapshot = false;                       // m_hasSnapshot：expected raw MSR 是否有效。
     KSWORD_ARK_CPU_POWER_RESPONSE m_snapshot{};       // m_snapshot：最近一次锁内 R0 快照。

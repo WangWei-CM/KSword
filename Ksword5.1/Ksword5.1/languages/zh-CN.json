@@ -8,6 +8,7 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "hardware.power.error.scheme_enumerate": "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。",
     "monitor.export.action": "导出",
     "monitor.export.ready_hint": "导出当前结果范围",
     "monitor.export.source_changed": "结果在准备期间发生变化，已取消本次准备；请重试导出。",
@@ -7099,6 +7100,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。": "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。",
     ", advice=": ", advice=",
     "CloseTrace": "CloseTrace",
     "ControlTraceW(STOP)": "ControlTraceW(STOP)",

@@ -50,6 +50,8 @@ struct HardwarePowerSchemeSnapshot
     struct Scheme { QString name; QByteArray guid; bool active = false; };
     std::vector<Scheme> schemes;
     QByteArray activeGuid;
+    DWORD enumerationError = ERROR_SUCCESS;
+    ULONG enumerationErrorIndex = 0;
 };
 
 struct HardwarePowerTransactionRequest
@@ -785,7 +787,9 @@ namespace
             }
             if (enumerateError != ERROR_SUCCESS || guidBytesCount != sizeof(schemeGuid))
             {
-                continue;
+                result.enumerationError = enumerateError != ERROR_SUCCESS ? enumerateError : ERROR_INVALID_DATA;
+                result.enumerationErrorIndex = schemeIndex;
+                break;
             }
 
             result.schemes.push_back({ powerSchemeFriendlyName(schemeGuid), guidBytes(schemeGuid),
@@ -980,6 +984,10 @@ namespace
 void HardwarePowerPage::applyPowerSchemesSnapshot(const HardwarePowerSchemeSnapshot& snapshot)
 {
     if (m_powerSchemeCombo == nullptr) return;
+    m_powerSchemeEnumerationError = snapshot.enumerationError == ERROR_SUCCESS ? QString()
+        : powerText(QStringLiteral("hardware.power.error.scheme_enumerate"),
+            QStringLiteral("Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。"))
+            .arg(snapshot.enumerationErrorIndex).arg(snapshot.enumerationError);
     m_powerSchemeCombo->clear();
     int activeIndex = -1;
     for (const auto& scheme : snapshot.schemes)
@@ -996,6 +1004,7 @@ void HardwarePowerPage::applyPowerSchemesSnapshot(const HardwarePowerSchemeSnaps
         m_restorePowerSchemeGuid = snapshot.activeGuid;
     if (activeIndex >= 0) m_powerSchemeCombo->setCurrentIndex(activeIndex);
     updateControlAvailability();
+    setStatus(m_statusText, m_statusIsError);
 }
 
 void HardwarePowerPage::applySelectedPowerScheme()
@@ -1502,10 +1511,13 @@ void HardwarePowerPage::setStatus(const QString& text, const bool isError)
     {
         return;
     }
-    m_statusLabel->setText(text);
+    m_statusText = text;
+    m_statusIsError = isError;
+    m_statusLabel->setText(m_powerSchemeEnumerationError.isEmpty()
+        ? text : text + QLatin1Char('\n') + m_powerSchemeEnumerationError);
     m_statusLabel->setStyleSheet(
         QStringLiteral("font-weight:600;color:%1;")
-            .arg(isError
+            .arg(isError || !m_powerSchemeEnumerationError.isEmpty()
                 ? KswordTheme::ErrorHex()
                 : KswordTheme::PrimaryBlueHex));
 }
