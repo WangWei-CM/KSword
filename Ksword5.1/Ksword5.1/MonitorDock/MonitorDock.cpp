@@ -1,3 +1,4 @@
+#include "MonitorTableExport.h"
 #include "MonitorEventFilterProjection.h"
 #include "../UI/AsyncCleanupRegistry.h"
 
@@ -5016,6 +5017,7 @@ void MonitorDock::activateMonitorTab(const QString& tabKey)
 
 MonitorDock::~MonitorDock()
 {
+    if (m_wmiTableExport) m_wmiTableExport->close();
     if (m_wmiFilterProjection) m_wmiFilterProjection->close();
     if (m_arkRiskExportOperation) m_arkRiskExportOperation->close();
     if (m_arkRiskDispatcher) m_arkRiskDispatcher->close();
@@ -9836,11 +9838,12 @@ void MonitorDock::applyWmiEventFilter()
                 ks::monitor::EventFilterRow values;
                 for (int column = 0; column < 5; ++column)
                     values.fields.append(m_wmiEventTable->item(row, column) ? m_wmiEventTable->item(row, column)->text() : QString());
+                values.exportCells = values.fields;
                 return values;
             },
             [this](int visible, int total, bool pending) {
                 if (m_wmiEventFilterStatusLabel) m_wmiEventFilterStatusLabel->setText(QStringLiteral("可见: %1 / %2").arg(visible).arg(total));
-                if (m_wmiExportButton) m_wmiExportButton->setEnabled(total > 0 && !pending);
+                updateWmiExportAction();
                 if (!pending && m_wmiEventTable->isVisible()
                     && m_wmiEventKeepBottomCheck && m_wmiEventKeepBottomCheck->isChecked())
                 {
@@ -10555,102 +10558,81 @@ void MonitorDock::appendWmiEventRow(
 
 }
 
+void MonitorDock::updateWmiExportAction()
+{
+    if (!m_wmiExportButton) return;
+    const bool preparing = m_wmiTableExport && m_wmiTableExport->isPreparing();
+    const bool busy = m_wmiTableExport && m_wmiTableExport->isBusy();
+    m_wmiExportButton->setEnabled(preparing || (!busy && m_wmiEventTable && m_wmiEventTable->rowCount() > 0));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_wmiExportButton->setText(preparing ? language.text(QStringLiteral("monitor.export.cancel_preparation"), QStringLiteral("取消导出准备"))
+        : language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")));
+    m_wmiExportButton->setToolTip(language.text(preparing ? QStringLiteral("monitor.export.preparing_hint") : busy ? QStringLiteral("monitor.export.in_progress") : QStringLiteral("monitor.export.ready_hint"),
+        preparing ? QStringLiteral("正在准备完整导出；再次点击可取消准备。") : busy ? QStringLiteral("导出进行中") : QStringLiteral("导出当前结果范围")));
+}
+
 void MonitorDock::exportWmiRowsToTsv()
 {
-    if (m_wmiEventTable == nullptr || m_wmiEventTable->rowCount() == 0)
+    const QPointer<MonitorDock> guard(this);
+    if (m_wmiTableExport) m_wmiTableExport->reconcile();
+    if (!guard) return;
+    if (m_wmiTableExport && m_wmiTableExport->isPreparing()) { m_wmiTableExport->cancelPreparation(); return; }
+    if (m_wmiTableExport && m_wmiTableExport->isBusy()) return;
+    if (!m_wmiEventTable || !m_wmiEventTable->model()) return;
+    if (m_wmiEventTable->model()->rowCount() == 0) { QMessageBox::information(this, QStringLiteral("导出WMI结果"), QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。")); return; }
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出WMI结果"), QStringLiteral("wmi_events_%1.tsv").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))), QStringLiteral("TSV文件 (*.tsv);;文本文件 (*.txt)"));
+    if (!guard || path.trimmed().isEmpty() || (m_wmiTableExport && m_wmiTableExport->isBusy())) return;
+    try {
+    if (!m_wmiTableExport)
     {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：无可导出事件。"
-            << eol;
-        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前没有可导出的WMI事件。"));
-        return;
+        m_wmiTableExport = new ks::monitor::MonitorCanonicalExport(this);
+        m_wmiTableExport->setStateChangedCallback([guard]() { if (guard) guard->updateWmiExportAction(); });
     }
-
-    int visibleCount = 0;
-    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
-    {
-        if (!ks::ui::IsTableRowExcludedByFilter(m_wmiEventTable, row))
-        {
-            ++visibleCount;
-        }
+    applyWmiEventFilter();
+    if (!guard) return;
+    ks::monitor::MonitorCachedTableExportSnapshot values;
+    values.rows = m_wmiFilterProjection->retainedRowsInDisplayOrder();
+    values.businessFilter = m_wmiFilterProjection->currentCompiledFilter();
+    values.archiveRevision = m_wmiFilterProjection->retainedRowsRevision();
+    values.search = ks::ui::CaptureTableSearchResultFilterSpec(m_wmiEventTable);
+    values.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    values.wmi = true;
+    for (int column = 0; column < m_wmiEventTable->columnCount(); ++column) {
+        const auto header = m_wmiEventTable->horizontalHeaderItem(column);
+        values.headers.push_back(header ? values.language.displayText(header->text()) : QString());
     }
-    if (visibleCount == 0)
-    {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：当前筛选后无可见事件。"
-            << eol;
-        QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。"));
-        return;
+    const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(std::move(values));
+    if (!guard) return;
+    const bool started = m_wmiTableExport->start(snapshot, QStringLiteral("monitor/retained-table/MonitorDock"), path, QString(),
+        [guard](const ks::monitor::CanonicalExportOutcome& result) {
+            if (!guard) return;
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+            auto& language = ks::i18n::LanguageManager::instance();
+            const QString title = language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出"));
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                QMessageBox::information(guard, title, QStringLiteral("当前筛选结果为空，没有可导出的WMI事件。")); return;
+            }
+            if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                QMessageBox::warning(guard, title, language.text(QStringLiteral("monitor.export.not_accepted"),
+                    QStringLiteral("未开始写入文件，请重试导出。"))); return;
+            }
+            const auto& receipt = result.receipt;
+            if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                    language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+            }
+            if (!receipt.succeeded()) QMessageBox::warning(guard, title,
+                language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
+            else QMessageBox::information(guard, QStringLiteral("导出WMI"), QStringLiteral("导出完成：%1").arg(receipt.outputPath));
+        }, ks::monitor::CanonicalExportFormat::Tsv, true);
+    if (!guard) return;
+    if (!started) QMessageBox::information(this, ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")),
+        ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, ks::i18n::sourceText(QStringLiteral("导出")),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-
-    const QString defaultName = QStringLiteral("wmi_events_%1.tsv")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-
-    const QString path = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("导出WMI结果"),
-        defaultName,
-        QStringLiteral("TSV文件 (*.tsv);;文本文件 (*.txt)"));
-
-    if (path.trimmed().isEmpty())
-    {
-        kLogEvent event;
-        dbg << event
-            << "[MonitorDock] WMI导出取消：用户未选择路径。"
-            << eol;
-        return;
-    }
-
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    {
-        kLogEvent event;
-        err << event
-            << "[MonitorDock] WMI导出失败：无法写入文件, path="
-            << path.toStdString()
-            << eol;
-        QMessageBox::warning(this, QStringLiteral("导出WMI"), QStringLiteral("无法写入文件：%1").arg(path));
-        return;
-    }
-
-    QTextStream out(&file);
-
-    QStringList header;
-    for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
-    {
-        QTableWidgetItem* item = m_wmiEventTable->horizontalHeaderItem(col);
-        header << (item != nullptr ? item->text() : QString());
-    }
-    out << header.join('\t') << '\n';
-
-    for (int row = 0; row < m_wmiEventTable->rowCount(); ++row)
-    {
-        if (ks::ui::IsTableRowExcludedByFilter(m_wmiEventTable, row))
-        {
-            continue;
-        }
-
-        QStringList values;
-        for (int col = 0; col < m_wmiEventTable->columnCount(); ++col)
-        {
-            QTableWidgetItem* item = m_wmiEventTable->item(row, col);
-            values << (item != nullptr ? item->text().replace('\t', ' ') : QString());
-        }
-        out << values.join('\t') << '\n';
-    }
-
-    file.close();
-
-    kLogEvent event;
-    info << event
-        << "[MonitorDock] WMI导出完成:"
-        << path.toStdString()
-        << ", visibleRows="
-        << visibleCount
-        << eol;
-    QMessageBox::information(this, QStringLiteral("导出WMI"), QStringLiteral("导出完成：%1").arg(path));
+    if (guard) updateWmiExportAction();
 }
 
 void MonitorDock::openWmiEventDetailViewerForRow(const int row) const

@@ -1,3 +1,5 @@
+#include "MonitorTableExport.h"
+#include <QMessageBox>
 #include "../UI/StructuredFieldView.h"
 #include "KernelCallbackMonitorWidget.h"
 #include "../UI/CodeEditorWidget.h"
@@ -229,6 +231,57 @@ namespace
     }
 }
 
+struct CallbackTableExportSnapshot
+{
+    using Ref = std::shared_ptr<const ksword::ark::CallbackMonitorEventRow>;
+    std::vector<Ref> rows;
+    QStringList headers;
+    ks::i18n::SourceTextSnapshot language;
+    std::shared_ptr<const ks::monitor::CompiledEventFilter> filter;
+    std::uint64_t archiveRevision = 0;
+    int sortColumn = -1;
+    Qt::SortOrder sortOrder = Qt::AscendingOrder;
+    QStringList displayedCells(const Ref& row) const
+    {
+        return {QString::number(row->sequence), callbackTimeText(row->timeUtc100ns),
+            language.sourceText(callbackCategoryText(row->category)), language.sourceText(callbackOperationText(*row)),
+            callbackProcessText(*row), callbackPidTidText(*row), callbackTargetText(*row), callbackResultText(*row),
+            QString::fromStdWString(row->path), language.sourceText(callbackSummaryText(*row))};
+    }
+    bool matches(const Ref& row) const
+    {
+        const auto operationSource = callbackOperationText(*row);
+        const auto operationDisplay = language.sourceText(operationSource);
+        const auto operationSearch = operationDisplay == operationSource ? operationSource : QStringLiteral("%1 %2").arg(operationSource, operationDisplay);
+        ks::monitor::EventFilterRow fields;
+        fields.type = QString::number(row->category);
+        fields.fields = {operationSearch, QStringLiteral("%1 %2 %3 %4 %5").arg(row->originatingProcessId).arg(row->originatingThreadId).arg(row->targetProcessId).arg(row->targetThreadId).arg(row->parentProcessId),
+            QStringLiteral("%1 %2").arg(QString::fromStdWString(row->processName), callbackProcessText(*row)), QString::fromStdWString(row->path), callbackResultText(*row)};
+        return !filter || filter->matches(fields);
+    }
+    auto orderedRows() const
+    {
+        auto ordered = rows;
+        const auto less = [this](const auto& left, const auto& right) {
+            const auto compare = [](const auto& a, const auto& b) { return a < b ? -1 : a > b ? 1 : 0; };
+            int order = 0;
+            switch (sortColumn) {
+            case CallbackColumnSequence: order = compare(left->sequence, right->sequence); break;
+            case CallbackColumnTime: order = compare(left->timeUtc100ns, right->timeUtc100ns); break;
+            case CallbackColumnCategory: order = compare(left->category, right->category); break;
+            case CallbackColumnOperation: order = compare(left->operation, right->operation); break;
+            case CallbackColumnPidTid: order = compare(left->originatingProcessId, right->originatingProcessId); break;
+            case CallbackColumnTarget: order = compare(left->targetProcessId, right->targetProcessId); break;
+            case CallbackColumnResult: order = compare(static_cast<qlonglong>(left->resultStatus), static_cast<qlonglong>(right->resultStatus)); break;
+            default: break; // Original sortRole returns invalid QVariant here.
+            }
+            return sortOrder == Qt::AscendingOrder ? order < 0 : order > 0;
+        };
+        if (sortColumn >= 0) std::stable_sort(ordered.begin(), ordered.end(), less);
+        return ordered;
+    }
+};
+
 class KernelCallbackEventModel final : public QAbstractTableModel
 {
 public:
@@ -321,7 +374,7 @@ public:
         {
             return nullptr;
         }
-        return &m_rows[static_cast<std::size_t>(row)];
+        return m_rows[static_cast<std::size_t>(row)].get();
     }
 
     void appendRows(
@@ -332,12 +385,12 @@ public:
         {
             return;
         }
+        const auto batch = ks::ui::RetainCompleteExportSnapshot<std::vector<ksword::ark::CallbackMonitorEventRow>>(
+            std::make_shared<const std::vector<ksword::ark::CallbackMonitorEventRow>>(std::move(rows)));
         const int firstRow = static_cast<int>(m_rows.size());
-        beginInsertRows(QModelIndex(), firstRow, firstRow + static_cast<int>(rows.size()) - 1);
-        for (auto& row : rows)
-        {
-            m_rows.push_back(std::move(row));
-        }
+        beginInsertRows(QModelIndex(), firstRow, firstRow + static_cast<int>(batch->size()) - 1);
+        for (const auto& row : *batch) m_rows.emplace_back(batch, &row);
+        ++m_exportRevision;
         endInsertRows();
         trimRows(maximumRows);
     }
@@ -350,7 +403,7 @@ public:
             return;
         }
         beginRemoveRows(QModelIndex(), 0, removeCount - 1);
-        m_rows.erase(m_rows.begin(), m_rows.begin() + removeCount);
+        m_rows.erase(m_rows.begin(), m_rows.begin() + removeCount); ++m_exportRevision;
         endRemoveRows();
     }
 
@@ -361,12 +414,15 @@ public:
             return;
         }
         beginResetModel();
-        m_rows.clear();
+        m_rows.clear(); ++m_exportRevision;
         endResetModel();
     }
 
+    auto snapshot() const { return std::vector<std::shared_ptr<const ksword::ark::CallbackMonitorEventRow>>(m_rows.begin(), m_rows.end()); }
+    std::uint64_t exportRevision() const { return m_exportRevision; }
 private:
-    std::deque<ksword::ark::CallbackMonitorEventRow> m_rows;
+    std::deque<std::shared_ptr<const ksword::ark::CallbackMonitorEventRow>> m_rows;
+    std::uint64_t m_exportRevision = 0;
 };
 
 class KernelCallbackFilterModel final : public QSortFilterProxyModel
@@ -427,6 +483,22 @@ public:
                 (!m_result.isEmpty() && !m_resultRegex.isValid());
         }
         invalidateRowsFilter();
+    }
+
+    CallbackTableExportSnapshot freezeForExport(const KernelCallbackEventModel& model) const
+    {
+        CallbackTableExportSnapshot snapshot;
+        snapshot.rows = model.snapshot(); snapshot.archiveRevision = model.exportRevision();
+        snapshot.language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        for (int column = 0; column < CallbackColumnCount; ++column)
+            snapshot.headers.push_back(model.headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
+        ks::monitor::EventFilterSpec spec;
+        spec.type = m_category ? QString::number(m_category) : QString();
+        spec.patterns = {m_operation, m_pid, m_process, m_path, m_result}; spec.fieldIndexes = {0,1,2,3,4};
+        spec.regex = m_regex;
+        snapshot.filter = std::make_shared<const ks::monitor::CompiledEventFilter>(std::move(spec));
+        snapshot.sortColumn = sortColumn(); snapshot.sortOrder = sortOrder();
+        return snapshot;
     }
 
     bool invalidRegex() const
@@ -511,6 +583,7 @@ KernelCallbackMonitorWidget::KernelCallbackMonitorWidget(QWidget* parent)
 
 KernelCallbackMonitorWidget::~KernelCallbackMonitorWidget()
 {
+    if (m_tableExport) m_tableExport->close();
     if (m_uiTimer != nullptr)
     {
         m_uiTimer->stop();
@@ -1045,6 +1118,7 @@ void KernelCallbackMonitorWidget::applyFilters()
 
 void KernelCallbackMonitorWidget::updateActionState()
 {
+    updateExportAction();
     const bool running = m_captureRunning.load();
     const bool paused = m_paused.load();
     m_startButton->setEnabled(!running || paused);
@@ -1133,51 +1207,68 @@ void KernelCallbackMonitorWidget::updateDetailPanel()
     m_detailEdit->setDocument(detailText);
 }
 
+void KernelCallbackMonitorWidget::updateExportAction()
+{
+    if (!m_exportButton) return;
+    const bool preparing = m_tableExport && m_tableExport->isPreparing();
+    const bool busy = m_tableExport && m_tableExport->isBusy();
+    m_exportButton->setEnabled(preparing || (!busy && true));
+    auto& language = ks::i18n::LanguageManager::instance();
+    m_exportButton->setText(preparing ? language.text(QStringLiteral("monitor.export.cancel_preparation"), QStringLiteral("取消导出准备"))
+        : language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")));
+    m_exportButton->setToolTip(language.text(preparing ? QStringLiteral("monitor.export.preparing_hint") : busy ? QStringLiteral("monitor.export.in_progress") : QStringLiteral("monitor.export.ready_hint"),
+        preparing ? QStringLiteral("正在准备完整导出；再次点击可取消准备。") : busy ? QStringLiteral("导出进行中") : QStringLiteral("导出当前结果范围")));
+}
+
 void KernelCallbackMonitorWidget::exportVisibleRows()
 {
-    const QString outputPath = QFileDialog::getSaveFileName(
-        this,
-        ks::i18n::sourceText(QStringLiteral("导出内核回调事件")),
-        QStringLiteral("kernel-callback-events.csv"),
-        ks::i18n::sourceText(QStringLiteral("CSV 文件 (*.csv);;所有文件 (*.*)")));
-    if (outputPath.isEmpty())
-    {
-        return;
-    }
-    QSaveFile outputFile(outputPath);
-    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        m_lastDisplayedError = QStringLiteral("无法创建导出文件");
-        updateStatusLabel();
-        return;
-    }
+    const QPointer<KernelCallbackMonitorWidget> guard(this);
+    if (m_tableExport) m_tableExport->reconcile();
+    if (!guard) return;
+    if (m_tableExport && m_tableExport->isPreparing()) { m_tableExport->cancelPreparation(); return; }
+    if (m_tableExport && m_tableExport->isBusy()) return;
+    if (!m_eventTable || !m_eventTable->model()) return;
 
-    QTextStream stream(&outputFile);
-    stream.setEncoding(QStringConverter::Utf8);
-    stream << QChar(0xFEFF);
-    for (int column = 0; column < CallbackColumnCount; ++column)
+    const QString path = QFileDialog::getSaveFileName(this, ks::i18n::sourceText(QStringLiteral("导出内核回调事件")), QStringLiteral("kernel-callback-events.csv"), ks::i18n::sourceText(QStringLiteral("CSV 文件 (*.csv);;所有文件 (*.*)")));
+    if (!guard || path.trimmed().isEmpty() || (m_tableExport && m_tableExport->isBusy())) return;
+    try {
+    if (!m_tableExport)
     {
-        if (column != 0) stream << QLatin1Char(',');
-        stream << QLatin1Char('"')
-            << m_filterModel->headerData(column, Qt::Horizontal, Qt::DisplayRole)
-                .toString().replace(QLatin1Char('"'), QStringLiteral("\"\""))
-            << QLatin1Char('"');
+        m_tableExport = new ks::monitor::MonitorCanonicalExport(this);
+        m_tableExport->setStateChangedCallback([guard]() { if (guard) guard->updateExportAction(); });
     }
-    stream << QLatin1Char('\n');
-    for (int row = 0; row < m_filterModel->rowCount(); ++row)
-    {
-        for (int column = 0; column < CallbackColumnCount; ++column)
-        {
-            if (column != 0) stream << QLatin1Char(',');
-            QString text = m_filterModel->index(row, column).data(Qt::DisplayRole).toString();
-            text.replace(QLatin1Char('"'), QStringLiteral("\"\""));
-            stream << QLatin1Char('"') << text << QLatin1Char('"');
-        }
-        stream << QLatin1Char('\n');
+    applyFilters();
+    if (!guard) return;
+    const auto snapshot = ks::monitor::MakeCanonicalExportSnapshot(m_filterModel->freezeForExport(*m_eventModel));
+    if (!guard) return;
+    const bool started = m_tableExport->start(snapshot, QStringLiteral("monitor/kernel-callback/retained-proxy"), path, QString(),
+        [guard](const ks::monitor::CanonicalExportOutcome& result) {
+            if (!guard) return;
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Canceled) return;
+            auto& language = ks::i18n::LanguageManager::instance();
+            const QString title = language.text(QStringLiteral("monitor.export.action"), QStringLiteral("导出"));
+            if (result.kind == ks::monitor::CanonicalExportOutcomeKind::Empty) {
+                QMessageBox::information(guard, title, QStringLiteral("当前没有可导出的事件。")); return;
+            }
+            if (result.kind != ks::monitor::CanonicalExportOutcomeKind::FileFinished) {
+                QMessageBox::warning(guard, title, language.text(QStringLiteral("monitor.export.not_accepted"),
+                    QStringLiteral("未开始写入文件，请重试导出。"))); return;
+            }
+            const auto& receipt = result.receipt;
+            if (receipt.phase == ks::ui::CompleteExportPhase::OutcomeUnavailable) {
+                QMessageBox::warning(guard, language.text(QStringLiteral("monitor.export.result_unconfirmed_title"), QStringLiteral("导出结果待确认")),
+                    language.text(QStringLiteral("monitor.export.result_unconfirmed"), QStringLiteral("导出结果尚未确认，请核对目标文件：%1")).arg(receipt.outputPath)); return;
+            }
+            if (!receipt.succeeded()) QMessageBox::warning(guard, title,
+                language.text(QStringLiteral("monitor.export.write_failed"), QStringLiteral("导出失败：%1")).arg(receipt.nativeError));
+
+        }, ks::monitor::CanonicalExportFormat::QuotedCsv, false);
+    if (!guard) return;
+    if (!started) QMessageBox::information(this, ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.action"), QStringLiteral("导出")),
+        ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
+    } catch (...) {
+        if (guard) QMessageBox::warning(guard, ks::i18n::sourceText(QStringLiteral("导出")),
+            ks::i18n::LanguageManager::instance().text(QStringLiteral("monitor.export.not_accepted"), QStringLiteral("未开始写入文件，请重试导出。")));
     }
-    if (!outputFile.commit())
-    {
-        m_lastDisplayedError = QStringLiteral("写入导出文件失败");
-        updateStatusLabel();
-    }
+    if (guard) updateExportAction();
 }

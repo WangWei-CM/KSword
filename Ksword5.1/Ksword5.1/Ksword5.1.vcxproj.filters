@@ -82,6 +82,9 @@
     <ClCompile Include="PrivilegeDock\PrivilegeTokenPages.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="MonitorDock\MonitorTableExport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MonitorDock\MonitorCanonicalExport.h">
       <Filter>Header Files</Filter>
     </ClInclude>

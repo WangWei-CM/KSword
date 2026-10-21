@@ -8,6 +8,10 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "monitor.export.action": "Export",
+    "monitor.export.ready_hint": "Export the current result scope",
+    "monitor.export.source_changed": "Results changed during preparation. Preparation was canceled; retry the export.",
+    "monitor.export.cancel_preparation": "Cancel export preparation",
     "monitor.export.preparing_hint": "Preparing the complete export; click again to cancel preparation.",
     "monitor.export.not_accepted": "File writing did not start. Retry the export.",
     "monitor.export.write_failed": "Export failed: %1",
@@ -7055,6 +7059,9 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "导出当前结果范围": "Export the current result scope",
+    "结果在准备期间发生变化，已取消本次准备；请重试导出。": "Results changed during preparation. Preparation was canceled; retry the export.",
+    "取消导出准备": "Cancel export preparation",
     "正在准备完整导出；再次点击可取消准备。": "Preparing the complete export; click again to cancel preparation.",
     "未开始写入文件，请重试导出。": "File writing did not start. Retry the export.",
     "%1（离线，保留历史）": "%1 (offline, history retained)",

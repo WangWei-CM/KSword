@@ -1,3 +1,4 @@
+namespace ks::monitor { class MonitorCanonicalExport; }
 #include "../UI/StructuredFieldView.h"
 #pragma once
 
@@ -142,6 +143,7 @@ private:
     void applyFilter();
     void clearFilter();
     void exportVisibleRowsToTsv();
+    void updateExportAction();
     void showEventContextMenu(const QPoint& position);
     void openEventDetailViewerForRow(int rowIndex);
 
@@ -181,6 +183,7 @@ private:
     QPushButton* m_pauseButton = nullptr;
     QPushButton* m_clearButton = nullptr;
     QPushButton* m_exportButton = nullptr;
+    ks::monitor::MonitorCanonicalExport* m_tableExport = nullptr;
     QLabel* m_statusLabel = nullptr;
     QLabel* m_mapStatusLabel = nullptr;
 

@@ -12,6 +12,7 @@
 #include <QTableWidget>
 #include <QTimer>
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -28,6 +29,7 @@ namespace ks::monitor
         QStringList fields;
         QString type;
         quint64 time100ns = 0;
+        QStringList exportCells; // Complete logical-column values, cached with this same immutable row.
     };
 
     struct EventFilterSpec
@@ -135,12 +137,12 @@ namespace ks::monitor
                         const auto found = m_ids.find(index);
                         if (found == m_ids.end()) continue;
                         m_records.erase(found.value()); m_versions.erase(found.value()); m_pending.remove(found.value());
-                        m_indexes.erase(found.value()); m_excluded.remove(index); m_ids.erase(found);
+                        m_indexes.erase(found.value()); m_excluded.remove(index); m_ids.erase(found); ++m_retainedRowsRevision;
                     }
                 });
             connect(table->model(), &QAbstractItemModel::rowsRemoved, this, [this]() { notify(); });
             connect(table->model(), &QAbstractItemModel::modelReset, this, [this]() {
-                ++m_revision; m_timer.stop(); m_ids.clear(); m_indexes.clear(); m_records.clear(); m_versions.clear();
+                ++m_revision; ++m_retainedRowsRevision; m_timer.stop(); m_ids.clear(); m_indexes.clear(); m_records.clear(); m_versions.clear();
                 m_pending.clear(); m_excluded.clear(); m_allDirty = false; m_operation->cancel(); notify();
             });
             connect(table->model(), &QAbstractItemModel::dataChanged, this,
@@ -165,6 +167,21 @@ namespace ks::monitor
         // GUI-only publication of a pure immutable condition. A null value means
         // the controller has not yet received a condition and excludes no row.
         std::shared_ptr<const CompiledEventFilter> currentCompiledFilter() const { return m_filter; }
+        quint64 retainedRowsRevision() const { return m_retainedRowsRevision; }
+        std::vector<std::shared_ptr<const EventFilterRow>> retainedRowsInDisplayOrder() const
+        {
+            std::vector<std::shared_ptr<const EventFilterRow>> rows(static_cast<std::size_t>(m_table->rowCount()));
+            for (const auto& [id, index] : m_indexes)
+            {
+                const auto found = m_records.find(id);
+                if (!index.isValid() || found == m_records.end() || index.row() < 0
+                    || static_cast<std::size_t>(index.row()) >= rows.size()) continue;
+                rows[static_cast<std::size_t>(index.row())] = found->second;
+            }
+            rows.erase(std::remove(rows.begin(), rows.end(), nullptr), rows.end());
+            return rows;
+        }
+
 
         // The display owner controls this independently from capture/archive.
         // In-flight/deferred old results cannot commit after suspension. Values
@@ -213,7 +230,7 @@ namespace ks::monitor
             quint64 id = found == m_ids.end() ? ++m_nextId : found.value();
             m_ids.insert(index, id); m_indexes[id] = index;
             m_records[id] = std::make_shared<const EventFilterRow>(m_resolver(row));
-            ++m_versions[id];
+            ++m_versions[id]; ++m_retainedRowsRevision;
             if (m_filter && !m_filter->spec.matchesAll()) { m_pending.insert(id); schedule(); }
         }
 
@@ -318,7 +335,7 @@ namespace ks::monitor
         ks::ui::AsyncOperation* m_operation;
         QTimer m_timer;
         std::shared_ptr<const CompiledEventFilter> m_filter;
-        quint64 m_revision = 0, m_nextId = 0;
+        quint64 m_revision = 0, m_nextId = 0, m_retainedRowsRevision = 0;
         bool m_allDirty = false, m_suspended = false, m_closed = false;
         QHash<QPersistentModelIndex, quint64> m_ids;
         std::unordered_map<quint64, QPersistentModelIndex> m_indexes;

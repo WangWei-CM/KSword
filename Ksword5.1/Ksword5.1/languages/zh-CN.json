@@ -8,6 +8,10 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "monitor.export.action": "导出",
+    "monitor.export.ready_hint": "导出当前结果范围",
+    "monitor.export.source_changed": "结果在准备期间发生变化，已取消本次准备；请重试导出。",
+    "monitor.export.cancel_preparation": "取消导出准备",
     "monitor.export.preparing_hint": "正在准备完整导出；再次点击可取消准备。",
     "monitor.export.not_accepted": "未开始写入文件，请重试导出。",
     "monitor.export.write_failed": "导出失败：%1",
@@ -7055,6 +7059,9 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "导出当前结果范围": "导出当前结果范围",
+    "结果在准备期间发生变化，已取消本次准备；请重试导出。": "结果在准备期间发生变化，已取消本次准备；请重试导出。",
+    "取消导出准备": "取消导出准备",
     "正在准备完整导出；再次点击可取消准备。": "正在准备完整导出；再次点击可取消准备。",
     "未开始写入文件，请重试导出。": "未开始写入文件，请重试导出。",
     "%1（离线，保留历史）": "%1（离线，保留历史）",

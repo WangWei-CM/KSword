@@ -6,6 +6,7 @@
 #include <QEvent>
 #include <QPointer>
 #include <QTimer>
+#include <QStringList>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -23,24 +24,37 @@ namespace ks::monitor
         CanonicalExportOutcomeKind kind = CanonicalExportOutcomeKind::PreparationFailed;
         ks::ui::CompleteExportReceipt receipt;
     };
+    enum class CanonicalExportFormat { Tsv, FlatTsv, QuotedCsv };
     template<class Snapshot> struct PreparedCanonicalExport
     {
         using Ref = typename std::decay_t<decltype(std::declval<Snapshot>().rows)>::value_type;
         std::shared_ptr<const Snapshot> source;
         std::vector<Ref> rows;
         QString comment;
+        CanonicalExportFormat format = CanonicalExportFormat::Tsv;
     };
     template<class Snapshot, class Sink>
     bool FormatCanonicalMonitorExport(const PreparedCanonicalExport<Snapshot>& value, Sink& sink)
     {
         if (!value.source) return false;
         if (!value.comment.isEmpty() && !sink.writeText(value.comment + QChar('\n'))) return false;
-        if (!sink.writeText(value.source->headers.join(QChar('\t')) + QChar('\n'))) return false;
-        for (const auto& record : value.rows)
-        {
+        const bool csv = value.format == CanonicalExportFormat::QuotedCsv;
+        auto encode = [csv, &value](QString text, bool header) {
+            if (csv) { text.replace(QChar('"'), QStringLiteral("\"\"")); return QChar('"') + text + QChar('"'); }
+            if (!header) {
+                text.replace(QChar('\t'), QChar(' '));
+                if (value.format == CanonicalExportFormat::FlatTsv) text.replace(QChar('\n'), QChar(' '));
+            }
+            return text;
+        };
+        QStringList header;
+        for (const auto& cell : value.source->headers) header.push_back(encode(cell, true));
+        const QChar separator(csv ? ',' : '\t');
+        if (!sink.writeText(header.join(separator) + QChar('\n'))) return false;
+        for (const auto& record : value.rows) {
             auto cells = value.source->displayedCells(record);
-            for (auto& cell : cells) cell.replace(QChar('\t'), QChar(' '));
-            if (!sink.writeText(cells.join(QChar('\t')) + QChar('\n')) || !sink.rowsCompleted()) return false;
+            for (auto& cell : cells) cell = encode(std::move(cell), false);
+            if (!sink.writeText(cells.join(separator) + QChar('\n')) || !sink.rowsCompleted()) return false;
         }
         return true;
     }
@@ -82,17 +96,18 @@ namespace ks::monitor
         void setStateChangedCallback(std::function<void()> callback) { m_changed = std::move(callback); }
 
         template<class Snapshot>
-        bool start(std::shared_ptr<const Snapshot> source, QString identity, QString path, QString comment, Completion completion)
+        bool start(std::shared_ptr<const Snapshot> source, QString identity, QString path, QString comment, Completion completion,
+            CanonicalExportFormat format = CanonicalExportFormat::Tsv, bool requireRows = true)
         {
             if (m_closed || isBusy() || !source) return false;
             using Prepared = PreparedCanonicalExport<Snapshot>;
-            struct Request { std::shared_ptr<const Snapshot> source; QString comment; };
+            struct Request { std::shared_ptr<const Snapshot> source; QString comment; CanonicalExportFormat format; };
             m_completion = std::move(completion);
             const QPointer<MonitorCanonicalExport> guard(this);
-            const auto ticket = m_prepare->submit<Request, std::shared_ptr<const Prepared>>({std::move(source), std::move(comment)},
+            const auto ticket = m_prepare->submit<Request, std::shared_ptr<const Prepared>>({std::move(source), std::move(comment), format},
                 [](const Request& request, const ks::ui::AsyncOperationToken& token) {
                     Prepared result;
-                    result.source = request.source; result.comment = request.comment;
+                    result.source = request.source; result.comment = request.comment; result.format = request.format;
                     const auto ordered = request.source->orderedRows(); result.rows.reserve(ordered.size());
                     for (const auto& record : ordered) {
                         if (token.isCanceled()) return std::shared_ptr<const Prepared>{};
@@ -100,9 +115,9 @@ namespace ks::monitor
                     }
                     return MakeCanonicalExportSnapshot(std::move(result));
                 },
-                [guard, identity = std::move(identity), path = std::move(path)](const std::shared_ptr<const Prepared>& prepared, std::uint64_t) {
+                [guard, identity = std::move(identity), path = std::move(path), requireRows](const std::shared_ptr<const Prepared>& prepared, std::uint64_t) {
                     if (!guard || guard->m_closed || !prepared) return true;
-                    if (prepared->rows.empty()) { guard->finish({CanonicalExportOutcomeKind::Empty, {}}); return true; }
+                    if (requireRows && prepared->rows.empty()) { guard->finish({CanonicalExportOutcomeKind::Empty, {}}); return true; }
                     const auto& snapshot = *prepared->source;
                     auto input = ks::ui::MakeCompleteExportInput(prepared, identity, snapshot.archiveRevision,
                         std::optional<std::uint64_t>(prepared->rows.size()), snapshot.language,
@@ -110,6 +125,7 @@ namespace ks::monitor
                             return FormatCanonicalMonitorExport(value, sink);
                         });
                     input.fileMode = ks::ui::CompleteExportFileMode::NativeText;
+                    input.utf8Bom = prepared->format == CanonicalExportFormat::QuotedCsv;
                     const auto journal = guard->m_writer->journal();
                     if (!guard->m_writer->startFile(path, std::move(input), [guard, journal](const auto& receipt) {
                         if (guard && !guard->m_closed) guard->finish({CanonicalExportOutcomeKind::FileFinished, receipt});

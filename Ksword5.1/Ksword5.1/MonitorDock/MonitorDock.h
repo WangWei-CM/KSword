@@ -1,3 +1,4 @@
+namespace ks::monitor { class MonitorCanonicalExport; }
 #include "../UI/StructuredFieldView.h"
 #pragma once
 
@@ -716,6 +717,7 @@ private:
         const QString& pidAndName,
         const ks::ui::FieldDocument& document);
     void exportWmiRowsToTsv();
+    void updateWmiExportAction();
     void openWmiEventDetailViewerForRow(int row) const;
     void showWmiEventContextMenu(const QPoint& position);
 
@@ -974,7 +976,8 @@ private:
     QPushButton* m_wmiStartSubscribeButton = nullptr; // 开始订阅按钮。
     QPushButton* m_wmiStopSubscribeButton = nullptr;  // 停止订阅按钮。
     QPushButton* m_wmiPauseSubscribeButton = nullptr; // 暂停/继续按钮。
-    QPushButton* m_wmiExportButton = nullptr;         // 导出结果按钮。
+    QPushButton* m_wmiExportButton = nullptr;
+    ks::monitor::MonitorCanonicalExport* m_wmiTableExport = nullptr;         // 导出结果按钮。
     QLabel* m_wmiSubscribeStatusLabel = nullptr;    // 订阅状态文本。
     QLineEdit* m_wmiEventGlobalFilterEdit = nullptr; // WMI 全字段筛选框。
     QLineEdit* m_wmiEventProviderFilterEdit = nullptr; // WMI Provider筛选框。
