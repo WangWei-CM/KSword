@@ -56,6 +56,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSize>
 #include <QSpinBox>
 #include <QSplitter>
@@ -90,6 +91,8 @@
 #include <vector>
 
 using ksword::kernel_dock_internal::kernelText;
+
+Q_DECLARE_METATYPE(CallbackRuleModel)
 
 namespace
 {
@@ -4025,6 +4028,8 @@ private:
             showRuleTableContextMenu(ruleTable, callbackType, localPos);
         });
 
+        ruleTable->viewport()->installEventFilter(this);
+        connect(ruleTable->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { scheduleRuleProjection(); });
         const int tabIndex = ksword::kernel_navigation::addTab(m_ruleTabWidget, tabPage, navigationId);
         m_tabCallbackTypeMap.insert(tabIndex, callbackType);
         m_ruleTableMap.insert(callbackType, ruleTable);
@@ -5103,6 +5108,20 @@ private:
         setDirtyState(true);
     }
 
+    CallbackRuleModel ruleWithComboFallbacks(CallbackRuleModel rule, const quint32 callbackType) const
+    {
+        const auto selectedValue = [](const quint32 value, const QList<QPair<QString, quint32>>& options) {
+            return containsOptionValue(options, value) ? value : (options.isEmpty() ? 0U : options.front().second);
+        };
+        // Match the existing Combo findData/index-zero fallback without creating an editor.
+        if (!m_groupOptionLabels.contains(rule.groupId))
+            rule.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+        rule.matchMode = selectedValue(rule.matchMode, allowedMatchModeListByType(callbackType));
+        rule.action = selectedValue(rule.action, allowedActionListByType(callbackType));
+        rule.timeoutDefaultDecision = selectedValue(rule.timeoutDefaultDecision, decisionOptionList());
+        return rule;
+    }
+
     void appendRuleRow(
         QTableWidget* ruleTable,
         const quint32 callbackType,
@@ -5114,11 +5133,13 @@ private:
             return;
         }
 
+        if (m_groupOptionsModel == nullptr) refreshRuleGroupComboOptions();
+        const auto draft = ruleWithComboFallbacks(ruleModel, callbackType);
+
         const int headerRow = insertLogicalIndex < 0 ? ruleTable->rowCount() : insertLogicalIndex * 2;
         const int detailRow = headerRow + 1;
         ruleTable->insertRow(headerRow);
         ruleTable->insertRow(detailRow);
-        const QPersistentModelIndex ruleAnchor(ruleTable->model()->index(headerRow, 0));
 
         // 每条规则使用两排展示：左侧启用/RuleID 跨两排，右侧第一排放规则属性。
         // 第二排从 GroupID 开始放匹配详情，避免匹配条件脱离表格布局。
@@ -5129,11 +5150,33 @@ private:
 
         auto* enabledItem = new QTableWidgetItem();
         enabledItem->setFlags(enabledItem->flags() | Qt::ItemIsUserCheckable);
-        enabledItem->setCheckState(ruleModel.enabled ? Qt::Checked : Qt::Unchecked);
+        enabledItem->setCheckState(draft.enabled ? Qt::Checked : Qt::Unchecked);
         setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Enabled, enabledItem);
-        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleId, makeReadOnlyItem(QString::number(ruleModel.ruleId)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleId, makeReadOnlyItem(QString::number(draft.ruleId)));
         setRuleIdentityColumnSpan(ruleTable, headerRow);
 
+        auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId));
+        source->setData(Qt::UserRole, QVariant::fromValue(draft));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleName, new QTableWidgetItem(draft.ruleName));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::TimeoutMs, new QTableWidgetItem(QString::number(draft.timeoutMs)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Priority, new QTableWidgetItem(QString::number(draft.priority)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::GroupId, makeReadOnlyItem(QString::number(draft.groupId)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::OperationMask, makeReadOnlyItem(operationMaskToText(draft.operationMask)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::MatchMode, makeReadOnlyItem(callbackMatchModeToDisplayText(draft.matchMode)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::Action, makeReadOnlyItem(callbackActionToDisplayText(draft.action)));
+        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::TimeoutDefaultDecision, makeReadOnlyItem(callbackDecisionToDisplayText(draft.timeoutDefaultDecision)));
+        ruleTable->setSpan(detailRow, static_cast<int>(RuleColumn::GroupId), 1,
+            static_cast<int>(RuleColumn::Count) - static_cast<int>(RuleColumn::GroupId));
+        ruleTable->setItem(detailRow, static_cast<int>(RuleColumn::GroupId),
+            makeReadOnlyItem(QStringList{draft.initiatorPattern, draft.targetPattern, draft.comment}.join(QLatin1Char(' '))));
+        if (m_ruleProjectionTimer) scheduleRuleProjection();
+    }
+
+    void materializeRuleEditors(QTableWidget* ruleTable, const quint32 callbackType,
+        const CallbackRuleModel& ruleModel, const int headerRow)
+    {
+        const int detailRow = headerRow + 1;
+        const QPersistentModelIndex ruleAnchor(ruleTable->model()->index(headerRow, 0));
         auto* groupCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(groupCombo);
         setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::GroupId, groupCombo);
@@ -5143,7 +5186,6 @@ private:
                 setDirtyState(true);
             }
         });
-        setRuleHeaderCell(ruleTable, headerRow, RuleColumn::RuleName, new QTableWidgetItem(ruleModel.ruleName));
 
         QWidget* operationPanel = createOperationMaskPanel(
             ruleTable,
@@ -5259,12 +5301,6 @@ private:
         });
         setRuleHeaderWidget(ruleTable, headerRow, RuleColumn::Action, actionCombo);
 
-        setRuleHeaderCell(
-            ruleTable,
-            headerRow,
-            RuleColumn::TimeoutMs,
-            new QTableWidgetItem(QString::number(ruleModel.timeoutMs)));
-
         auto* timeoutDecisionCombo = new QComboBox(ruleTable);
         applyRuleComboStyle(timeoutDecisionCombo);
         for (const QPair<QString, quint32>& optionPair : decisionOptionList())
@@ -5285,22 +5321,56 @@ private:
             RuleColumn::TimeoutDefaultDecision,
             timeoutDecisionCombo);
 
-        setRuleHeaderCell(
-            ruleTable,
-            headerRow,
-            RuleColumn::Priority,
-            new QTableWidgetItem(QString::number(ruleModel.priority)));
-
         QWidget* detailPanel = createRuleDetailPanel(ruleTable, callbackType, ruleModel);
         setRuleDetailWidget(ruleTable, detailRow, detailPanel);
 
         refreshRuleGroupComboForCell(groupCombo, ruleModel.groupId);
+        // Clear the frozen seed only after every existing editor was populated.
+        // Header items remain canonical for enabled/name/timeout/priority edits.
+        if (auto* source = ruleTable->item(headerRow, static_cast<int>(RuleColumn::RuleId))) source->setData(Qt::UserRole, {});
+    }
+
+    bool hasVisibleRuleDrafts(QTableWidget* table) const
+    {
+        if (!table || !table->isVisible() || !table->viewport()->isVisible()
+            || table->viewport()->height() <= 0 || table->viewport()->width() <= 0 || table->rowCount() == 0) return false;
+        const int firstAt = table->rowAt(0);
+        if (firstAt < 0) return false;
+        const int first = normalizeRuleHeaderRow(firstAt);
+        const int lastAt = table->rowAt(table->viewport()->height() - 1);
+        const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+        for (int row = first; row <= last; row += 2)
+            if (const auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+                source && source->data(Qt::UserRole).canConvert<CallbackRuleModel>()) return true;
+        return false;
+    }
+
+    void materializeVisibleRuleEditors(QTableWidget* table, const quint32 type, QElapsedTimer& budget, int& count)
+    {
+        if (!table || !table->isVisible() || !table->viewport()->isVisible()
+            || table->viewport()->height() <= 0 || table->viewport()->width() <= 0 || table->rowCount() == 0) return;
+        const int firstAt = table->rowAt(0);
+        if (firstAt < 0) return;
+        const int first = normalizeRuleHeaderRow(firstAt);
+        const int lastAt = table->rowAt(table->viewport()->height() - 1);
+        const int last = lastAt < 0 ? table->rowCount() - 1 : lastAt;
+        for (int row = first; row <= last && count < 4 && (count == 0 || budget.elapsed() < 3); row += 2)
+        {
+            const auto* source = table->item(row, static_cast<int>(RuleColumn::RuleId));
+            if (!source || !source->data(Qt::UserRole).canConvert<CallbackRuleModel>()) continue;
+            const auto rule = source->data(Qt::UserRole).value<CallbackRuleModel>();
+            materializeRuleEditors(table, type, rule, row);
+            ++count;
+        }
     }
 
     bool eventFilter(QObject* watched, QEvent* event) override
     {
         if (watched == m_eventLogEditor && event != nullptr && event->type() == QEvent::Show
             && m_eventLogFlushTimer != nullptr && !m_pendingEventLogLines.isEmpty()) m_eventLogFlushTimer->start();
+        if (event && (event->type() == QEvent::Show || event->type() == QEvent::Resize))
+            for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+                if (table.value() && watched == table.value()->viewport()) { scheduleRuleProjection(); break; }
         if (watched == m_ruleTabWidget && event != nullptr)
         {
             if (event->type() == QEvent::Show) scheduleRuleProjection();
@@ -5312,13 +5382,14 @@ private:
     void scheduleRuleProjection()
     {
         const bool pending = !m_pendingRuleRows.value(currentRuleCallbackType()).isEmpty();
+        const bool editors = hasVisibleRuleDrafts(currentRuleTable());
         const bool editable = currentRuleTable() != nullptr && !pending;
         m_addRuleButton->setEnabled(editable);
         m_removeRuleButton->setEnabled(editable);
         m_moveRuleUpButton->setEnabled(editable);
         m_moveRuleDownButton->setEnabled(editable);
         if (m_ruleProjectionTimer == nullptr) return;
-        if (pending && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
+        if ((pending || editors) && m_ruleTabWidget->isVisible()) m_ruleProjectionTimer->start();
         else m_ruleProjectionTimer->stop();
     }
 
@@ -5329,7 +5400,6 @@ private:
         QTableWidget* table = currentRuleTable();
         if (table == nullptr) { scheduleRuleProjection(); return; }
         auto pending = m_pendingRuleRows.find(type);
-        if (pending == m_pendingRuleRows.end()) { scheduleRuleProjection(); return; }
         if (ks::ui::IsItemViewUiCommitBlockedByContextMenu({table}))
         {
             m_ruleProjectionTimer->stop();
@@ -5341,14 +5411,15 @@ private:
         const QScopedValueRollback<bool> silence(m_ignoreUiSignal, true);
         QElapsedTimer budget; budget.start();
         int count = 0;
-        while (!pending->isEmpty() && count < 4 && (count == 0 || budget.elapsed() < 3))
+        materializeVisibleRuleEditors(table, type, budget, count);
+        while (pending != m_pendingRuleRows.end() && !pending->isEmpty() && count < 4 && (count == 0 || budget.elapsed() < 3))
         {
             const auto rule = pending->takeFirst();
             appendRuleRow(table, type, rule);
             ++count;
         }
-        if (pending->isEmpty()) { m_pendingRuleRows.erase(pending); updateStatusLabel(); }
-        else m_statusLabel->setText(kernelText("kernel.callback.intercept.rules.loading", QStringLiteral("正在加载规则编辑器，剩余 %1 条")).arg(pending->size()));
+        if (pending != m_pendingRuleRows.end() && pending->isEmpty()) { m_pendingRuleRows.erase(pending); updateStatusLabel(); }
+        else if (pending != m_pendingRuleRows.end()) m_statusLabel->setText(kernelText("kernel.callback.intercept.rules.loading", QStringLiteral("正在加载规则编辑器，剩余 %1 条")).arg(pending->size()));
         scheduleRuleProjection();
     }
 
@@ -5390,10 +5461,26 @@ private:
             m_groupOptionsModel->appendRow(item);
         }
         m_groupOptions = std::move(options);
+        m_groupOptionLabels.clear();
+        for (const auto& option : m_groupOptions) m_groupOptionLabels.insert(option.first, option.second);
         for (auto pending = m_pendingRuleRows.begin(); pending != m_pendingRuleRows.end(); ++pending)
             for (auto& rule : pending.value())
-                if (std::none_of(m_groupOptions.cbegin(), m_groupOptions.cend(), [&rule](const auto& option) { return option.first == rule.groupId; }))
+                if (!m_groupOptionLabels.contains(rule.groupId))
                     rule.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+        for (auto table = m_ruleTableMap.cbegin(); table != m_ruleTableMap.cend(); ++table)
+        {
+            if (!table.value()) continue;
+            const QSignalBlocker silence(table.value());
+            for (int row = 0; row < table.value()->rowCount(); row += 2)
+                if (auto* source = table.value()->item(row, static_cast<int>(RuleColumn::RuleId));
+                    source && source->data(Qt::UserRole).canConvert<CallbackRuleModel>())
+                {
+                    auto draft = source->data(Qt::UserRole).value<CallbackRuleModel>();
+                    if (!m_groupOptionLabels.contains(draft.groupId)) draft.groupId = m_groupOptions.isEmpty() ? 0U : m_groupOptions.front().first;
+                    source->setData(Qt::UserRole, QVariant::fromValue(draft));
+                    if (auto* cell = table.value()->item(row, static_cast<int>(RuleColumn::GroupId))) cell->setText(m_groupOptionLabels.value(draft.groupId));
+                }
+        }
         for (const auto& selection : selections)
             if (selection.combo)
             {
@@ -5514,16 +5601,17 @@ private:
                 ? detailPanel->findChild<QLineEdit*>(QStringLiteral("ksCallbackRuleCommentEdit"))
                 : nullptr;
 
+            const bool lazy = ruleIdItem && ruleIdItem->data(Qt::UserRole).canConvert<CallbackRuleModel>();
             if (ruleIdItem == nullptr || ruleNameItem == nullptr || enabledItem == nullptr ||
                 timeoutItem == nullptr || priorityItem == nullptr ||
-                groupCombo == nullptr || operationPanel == nullptr ||
+                (!lazy && (groupCombo == nullptr || operationPanel == nullptr ||
                 matchModeCombo == nullptr || actionCombo == nullptr || timeoutDecisionCombo == nullptr ||
-                initiatorEdit == nullptr || targetEdit == nullptr || commentEdit == nullptr)
+                initiatorEdit == nullptr || targetEdit == nullptr || commentEdit == nullptr)))
             {
                 continue;
             }
 
-            CallbackRuleModel ruleModel;
+            CallbackRuleModel ruleModel = lazy ? ruleIdItem->data(Qt::UserRole).value<CallbackRuleModel>() : CallbackRuleModel{};
             if (!parseUnsignedText(ruleIdItem->text(), &ruleModel.ruleId))
             {
                 if (errorTextOut != nullptr)
@@ -5533,7 +5621,7 @@ private:
                 return false;
             }
 
-            ruleModel.groupId = static_cast<quint32>(groupCombo->currentData().toUInt());
+            ruleModel.groupId = lazy ? ruleModel.groupId : static_cast<quint32>(groupCombo->currentData().toUInt());
             if (ruleModel.groupId == 0U)
             {
                 if (errorTextOut != nullptr)
@@ -5543,8 +5631,8 @@ private:
                 return false;
             }
 
-            bool operationParseOk = false;
-            ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
+            bool operationParseOk = lazy;
+            if (!lazy) ruleModel.operationMask = currentOperationMaskFromPanel(operationPanel, &operationParseOk);
             if (!operationParseOk || ruleModel.operationMask == 0U)
             {
                 if (errorTextOut != nullptr)
@@ -5579,14 +5667,14 @@ private:
             ruleModel.ruleName = ruleNameItem->text().trimmed();
             ruleModel.enabled = (enabledItem->checkState() == Qt::Checked);
             ruleModel.callbackType = callbackType;
-            ruleModel.initiatorPattern = normalizeMatchAllPattern(initiatorEdit->text());
-            ruleModel.targetPattern = normalizeMatchAllPattern(targetEdit->text());
-            ruleModel.matchMode = static_cast<quint32>(matchModeCombo->currentData().toUInt());
-            ruleModel.action = static_cast<quint32>(actionCombo->currentData().toUInt());
+            ruleModel.initiatorPattern = normalizeMatchAllPattern(lazy ? ruleModel.initiatorPattern : initiatorEdit->text());
+            ruleModel.targetPattern = normalizeMatchAllPattern(lazy ? ruleModel.targetPattern : targetEdit->text());
+            if (!lazy) ruleModel.matchMode = static_cast<quint32>(matchModeCombo->currentData().toUInt());
+            if (!lazy) ruleModel.action = static_cast<quint32>(actionCombo->currentData().toUInt());
             ruleModel.timeoutMs = timeoutMs;
-            ruleModel.timeoutDefaultDecision = static_cast<quint32>(timeoutDecisionCombo->currentData().toUInt());
+            if (!lazy) ruleModel.timeoutDefaultDecision = static_cast<quint32>(timeoutDecisionCombo->currentData().toUInt());
             ruleModel.priority = rulePriority;
-            ruleModel.comment = commentEdit->text().trimmed();
+            ruleModel.comment = (lazy ? ruleModel.comment : commentEdit->text()).trimmed();
 
             if (!ruleModel.initiatorPattern.trimmed().isEmpty())
             {
@@ -5614,7 +5702,8 @@ private:
             ruleListOut->push_back(ruleModel);
         }
 
-        ruleListOut->append(m_pendingRuleRows.value(callbackType));
+        for (const auto& pending : m_pendingRuleRows.value(callbackType))
+            ruleListOut->push_back(ruleWithComboFallbacks(pending, callbackType));
         return true;
     }
 
@@ -6237,6 +6326,7 @@ private:
     QTimer* m_ruleProjectionTimer = nullptr;
     QStandardItemModel* m_groupOptionsModel = nullptr;
     QVector<QPair<quint32, QString>> m_groupOptions;
+    QHash<quint32, QString> m_groupOptionLabels;
 
     QPushButton* m_addRuleButton = nullptr;
     QPushButton* m_removeRuleButton = nullptr;
