@@ -6,6 +6,7 @@
 #include "KernelDock.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 
 #include <memory>
 #include "../UI/VisibleTableWidget.h"
@@ -1709,6 +1710,7 @@ void KernelDock::initializeShadowSsdtTab()
         m_shadowSsdtTable, m_shadowSsdtDetailEditor, m_shadowSsdtPage);
 
     connect(m_refreshShadowSsdtButton, &QPushButton::clicked, this, [this]() {
+        if (m_kernelActionOperations[3] && m_kernelActionOperations[3]->isBusy()) return;
         refreshShadowSsdtAsync();
     });
     auto* shadowSsdtFilterTimer = new QTimer(m_shadowSsdtFilterEdit);
@@ -1812,6 +1814,8 @@ void KernelDock::initializeInlineHookTab()
         m_inlineHookTable, m_inlineHookDetailEditor, m_inlineHookPage);
 
     connect(m_refreshInlineHookButton, &QPushButton::clicked, this, [this]() {
+        if (m_kernelActionOperations[4] && (m_kernelActionOperations[4]->isBusy()
+            || m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool())) return;
         refreshInlineHooksAsync();
     });
     connect(m_patchInlineHookButton, &QPushButton::clicked, this, [this]() {
@@ -2094,7 +2098,8 @@ void KernelDock::refreshShadowSsdtAsync()
             guardThis->m_shadowSsdtRefreshRunning.store(false);
             if (guardThis->m_refreshShadowSsdtButton != nullptr)
             {
-                guardThis->m_refreshShadowSsdtButton->setEnabled(true);
+                guardThis->m_refreshShadowSsdtButton->setEnabled(
+                    !guardThis->m_kernelActionOperations[3] || !guardThis->m_kernelActionOperations[3]->isBusy());
             }
 
             if (!success)
@@ -2153,6 +2158,7 @@ void KernelDock::refreshInlineHooksAsync()
     {
         m_refreshInlineHookButton->setEnabled(false);
     }
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(false);
     if (m_inlineHookStatusLabel != nullptr)
     {
         m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.status.scanning", QStringLiteral("状态：Inline Hook 扫描中...")));
@@ -2215,9 +2221,13 @@ void KernelDock::refreshInlineHooksAsync()
             }
 
             guardThis->m_inlineHookRefreshRunning.store(false);
+            if (guardThis->m_patchInlineHookButton)
+                guardThis->m_patchInlineHookButton->setEnabled(
+                    !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
             if (guardThis->m_refreshInlineHookButton != nullptr)
             {
-                guardThis->m_refreshInlineHookButton->setEnabled(true);
+                guardThis->m_refreshInlineHookButton->setEnabled(
+                    !guardThis->m_kernelActionOperations[4] || !guardThis->m_kernelActionOperations[4]->isBusy());
             }
 
             if (!success)
@@ -2964,6 +2974,19 @@ void KernelDock::showShadowSsdtDetailByCurrentRow()
 
 void KernelDock::restoreSelectedShadowSsdtBaseline()
 {
+    auto& slot = m_kernelActionOperations[3];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot] {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_shadowSsdtRefreshRunning.load();
+            if (m_refreshShadowSsdtButton) m_refreshShadowSsdtButton->setEnabled(!busy && !scanning);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation(slot);
+    if (m_shadowSsdtRefreshRunning.load() || operation->isBusy()) return;
+    const QPointer<KernelDock> owner(this);
     const KernelSsdtEntry* selected = currentShadowSsdtEntry();
     if (selected == nullptr
         || !selected->cleanBaselineAvailable
@@ -2986,19 +3009,7 @@ void KernelDock::restoreSelectedShadowSsdtBaseline()
     }
 
     const KernelSsdtEntry snapshot = *selected;
-    const ksword::ark::DriverClient client;
-    const ksword::ark::KernelInlinePatchResult preflight =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            0UL);
-    if (!preflight.io.ok
-        || preflight.status
-            != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
-    {
+    const auto showPreflightFailure = [this](const ksword::ark::KernelInlinePatchResult& preflight) {
         QMessageBox::critical(
             this,
             kernelText(
@@ -3014,97 +3025,131 @@ void KernelDock::restoreSelectedShadowSsdtBaseline()
                     8,
                     16,
                     QChar('0')));
-        return;
-    }
+    };
+    const auto applyResult = [this, owner, snapshot](const ksword::ark::KernelInlinePatchResult& applied, std::uint64_t) {
+        if (!applied.io.ok
+            || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
+            || applied.bytesPatched != snapshot.tableEntrySize)
+        {
+            QMessageBox::critical(
+                this,
+                kernelText(
+                    "kernel.hooks.shadow.restore.title",
+                    QStringLiteral("ShadowSSDT 槽位恢复")),
+                kernelText(
+                    "kernel.hooks.shadow.restore.failed",
+                    QStringLiteral(
+                        "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
+                    .arg(applied.io.win32Error)
+                    .arg(applied.status)
+                    .arg(static_cast<unsigned long>(applied.lastStatus),
+                        8,
+                        16,
+                        QChar('0'))
+                    .arg(applied.bytesPatched));
+            if (owner) refreshShadowSsdtAsync();
+            return true;
+        }
 
-    const QMessageBox::StandardButton warning =
-        QMessageBox::warning(
-            this,
-            kernelText(
-                "kernel.hooks.shadow.restore.warning.title",
-                QStringLiteral("高风险图形系统调用表恢复")),
-            kernelText(
-                "kernel.hooks.shadow.restore.warning.body",
-                QStringLiteral(
-                    "即将把 ShadowSSDT[%1] 从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
-                    "R0 写入前会再次逐字节比较当前值；任何并发变化都会拒绝操作。"
-                    "错误恢复可能立即导致图形会话或系统崩溃。\n\n映像：%4"))
-                .arg(snapshot.serviceIndex)
-                .arg(static_cast<qulonglong>(snapshot.currentTableValue),
-                    0,
-                    16)
-                .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
-                    0,
-                    16)
-                .arg(snapshot.cleanBaselinePath),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No);
-    if (warning != QMessageBox::Yes)
-    {
-        return;
-    }
-
-    bool accepted = false;
-    const QString confirmation = QInputDialog::getText(
-        this,
-        kernelText(
-            "kernel.hooks.shadow.restore.confirm.title",
-            QStringLiteral("最终确认")),
-        kernelText(
-            "kernel.hooks.shadow.restore.confirm.prompt",
-            QStringLiteral("请输入 RESTORE SHADOW SSDT 继续：")),
-        QLineEdit::Normal,
-        QString(),
-        &accepted);
-    if (!accepted
-        || confirmation.trimmed()
-            != QStringLiteral("RESTORE SHADOW SSDT"))
-    {
-        return;
-    }
-
-    const ksword::ark::KernelInlinePatchResult applied =
-        client.patchInlineHook(
-            snapshot.tableEntryAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES,
-            snapshot.tableEntrySize,
-            snapshot.currentTableBytes,
-            snapshot.cleanTableBytes,
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    if (!applied.io.ok
-        || applied.status != KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED
-        || applied.bytesPatched != snapshot.tableEntrySize)
-    {
-        QMessageBox::critical(
+        QMessageBox::information(
             this,
             kernelText(
                 "kernel.hooks.shadow.restore.title",
                 QStringLiteral("ShadowSSDT 槽位恢复")),
             kernelText(
-                "kernel.hooks.shadow.restore.failed",
+                "kernel.hooks.shadow.restore.success",
                 QStringLiteral(
-                    "恢复失败或当前槽值已变化。\nWin32=%1\n状态=%2\nNT=0x%3\n写入=%4"))
-                .arg(applied.io.win32Error)
-                .arg(applied.status)
-                .arg(static_cast<unsigned long>(applied.lastStatus),
-                    8,
-                    16,
-                    QChar('0'))
-                .arg(applied.bytesPatched));
-        refreshShadowSsdtAsync();
-        return;
-    }
+                    "槽位已按验证基线恢复，并已触发重新扫描。")));
+        if (owner) refreshShadowSsdtAsync();
+        return true;
+    };
+    operation->submit<KernelSsdtEntry, ksword::ark::KernelInlinePatchResult>(snapshot,
+        [](const KernelSsdtEntry& value, const ks::ui::AsyncOperationToken&) {
+            const ksword::ark::DriverClient client;
+            return client.patchInlineHook(value.tableEntryAddress,
+                KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES, value.tableEntrySize,
+                value.currentTableBytes, value.cleanTableBytes, 0UL);
+        },
+        [this, owner, operation, snapshot, showPreflightFailure, applyResult](const ksword::ark::KernelInlinePatchResult& preflight, std::uint64_t ticket) {
+            if (!preflight.io.ok || preflight.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+            {
+                showPreflightFailure(preflight);
+                return true;
+            }
+            const QMessageBox::StandardButton warning =
+                QMessageBox::warning(
+                    this,
+                    kernelText(
+                        "kernel.hooks.shadow.restore.warning.title",
+                        QStringLiteral("高风险图形系统调用表恢复")),
+                    kernelText(
+                        "kernel.hooks.shadow.restore.warning.body",
+                        QStringLiteral(
+                            "即将把 ShadowSSDT[%1] 从当前编码值 0x%2 恢复为磁盘基线 0x%3。\n\n"
+                            "R0 写入前会再次逐字节比较当前值；任何并发变化都会拒绝操作。"
+                            "错误恢复可能立即导致图形会话或系统崩溃。\n\n映像：%4"))
+                        .arg(snapshot.serviceIndex)
+                        .arg(static_cast<qulonglong>(snapshot.currentTableValue),
+                            0,
+                            16)
+                        .arg(static_cast<qulonglong>(snapshot.cleanTableValue),
+                            0,
+                            16)
+                        .arg(snapshot.cleanBaselinePath),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+            if (!owner || !operation || !operation->isCurrent(ticket)) return true;
+            if (warning != QMessageBox::Yes)
+            {
+                return true;
+            }
 
-    QMessageBox::information(
-        this,
-        kernelText(
-            "kernel.hooks.shadow.restore.title",
-            QStringLiteral("ShadowSSDT 槽位恢复")),
-        kernelText(
-            "kernel.hooks.shadow.restore.success",
-            QStringLiteral(
-                "槽位已按验证基线恢复，并已触发重新扫描。")));
-    refreshShadowSsdtAsync();
+            bool accepted = false;
+            const QString confirmation = QInputDialog::getText(
+                this,
+                kernelText(
+                    "kernel.hooks.shadow.restore.confirm.title",
+                    QStringLiteral("最终确认")),
+                kernelText(
+                    "kernel.hooks.shadow.restore.confirm.prompt",
+                    QStringLiteral("请输入 RESTORE SHADOW SSDT 继续：")),
+                QLineEdit::Normal,
+                QString(),
+                &accepted);
+            if (!owner || !operation || !operation->isCurrent(ticket)) return true;
+            if (!accepted
+                || confirmation.trimmed()
+                    != QStringLiteral("RESTORE SHADOW SSDT"))
+            {
+                return true;
+            }
+
+            // Keep this controller busy through both nested confirmations and the
+            // queued handoff; complete only after apply has entered awaitingCommit.
+            QTimer::singleShot(0, this, [this, owner, operation, snapshot, ticket, applyResult] {
+                if (!owner || !operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!owner || !operation || operation->isBusy()) return;
+                operation->submitTransaction<KernelSsdtEntry, ksword::ark::KernelInlinePatchResult>(snapshot,
+                    [](const KernelSsdtEntry& value) {
+                        const ksword::ark::DriverClient client;
+                        return client.patchInlineHook(value.tableEntryAddress,
+                            KSWORD_ARK_INLINE_PATCH_MODE_RESTORE_BYTES, value.tableEntrySize,
+                            value.currentTableBytes, value.cleanTableBytes, KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
+                    }, applyResult,
+                    [applyResult](std::exception_ptr) {
+                        ksword::ark::KernelInlinePatchResult failed{};
+                        failed.io.win32Error = ERROR_GEN_FAILURE;
+                        applyResult(failed, 0);
+                    });
+            });
+            return false;
+        },
+        [showPreflightFailure](std::exception_ptr) {
+            ksword::ark::KernelInlinePatchResult failed{};
+            failed.io.win32Error = ERROR_GEN_FAILURE;
+            showPreflightFailure(failed);
+        });
 }
 
 void KernelDock::showInlineHookDetailByCurrentRow()
@@ -3231,8 +3276,12 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
             "kernel.hooks.shadow.menu.restore",
             QStringLiteral("恢复选中槽位为磁盘基线")));
     const KernelSsdtEntry* currentEntry = currentShadowSsdtEntry();
+    refreshAction->setEnabled(!m_shadowSsdtRefreshRunning.load()
+        && (!m_kernelActionOperations[3] || !m_kernelActionOperations[3]->isBusy()));
     restoreAction->setEnabled(
-        currentEntry != nullptr
+        !m_shadowSsdtRefreshRunning.load()
+        && (!m_kernelActionOperations[3] || !m_kernelActionOperations[3]->isBusy())
+        && currentEntry != nullptr
         && currentEntry->cleanBaselineAvailable
         && currentEntry->cleanBaselineDiffers
         && selectedIndices.size() == 1U);
@@ -3283,6 +3332,7 @@ void KernelDock::showShadowSsdtContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == refreshAction)
     {
+        if (m_kernelActionOperations[3] && m_kernelActionOperations[3]->isBusy()) return;
         refreshShadowSsdtAsync();
         return;
     }
@@ -3394,7 +3444,11 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     menu.setStyleSheet(KswordTheme::ContextMenuStyle());
     QAction* refreshAction = menu.addAction(QIcon(":/Icon/process_refresh.svg"), kernelText("kernel.hooks.inline.menu.rescan", QStringLiteral("重新扫描 Inline Hook")));
     QAction* patchAction = menu.addAction(QIcon(":/Icon/process_terminate.svg"), kernelText("kernel.hooks.inline.menu.patch_current", QStringLiteral("NOP 摘除当前 Hook")));
-    patchAction->setEnabled(hasSelection);
+    const bool actionReady = !m_inlineHookRefreshRunning.load()
+        && (!m_kernelActionOperations[4] || (!m_kernelActionOperations[4]->isBusy()
+            && !m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool()));
+    refreshAction->setEnabled(actionReady);
+    patchAction->setEnabled(hasSelection && actionReady);
     const bool hasSingleInlineHook = selectedIndices.size() == 1U && selectedIndices.front() < m_inlineHookRows.size();
     const QString inlineHookDiskPath = hasSingleInlineHook
         ? m_inlineHookRows[selectedIndices.front()].diskBaselinePathText.trimmed()
@@ -3455,6 +3509,8 @@ void KernelDock::showInlineHookContextMenu(const QPoint& localPosition)
     }
     if (selectedAction == refreshAction)
     {
+        if (m_kernelActionOperations[4] && (m_kernelActionOperations[4]->isBusy()
+            || m_kernelActionOperations[4]->property("kernel_hook_action_confirming").toBool())) return;
         refreshInlineHooksAsync();
         return;
     }
@@ -3643,6 +3699,20 @@ void KernelDock::showIatEatHookContextMenu(const QPoint& localPosition)
 
 void KernelDock::patchSelectedInlineHookWithNop()
 {
+    auto& slot = m_kernelActionOperations[4];
+    if (!slot)
+    {
+        slot = new ks::ui::AsyncOperation(this);
+        slot->setStateChangedCallback([this, operation = slot] {
+            const bool busy = operation && operation->isBusy();
+            const bool scanning = m_inlineHookRefreshRunning.load();
+            if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(!busy && !scanning);
+            if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(!busy && !scanning);
+        });
+    }
+    const QPointer<ks::ui::AsyncOperation> operation(slot);
+    if (m_inlineHookRefreshRunning.load() || operation->isBusy() || operation->property("kernel_hook_action_confirming").toBool()) return;
+    const QPointer<KernelDock> owner(this);
     const KernelInlineHookEntry* entry = currentInlineHookEntry();
     if (entry == nullptr)
     {
@@ -3650,6 +3720,8 @@ void KernelDock::patchSelectedInlineHookWithNop()
         return;
     }
 
+    const KernelInlineHookEntry snapshot = *entry;
+    entry = &snapshot;
     const std::uint32_t patchBytes = inlineHookPatchLength(entry->hookType, entry->currentByteCount);
     if (patchBytes == 0U)
     {
@@ -3660,6 +3732,9 @@ void KernelDock::patchSelectedInlineHookWithNop()
         return;
     }
 
+    operation->setProperty("kernel_hook_action_confirming", true);
+    if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(false);
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(false);
     const QMessageBox::StandardButton firstConfirm = QMessageBox::warning(
         this,
         kernelText("kernel.hooks.inline.patch.confirm.title", QStringLiteral("Inline Hook 摘除确认")),
@@ -3671,99 +3746,132 @@ void KernelDock::patchSelectedInlineHookWithNop()
         .arg(patchBytes),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
+    if (!owner || !operation) return;
+    operation->setProperty("kernel_hook_action_confirming", false);
+    if (m_refreshInlineHookButton) m_refreshInlineHookButton->setEnabled(!m_inlineHookRefreshRunning.load());
+    if (m_patchInlineHookButton) m_patchInlineHookButton->setEnabled(!m_inlineHookRefreshRunning.load());
     if (firstConfirm != QMessageBox::Yes)
     {
         return;
     }
 
-    ksword::ark::DriverClient driverClient;
-    ksword::ark::KernelInlinePatchResult patchResult = driverClient.patchInlineHook(
-        entry->functionAddress,
-        KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH,
-        patchBytes,
-        entry->currentBytes,
-        {},
-        0UL);
-    if (!patchResult.io.ok)
-    {
+    struct PatchRequest {
+        KernelInlineHookEntry snapshot;
+        std::uint32_t patchBytes;
+        unsigned long flags;
+    };
+    const auto worker = [](const PatchRequest& value) {
+        const ksword::ark::DriverClient client;
+        return client.patchInlineHook(value.snapshot.functionAddress,
+            KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH, value.patchBytes,
+            value.snapshot.currentBytes, {}, value.flags);
+    };
+    const auto showRequestFailure = [this](const ksword::ark::KernelInlinePatchResult& patchResult) {
         QMessageBox::warning(
             this,
             kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")),
             kernelText("kernel.hooks.inline.patch.request_failed", QStringLiteral("普通摘除请求失败：\n%1")).arg(friendlyKernelHookIoMessage(patchResult.io.message)));
-        return;
-    }
-
-    if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
-    {
-        QMessageBox warningBox(this);
-        warningBox.setIcon(QMessageBox::Warning);
-        warningBox.setWindowTitle(kernelText("kernel.hooks.inline.patch.force.title", QStringLiteral("强制 Inline Hook 摘除")));
-        warningBox.setText(kernelText("kernel.hooks.inline.patch.force.rejected", QStringLiteral("R0 已拒绝普通内核补丁请求。")));
-        warningBox.setInformativeText(
-            kernelText("kernel.hooks.inline.patch.force.message", QStringLiteral("目标函数: %1!%2\n地址: %3\n补丁长度: %4 字节\nR0状态: %5\nLastStatus: %6\n\n强制继续会修改内核代码页，只应在确认目标和字节快照无误时使用。"))
-            .arg(kernelHookSafeText(entry->moduleNameText))
-            .arg(kernelHookSafeText(entry->functionNameText))
-            .arg(kernelHookFormatAddress(entry->functionAddress))
-            .arg(patchBytes)
+    };
+    const auto applyResult = [this, owner, snapshot](const ksword::ark::KernelInlinePatchResult& patchResult, std::uint64_t) {
+        const QString resultText = kernelText("kernel.hooks.inline.patch.result", QStringLiteral(
+            "Inline Hook 摘除结果\n"
+            "函数: %1!%2\n"
+            "地址: %3\n"
+            "状态: %4\n"
+            "写入字节: %5\n"
+            "LastStatus: %6\n"
+            "R3信息: %7"))
+            .arg(kernelHookSafeText(snapshot.moduleNameText))
+            .arg(kernelHookSafeText(snapshot.functionNameText))
+            .arg(kernelHookFormatAddress(snapshot.functionAddress))
             .arg(kernelHookStatusText(patchResult.status))
-            .arg(kernelHookFormatNtStatus(patchResult.lastStatus)));
-        warningBox.setStandardButtons(QMessageBox::Cancel);
-        warningBox.setDefaultButton(QMessageBox::Cancel);
-        QPushButton* forceButton = warningBox.addButton(kernelText("kernel.hooks.inline.patch.force.continue", QStringLiteral("强制继续")), QMessageBox::DestructiveRole);
-        warningBox.exec();
-        if (warningBox.clickedButton() != forceButton)
+            .arg(patchResult.bytesPatched)
+            .arg(kernelHookFormatNtStatus(patchResult.lastStatus))
+            .arg(friendlyKernelHookIoMessage(patchResult.io.message));
+
+        if (m_inlineHookDetailEditor != nullptr)
         {
-            if (m_inlineHookStatusLabel != nullptr)
-            {
-                m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.force.cancelled", QStringLiteral("状态：用户取消强制 Inline Hook 摘除")));
-            }
-            return;
+            m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(resultText));
+        }
+        if (!owner) return true;
+        if (m_inlineHookStatusLabel != nullptr)
+        {
+            m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.status", QStringLiteral("状态：%1，写入 %2 字节"))
+                .arg(kernelHookStatusText(patchResult.status))
+                .arg(patchResult.bytesPatched));
+            if (!owner) return true;
+            m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
+                patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
         }
 
-        patchResult = driverClient.patchInlineHook(
-            entry->functionAddress,
-            KSWORD_ARK_INLINE_PATCH_MODE_NOP_BRANCH,
-            patchBytes,
-            entry->currentBytes,
-            {},
-            KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE);
-    }
+        if (!owner) return true;
+        if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED)
+        {
+            refreshInlineHooksAsync();
+        }
+        else
+        {
+            QMessageBox::warning(this, kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")), resultText);
+        }
+        return true;
+    };
+    operation->submitTransaction<PatchRequest, ksword::ark::KernelInlinePatchResult>(PatchRequest{snapshot, patchBytes, 0UL}, worker,
+        [this, owner, operation, snapshot, patchBytes, worker, applyResult, showRequestFailure](const ksword::ark::KernelInlinePatchResult& patchResult, std::uint64_t ticket) {
+            if (!patchResult.io.ok) { showRequestFailure(patchResult); return true; }
+            if (patchResult.status != KSWORD_ARK_KERNEL_HOOK_STATUS_FORCE_REQUIRED)
+                return applyResult(patchResult, ticket);
+            const QPointer<QMessageBox> warningBox(new QMessageBox(this));
+            warningBox->setIcon(QMessageBox::Warning);
+            warningBox->setWindowTitle(kernelText("kernel.hooks.inline.patch.force.title", QStringLiteral("强制 Inline Hook 摘除")));
+            warningBox->setText(kernelText("kernel.hooks.inline.patch.force.rejected", QStringLiteral("R0 已拒绝普通内核补丁请求。")));
+            warningBox->setInformativeText(
+                kernelText("kernel.hooks.inline.patch.force.message", QStringLiteral("目标函数: %1!%2\n地址: %3\n补丁长度: %4 字节\nR0状态: %5\nLastStatus: %6\n\n强制继续会修改内核代码页，只应在确认目标和字节快照无误时使用。"))
+                .arg(kernelHookSafeText(snapshot.moduleNameText))
+                .arg(kernelHookSafeText(snapshot.functionNameText))
+                .arg(kernelHookFormatAddress(snapshot.functionAddress))
+                .arg(patchBytes)
+                .arg(kernelHookStatusText(patchResult.status))
+                .arg(kernelHookFormatNtStatus(patchResult.lastStatus)));
+            warningBox->setStandardButtons(QMessageBox::Cancel);
+            warningBox->setDefaultButton(QMessageBox::Cancel);
+            QPushButton* forceButton = warningBox->addButton(kernelText("kernel.hooks.inline.patch.force.continue", QStringLiteral("强制继续")), QMessageBox::DestructiveRole);
+            warningBox->exec();
+            if (!owner || !operation || !warningBox) return true;
+            const bool forceAccepted = warningBox->clickedButton() == forceButton;
+            warningBox->deleteLater();
+            if (!operation->isCurrent(ticket)) return true;
+            if (!forceAccepted)
+            {
+                if (m_inlineHookStatusLabel != nullptr)
+                {
+                    m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.force.cancelled", QStringLiteral("状态：用户取消强制 Inline Hook 摘除")));
+                }
+                return true;
+            }
 
-    const QString resultText = kernelText("kernel.hooks.inline.patch.result", QStringLiteral(
-        "Inline Hook 摘除结果\n"
-        "函数: %1!%2\n"
-        "地址: %3\n"
-        "状态: %4\n"
-        "写入字节: %5\n"
-        "LastStatus: %6\n"
-        "R3信息: %7"))
-        .arg(kernelHookSafeText(entry->moduleNameText))
-        .arg(kernelHookSafeText(entry->functionNameText))
-        .arg(kernelHookFormatAddress(entry->functionAddress))
-        .arg(kernelHookStatusText(patchResult.status))
-        .arg(patchResult.bytesPatched)
-        .arg(kernelHookFormatNtStatus(patchResult.lastStatus))
-        .arg(friendlyKernelHookIoMessage(patchResult.io.message));
-
-    if (m_inlineHookDetailEditor != nullptr)
-    {
-        m_inlineHookDetailEditor->setDocument(ks::ui::FieldDocument{}.note(resultText));
-    }
-    if (m_inlineHookStatusLabel != nullptr)
-    {
-        m_inlineHookStatusLabel->setText(kernelText("kernel.hooks.inline.patch.status", QStringLiteral("状态：%1，写入 %2 字节"))
-            .arg(kernelHookStatusText(patchResult.status))
-            .arg(patchResult.bytesPatched));
-        m_inlineHookStatusLabel->setStyleSheet(kernelHookStatusLabelStyle(
-            patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED ? KswordTheme::SuccessHex() : KswordTheme::ErrorHex()));
-    }
-
-    if (patchResult.status == KSWORD_ARK_KERNEL_HOOK_STATUS_PATCHED)
-    {
-        refreshInlineHooksAsync();
-    }
-    else
-    {
-        QMessageBox::warning(this, kernelText("kernel.hooks.inline.patch.title", QStringLiteral("Inline Hook 摘除")), resultText);
-    }
+            QTimer::singleShot(0, this, [this, owner, operation, snapshot, patchBytes, ticket, worker, applyResult] {
+                if (!owner || !operation || !operation->isCurrent(ticket)) return;
+                operation->completeDeferred(ticket);
+                if (!owner || !operation || operation->isBusy()) return;
+                operation->submitTransaction<PatchRequest, ksword::ark::KernelInlinePatchResult>(
+                    PatchRequest{snapshot, patchBytes, KSWORD_ARK_KERNEL_PATCH_FLAG_FORCE}, worker, applyResult,
+                    [applyResult](std::exception_ptr failure) {
+                        ksword::ark::KernelInlinePatchResult failed{};
+                        failed.io.win32Error = ERROR_GEN_FAILURE;
+                        try { if (failure) std::rethrow_exception(failure); }
+                        catch (const std::exception& error) { failed.io.message = error.what(); }
+                        catch (...) {}
+                        applyResult(failed, 0);
+                    });
+            });
+            return false;
+        },
+        [showRequestFailure](std::exception_ptr failure) {
+            ksword::ark::KernelInlinePatchResult failed{};
+            failed.io.win32Error = ERROR_GEN_FAILURE;
+            try { if (failure) std::rethrow_exception(failure); }
+            catch (const std::exception& error) { failed.io.message = error.what(); }
+            catch (...) {}
+            showRequestFailure(failed);
+        });
 }
