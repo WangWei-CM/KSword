@@ -12,6 +12,8 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include <QPointer>
+class QProgressDialog;
 
 #include <cstdint>
 #include <array>
@@ -34,6 +36,8 @@ class QEvent;
 class QVBoxLayout;
 class QPoint;
 
+namespace ks::ui { class AsyncOperation; }
+
 namespace ks::misc
 {
     // ApplicationControlPage：
@@ -51,7 +55,7 @@ namespace ks::misc
         // 析构函数：
         // - 页面采用 Qt 对象树管理控件；
         // - 后台任务使用 QPointer 回投，无需显式收尾。
-        ~ApplicationControlPage() override = default;
+        ~ApplicationControlPage() override;
 
     protected:
         void showEvent(QShowEvent* event) override;
@@ -148,6 +152,17 @@ namespace ks::misc
         // - sourcePath 为空时弹出文件选择对话框，非空时直接编辑该路径；
         // - 无返回值；已有配置写入在途时直接返回，不重入。
         void editWdacPolicy(const QString& sourcePath = QString());
+        void showWdacPolicyEditor(const QString& sourcePath, const QString& originalXml);
+        void deploySavedWdacPolicy(const QString& sourcePath);
+        void setPolicyEditorBusy(bool busy);
+        void finishWdacLoadingDialog();
+        QPointer<QProgressDialog> m_wdacLoadingDialog;
+        ks::ui::AsyncOperation* m_wdacXmlRead = nullptr;
+        ks::ui::AsyncOperation* m_wdacXmlSave = nullptr;
+        bool m_policyEditorBusy = false; // One accepted editor flow reserves the existing mutation gate.
+        bool m_wdacReadPending = false;
+        bool m_wdacSavePending = false;
+        QString m_wdacIoPath;
 
         // editDefenderSetting：
         // - 编辑 Defender 表格中当前选中的受支持配置项；

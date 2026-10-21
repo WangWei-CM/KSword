@@ -9,6 +9,7 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
+#include "../UI/AsyncOperation.h"
 
 #include "../UI/CodeEditorWidget.h"
 
@@ -50,6 +51,7 @@
 #include <QMetaObject>
 #include <QMetaType>
 #include <QProcess>
+#include <QProgressDialog>
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -151,6 +153,60 @@ namespace
         table->setProperty("ks_i18n_preserve_model_data", true);
         table->setModel(proxy);
         return proxy;
+    }
+
+    struct WdacXmlReadResult
+    {
+        bool ok = false;
+        QString xml;
+    };
+    struct WdacXmlSaveRequest
+    {
+        QString sourcePath;
+        QString xml;
+    };
+    struct WdacXmlSaveResult
+    {
+        enum class Status { Saved, InvalidXml, WriteFailed } status = Status::WriteFailed;
+        QString parserError;
+    };
+
+    WdacXmlReadResult readWdacXmlValue(const QString& sourcePath, const ks::ui::AsyncOperationToken& token)
+    {
+        if (token.isCanceled()) return {};
+        QFile sourceFile(sourcePath);
+        if (!sourceFile.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+        const QByteArray bytes = sourceFile.readAll();
+        if (sourceFile.error() != QFileDevice::NoError || token.isCanceled()) return {};
+        return {true, QString::fromUtf8(bytes)};
+    }
+
+    WdacXmlSaveResult saveWdacXmlValue(const WdacXmlSaveRequest& request)
+    {
+        const QString xml = request.xml.trimmed();
+        QXmlStreamReader reader(xml);
+        QString root;
+        while (!reader.atEnd())
+        {
+            reader.readNext();
+            if (root.isEmpty() && reader.isStartElement()) root = reader.name().toString();
+        }
+        if (reader.hasError() || root.compare(QStringLiteral("SiPolicy"), Qt::CaseInsensitive) != 0)
+            return {WdacXmlSaveResult::Status::InvalidXml, reader.hasError() ? reader.errorString() : QString()};
+
+        const QByteArray bytes = xml.toUtf8(); // Exactly one encoding of the complete validated document.
+        QSaveFile output(request.sourcePath);
+        output.setDirectWriteFallback(false); // Failure must leave the old source intact.
+        if (!output.open(QIODevice::WriteOnly | QIODevice::Text)) return {};
+        qint64 written = 0;
+        while (written < bytes.size())
+        {
+            const qint64 count = output.write(bytes.constData() + written, bytes.size() - written);
+            if (count <= 0) { output.cancelWriting(); return {}; }
+            written += count;
+        }
+        if (!output.commit()) return {};
+        return {WdacXmlSaveResult::Status::Saved, {}};
     }
 
     // makeReadOnlyItem：
@@ -594,8 +650,63 @@ namespace ks::misc
     ApplicationControlPage::ApplicationControlPage(QWidget* parent)
         : QWidget(parent)
     {
+        m_wdacXmlRead = new ks::ui::AsyncOperation(this);
+        m_wdacXmlSave = new ks::ui::AsyncOperation(this);
+        const QPointer<ApplicationControlPage> guard(this);
+        m_wdacXmlRead->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_wdacReadPending || guard->m_wdacXmlRead->isBusy()) return;
+            guard->m_wdacReadPending = false;
+            const QString path = guard->m_wdacIoPath;
+            guard->finishWdacLoadingDialog();
+            if (!guard) return;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(path));
+        });
+        m_wdacXmlSave->setStateChangedCallback([guard]() {
+            if (!guard || !guard->m_wdacSavePending || guard->m_wdacXmlSave->isBusy()) return;
+            guard->m_wdacSavePending = false;
+            const QString path = guard->m_wdacIoPath;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                QStringLiteral("保存结果未能回传，请重新读取源 XML 核对实际结果：%1").arg(path));
+        });
         initializeUi();
         refreshAsync();
+    }
+
+    ApplicationControlPage::~ApplicationControlPage()
+    {
+        // Closing the GUI gate does not cancel an already accepted atomic save.
+        if (m_wdacXmlRead) m_wdacXmlRead->close();
+        if (m_wdacXmlSave) m_wdacXmlSave->close();
+    }
+
+    void ApplicationControlPage::finishWdacLoadingDialog()
+    {
+        const auto dialog = m_wdacLoadingDialog;
+        m_wdacLoadingDialog.clear();
+        if (!dialog) return;
+        QObject::disconnect(dialog.data(), nullptr, this, nullptr);
+        dialog->close();
+        if (dialog) dialog->deleteLater();
+    }
+
+    void ApplicationControlPage::setPolicyEditorBusy(bool busy)
+    {
+        if (m_policyEditorBusy == busy) return;
+        m_policyEditorBusy = busy;
+        m_pendingMutationCount = std::max(0, m_pendingMutationCount + (busy ? 1 : -1));
+        const bool idle = m_pendingMutationCount == 0;
+        const QPointer<ApplicationControlPage> guard(this);
+        if (m_refreshButton) m_refreshButton->setEnabled(idle && !m_refreshInFlight);
+        if (!guard) return;
+        if (m_exportButton) m_exportButton->setEnabled(idle && !m_refreshInFlight);
+        if (!guard) return;
+        if (m_appLockerEditButton) m_appLockerEditButton->setEnabled(idle && m_appLockerModuleAvailable);
+        if (!guard) return;
+        if (m_wdacEditButton) m_wdacEditButton->setEnabled(idle);
+        if (!guard) return;
+        if (m_defenderEditButton) m_defenderEditButton->setEnabled(idle);
     }
 
     void ApplicationControlPage::initializeUi()
@@ -1502,109 +1613,143 @@ namespace ks::misc
 
     void ApplicationControlPage::editWdacPolicy(const QString& requestedSourcePath)
     {
-        if (m_pendingMutationCount > 0)
-        {
-            return;
-        }
-
+        if (m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        const QPointer<ApplicationControlPage> guard(this);
         QString sourcePath = requestedSourcePath;
         if (sourcePath.isEmpty())
-        {
-            sourcePath = QFileDialog::getOpenFileName(
-                this,
-                QStringLiteral("选择 WDAC 源策略 XML"),
-                QString(),
+            sourcePath = QFileDialog::getOpenFileName(this, QStringLiteral("选择 WDAC 源策略 XML"), QString(),
                 QStringLiteral("WDAC 策略 XML (*.xml);;所有文件 (*.*)"));
-        }
-        if (sourcePath.isEmpty())
-        {
-            return;
-        }
-
-        QFile sourceFile(sourcePath);
-        if (!sourceFile.open(QIODevice::ReadOnly | QIODevice::Text))
-        {
-            QMessageBox::warning(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
-            return;
-        }
-        const QString originalXml = QString::fromUtf8(sourceFile.readAll());
-        sourceFile.close();
-
-        QDialog dialog(this);
-        dialog.setWindowTitle(QStringLiteral("编辑 WDAC 源策略 XML"));
-        ks::ui::StyleSecondaryWindow(&dialog);
-        dialog.resize(960, 680);
-        auto* layout = new QVBoxLayout(&dialog);
-        ks::ui::StyleSecondaryContentLayout(layout);
-        auto* hintLabel = new QLabel(
-            QStringLiteral("保存仅更新所选 XML 源文件。选择“保存并部署”会调用 ConfigCI 编译为 CIP，再由 CiTool 更新系统策略。部署前请在测试环境验证策略。"),
-            &dialog);
-        hintLabel->setWordWrap(true);
-        hintLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        auto* editor = new CodeTextEdit(&dialog);
-        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
-        editor->setPlainText(originalXml);
-        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-        auto* buttonBox = new QDialogButtonBox(&dialog);
-        QPushButton* saveButton = buttonBox->addButton(QStringLiteral("保存源 XML"), QDialogButtonBox::AcceptRole);
-        QPushButton* deployButton = buttonBox->addButton(QStringLiteral("保存并部署"), QDialogButtonBox::ActionRole);
-        buttonBox->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
-        bool deployRequested = false;
-        layout->addWidget(hintLabel);
-        layout->addWidget(editor, 1);
-        // XML 编辑保持独立滚动，保存操作放在带细分界线的固定底栏。
-        ks::ui::StyleSecondaryButtonBox(buttonBox);
-        ks::ui::StyleSecondaryFooter(buttonBox);
-        layout->addWidget(buttonBox);
-        QObject::connect(saveButton, &QPushButton::clicked, &dialog, &QDialog::accept);
-        QObject::connect(deployButton, &QPushButton::clicked, &dialog, [&dialog, &deployRequested]() {
-            deployRequested = true;
-            dialog.accept();
+        if (!guard || sourcePath.isEmpty() || m_pendingMutationCount > 0 || m_policyEditorBusy) return;
+        // Freeze path resolution on the GUI thread before the asynchronous IO.
+        sourcePath = QDir::current().absoluteFilePath(sourcePath);
+        m_wdacIoPath = sourcePath;
+        setPolicyEditorBusy(true);
+        if (!guard) return;
+        m_wdacReadPending = true;
+        auto* progress = new QProgressDialog(QStringLiteral("正在加载…"), QStringLiteral("取消"), 0, 0, this);
+        progress->setWindowTitle(QStringLiteral("编辑 WDAC 策略"));
+        progress->setAutoClose(false);
+        progress->setAutoReset(false);
+        progress->setMinimumDuration(0);
+        progress->setWindowModality(Qt::NonModal);
+        m_wdacLoadingDialog = progress;
+        const QPointer<QProgressDialog> loading(progress);
+        connect(progress, &QProgressDialog::canceled, this, [guard, loading]() {
+            if (!guard || !guard->m_wdacReadPending || guard->m_wdacLoadingDialog != loading) return;
+            guard->m_wdacReadPending = false;
+            guard->m_wdacXmlRead->cancel();
+            if (!guard) return;
+            guard->finishWdacLoadingDialog();
+            if (guard) guard->setPolicyEditorBusy(false);
         });
-        QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        if (dialog.exec() != QDialog::Accepted)
-        {
-            return;
-        }
+        progress->show();
+        if (!guard) return;
+        const auto failed = [guard, sourcePath](std::exception_ptr) {
+            if (!guard) return;
+            guard->m_wdacReadPending = false;
+            guard->finishWdacLoadingDialog();
+            if (!guard) return;
+            guard->setPolicyEditorBusy(false);
+            if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
+        };
+        const auto ticket = m_wdacXmlRead->submit<QString, WdacXmlReadResult>(sourcePath, readWdacXmlValue,
+            [guard, sourcePath](const WdacXmlReadResult& result, std::uint64_t) {
+                if (!guard) return true;
+                guard->m_wdacReadPending = false;
+                guard->finishWdacLoadingDialog();
+                if (!guard) return true;
+                if (!result.ok)
+                {
+                    guard->setPolicyEditorBusy(false);
+                    if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法读取：%1").arg(sourcePath));
+                    return true;
+                }
+                guard->showWdacPolicyEditor(sourcePath, result.xml);
+                return true;
+            }, failed);
+        if (ticket == 0) failed({});
+    }
 
-        const QString editedXml = editor->toPlainText().trimmed();
-        QXmlStreamReader xmlReader(editedXml);
-        QString rootElementName;
-        while (!xmlReader.atEnd())
-        {
-            xmlReader.readNext();
-            if (rootElementName.isEmpty() && xmlReader.isStartElement())
+    void ApplicationControlPage::showWdacPolicyEditor(const QString& sourcePath, const QString& originalXml)
+    {
+        auto* dialog = new QDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("编辑 WDAC 源策略 XML"));
+        ks::ui::StyleSecondaryWindow(dialog);
+        dialog->resize(960, 680);
+        auto* layout = new QVBoxLayout(dialog);
+        ks::ui::StyleSecondaryContentLayout(layout);
+        auto* hint = new QLabel(QStringLiteral("保存仅更新所选 XML 源文件。选择“保存并部署”会调用 ConfigCI 编译为 CIP，再由 CiTool 更新系统策略。部署前请在测试环境验证策略。"), dialog);
+        hint->setWordWrap(true);
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* editor = new CodeTextEdit(dialog);
+        editor->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::Xml);
+        editor->setPlainText(originalXml); // QTextDocument access remains on its GUI owner thread.
+        editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        auto* buttons = new QDialogButtonBox(dialog);
+        auto* save = buttons->addButton(QStringLiteral("保存源 XML"), QDialogButtonBox::AcceptRole);
+        auto* deploy = buttons->addButton(QStringLiteral("保存并部署"), QDialogButtonBox::ActionRole);
+        buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
+        layout->addWidget(hint);
+        layout->addWidget(editor, 1);
+        ks::ui::StyleSecondaryButtonBox(buttons);
+        ks::ui::StyleSecondaryFooter(buttons);
+        layout->addWidget(buttons);
+        auto deployRequested = std::make_shared<bool>(false); // GUI callbacks only.
+        connect(save, &QPushButton::clicked, dialog, &QDialog::accept);
+        connect(deploy, &QPushButton::clicked, dialog, [dialog, deployRequested]() { *deployRequested = true; dialog->accept(); });
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        const QPointer<ApplicationControlPage> guard(this);
+        const QPointer<CodeTextEdit> safeEditor(editor);
+        connect(dialog, &QDialog::finished, this, [guard, safeEditor, deployRequested, sourcePath](int code) {
+            if (!guard) return;
+            if (code != QDialog::Accepted || !safeEditor)
             {
-                rootElementName = xmlReader.name().toString();
+                guard->setPolicyEditorBusy(false);
+                return;
             }
-        }
-        if (xmlReader.hasError() || rootElementName.compare(QStringLiteral("SiPolicy"), Qt::CaseInsensitive) != 0)
-        {
-            QMessageBox::warning(
-                this,
-                QStringLiteral("编辑 WDAC 策略"),
-                QStringLiteral("策略 XML 无效。根元素必须为 SiPolicy。%1")
-                    .arg(xmlReader.hasError() ? QStringLiteral("\n%1").arg(xmlReader.errorString()) : QString()));
-            return;
-        }
+            // Snapshot the complete accepted document once. No revision can change after acceptance.
+            WdacXmlSaveRequest request{sourcePath, safeEditor->toPlainText()};
+            const bool shouldDeploy = *deployRequested;
+            guard->m_wdacSavePending = true;
+            const auto failed = [guard, sourcePath](std::exception_ptr) {
+                if (!guard) return;
+                guard->m_wdacSavePending = false;
+                guard->setPolicyEditorBusy(false);
+                if (guard) QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                    QStringLiteral("保存结果未能回传，请重新读取源 XML 核对实际结果：%1").arg(sourcePath));
+            };
+            const auto ticket = guard->m_wdacXmlSave->submitTransaction<WdacXmlSaveRequest, WdacXmlSaveResult>(
+                std::move(request), saveWdacXmlValue,
+                [guard, sourcePath, shouldDeploy](const WdacXmlSaveResult& result, std::uint64_t) {
+                    if (!guard) return true;
+                    guard->m_wdacSavePending = false;
+                    if (result.status == WdacXmlSaveResult::Status::Saved && shouldDeploy)
+                    {
+                        guard->deploySavedWdacPolicy(sourcePath); // Second confirmation only after successful atomic save.
+                        return true;
+                    }
+                    guard->setPolicyEditorBusy(false);
+                    if (!guard) return true;
+                    if (result.status == WdacXmlSaveResult::Status::InvalidXml)
+                        QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"),
+                            QStringLiteral("策略 XML 无效。根元素必须为 SiPolicy。%1")
+                                .arg(result.parserError.isEmpty() ? QString() : QStringLiteral("\n%1").arg(result.parserError)));
+                    else if (result.status == WdacXmlSaveResult::Status::WriteFailed)
+                        QMessageBox::warning(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法保存：%1").arg(sourcePath));
+                    else QMessageBox::information(guard, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("已保存源 XML：%1").arg(sourcePath));
+                    return true;
+                }, failed);
+            if (ticket == 0) failed({});
+        });
+        dialog->open(); // Window-modal without a nested stack-owned editor lifetime.
+    }
 
-        QSaveFile outputFile(sourcePath);
-        if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text) ||
-            outputFile.write(editedXml.toUtf8()) != editedXml.toUtf8().size() ||
-            !outputFile.commit())
-        {
-            QMessageBox::warning(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("无法保存：%1").arg(sourcePath));
-            return;
-        }
-
-        if (!deployRequested)
-        {
-            QMessageBox::information(this, QStringLiteral("编辑 WDAC 策略"), QStringLiteral("已保存源 XML：%1").arg(sourcePath));
-            return;
-        }
-
+    void ApplicationControlPage::deploySavedWdacPolicy(const QString& sourcePath)
+    {
         const QFileInfo sourceInfo(sourcePath);
         const QString binaryPath = sourceInfo.dir().absoluteFilePath(sourceInfo.completeBaseName() + QStringLiteral(".cip"));
+        const QPointer<ApplicationControlPage> guard(this);
         if (QMessageBox::warning(
             this,
             QStringLiteral("确认部署 WDAC 策略"),
@@ -1612,8 +1757,10 @@ namespace ks::misc
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes)
         {
+            if (guard) setPolicyEditorBusy(false);
             return;
         }
+        if (!guard) return;
 
         const QString encodedSourcePath = QString::fromLatin1(sourcePath.toUtf8().toBase64());
         const QString encodedBinaryPath = QString::fromLatin1(binaryPath.toUtf8().toBase64());
@@ -1632,6 +1779,7 @@ namespace ks::misc
             "} catch { Write-Output '__ERROR__'; Write-Output $_.Exception.Message; exit 1 }")
             .arg(encodedSourcePath, encodedBinaryPath);
         runPowerShellMutationAsync(QStringLiteral("部署 WDAC 策略"), deployScript);
+        if (guard) setPolicyEditorBusy(false);
     }
 
     void ApplicationControlPage::addWdacPolicy()
@@ -3136,9 +3284,9 @@ namespace ks::misc
         if (!guard) return;
         if (m_appLockerEditButton) m_appLockerEditButton->setEnabled(m_appLockerModuleAvailable && m_pendingMutationCount == 0);
         if (!guard) return;
-        if (m_refreshButton) m_refreshButton->setEnabled(true);
+        if (m_refreshButton) m_refreshButton->setEnabled(m_pendingMutationCount == 0);
         if (!guard) return;
-        if (m_exportButton) m_exportButton->setEnabled(true);
+        if (m_exportButton) m_exportButton->setEnabled(m_pendingMutationCount == 0);
         if (!guard) return;
         presentVisibleSnapshot();
     }
