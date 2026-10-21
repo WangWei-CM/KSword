@@ -497,3 +497,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 诊断探针的writer关闭请求不等于尾部日志已落盘。默认宏0不启动writer也不等待；显式启用时在app.exec返回后、Qt销毁前进行默认100ms有界等待（调用上限1000ms），不改退出码。writer排空全部已接纳记录并明确统计overflow丢失，QFile flush与Windows FlushFileBuffers均成功后才原子发布带session/实际路径/字节数的completed回执；单独writer_drain_end标记不能作为成功依据。超时、无法写入/flush/发布回执或进程异常退出都不得宣称完成；这不是物理呈现或整条输入因果链证据。
 
 - 插件结果固定source/identity proxy，完整块值及显示顺序在原AsyncOperation后台准备，GUI只接纳布局与persistent映射；完整捕获在请求时即标preparing，不能等下一轮timer才关屏障。同值沿实际先前显示顺序；原Qt dynamicSortFilter=false时，新发布批次只在批内排序后追加，不能静默整表重新排序，合并后台请求仍保留发布批次边界。sort(-1,Descending)也必须按原canonical行号降序；失败恢复原已应用列/方向，reentrant尾部发布保留新行身份。真实Qt旧代理对照140821项（10362行）通过；未验证产品GUI、捕获UI或实机退役时序，极长wrapped段落仍有Qt单次布局成本。
+
+- NIDS不能用TTL、单调时钟或删除历史流键解决驻留增长：原系统时间允许回拨/迟到，必须保留完整FIFO、累计值和cooldown。现将三类状态的合计热键限制为1024，旧键完整序列化到分析worker独占的系统winsqlite3临时库，成功写入后才移出热表；无provider/写失败保留全部热状态并回退RAM，冷读失败走原显式失败通道，不能当新键。零时间原本不记录cooldown，因此0只作未记录哨兵。Reset同时销毁临时库，沿原后台退役lane清理；不新增GUI等待/状态时钟。旧引擎逐包106450输入/38841告警全字段差分通过，资源/故障90012项通过。30000个冷流受控样本private增长旧26.72MB、新1.36MB，但worker耗时168ms→383ms；这是驻留历史键优化及其I/O代价，不能宣称全进程硬内存上限或实机UI提速，活动单键事件和原待处理队列仍完整保留。

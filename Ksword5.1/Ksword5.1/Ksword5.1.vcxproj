@@ -974,6 +974,7 @@
     <ClInclude Include="ksword\network\network_download_tools.h" />
     <ClInclude Include="ksword\network\network_format_tools.h" />
     <ClInclude Include="ksword\network\network_nids.h" />
+    <ClInclude Include="ksword\network\network_nids_state.h" />
     <ClInclude Include="ksword\network\network_process_etw_monitor.h" />
     <ClInclude Include="ksword\network\network_request_tools.h" />
     <ClInclude Include="ksword\process\dll_hijack_detector.h" />

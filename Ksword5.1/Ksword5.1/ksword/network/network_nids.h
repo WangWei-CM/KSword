@@ -5,7 +5,7 @@
 // Namespace: ks::network
 // Purpose:
 // - Provide a lightweight, UI-independent NIDS rule engine for PacketRecord.
-// - Keep rolling flow state in memory and return structured alerts to callers.
+// - Keep complete flow state in a resident working set/private temporary tier.
 // - Cover practical real-time checks: port scan bursts, suspicious DNS/HTTP,
 //   risky remote ports, and abnormal outbound transfer bursts.
 // ============================================================
@@ -14,6 +14,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <list>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,6 +60,8 @@ namespace ks::network
     class NidsEngine
     {
     public:
+        NidsEngine();
+        ~NidsEngine();
         // AnalyzePacket：
         // - 输入：单条抓包记录；
         // - 输出：本报文触发的告警列表；
@@ -116,9 +120,24 @@ namespace ks::network
             std::uint64_t nowMs,
             std::uint64_t cooldownMs);
 
-        std::unordered_map<std::string, PortScanWindow> m_portScanWindowByKey; // 扫描窗口。
-        std::unordered_map<std::string, ByteWindow> m_outboundByteWindowByKey; // 出站字节窗口。
-        std::unordered_map<std::string, std::uint64_t> m_flowAlertLastTimestampByKey; // 告警冷却。
+        // Only residency changes. Logical state is never expired or truncated.
+        struct StateKey { int kind; std::string key; };
+        using RecentPosition = std::list<StateKey>::iterator;
+        struct CachedScan { PortScanWindow state; RecentPosition recent; };
+        struct CachedBytes { ByteWindow state; RecentPosition recent; };
+        struct CachedCooldown { std::uint64_t state = 0; RecentPosition recent; };
+        class StateStore;
+        PortScanWindow& scanWindow(const std::string& key);
+        ByteWindow& byteWindow(const std::string& key);
+        std::uint64_t& flowCooldown(const std::string& key);
+        void trimResidentState();
+        static constexpr std::size_t kResidentStateKeys = 1024;
+        std::unordered_map<std::string, CachedScan> m_portScanWindowByKey;
+        std::unordered_map<std::string, CachedBytes> m_outboundByteWindowByKey;
+        std::unordered_map<std::string, CachedCooldown> m_flowAlertLastTimestampByKey;
+        std::list<StateKey> m_recentStateKeys;
+        std::unique_ptr<StateStore> m_stateStore;
+        bool m_stateTierEnabled = true; // Store unavailable: retain the legacy complete RAM state.
     };
 
     // NidsAlertSeverityToString：等级枚举转稳定英文文本。

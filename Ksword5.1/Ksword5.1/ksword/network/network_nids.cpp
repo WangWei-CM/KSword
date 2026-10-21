@@ -1,4 +1,5 @@
 #include "network_nids.h"
+#include "network_nids_state.h"
 
 #include "network_format_tools.h"
 
@@ -12,6 +13,71 @@
 
 namespace ks::network
 {
+    NidsEngine::NidsEngine() = default;
+    NidsEngine::~NidsEngine() = default;
+
+    NidsEngine::PortScanWindow& NidsEngine::scanWindow(const std::string& key)
+    {
+        auto [position, added] = m_portScanWindowByKey.try_emplace(key);
+        auto& value = position->second;
+        if (added) {
+            if (m_stateStore) if (auto bytes = m_stateStore->read(0, key)) StateStore::restore(*bytes, value.state);
+            if (m_stateTierEnabled) { m_recentStateKeys.push_back({0, key}); value.recent = std::prev(m_recentStateKeys.end()); }
+        } else if (m_stateTierEnabled) m_recentStateKeys.splice(m_recentStateKeys.end(), m_recentStateKeys, value.recent);
+        return value.state;
+    }
+    NidsEngine::ByteWindow& NidsEngine::byteWindow(const std::string& key)
+    {
+        auto [position, added] = m_outboundByteWindowByKey.try_emplace(key);
+        auto& value = position->second;
+        if (added) {
+            if (m_stateStore) if (auto bytes = m_stateStore->read(1, key)) StateStore::restore(*bytes, value.state);
+            if (m_stateTierEnabled) { m_recentStateKeys.push_back({1, key}); value.recent = std::prev(m_recentStateKeys.end()); }
+        } else if (m_stateTierEnabled) m_recentStateKeys.splice(m_recentStateKeys.end(), m_recentStateKeys, value.recent);
+        return value.state;
+    }
+    std::uint64_t& NidsEngine::flowCooldown(const std::string& key)
+    {
+        auto [position, added] = m_flowAlertLastTimestampByKey.try_emplace(key);
+        auto& value = position->second;
+        if (added) {
+            if (m_stateStore) if (auto bytes = m_stateStore->read(2, key)) StateStore::restore(*bytes, value.state);
+            if (m_stateTierEnabled) { m_recentStateKeys.push_back({2, key}); value.recent = std::prev(m_recentStateKeys.end()); }
+        } else if (m_stateTierEnabled) m_recentStateKeys.splice(m_recentStateKeys.end(), m_recentStateKeys, value.recent);
+        return value.state;
+    }
+    void NidsEngine::trimResidentState()
+    {
+        if (!m_stateTierEnabled || m_recentStateKeys.size() <= kResidentStateKeys) return;
+        if (!m_stateStore) m_stateStore = std::make_unique<StateStore>(); // Worker only, after first overflow.
+        while (m_recentStateKeys.size() > kResidentStateKeys) {
+            const auto& oldest = m_recentStateKeys.front();
+            bool stored = false;
+            if (oldest.kind == 0) {
+                const auto position = m_portScanWindowByKey.find(oldest.key);
+                stored = m_stateStore->save(0, oldest.key, StateStore::pack(position->second.state));
+                if (stored) m_portScanWindowByKey.erase(position);
+            } else if (oldest.kind == 1) {
+                const auto position = m_outboundByteWindowByKey.find(oldest.key);
+                stored = m_stateStore->save(1, oldest.key, StateStore::pack(position->second.state));
+                if (stored) m_outboundByteWindowByKey.erase(position);
+            } else {
+                const auto position = m_flowAlertLastTimestampByKey.find(oldest.key);
+                stored = m_stateStore->save(2, oldest.key, StateStore::pack(position->second.state));
+                if (stored) m_flowAlertLastTimestampByKey.erase(position);
+            }
+            if (!stored) {
+                // No successful store means no eviction. Retain every complete
+                // hot value; existing cold values remain readable. A cold-read
+                // fault throws into the existing explicit failed/clear path.
+                m_stateTierEnabled = false;
+                m_recentStateKeys.clear();
+                return;
+            }
+            m_recentStateKeys.pop_front();
+        }
+    }
+
     namespace
     {
         constexpr std::uint64_t kPortScanWindowMs = 15000;
@@ -535,6 +601,7 @@ namespace ks::network
         analyzeHttpPayload(packetRecord, alertList);
         analyzeSuspiciousPort(packetRecord, alertList);
         analyzeOutboundByteBurst(packetRecord, alertList);
+        trimResidentState();
         return alertList;
     }
 
@@ -543,6 +610,9 @@ namespace ks::network
         m_portScanWindowByKey.clear();
         m_outboundByteWindowByKey.clear();
         m_flowAlertLastTimestampByKey.clear();
+        m_recentStateKeys.clear();
+        m_stateStore.reset();
+        m_stateTierEnabled = true;
     }
 
     void NidsEngine::analyzePortScan(const PacketRecord& packetRecord, std::vector<NidsAlert>& alertList)
@@ -587,7 +657,7 @@ namespace ks::network
         }
 
         const std::string scanKey = buildScanKey(packetRecord);
-        PortScanWindow& window = m_portScanWindowByKey[scanKey];
+        PortScanWindow& window = scanWindow(scanKey);
         appendPortWindowEvent(window, packetRecord.captureTimestampMs, probePort);
 
         const std::size_t distinctPortCount = countDistinctPorts(window.eventList);
@@ -837,7 +907,7 @@ namespace ks::network
         }
 
         const std::string flowKey = buildEndpointKey(packetRecord) + "|out-bytes";
-        ByteWindow& window = m_outboundByteWindowByKey[flowKey];
+        ByteWindow& window = byteWindow(flowKey);
         appendByteWindowEvent(window, packetRecord.captureTimestampMs, packetRecord.payloadSize);
         if (window.totalBytes < kOutboundByteThreshold)
         {
@@ -878,14 +948,14 @@ namespace ks::network
             return true;
         }
 
-        const auto iterator = m_flowAlertLastTimestampByKey.find(dedupeKey);
-        if (iterator != m_flowAlertLastTimestampByKey.end() &&
-            nowMs > iterator->second &&
-            nowMs - iterator->second < cooldownMs)
+        auto& timestamp = flowCooldown(dedupeKey);
+        // nowMs==0 returned above; a recorded legacy cooldown is always nonzero.
+        if (timestamp != 0 && nowMs > timestamp &&
+            nowMs - timestamp < cooldownMs)
         {
             return false;
         }
-        m_flowAlertLastTimestampByKey[dedupeKey] = nowMs;
+        timestamp = nowMs;
         return true;
     }
 } // namespace ks::network

@@ -3441,6 +3441,9 @@
     <ClInclude Include="ksword\network\network_nids.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ksword\network\network_nids_state.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ksword\network\network_process_etw_monitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
