@@ -1454,22 +1454,27 @@ namespace
             QMessageBox::No) == QMessageBox::Yes;
     }
 
-    bool callbackEnumExecuteSafeRemove(
+    void callbackEnumExecuteSafeRemove(
         QWidget* parentWidget,
         QLabel* statusLabel,
         ks::ui::StructuredFieldView* detailEditor,
-        const KernelCallbackEnumEntry& entry)
+        const KernelCallbackEnumEntry& selectedEntry,
+        QPointer<ks::ui::AsyncOperation> operation,
+        std::function<void()> removed)
     {
         // Input: UI sinks plus the selected callback row.
         // Processing: validates the EX packet, asks for confirmation, then calls ArkDriverClient.
-        // Return: true only when R0 completed and confirmed the removal.
+        // Completion refresh is delivered only after the accepted native receipt.
+        const QPointer<QWidget> owner(parentWidget);
+        if (!owner || !operation || operation->isBusy()) return;
+        const KernelCallbackEnumEntry entry = selectedEntry;
         if (!callbackEnumCanUseLegacySafeRemove(entry))
         {
             QMessageBox::information(
                 parentWidget,
                 kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
                 kernelText("kernel.callback.enum.remove.safe.unavailable", QStringLiteral("当前记录不支持安全移除。")));
-            return false;
+            return;
         }
 
         const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST requestPacket =
@@ -1484,66 +1489,84 @@ namespace
                 parentWidget,
                 kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
                 kernelText("kernel.callback.enum.remove.safe.missing_value", QStringLiteral("当前记录缺少可用的类型或地址/标识值。")));
-            return false;
+            return;
         }
 
         if (!callbackEnumConfirmSafeRemove(parentWidget, entry))
         {
-            if (statusLabel != nullptr)
+            if (owner && statusLabel != nullptr)
             {
                 statusLabel->setText(kernelText("kernel.callback.enum.remove.safe.cancelled", QStringLiteral("状态：已取消安全移除")));
             }
-            return false;
+            return;
         }
 
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::CallbackRemoveExResult removeResult =
-            driverClient.removeExternalCallbackEx(requestPacket);
-        if (detailEditor != nullptr)
-        {
-            detailEditor->setDocument(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
-        }
+        if (!owner || !operation || operation->isBusy()) return;
+        operation->submitTransaction<KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST, ksword::ark::CallbackRemoveExResult>(
+            requestPacket,
+            [](const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST& request) {
+                const ksword::ark::DriverClient driverClient;
+                return driverClient.removeExternalCallbackEx(request);
+            },
+            [owner, status = QPointer<QLabel>(statusLabel), detail = QPointer<ks::ui::StructuredFieldView>(detailEditor),
+             entry, requestPacket, removed = std::move(removed)](const ksword::ark::CallbackRemoveExResult& removeResult, std::uint64_t) {
+                if (!owner) return true;
+                QWidget* parentWidget = owner.data();
+                QLabel* statusLabel = status.data();
+                auto* detailEditor = detail.data();
+                if (detailEditor != nullptr)
+                {
+                    detailEditor->setDocument(callbackEnumExRemoveDetailText(entry, requestPacket, removeResult));
+                }
 
-        if (!removeResult.io.ok)
-        {
-            if (statusLabel != nullptr)
-            {
-                statusLabel->setText(
-                    kernelText("kernel.callback.enum.remove.safe.io_failed", QStringLiteral("状态：安全移除失败，Win32=%1"))
-                    .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
-            }
-            QMessageBox::warning(
-                parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
-                kernelText("kernel.callback.enum.remove.safe.call_failed", QStringLiteral("回调移除失败，Win32=%1。"))
-                    .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
-            return false;
-        }
+                if (!owner) return true;
+                if (!removeResult.io.ok)
+                {
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(
+                            kernelText("kernel.callback.enum.remove.safe.io_failed", QStringLiteral("状态：安全移除失败，Win32=%1"))
+                            .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
+                    }
+                    if (!owner) return true;
+                    QMessageBox::warning(
+                        parentWidget,
+                        kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
+                        kernelText("kernel.callback.enum.remove.safe.call_failed", QStringLiteral("回调移除失败，Win32=%1。"))
+                            .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
+                    return true;
+                }
 
-        if (removeResult.response.ntstatus >= 0)
-        {
-            if (statusLabel != nullptr)
-            {
-                statusLabel->setText(kernelText("kernel.callback.enum.remove.safe.completed", QStringLiteral("状态：安全移除完成")));
-            }
-            return true;
-        }
-        else
-        {
-            if (statusLabel != nullptr)
-            {
-                statusLabel->setText(
-                    kernelText("kernel.callback.enum.remove.safe.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=%1"))
-                    .arg(callbackEnumNtStatusText(removeResult.response.ntstatus)));
-            }
-            QMessageBox::warning(
-                parentWidget,
-                kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
-                kernelText("kernel.callback.enum.remove.safe.driver_failed_message", QStringLiteral("驱动返回失败，NTSTATUS=%1。"))
-                    .arg(callbackEnumNtStatusText(removeResult.response.ntstatus))
-                    + QStringLiteral("\n") + QString::fromWCharArray(removeResult.response.message));
-        }
-        return false;
+                if (removeResult.response.ntstatus >= 0)
+                {
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(kernelText("kernel.callback.enum.remove.safe.completed", QStringLiteral("状态：安全移除完成")));
+                    }
+                    if (owner && removed) removed();
+                    return true;
+                }
+                else
+                {
+                    if (statusLabel != nullptr)
+                    {
+                        statusLabel->setText(
+                            kernelText("kernel.callback.enum.remove.safe.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=%1"))
+                            .arg(callbackEnumNtStatusText(removeResult.response.ntstatus)));
+                    }
+                    if (!owner) return true;
+                    QMessageBox::warning(
+                        parentWidget,
+                        kernelText("kernel.callback.enum.remove.safe.title", QStringLiteral("安全移除")),
+                        kernelText("kernel.callback.enum.remove.safe.driver_failed_message", QStringLiteral("驱动返回失败，NTSTATUS=%1。"))
+                            .arg(callbackEnumNtStatusText(removeResult.response.ntstatus))
+                            + QStringLiteral("\n") + QString::fromWCharArray(removeResult.response.message));
+                }
+                return true;
+            },
+            [owner, status = QPointer<QLabel>(statusLabel)](std::exception_ptr) {
+                if (owner && status) status->setText(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+            });
     }
 
     QString callbackEnumPrimaryAddressText(const KernelCallbackEnumEntry& entry)
@@ -2227,6 +2250,8 @@ void KernelDock::initializeCallbackEnumTab()
     initializeCallbackRemovePanel();
 
     connect(m_refreshCallbackEnumButton, &QPushButton::clicked, this, [this]() {
+        if ((m_kernelActionOperations[0] && m_kernelActionOperations[0]->isBusy())
+            || (m_kernelActionOperations[1] && m_kernelActionOperations[1]->isBusy())) return;
         refreshCallbackEnumAsync();
     });
     auto* callbackEnumFilterTimer = new QTimer(m_callbackEnumFilterEdit);
@@ -3102,6 +3127,8 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
 
     if (selectedAction == refreshAction)
     {
+        if ((m_kernelActionOperations[0] && m_kernelActionOperations[0]->isBusy())
+            || (m_kernelActionOperations[1] && m_kernelActionOperations[1]->isBusy())) return;
         refreshCallbackEnumAsync();
         return;
     }
@@ -3178,15 +3205,18 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
     {
         if (actionEntry != nullptr)
         {
-            const bool removalConfirmed = callbackEnumExecuteSafeRemove(
+            if (m_callbackEnumRefreshRunning.load()
+                || (m_kernelActionOperations[1] && m_kernelActionOperations[1]->isBusy())) return;
+            auto& operation = m_kernelActionOperations[0];
+            if (!operation) operation = new ks::ui::AsyncOperation(this);
+            if (operation->isBusy()) return;
+            callbackEnumExecuteSafeRemove(
                 this,
                 m_callbackEnumStatusLabel,
                 m_callbackEnumDetailEditor,
-                *actionEntry);
-            if (removalConfirmed)
-            {
-                refreshCallbackEnumAsync();
-            }
+                *actionEntry,
+                operation,
+                [this]() { refreshCallbackEnumAsync(); });
         }
         return;
     }

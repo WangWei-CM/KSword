@@ -1,12 +1,12 @@
 #include "KernelDock.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ToolbarMetrics.h"
+#include "../UI/AsyncOperation.h"
 
 #include "../ArkDriverClient/ArkDriverClient.h"
 #include "../theme.h"
 
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -17,7 +17,6 @@
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QStringList>
-#include <QThreadPool>
 #include <QVBoxLayout>
 
 #include <atomic>
@@ -312,6 +311,20 @@ void KernelDock::initializeCallbackRemovePanel()
     m_callbackEnumLayout->addWidget(m_callbackRemoveContentWidget, 0);
 
     connect(m_callbackRemoveButton, &QPushButton::clicked, this, [this]() {
+        if (m_callbackEnumRefreshRunning.load()
+            || (m_kernelActionOperations[0] && m_kernelActionOperations[0]->isBusy())) return;
+        auto& operation = m_kernelActionOperations[1];
+        if (!operation) {
+            operation = new ks::ui::AsyncOperation(this);
+            operation->setStateChangedCallback([this]() {
+                const auto current = m_kernelActionOperations[1];
+                if (m_callbackRemoveButton != nullptr) m_callbackRemoveButton->setEnabled(current && !current->isBusy());
+            });
+        }
+        if (operation->isBusy()) return;
+        const QPointer<KernelDock> guardedSelf(this);
+        const quint32 selectedCallbackType = static_cast<quint32>(m_callbackRemoveTypeCombo->currentData().toUInt());
+        const QString callbackTypeText = m_callbackRemoveTypeCombo->currentText();
         quint64 callbackAddress = 0;
         if (!callbackRemoveParseAddress(m_callbackRemoveAddressEdit->text(), callbackAddress) || callbackAddress == 0)
         {
@@ -330,7 +343,7 @@ void KernelDock::initializeCallbackRemovePanel()
                 "地址：0x%2\n\n"
                 "该地址由你手工输入，本页没有枚举行的来源与可信信息可供交叉核对。\n"
                 "此操作会修改内核回调注册，可能影响系统稳定性。是否继续？"))
-                .arg(m_callbackRemoveTypeCombo->currentText())
+                .arg(callbackTypeText)
                 .arg(QString::number(callbackAddress, 16).toUpper());
         if (QMessageBox::question(
                 this,
@@ -342,8 +355,7 @@ void KernelDock::initializeCallbackRemovePanel()
             return;
         }
 
-        const quint32 selectedCallbackType =
-            static_cast<quint32>(m_callbackRemoveTypeCombo->currentData().toUInt());
+        if (!guardedSelf || !operation || operation->isBusy()) return;
         if (selectedCallbackType == KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_TYPE_OBJECT)
         {
             const KernelCallbackEnumEntry* matchedEntry = nullptr;
@@ -383,7 +395,7 @@ void KernelDock::initializeCallbackRemovePanel()
                     this,
                     kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
                     m_callbackRemoveStatusLabel->text());
-                refreshCallbackEnumAsync();
+                if (guardedSelf) refreshCallbackEnumAsync();
                 return;
             }
 
@@ -403,45 +415,58 @@ void KernelDock::initializeCallbackRemovePanel()
             exRequest.trustFlags = matchedEntry->trustFlags;
             exRequest.removeBehavior = matchedEntry->removeBehavior;
 
-            const ksword::ark::DriverClient driverClient;
-            const ksword::ark::CallbackRemoveExResult removeResult =
-                driverClient.removeExternalCallbackEx(exRequest);
-            if (!removeResult.io.ok)
-            {
-                m_callbackRemoveStatusLabel->setText(
-                    kernelText("kernel.callback.enum.remove.safe.io_failed", QStringLiteral("状态：安全移除失败，Win32=%1"))
-                    .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
-                QMessageBox::warning(
-                    this,
-                    kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
-                    m_callbackRemoveStatusLabel->text());
-                return;
-            }
+            operation->submitTransaction<KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST, ksword::ark::CallbackRemoveExResult>(
+                exRequest,
+                [](const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_EX_REQUEST& request) {
+                    const ksword::ark::DriverClient driverClient;
+                    return driverClient.removeExternalCallbackEx(request);
+                },
+                [this, guardedSelf](const ksword::ark::CallbackRemoveExResult& removeResult, std::uint64_t) {
+                    if (!guardedSelf) return true;
+                    if (!removeResult.io.ok)
+                    {
+                        m_callbackRemoveStatusLabel->setText(
+                            kernelText("kernel.callback.enum.remove.safe.io_failed", QStringLiteral("状态：安全移除失败，Win32=%1"))
+                            .arg(static_cast<qulonglong>(removeResult.io.win32Error)));
+                        if (!guardedSelf) return true;
+                        QMessageBox::warning(
+                            this,
+                            kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
+                            m_callbackRemoveStatusLabel->text());
+                        return true;
+                    }
 
-            const QString responseMessage = QString::fromWCharArray(removeResult.response.message);
-            if (removeResult.response.ntstatus >= 0)
-            {
-                m_callbackRemoveStatusLabel->setText(kernelText(
-                    "kernel.callback.enum.remove.safe.completed",
-                    QStringLiteral("状态：安全移除完成")));
-                QMessageBox::information(
-                    this,
-                    kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
-                    responseMessage.isEmpty() ? m_callbackRemoveStatusLabel->text() : responseMessage);
-                refreshCallbackEnumAsync();
-            }
-            else
-            {
-                m_callbackRemoveStatusLabel->setText(
-                    kernelText("kernel.callback.enum.remove.safe.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=%1"))
-                    .arg(QStringLiteral("0x%1")
-                        .arg(static_cast<qulonglong>(static_cast<quint32>(removeResult.response.ntstatus)), 8, 16, QChar('0'))
-                        .toUpper()));
-                QMessageBox::warning(
-                    this,
-                    kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
-                    responseMessage.isEmpty() ? m_callbackRemoveStatusLabel->text() : responseMessage);
-            }
+                    const QString responseMessage = QString::fromWCharArray(removeResult.response.message);
+                    if (removeResult.response.ntstatus >= 0)
+                    {
+                        m_callbackRemoveStatusLabel->setText(kernelText(
+                            "kernel.callback.enum.remove.safe.completed",
+                            QStringLiteral("状态：安全移除完成")));
+                        if (!guardedSelf) return true;
+                        QMessageBox::information(
+                            this,
+                            kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
+                            responseMessage.isEmpty() ? m_callbackRemoveStatusLabel->text() : responseMessage);
+                        if (guardedSelf) refreshCallbackEnumAsync();
+                    }
+                    else
+                    {
+                        m_callbackRemoveStatusLabel->setText(
+                            kernelText("kernel.callback.enum.remove.safe.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=%1"))
+                            .arg(QStringLiteral("0x%1")
+                                .arg(static_cast<qulonglong>(static_cast<quint32>(removeResult.response.ntstatus)), 8, 16, QChar('0'))
+                                .toUpper()));
+                        if (!guardedSelf) return true;
+                        QMessageBox::warning(
+                            this,
+                            kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
+                            responseMessage.isEmpty() ? m_callbackRemoveStatusLabel->text() : responseMessage);
+                    }
+                    return true;
+                },
+                [this, guardedSelf](std::exception_ptr) {
+                    if (guardedSelf) m_callbackRemoveStatusLabel->setText(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+                });
             return;
         }
 
@@ -452,87 +477,92 @@ void KernelDock::initializeCallbackRemovePanel()
         requestPacket.flags = KSWORD_ARK_EXTERNAL_CALLBACK_REMOVE_FLAG_NONE;
         requestPacket.callbackAddress = callbackAddress;
 
-        const ksword::ark::DriverClient driverClient;
-        const ksword::ark::CallbackRemoveResult removeResult = driverClient.removeExternalCallback(requestPacket);
-        const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE& responsePacket = removeResult.response;
-        const DWORD bytesReturned = removeResult.io.bytesReturned;
-
-        if (!removeResult.io.ok)
-        {
-            m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.io_failed", QStringLiteral("状态：移除失败，error=%1"))
-                .arg(removeResult.io.win32Error));
-            const QString errorDetailText = kernelText("kernel.callback.remove.detail.io_failed", QStringLiteral("回调移除失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3"))
-                .arg(removeResult.io.win32Error)
-                .arg(QString::number(callbackAddress, 16).toUpper())
-                .arg(callbackRemoveIoMessageText(QString::fromStdString(removeResult.io.message)));
-            QMessageBox::warning(this, kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")), errorDetailText);
-            return;
-        }
-
-        const QString modulePath = QString::fromWCharArray(responsePacket.modulePath);
-        const QString responseServiceName = QString::fromWCharArray(responsePacket.serviceName);
-
-        // composeCallbackRemoveDetailText：
-        // - 入参 localServiceNameText：本地 SCM 服务映射结果，未完成时用“未解析”占位；
-        // - 处理：把本轮移除响应的全部字段拼成详情文本，供同步渲染与异步补齐复用；
-        // - 返回：用于结果弹窗的详情文本。
-        const auto composeCallbackRemoveDetailText =
-            [typeText = m_callbackRemoveTypeCombo->currentText(),
-             callbackAddress,
-             bytesReturned,
-             ntstatusValue = static_cast<quint32>(responsePacket.ntstatus),
-             mappingText = callbackRemoveMappingText(responsePacket.mappingFlags),
-             modulePath,
-             moduleBase = static_cast<quint64>(responsePacket.moduleBase),
-             moduleSize = static_cast<quint64>(responsePacket.moduleSize),
-             responseServiceName](const QString& localServiceNameText)
-        {
-            return kernelText("kernel.callback.remove.detail.full", QStringLiteral(
-                "安全移除请求已执行。\n"
-                "- 类型：%1\n"
-                "- 地址：0x%2\n"
-                "- 返回字节：%3\n"
-                "- NTSTATUS：0x%4\n"
-                "- 映射标志：%5\n"
-                "- 模块路径：%6\n"
-                "- 模块基址：0x%7\n"
-                "- 模块大小：0x%8\n"
-                "- 驱动返回服务名：%9\n"
-                "- 本地服务映射：%10"))
-                .arg(typeText)
-                .arg(QString::number(callbackAddress, 16).toUpper())
-                .arg(bytesReturned)
-                .arg(QString::number(ntstatusValue, 16).rightJustified(8, QLatin1Char('0')).toUpper())
-                .arg(mappingText)
-                .arg(modulePath.isEmpty() ? kernelText("kernel.callback.remove.placeholder.unresolved", QStringLiteral("未解析")) : modulePath)
-                .arg(QString::number(moduleBase, 16).toUpper())
-                .arg(QString::number(moduleSize, 16).toUpper())
-                .arg(responseServiceName.isEmpty() ? kernelText("kernel.callback.remove.placeholder.not_returned", QStringLiteral("未返回")) : responseServiceName)
-                .arg(localServiceNameText);
-        };
-
-        // 本地服务名反查要枚举全量 SCM 驱动服务并逐条 QueryServiceConfigW，最坏在秒级。
-        // 内核回调此刻已经被改，结果弹窗在反查完成后再展示，避免弹出缺少本地服务
-        // 映射的半成品详情。
-        const QString unmatchedServiceText = kernelText("kernel.callback.remove.placeholder.unmatched", QStringLiteral("未匹配"));
-
-        const QPointer<KernelDock> guardedSelf(this);
-        const quint64 requestGeneration = g_callbackRemoveResolveGeneration.fetch_add(1ULL) + 1ULL;
-        const bool removalSucceeded = responsePacket.ntstatus >= 0;
-        QThreadPool::globalInstance()->start(
-            [guardedSelf, requestGeneration, modulePath, unmatchedServiceText, removalSucceeded, composeCallbackRemoveDetailText]()
-            {
-                const QString resolvedServiceName = callbackRemoveResolveServiceByModule(modulePath);
-                const QString localServiceNameText = resolvedServiceName.isEmpty()
-                    ? unmatchedServiceText
-                    : resolvedServiceName;
-
-                QCoreApplication* const appInstance = QCoreApplication::instance();
-                if (appInstance == nullptr)
-                {
-                    return;
+        struct LegacyRemoveReceipt { ksword::ark::CallbackRemoveResult result; QString serviceName; quint64 generation = 0; };
+        operation->submitTransaction<KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST, LegacyRemoveReceipt>(
+            requestPacket,
+            [](const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_REQUEST& request) {
+                const ksword::ark::DriverClient driverClient;
+                LegacyRemoveReceipt receipt;
+                receipt.result = driverClient.removeExternalCallback(request);
+                if (receipt.result.io.ok) {
+                    receipt.generation = g_callbackRemoveResolveGeneration.fetch_add(1ULL) + 1ULL;
+                    // Preserve the complete original SCM lookup before detail
+                    // delivery, under this same accepted value-resource lifetime.
+                    try { receipt.serviceName = callbackRemoveResolveServiceByModule(QString::fromWCharArray(receipt.result.response.modulePath)); }
+                    catch (...) { /* Keep the original unmatched-service fallback. */ }
                 }
-                QMetaObject::invokeMethod(appInstance,
+                return receipt;
+            },
+            [this, guardedSelf, callbackAddress, callbackTypeText](const LegacyRemoveReceipt& receipt, std::uint64_t) {
+                if (!guardedSelf) return true;
+                const auto& removeResult = receipt.result;
+                const KSWORD_ARK_REMOVE_EXTERNAL_CALLBACK_RESPONSE& responsePacket = removeResult.response;
+                const DWORD bytesReturned = removeResult.io.bytesReturned;
+
+                if (!removeResult.io.ok)
+                {
+                    m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.io_failed", QStringLiteral("状态：移除失败，error=%1"))
+                        .arg(removeResult.io.win32Error));
+                    const QString errorDetailText = kernelText("kernel.callback.remove.detail.io_failed", QStringLiteral("回调移除失败，Win32 错误码=%1。\n地址=0x%2\n详情=%3"))
+                        .arg(removeResult.io.win32Error)
+                        .arg(QString::number(callbackAddress, 16).toUpper())
+                        .arg(callbackRemoveIoMessageText(QString::fromStdString(removeResult.io.message)));
+                    if (!guardedSelf) return true;
+                    QMessageBox::warning(this, kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")), errorDetailText);
+                    return true;
+                }
+
+                const QString modulePath = QString::fromWCharArray(responsePacket.modulePath);
+                const QString responseServiceName = QString::fromWCharArray(responsePacket.serviceName);
+
+                // composeCallbackRemoveDetailText：
+                // - 入参 localServiceNameText：本地 SCM 服务映射结果，未完成时用“未解析”占位；
+                // - 处理：把本轮移除响应的全部字段拼成详情文本，供同步渲染与异步补齐复用；
+                // - 返回：用于结果弹窗的详情文本。
+                const auto composeCallbackRemoveDetailText =
+                    [typeText = callbackTypeText,
+                     callbackAddress,
+                     bytesReturned,
+                     ntstatusValue = static_cast<quint32>(responsePacket.ntstatus),
+                     mappingText = callbackRemoveMappingText(responsePacket.mappingFlags),
+                     modulePath,
+                     moduleBase = static_cast<quint64>(responsePacket.moduleBase),
+                     moduleSize = static_cast<quint64>(responsePacket.moduleSize),
+                     responseServiceName](const QString& localServiceNameText)
+                {
+                    return kernelText("kernel.callback.remove.detail.full", QStringLiteral(
+                        "安全移除请求已执行。\n"
+                        "- 类型：%1\n"
+                        "- 地址：0x%2\n"
+                        "- 返回字节：%3\n"
+                        "- NTSTATUS：0x%4\n"
+                        "- 映射标志：%5\n"
+                        "- 模块路径：%6\n"
+                        "- 模块基址：0x%7\n"
+                        "- 模块大小：0x%8\n"
+                        "- 驱动返回服务名：%9\n"
+                        "- 本地服务映射：%10"))
+                        .arg(typeText)
+                        .arg(QString::number(callbackAddress, 16).toUpper())
+                        .arg(bytesReturned)
+                        .arg(QString::number(ntstatusValue, 16).rightJustified(8, QLatin1Char('0')).toUpper())
+                        .arg(mappingText)
+                        .arg(modulePath.isEmpty() ? kernelText("kernel.callback.remove.placeholder.unresolved", QStringLiteral("未解析")) : modulePath)
+                        .arg(QString::number(moduleBase, 16).toUpper())
+                        .arg(QString::number(moduleSize, 16).toUpper())
+                        .arg(responseServiceName.isEmpty() ? kernelText("kernel.callback.remove.placeholder.not_returned", QStringLiteral("未返回")) : responseServiceName)
+                        .arg(localServiceNameText);
+                };
+
+                // 本地服务名反查要枚举全量 SCM 驱动服务并逐条 QueryServiceConfigW，最坏在秒级。
+                // 内核回调此刻已经被改，结果弹窗在反查完成后再展示，避免弹出缺少本地服务
+                // 映射的半成品详情。
+                const QString unmatchedServiceText = kernelText("kernel.callback.remove.placeholder.unmatched", QStringLiteral("未匹配"));
+
+                const quint64 requestGeneration = receipt.generation;
+                const bool removalSucceeded = responsePacket.ntstatus >= 0;
+                const QString localServiceNameText = receipt.serviceName.isEmpty() ? unmatchedServiceText : receipt.serviceName;
+                QMetaObject::invokeMethod(this,
                     [guardedSelf, requestGeneration, localServiceNameText, removalSucceeded, composeCallbackRemoveDetailText]()
                     {
                         if (guardedSelf == nullptr)
@@ -558,18 +588,23 @@ void KernelDock::initializeCallbackRemovePanel()
                                 kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")),
                                 detailText);
                         }
-                    });
-            });
+                    }, Qt::QueuedConnection);
 
-        if (responsePacket.ntstatus >= 0)
-        {
-            m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.completed", QStringLiteral("状态：移除完成。")));
-        }
-        else
-        {
-            m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=0x%1"))
-                .arg(QString::number(static_cast<quint32>(responsePacket.ntstatus), 16).toUpper()));
-            QMessageBox::warning(this, kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")), m_callbackRemoveStatusLabel->text());
-        }
+                if (responsePacket.ntstatus >= 0)
+                {
+                    m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.completed", QStringLiteral("状态：移除完成。")));
+                }
+                else
+                {
+                    m_callbackRemoveStatusLabel->setText(kernelText("kernel.callback.remove.status.driver_failed", QStringLiteral("状态：驱动返回失败，NTSTATUS=0x%1"))
+                        .arg(QString::number(static_cast<quint32>(responsePacket.ntstatus), 16).toUpper()));
+                    if (!guardedSelf) return true;
+                    QMessageBox::warning(this, kernelText("kernel.callback.remove.title.short", QStringLiteral("回调移除")), m_callbackRemoveStatusLabel->text());
+                }
+                return true;
+            },
+            [this, guardedSelf](std::exception_ptr) {
+                if (guardedSelf) m_callbackRemoveStatusLabel->setText(kernelText("kernel.driver_editor.status.background_failed", QStringLiteral("状态：后台查询失败，请刷新后重试。")));
+            });
     });
 }
