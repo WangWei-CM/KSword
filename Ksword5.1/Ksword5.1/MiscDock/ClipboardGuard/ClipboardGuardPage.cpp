@@ -51,6 +51,8 @@ namespace ks::misc
 
     ClipboardGuardPage::ClipboardGuardPage(QWidget* const parent)
         : QWidget(parent)
+        , m_inbox(std::make_shared<ClipboardGuardInbox>())
+        , m_runtime(std::make_shared<ClipboardGuardRuntime>(m_inbox))
     {
         initializeUi();
         initializeConnections();
@@ -58,30 +60,12 @@ namespace ks::misc
 
     ClipboardGuardPage::~ClipboardGuardPage()
     {
-        // 必须最先等 m_scanThreadPool 排空：refreshProcessListAndSessionsAsync 提交
-        // 的后台任务会解引用 QPointer<ClipboardGuardPage>（非线程安全，只是靠"任务
-        // 存活期间对象不会开始析构"这个前提保证它读到的值不被并发修改）。这里不等的话，
-        // 任务里的 guardThis->ensureProcessProtected(...) 等调用可能正好撞上下面这些
-        // 成员已经开始销毁的过程，是一个真实的 use-after-free。
-        m_scanThreadPool.waitForDone();
-
-        // 页面销毁前必须先让所有会话线程退场，否则线程回调里的 QPointer 判空
-        // 之外还会残留没有 join 的 std::thread，析构 std::thread 会直接 terminate。
-        std::vector<std::uint32_t> pidList;
-        {
-            std::lock_guard<std::mutex> lock(m_sessionsMutex);
-            for (const std::unique_ptr<Session>& sessionPointer : m_sessions)
-            {
-                if (sessionPointer != nullptr)
-                {
-                    pidList.push_back(sessionPointer->pid);
-                }
-            }
-        }
-        for (const std::uint32_t pidValue : pidList)
-        {
-            teardownSession(pidValue);
-        }
+        if (m_processPollTimer) m_processPollTimer->stop();
+        if (m_uiFlushTimer) m_uiFlushTimer->stop();
+        // The registered value owner retains every session/lease until STOP,
+        // CancelSynchronousIo, reader join and pipe/session handle cleanup finish.
+        m_runtime->requestStop();
+        m_runtime.reset();
     }
 
     void ClipboardGuardPage::notifyPageActivated()
