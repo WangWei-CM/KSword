@@ -10,6 +10,7 @@
 #include <QtCore/QMetaObject>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
+#include <QtCore/QDeadlineTimer>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QProcess>
@@ -1158,22 +1159,16 @@ namespace ks::network
                     }
                 }
 
-                // 会话线程可能正卡在叶子证书生成的 powershell.exe 上，等待必须带超时：
-                // 先给一轮常规等待，超时后请求中断并再次 quit，最后仍未退出就放弃等待，
-                // 绝不允许调用方（含析构路径）在这里无限期挂死。
+                // One aggregate deadline covers the whole accepted session set;
+                // N blocked certificate workers must not multiply the close wait.
+                const QDeadlineTimer deadline(kSessionStopFirstWaitMs + kSessionStopFinalWaitMs);
                 for (const SessionWorker& worker : sessionWorkerList)
                 {
                     if (worker.thread == nullptr || worker.thread.get() == QThread::currentThread())
                     {
                         continue;
                     }
-                    if (worker.thread->wait(kSessionStopFirstWaitMs))
-                    {
-                        continue;
-                    }
-                    worker.thread->requestInterruption();
-                    worker.thread->quit();
-                    worker.thread->wait(kSessionStopFinalWaitMs);
+                    worker.thread->wait(deadline);
                 }
 
                 // 超时线程继续由登记表持有，到 finished 的 remove 才释放。
@@ -1270,8 +1265,23 @@ namespace ks::network
 
     HttpsMitmProxyService::~HttpsMitmProxyService()
     {
+        // QTcpServer belongs to this GUI thread; close listening here before
+        // detaching only independent registry/certificate values for cleanup.
         m_uiDispatcher->close();
-        stop();
+        if (m_server)
+        {
+            m_server->close();
+            m_server.reset();
+        }
+        if (m_stopWorkerThread && m_stopWorkerThread->joinable()) m_stopWorkerThread->detach();
+        m_stopWorkerThread.reset();
+        if (m_stopSessionWorkers)
+        {
+            const auto finishSessions = std::move(m_stopSessionWorkers);
+            m_stopSessionWorkers = {};
+            try { std::thread([finishSessions]() { finishSessions(); }).detach(); }
+            catch (...) { finishSessions(); } // Thread allocation failure preserves resource cleanup.
+        }
     }
 
     bool HttpsMitmProxyService::start(

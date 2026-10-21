@@ -190,7 +190,7 @@ NetworkDock::~NetworkDock()
     }
 
     // Close receiver borrowing before cancellation; remaining ICMP calls only
-    // own copied targets, cancellation state and native handle RAII.
+    // own copied targets, cancellation state and native handle lifetime.
     if (m_aliveScanDispatcher) m_aliveScanDispatcher->close();
     cancelAliveHostScan();
 
@@ -220,10 +220,9 @@ NetworkDock::~NetworkDock()
     {
         m_trafficService->StopCapture();
     }
-    if (m_httpsProxyService != nullptr)
-    {
-        m_httpsProxyService->stop();
-    }
+    // The service closes its QObject listener here and transfers only its
+    // existing independent session registry to bounded background cleanup.
+    m_httpsProxyService.reset();
     if (m_httpsSystemProxySnapshotCaptured)
     {
         QString restoreErrorText;
