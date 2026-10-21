@@ -2,6 +2,7 @@
 #include "UI/StandardWidgetTheme.h"
 #include "UI/FloatingScrollbars.h"
 #include "MainWindow.h"
+#include "theme.h"
 
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
@@ -10,6 +11,7 @@
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtGui/QFont>
+#include <QtGui/QStyleHints>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
@@ -1599,6 +1601,21 @@ int main(int argc, char* argv[])
 
     startupTraceRaw("before QApplication construction");
     QApplication app(argc, argv);
+    // Match MainWindow::isDarkModeEffective before the first themed palette/QSS.
+    bool startupDarkModeEnabled = false;
+    if (startupSettings.themeMode == ks::settings::ThemeMode::Dark)
+    {
+        startupDarkModeEnabled = true;
+    }
+    else if (startupSettings.themeMode != ks::settings::ThemeMode::Light)
+    {
+        QStyleHints* styleHints = QGuiApplication::styleHints();
+        startupDarkModeEnabled = styleHints != nullptr
+            && styleHints->colorScheme() == Qt::ColorScheme::Dark;
+    }
+    KswordTheme::SetDarkModeEnabled(startupDarkModeEnabled);
+    KswordTheme::SetPrimaryAccentColor(startupSettings.customThemeColor);
+    KswordTheme::SetMainBackgroundColor(startupSettings.customMainBackgroundColor);
     ks::ui::InstallStandardWidgetTheme(&app); // 新控件在首个业务窗口创建前就采用标准外观与度量。
     rescueSession.install(app);
     startupTraceRaw("QApplication constructed");
