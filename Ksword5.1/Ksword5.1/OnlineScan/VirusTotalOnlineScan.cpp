@@ -7,6 +7,7 @@
 #include "../UI/UI_All.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/ThemeBinding.h"
+#include "../Internationalization/LanguageManager.h"
 
 #include "OnlineScanSupport.h"
 #include "../Framework.h"
@@ -40,6 +41,7 @@
 #include <QJsonDocument>
 #include <QJsonValue>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -1287,6 +1289,91 @@ namespace
         childItem->setToolTip(1, valueText);
         return childItem;
     }
+
+    constexpr int kLazyResponseJsonRole = Qt::UserRole + 301;
+    constexpr int kLazyResponseOffsetRole = Qt::UserRole + 302;
+    constexpr int kLazyResponseMoreRole = Qt::UserRole + 303;
+
+    void initializeLazyResponseItem(QTreeWidgetItem* item, const QJsonValue& value)
+    {
+        if (value.isObject() || value.isArray())
+        {
+            const qsizetype size = value.isObject() ? value.toObject().size() : value.toArray().size();
+            item->setText(1, value.isObject() ? QStringLiteral("{ %1 fields }").arg(size)
+                : QStringLiteral("[ %1 items ]").arg(size));
+            item->setData(0, kLazyResponseJsonRole, QVariant::fromValue(value));
+            item->setData(0, kLazyResponseOffsetRole, 0);
+            item->setChildIndicatorPolicy(size > 0 ? QTreeWidgetItem::ShowIndicator : QTreeWidgetItem::DontShowIndicator);
+        }
+        else
+        {
+            const QString text = jsonPrimitiveText(value);
+            item->setText(1, text);
+            item->setToolTip(1, text);
+        }
+    }
+
+    void appendLazyResponseBatch(QTreeWidgetItem* item)
+    {
+        if (!item) return;
+        const QJsonValue value = item->data(0, kLazyResponseJsonRole).value<QJsonValue>();
+        if (!value.isObject() && !value.isArray()) return;
+        const int offset = item->data(0, kLazyResponseOffsetRole).toInt();
+        const auto object = value.toObject();
+        const auto array = value.toArray();
+        const int total = static_cast<int>(value.isObject() ? object.size() : array.size());
+        if (offset >= total) return;
+        if (item->childCount() > 0 && item->child(item->childCount() - 1)->data(0, kLazyResponseMoreRole).toBool())
+            delete item->takeChild(item->childCount() - 1);
+        const int end = qMin(offset + 300, total);
+        auto objectIt = object.constBegin();
+        if (value.isObject()) objectIt += offset;
+        for (int index = offset; index < end; ++index)
+        {
+            auto* child = new QTreeWidgetItem(item);
+            const QString key = value.isObject() ? objectIt.key() : QStringLiteral("[%1]").arg(index);
+            child->setText(0, key);
+            child->setToolTip(0, key);
+            initializeLazyResponseItem(child, value.isObject() ? objectIt.value() : array.at(index));
+            if (value.isObject()) ++objectIt;
+        }
+        item->setData(0, kLazyResponseOffsetRole, end);
+        if (end < total)
+        {
+            auto* more = new QTreeWidgetItem(item);
+            more->setData(0, kLazyResponseMoreRole, true);
+            more->setText(0, ks::i18n::sourceText(QStringLiteral("继续加载（已显示 %1 / %2）")).arg(end).arg(total));
+        }
+    }
+
+    class LazyResponseKeyFilter final : public QObject
+    {
+    public:
+        explicit LazyResponseKeyFilter(QTreeWidget* tree) : QObject(tree), m_tree(tree)
+        { tree->installEventFilter(this); }
+    protected:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (watched == m_tree && event->type() == QEvent::KeyPress)
+            {
+                const auto* key = static_cast<QKeyEvent*>(event);
+                auto* item = m_tree->currentItem();
+                if (item && item->data(0, kLazyResponseMoreRole).toBool() &&
+                    (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter || key->key() == Qt::Key_Space))
+                {
+                    auto* parent = item->parent();
+                    const int row = parent ? parent->indexOfChild(item) : -1;
+                    appendLazyResponseBatch(parent);
+                    if (parent && row >= 0 && row < parent->childCount()) m_tree->setCurrentItem(parent->child(row));
+                    event->accept();
+                    return true;
+                }
+            }
+            return QObject::eventFilter(watched, event);
+        }
+    private:
+        QTreeWidget* m_tree;
+    };
 
     // appendJsonValueToTree 作用：
     // - Recursively project JSON objects/arrays into an expandable tree.
@@ -3026,17 +3113,14 @@ void VirusTotalOnlineScan::ensureResultDialog()
             pane.reportTree = reportTree;
             if (apiKind == VtApiKind::FileProfile && !pane.fileProfileFilterEdit.isNull())
             {
-                QObject::connect(
-                    pane.fileProfileFilterEdit,
-                    &QLineEdit::textChanged,
-                    reportTree,
-                    [reportTree](const QString& filterText)
-                    {
-                        // 输入：文件画像筛选框文本。
-                        // 处理：即时过滤报告树节点，仅隐藏不匹配项，不修改原始数据。
-                        // 返回：无。
-                        applyTreeFilter(reportTree, filterText);
-                    });
+                auto* filterTimer = new QTimer(reportTree);
+                filterTimer->setSingleShot(true);
+                filterTimer->setInterval(120);
+                const QPointer<QLineEdit> filterEdit = pane.fileProfileFilterEdit;
+                QObject::connect(filterEdit, &QLineEdit::textChanged, filterTimer, [filterTimer]() { filterTimer->start(); });
+                QObject::connect(filterTimer, &QTimer::timeout, reportTree, [reportTree, filterEdit]() {
+                    if (filterEdit) applyTreeFilter(reportTree, filterEdit->text());
+                });
             }
 
             if (apiKind == VtApiKind::Sandbox)
@@ -3121,6 +3205,14 @@ void VirusTotalOnlineScan::ensureResultDialog()
             responseTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
             responseTree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
             installTreeCopyMenu(responseTree);
+            responseTree->header()->setResizeContentsPrecision(64);
+            new LazyResponseKeyFilter(responseTree);
+            QObject::connect(responseTree, &QTreeWidget::itemExpanded, responseTree, [](QTreeWidgetItem* item) {
+                if (item->data(0, kLazyResponseOffsetRole).toInt() == 0) appendLazyResponseBatch(item);
+            });
+            QObject::connect(responseTree, &QTreeWidget::itemClicked, responseTree, [](QTreeWidgetItem* item, int) {
+                if (item->data(0, kLazyResponseMoreRole).toBool()) appendLazyResponseBatch(item->parent());
+            });
             responseLayout->addWidget(responseTree, 1);
             pane.responseTree = responseTree;
 
@@ -4150,11 +4242,8 @@ void VirusTotalOnlineScan::appendResponseTreeJsonSection(
     sectionItem->setText(1, QStringLiteral("{ %1 fields }").arg(jsonObject.size()));
     sectionItem->setText(2, timestampText);
     sectionItem->setExpanded(false);
-    for (auto iterator = jsonObject.constBegin(); iterator != jsonObject.constEnd(); ++iterator)
-    {
-        appendJsonValueToTree(sectionItem, iterator.key(), iterator.value());
-    }
-    pane.responseTree->scrollToItem(sectionItem);
+    initializeLazyResponseItem(sectionItem, QJsonValue(jsonObject));
+    if (pane.responseTree->isVisible()) pane.responseTree->scrollToItem(sectionItem);
 }
 
 void VirusTotalOnlineScan::appendResponseTreeTextSection(
