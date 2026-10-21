@@ -1485,6 +1485,24 @@ namespace
         }
     }
 
+    QString takePluginTextProjectionBatch(std::deque<QString>& pending, bool emptyDocument, int& units)
+    {
+        QString text = std::move(pending.front());
+        pending.pop_front();
+        ++units;
+        // Qt discards an empty append to a genuinely empty document. Do not
+        // turn such leading empty appends into newly visible blank paragraphs.
+        if (emptyDocument && text.isEmpty()) return text;
+        for (int count = 1; count < 8 && units < 32 && !pending.empty(); ++count) {
+            if (text.size() + 1 + pending.front().size() > 8192) break;
+            text += QLatin1Char('\n');
+            text += pending.front();
+            pending.pop_front();
+            ++units;
+        }
+        return text;
+    }
+
     class PluginResultModel final : public QAbstractTableModel
     {
     public:
@@ -1880,10 +1898,9 @@ namespace
             const auto project = [&](QPlainTextEdit* editor, std::deque<QString>& pending) {
                 if (!editor || !editor->isVisible()) return;
                 while (!pending.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
-                    const QString text = std::move(pending.front()); pending.pop_front();
+                    const QString text = takePluginTextProjectionBatch(pending, editor->document()->isEmpty(), units);
                     editor->appendPlainText(text);
                     if (!guard) return;
-                    ++units;
                 }
             };
             project(m_plainOutput, m_pendingPlainOutput);
@@ -2345,8 +2362,9 @@ namespace
                 if (!m_diagnostics->isVisible()) return;
                 QElapsedTimer budget; budget.start();
                 const QPointer<PluginTabPage> guard(this);
-                for (int unit = 0; !m_pendingDiagnostics.empty() && unit < 32 && (unit == 0 || budget.elapsed() < 3); ++unit) {
-                    const QString text = std::move(m_pendingDiagnostics.front()); m_pendingDiagnostics.pop_front();
+                int units = 0;
+                while (!m_pendingDiagnostics.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
+                    const QString text = takePluginTextProjectionBatch(m_pendingDiagnostics, m_diagnostics->document()->isEmpty(), units);
                     m_diagnostics->appendPlainText(text);
                     if (!guard) return;
                 }
