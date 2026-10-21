@@ -15,12 +15,20 @@ using namespace process_detail_window_internal;
 
 namespace
 {
+    thread_local const ks::i18n::SourceTextSnapshot* reportTranslator = nullptr;
+    struct ReportLanguageScope
+    {
+        const ks::i18n::SourceTextSnapshot* previous;
+        explicit ReportLanguageScope(const ks::i18n::SourceTextSnapshot& translator)
+            : previous(reportTranslator) { reportTranslator = &translator; }
+        ~ReportLanguageScope() { reportTranslator = previous; }
+    };
     namespace ev = Ksword::Evidence;
 
     QString injectionText(const char* const key, const QString& sourceText)
     {
         static_cast<void>(key);
-        return ks::i18n::sourceText(sourceText);
+        return reportTranslator ? reportTranslator->sourceText(sourceText) : ks::i18n::sourceText(sourceText);
     }
 
     QString hex64(const ev::OptionalU64& value)
@@ -909,10 +917,38 @@ namespace
         return document;
     }
 
+    struct InjectionReportValues
+    {
+        struct Group
+        {
+            std::vector<std::size_t> indices;
+            QString title, note, meaning;
+        };
+        ks::process::InjectionTraceResult result;
+        QVector<QStringList> cells;
+        QVector<ks::ui::FieldDocument> details;
+        std::vector<Group> groups;
+        QString reportText;
+    };
+    std::shared_ptr<InjectionReportValues> makeInjectionReportValues()
+    {
+        return {new InjectionReportValues, [](InjectionReportValues* value) noexcept
+        {
+            try
+            {
+                auto retired = std::unique_ptr<InjectionReportValues>(value);
+                auto task = std::unique_ptr<QRunnable>(QRunnable::create([retired = std::move(retired)] {}));
+                QThreadPool::globalInstance()->start(task.get()); (void)task.release();
+            }
+            catch (...) { /* RAII owns enqueue failure. */ }
+        }};
+    }
+
     void showInjectionTraceDialog(QWidget* const parent,
-                                  const ks::process::InjectionTraceResult& result,
+                                  const std::shared_ptr<const InjectionReportValues>& prepared,
                                   const QString& processName)
     {
+        const auto& result = prepared->result;
         QDialog dialog(parent);
         dialog.setWindowTitle(
             injectionText("process.detail.injection.dialog.title",
@@ -1037,98 +1073,69 @@ namespace
         tree->setAlternatingRowColors(true);
         tree->setRootIsDecorated(true);
 
-        // 分组顺序沿用判据层给出的顺序（先出现的规则排在前面），不做任何重排序，
-        // 免得看起来像按"严重程度"排——本层不产生严重程度。
-        std::vector<std::string> ruleOrder;
-        std::map<std::string, std::vector<std::size_t>> groupedIndices;
-        for (std::size_t index = 0; index < report.findings.size(); ++index)
-        {
-            const std::string& ruleId = report.findings[index].ruleId;
-            if (groupedIndices.find(ruleId) == groupedIndices.end())
-            {
-                ruleOrder.push_back(ruleId);
-            }
-            groupedIndices[ruleId].push_back(index);
-        }
-
         constexpr int kFindingIndexRole = Qt::UserRole + 1;
-        // 展开阈值：条目多的分组默认折起来，少的直接摊开，免得还要手动点。
+        constexpr int kGroupIndexRole = Qt::UserRole + 2;
+        constexpr int kLoadedCountRole = Qt::UserRole + 3;
+        constexpr int kLoadingRole = Qt::UserRole + 4;
         constexpr std::size_t kAutoExpandLimit = 12U;
-        for (const std::string& ruleId : ruleOrder)
+        const QColor secondary = KswordTheme::TextSecondaryColor();
+        const QColor warning = KswordTheme::WarningColor();
+        const QColor primary = KswordTheme::TextPrimaryColor();
+        // Canonical values and grouping already exist; collapsed large groups have
+        // one placeholder, and opening a group exposes at most 64 rows per event.
+        const QPointer<QTreeWidget> treeGuard(tree);
+        auto appendBatch = std::make_shared<std::function<void(QTreeWidgetItem*)>>();
+        const std::weak_ptr<std::function<void(QTreeWidgetItem*)>> weakAppend(appendBatch);
+        *appendBatch = [treeGuard, prepared, weakAppend, secondary, warning, primary](QTreeWidgetItem* groupItem)
         {
-            const std::vector<std::size_t>& indices = groupedIndices[ruleId];
-            std::size_t explainedCount = 0;
-            for (const std::size_t index : indices)
+            if (!treeGuard || !groupItem || !groupItem->isExpanded())
+            { if (treeGuard && groupItem) groupItem->setData(0, kLoadingRole, false); return; }
+            const auto groupIndex = static_cast<std::size_t>(groupItem->data(0, kGroupIndexRole).toULongLong());
+            if (groupIndex >= prepared->groups.size()) return;
+            const auto& group = prepared->groups[groupIndex];
+            std::size_t loaded = static_cast<std::size_t>(groupItem->data(0, kLoadedCountRole).toULongLong());
+            if (loaded == 0U && groupItem->childCount() == 1) delete groupItem->takeChild(0);
+            const std::size_t end = std::min(group.indices.size(), loaded + 64U);
+            for (; loaded < end; ++loaded)
             {
-                if (report.findings[index].explainedByException())
-                {
-                    ++explainedCount;
-                }
-            }
-
-            QTreeWidgetItem* const groupItem = new QTreeWidgetItem(tree);
-            groupItem->setText(0, injectionText("process.detail.injection.group.title",
-                                                QStringLiteral("%1 — %2 处"))
-                                      .arg(ruleText(ruleId))
-                                      .arg(indices.size()));
-            groupItem->setData(0, kFindingIndexRole, -1);
-            if (explainedCount > 0)
-            {
-                groupItem->setText(5, injectionText("process.detail.injection.group.explained",
-                                                    QStringLiteral("其中 %1 处已被已知例外解释"))
-                                          .arg(explainedCount));
-            }
-            QFont groupFont = groupItem->font(0);
-            groupFont.setBold(true);
-            groupItem->setFont(0, groupFont);
-            const QString meaning = ruleMeaningText(ruleId);
-            if (!meaning.isEmpty())
-            {
-                // 整行 tooltip：鼠标停在分组上就知道这一类是什么，不用先展开再猜。
-                for (int column = 0; column < headers.size(); ++column)
-                {
-                    groupItem->setToolTip(column, meaning);
-                }
-            }
-
-            for (const std::size_t index : indices)
-            {
-                const ev::InjectionFinding& finding = report.findings[index];
-                QTreeWidgetItem* const item = new QTreeWidgetItem(groupItem);
-                item->setText(0, findingHeadlineText(finding));
-                item->setText(1, hex64(finding.address));
-                item->setText(2, humanSizeText(finding.size));
-                item->setText(3, humanProtectionText(finding.protection));
-                item->setText(4, humanRegionTypeText(finding.regionType));
-                if (finding.explainedByException())
-                {
-                    item->setText(5, injectionText("process.detail.injection.note.explained",
-                                                   QStringLiteral("已被已知例外解释")));
-                }
-                else if (finding.confidence == ev::EvidenceConfidence::InputIncomplete)
-                {
-                    item->setText(5, injectionText("process.detail.injection.note.incomplete",
-                                                   QStringLiteral("采集不完整，不能单独作判断")));
-                }
-                else if (finding.confidence ==
-                         ev::EvidenceConfidence::CorroboratedIndependent)
-                {
-                    item->setText(5, injectionText("process.detail.injection.note.corroborated",
-                                                   QStringLiteral("有多个独立来源互相印证")));
-                }
+                const auto index = group.indices[loaded];
+                const auto& finding = prepared->result.report.findings[index];
+                auto* item = new QTreeWidgetItem(groupItem, prepared->cells.at(static_cast<qsizetype>(index)));
                 item->setData(0, kFindingIndexRole, static_cast<qulonglong>(index));
-                // 例外命中的条目保留但降色：可核对，不再作为未解释项。
-                const QColor color = finding.explainedByException()
-                    ? KswordTheme::TextSecondaryColor()
-                    : (finding.confidence == ev::EvidenceConfidence::InputIncomplete
-                           ? KswordTheme::WarningColor()
-                           : KswordTheme::TextPrimaryColor());
-                for (int column = 0; column < headers.size(); ++column)
-                {
-                    item->setForeground(column, QBrush(color));
-                }
+                const QColor color = finding.explainedByException() ? secondary :
+                    finding.confidence == ev::EvidenceConfidence::InputIncomplete ? warning : primary;
+                for (int column = 0; column < 6; ++column) item->setForeground(column, QBrush(color));
             }
-            groupItem->setExpanded(indices.size() <= kAutoExpandLimit);
+            groupItem->setData(0, kLoadedCountRole, static_cast<qulonglong>(loaded));
+            if (loaded < group.indices.size())
+            {
+                if (const auto next = weakAppend.lock())
+                    QTimer::singleShot(0, treeGuard, [treeGuard, groupItem, next] { if (treeGuard) (*next)(groupItem); });
+            }
+            else groupItem->setData(0, kLoadingRole, false);
+        };
+        QObject::connect(tree, &QTreeWidget::itemExpanded, tree, [appendBatch](QTreeWidgetItem* groupItem)
+        {
+            if (!groupItem->data(0, kLoadingRole).toBool())
+            { groupItem->setData(0, kLoadingRole, true); (*appendBatch)(groupItem); }
+        });
+        for (std::size_t groupIndex = 0; groupIndex < prepared->groups.size(); ++groupIndex)
+        {
+            const auto& group = prepared->groups[groupIndex];
+            auto* groupItem = new QTreeWidgetItem(tree);
+            groupItem->setText(0, group.title);
+            groupItem->setText(5, group.note);
+            groupItem->setData(0, kFindingIndexRole, -1);
+            groupItem->setData(0, kGroupIndexRole, static_cast<qulonglong>(groupIndex));
+            groupItem->setData(0, kLoadedCountRole, 0ULL);
+            QFont font = groupItem->font(0); font.setBold(true); groupItem->setFont(0, font);
+            for (int column = 0; column < 6; ++column) groupItem->setToolTip(column, group.meaning);
+            if (!group.indices.empty())
+            {
+                auto* placeholder = new QTreeWidgetItem(groupItem);
+                placeholder->setData(0, kFindingIndexRole, -1);
+            }
+            groupItem->setExpanded(group.indices.size() <= kAutoExpandLimit);
         }
 
         tree->setColumnWidth(0, 300);
@@ -1146,11 +1153,11 @@ namespace
                 ? injectionText("process.detail.injection.dialog.no_finding",
                                 QStringLiteral("这次没有找出需要解释的东西。这不等于「没有被注入过」——只说明在「查了什么」页列出的范围内没发现。选中上面任意一条可以在这里看它的完整信息。"))
                 : failure;
-        detailPane->setDocument(report.findings.empty() ? fieldNotice(emptyDetailText) : findingDocument(report.findings.front()));
+        detailPane->setDocument(report.findings.empty() ? fieldNotice(emptyDetailText) : prepared->details.first());
         findingLayout->addWidget(detailPane);
         QObject::connect(
             tree, &QTreeWidget::currentItemChanged, &dialog,
-            [detailPane, report, emptyDetailText](QTreeWidgetItem* const current,
+            [detailPane, prepared, emptyDetailText](QTreeWidgetItem* const current,
                                                   QTreeWidgetItem*) {
                 if (current == nullptr)
                 {
@@ -1165,9 +1172,9 @@ namespace
                     return;
                 }
                 const std::size_t index = static_cast<std::size_t>(stored.toULongLong());
-                if (index < report.findings.size())
+                if (index < static_cast<std::size_t>(prepared->details.size()))
                 {
-                    detailPane->setDocument(findingDocument(report.findings[index]));
+                    detailPane->setDocument(prepared->details.at(static_cast<qsizetype>(index)));
                 }
             });
         tabs->addTab(findingPage,
@@ -1309,9 +1316,8 @@ namespace
         buttonLayout->addWidget(closeButton);
         layout->addLayout(buttonLayout);
 
-        const ks::ui::FieldDocument reportDocument = buildReportDocument(result, processName);
-        QObject::connect(copyButton, &QPushButton::clicked, &dialog, [reportDocument]() {
-            QApplication::clipboard()->setText(reportDocument.toPlainText(true));
+        QObject::connect(copyButton, &QPushButton::clicked, &dialog, [prepared]() {
+            QApplication::clipboard()->setText(prepared->reportText);
         });
         QObject::connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
 
@@ -1364,6 +1370,7 @@ void ProcessDetailWindow::requestAsyncInjectionTraceScan(const bool deepMode)
         << (deepMode ? 1 : 0)
         << eol;
 
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     QPointer<ProcessDetailWindow> guard(this);
     QRunnable* const task = QRunnable::create([
         guard,
@@ -1372,7 +1379,7 @@ void ProcessDetailWindow::requestAsyncInjectionTraceScan(const bool deepMode)
         creationTime100ns,
         fallbackImagePath,
         processName,
-        deepMode]()
+        deepMode, translator]()
     {
         ks::process::InjectionTraceOptions options;
         options.deepMode = deepMode;
@@ -1383,19 +1390,71 @@ void ProcessDetailWindow::requestAsyncInjectionTraceScan(const bool deepMode)
             options.maxDurationMs = 120000ULL;
             options.maxReadBytes = 512ULL * 1024ULL * 1024ULL;
         }
-        const ks::process::InjectionTraceResult result =
-            ks::process::ScanProcessInjectionTrace(
+        auto prepared = makeInjectionReportValues();
+        prepared->result = ks::process::ScanProcessInjectionTrace(
                 pid, creationTime100ns, fallbackImagePath, options);
-        if (guard == nullptr)
+        const auto& result = prepared->result;
+        const auto& report = result.report;
+        const ReportLanguageScope language(translator);
+        prepared->details.reserve(static_cast<qsizetype>(report.findings.size()));
+        prepared->cells.reserve(static_cast<qsizetype>(report.findings.size()));
+        std::vector<std::string> ruleOrder;
+        std::map<std::string, std::vector<std::size_t>> groupedIndices;
+        for (std::size_t index = 0; index < report.findings.size(); ++index)
         {
-            return;
+            const auto& finding = report.findings[index];
+            if (!groupedIndices.contains(finding.ruleId)) ruleOrder.push_back(finding.ruleId);
+            groupedIndices[finding.ruleId].push_back(index);
+            QStringList cells; cells.resize(6);
+            const auto setCell = [&cells](int column, const QString& text) { cells[column] = text; };
+                setCell(0, findingHeadlineText(finding));
+                setCell(1, hex64(finding.address));
+                setCell(2, humanSizeText(finding.size));
+                setCell(3, humanProtectionText(finding.protection));
+                setCell(4, humanRegionTypeText(finding.regionType));
+                if (finding.explainedByException())
+                {
+                    setCell(5, injectionText("process.detail.injection.note.explained",
+                                                   QStringLiteral("已被已知例外解释")));
+                }
+                else if (finding.confidence == ev::EvidenceConfidence::InputIncomplete)
+                {
+                    setCell(5, injectionText("process.detail.injection.note.incomplete",
+                                                   QStringLiteral("采集不完整，不能单独作判断")));
+                }
+                else if (finding.confidence ==
+                         ev::EvidenceConfidence::CorroboratedIndependent)
+                {
+                    setCell(5, injectionText("process.detail.injection.note.corroborated",
+                                                   QStringLiteral("有多个独立来源互相印证")));
+                }
+
+            prepared->cells.push_back(std::move(cells));
+            prepared->details.push_back(findingDocument(finding));
         }
+        for (const auto& ruleId : ruleOrder)
+        {
+            InjectionReportValues::Group group;
+            group.indices = std::move(groupedIndices[ruleId]);
+            std::size_t explained = 0;
+            for (const auto index : group.indices) if (report.findings[index].explainedByException()) ++explained;
+            group.title = injectionText("process.detail.injection.group.title", QStringLiteral("%1 — %2 处"))
+                .arg(ruleText(ruleId)).arg(group.indices.size());
+            if (explained) group.note = injectionText("process.detail.injection.group.explained",
+                QStringLiteral("其中 %1 处已被已知例外解释")).arg(explained);
+            group.meaning = ruleMeaningText(ruleId);
+            prepared->groups.push_back(std::move(group));
+        }
+        prepared->reportText = buildReportDocument(result, processName).toPlainText(
+            [&translator](const QString& text) { return translator.sourceText(text); });
 
         QMetaObject::invokeMethod(
                     qApp,
-            [guard, localTicket, pid, processName, result]()
+            [guard, localTicket, pid, creationTime100ns, processName, prepared]()
             {
-                if (guard == nullptr || localTicket != guard->m_injectionTraceTicket)
+                const auto& result = prepared->result;
+                if (guard == nullptr || localTicket != guard->m_injectionTraceTicket ||
+                    pid != guard->m_baseRecord.pid || creationTime100ns != guard->m_baseRecord.creationTime100ns)
                 {
                     return;
                 }
@@ -1449,7 +1508,7 @@ void ProcessDetailWindow::requestAsyncInjectionTraceScan(const bool deepMode)
                     << result.elapsedMs
                     << eol;
 
-                showInjectionTraceDialog(guard, result, processName);
+                showInjectionTraceDialog(guard, prepared, processName);
             },
             Qt::QueuedConnection);
     });
