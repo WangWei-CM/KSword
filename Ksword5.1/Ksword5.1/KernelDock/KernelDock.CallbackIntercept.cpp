@@ -6429,15 +6429,15 @@ private:
                     result.validation = validateCallbackConfig(result.document, &input.language);
                 return result;
             },
-            [owner, filePath](Result result) {
-                if (!owner) return;
+            [owner, filePath](const Result& result, std::uint64_t) {
+                if (!owner) return true;
                 if (!result.parsed)
                 {
                     QMessageBox::warning(owner->m_hostPage,
                         kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")), result.error);
-                    if (!owner) return;
+                    if (!owner) return true;
                     owner->appendAppLog(kernelText("kernel.callback.intercept.import.failed", QStringLiteral("导入失败：%1")).arg(result.error));
-                    return;
+                    return true;
                 }
                 if (!result.validation.success)
                 {
@@ -6445,9 +6445,9 @@ private:
                     QMessageBox::warning(owner->m_hostPage,
                         kernelText("kernel.callback.intercept.dialog.title", QStringLiteral("驱动回调")),
                         kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
-                    if (!owner) return;
+                    if (!owner) return true;
                     owner->appendAppLog(kernelText("kernel.callback.intercept.import.invalid", QStringLiteral("导入配置不合法：%1")).arg(error));
-                    return;
+                    return true;
                 }
                 for (const QString& warning : result.warnings)
                     owner->appendAppLog(kernelText("kernel.callback.intercept.import.warning", QStringLiteral("导入警告：%1")).arg(warning));
@@ -6457,6 +6457,7 @@ private:
                 owner->m_nextRuleVersion = std::max(owner->m_nextRuleVersion, result.document.ruleVersion + 1ULL);
                 owner->setDirtyState(true);
                 owner->appendAppLog(kernelText("kernel.callback.intercept.import.success", QStringLiteral("导入成功：%1")).arg(filePath));
+                return true;
             },
             [owner](std::exception_ptr) {
                 if (owner) owner->controlOperationFailed();
