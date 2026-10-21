@@ -55,6 +55,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QResizeEvent;
 class QShowEvent;
+class QHideEvent;
 class QSlider;
 class QSpinBox;
 class QSortFilterProxyModel;
@@ -154,6 +155,7 @@ protected:
     // - 在 Dock 首次真正显示时再启动首轮刷新与周期监视；
     // - 避免主窗口启动阶段被进程枚举拖慢。
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
     // resizeEvent 作用：
     // - 在 Dock 尺寸变化时请求一次进程表默认列宽自适应；
@@ -449,6 +451,9 @@ private:
     {
         std::unordered_map<std::string, CacheEntry> nextCache;                    // 下一轮缓存。
         std::unordered_map<std::string, ks::process::CounterSample> nextCounters; // 下一轮计数器样本。
+        std::uint64_t networkCaptureGeneration = 0;
+        bool networkSnapshotValid = false;
+        std::uint64_t cpuCoreCaptureGeneration = 0; // 丢弃暂停/重启前构造的旧矩阵。
         std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> cpuCoreUsageSnapshot; // 后台构造的共享逐核心快照，UI 只移动指针。
 
         // ======== 统计字段（用于 UI 状态提示 + 详细日志） ========
@@ -823,7 +828,7 @@ private:
     void synchronizeDetailWindowPerformanceHistory(
         ProcessDetailWindow* detailWindow,
         const std::string& identityKey) const;
-    void appendProcessActivitySampleToDetailWindows(const ProcessActivitySample& sample);
+    void appendCurrentPerformanceSamplesToDetailWindows();
     std::size_t trimProcessActivitySamples();
     void refreshProcessActivityTimeline(std::size_t removedSampleCount = 0);
     void refreshProcessActivityChart();
@@ -1128,10 +1133,14 @@ private:
         std::uint32_t logicalCpuCount);
 
     // ======== 进程网络吞吐采样 ========
+    bool hasVisibleProcessDetailConsumer() const;
+    ks::process::ProcessEtwCaptureDemand currentEtwCaptureDemand() const;
+    void syncProcessEtwCaptureDemand();
     void ensureProcessNetworkTrafficCaptureStarted();
     void stopProcessNetworkTrafficCapture();
     void pruneProcessNetworkTrafficCounters();
-    std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters() const;
+    static std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshotProcessNetworkTrafficCounters(
+        const std::shared_ptr<ks::network::ProcessNetworkEtwMonitor>& service);
 
     // ======== 进程/线程逐核心 CPU 采样 ========
     void ensureCpuCoreUsageCaptureStarted();
@@ -1350,11 +1359,13 @@ private:
     std::unordered_map<std::string, AffinityRestoreRetryState> m_affinityRestoreRetryByIdentity; // 暂时失败且等待重试的进程实例。
     std::unordered_map<std::string, ks::process::CounterSample> m_counterSampleByIdentity; // 差值样本。
     std::shared_ptr<ks::network::ProcessNetworkEtwMonitor> m_processNetworkTrafficService; // 进程页内部 ETW 网络累计器。
+    bool m_processNetworkBaselineResetRequired = true;
     bool m_processNetworkTrafficCaptureStarted = false; // ETW 采集器是否已经尝试启动。
     std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> m_cpuCoreUsageService; // 单个系统级 CSwitch 会话；后台快照任务共享生命周期。
     bool m_cpuCoreUsageCaptureStarted = false; // UI 线程状态：本轮监视周期内是否已经投递启动。
     std::shared_ptr<std::atomic_bool> m_cpuCoreUsageCaptureDesired =
         std::make_shared<std::atomic_bool>(false); // 后台 Start 返回后读取的期望状态，解决快速开始/暂停竞态。
+    bool m_etwDemandSyncScheduled = false; // 合并详情/主窗口生命周期事件。
     std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_processNetworkCaptureLifecycle =
         std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
     std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_cpuCoreCaptureLifecycle =

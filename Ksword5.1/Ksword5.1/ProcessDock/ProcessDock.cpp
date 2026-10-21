@@ -65,6 +65,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHelpEvent>
+#include <QHideEvent>
 #include <QHBoxLayout>
 #include <QItemSelection>
 #include <QItemSelectionModel>
@@ -137,6 +138,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 
 #ifndef NOMINMAX
@@ -177,7 +179,15 @@ namespace
             using Operation = ks::process::ProcessEtwCaptureLifecycle::Operation;
             for (;;)
             {
-                switch (lifecycle->NextOperation())
+                const auto operation = lifecycle->NextOperation();
+                if (operation == Operation::None)
+                {
+                    return;
+                }
+                // NextOperation released the short state lock before this potentially slow
+                // backend gate. GUI Request never takes the gate and remains nonblocking.
+                const auto operationGuard = lifecycle->LockBackgroundOperation();
+                switch (operation)
                 {
                 case Operation::Start:
                 {
@@ -188,6 +198,16 @@ namespace
                 }
                 case Operation::Stop:
                     service->Stop();
+                    // There is no remaining consumer. Release completed interval storage here,
+                    // after callbacks are joined, rather than retaining hidden PID/TID churn.
+                    if constexpr (std::is_same_v<Service, ks::network::ProcessNetworkEtwMonitor>)
+                    {
+                        service->PruneCounters({});
+                    }
+                    else
+                    {
+                        (void)service->SnapshotAndReset();
+                    }
                     lifecycle->CompleteStop();
                     break;
                 case Operation::None:
@@ -4579,6 +4599,61 @@ bool ProcessDock::invokeMainWindowPidSlot(const char* methodName, const std::uin
         Q_ARG(quint32, static_cast<quint32>(pid)));
 }
 
+bool ProcessDock::hasVisibleProcessDetailConsumer() const
+{
+    return std::any_of(m_detailWindowByIdentity.cbegin(), m_detailWindowByIdentity.cend(),
+        [](const auto& pair)
+        {
+            return pair.second != nullptr && pair.second->isVisible() && !pair.second->isMinimized();
+        });
+}
+
+ks::process::ProcessEtwCaptureDemand ProcessDock::currentEtwCaptureDemand() const
+{
+    return {
+        m_monitoringEnabled,
+        isProcessListPageVisibleForRecording(),
+        m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked(),
+        hasVisibleProcessDetailConsumer(),
+        isProcessColumnVisible(TableColumn::CpuCore)
+    };
+}
+
+void ProcessDock::syncProcessEtwCaptureDemand()
+{
+    const auto demand = currentEtwCaptureDemand();
+    if (demand.RefreshAllowed())
+    {
+        ensureProcessNetworkTrafficCaptureStarted();
+    }
+    else if (m_processNetworkTrafficCaptureStarted)
+    {
+        stopProcessNetworkTrafficCapture();
+    }
+    if (demand.CpuCaptureAllowed())
+    {
+        ensureCpuCoreUsageCaptureStarted();
+    }
+    else if (m_cpuCoreUsageCaptureStarted)
+    {
+        stopCpuCoreUsageCapture();
+    }
+    if (m_refreshTimer != nullptr)
+    {
+        if (demand.RefreshAllowed())
+        {
+            if (!m_refreshTimer->isActive())
+            {
+                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
+            }
+        }
+        else
+        {
+            m_refreshTimer->stop();
+        }
+    }
+}
+
 void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 {
     if (m_processNetworkTrafficCaptureStarted)
@@ -4611,6 +4686,7 @@ void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 
 void ProcessDock::stopProcessNetworkTrafficCapture()
 {
+    m_processNetworkBaselineResetRequired = true;
     m_processNetworkTrafficCaptureStarted = false;
     requestProcessEtwCapture(
         m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, false,
@@ -4841,19 +4917,20 @@ void ProcessDock::pruneProcessNetworkTrafficCounters()
 }
 
 std::unordered_map<std::uint32_t, ProcessDock::NetworkTrafficCounters>
-ProcessDock::snapshotProcessNetworkTrafficCounters() const
+ProcessDock::snapshotProcessNetworkTrafficCounters(
+    const std::shared_ptr<ks::network::ProcessNetworkEtwMonitor>& service)
 {
     // snapshotProcessNetworkTrafficCounters：
     // - 输入：无；
     // - 处理：向 ETW 累计器请求当前 PID 网络累计字节快照；
     // - 返回：刷新线程可安全读取的独立快照。
     std::unordered_map<std::uint32_t, NetworkTrafficCounters> snapshot;
-    if (m_processNetworkTrafficService == nullptr)
+    if (service == nullptr)
     {
         return snapshot;
     }
 
-    const auto etwSnapshot = m_processNetworkTrafficService->SnapshotCounters();
+    const auto etwSnapshot = service->SnapshotCounters();
     snapshot.reserve(etwSnapshot.size());
     for (const auto& [processId, counters] : etwSnapshot)
     {
@@ -4867,6 +4944,26 @@ bool ProcessDock::eventFilter(QObject* watched, QEvent* event)
     if (event == nullptr)
     {
         return QWidget::eventFilter(watched, event);
+    }
+
+    // The existing application filter already observes lifecycle events. Only explicit
+    // top-level consumers trigger demand reconciliation; child paint/move events do not.
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+        event->type() == QEvent::WindowStateChange)
+    {
+        const bool detailEvent = qobject_cast<ProcessDetailWindow*>(watched) != nullptr &&
+            std::any_of(m_detailWindowByIdentity.cbegin(), m_detailWindowByIdentity.cend(),
+                [watched](const auto& pair) { return pair.second.data() == watched; });
+        if ((watched == window() || detailEvent) && !m_etwDemandSyncScheduled)
+        {
+            m_etwDemandSyncScheduled = true;
+            QTimer::singleShot(0, this, [this]()
+            {
+                m_etwDemandSyncScheduled = false;
+                syncProcessEtwCaptureDemand();
+                updateProcessActivityStatusLabel();
+            });
+        }
     }
 
     // 后端状态变化由表格发布；不轮询，也不在每帧重新设置状态文字。
@@ -4959,6 +5056,11 @@ void ProcessDock::showEvent(QShowEvent* event)
 
     if (m_initialRefreshScheduled)
     {
+        syncProcessEtwCaptureDemand();
+        if (isProcessActivityRefreshAllowedNow())
+        {
+            requestAsyncRefresh(true);
+        }
         // Show 内部的可见性尚未稳定；只消费隐藏期间积累的展示，不额外枚举。
         QTimer::singleShot(0, this, [this]() {
             if (m_processTableProjectionPending && isProcessListPageVisibleForRecording())
@@ -4991,12 +5093,20 @@ void ProcessDock::showEvent(QShowEvent* event)
 
     // showEvent 内部阶段列表页的 isVisible() 可能尚未稳定，延迟到事件循环首轮再启动周期计时器。
     QTimer::singleShot(0, this, [this]() {
+        syncProcessEtwCaptureDemand();
         if (m_refreshTimer != nullptr && isProcessActivityRefreshAllowedNow())
         {
             m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
         }
         updateProcessActivityStatusLabel();
     });
+}
+
+void ProcessDock::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    syncProcessEtwCaptureDemand();
+    updateProcessActivityStatusLabel();
 }
 
 bool ProcessDock::invokeMainWindowPidListSlot(const char* methodName, const QString& pidListText) const
@@ -6657,20 +6767,9 @@ void ProcessDock::initializeConnections()
     // - 未勾选时，进程页隐藏后周期刷新和记录都会自动暂停；
     // - 勾选后允许后台继续刷新，除非“不记录历史”主动禁止写记录。
     connect(m_activityBackgroundRecordCheck, &QCheckBox::toggled, this, [this]() {
+        syncProcessEtwCaptureDemand();
         updateProcessActivityStatusLabel();
-        if (m_refreshTimer != nullptr && m_monitoringEnabled)
-        {
-            if (isProcessActivityRefreshAllowedNow())
-            {
-                m_refreshTimer->start(refreshIntervalMillisecondsFromInput());
-            }
-            else
-            {
-                m_refreshTimer->stop();
-                stopCpuCoreUsageCapture();
-            }
-        }
-        if (m_monitoringEnabled && isProcessActivityRefreshAllowedNow())
+        if (isProcessActivityRefreshAllowedNow())
         {
             requestAsyncRefresh(true);
         }
@@ -6780,6 +6879,7 @@ void ProcessDock::initializeConnections()
         refreshSideTabIconContrast();
 
         QWidget* currentPage = m_sideTabWidget->widget(currentIndex);
+        syncProcessEtwCaptureDemand();
         if (currentPage == m_processListPage)
         {
             if (m_processTableProjectionPending)
@@ -6797,17 +6897,6 @@ void ProcessDock::initializeConnections()
                 requestAsyncRefresh(true);
             }
             return;
-        }
-        if (m_monitoringEnabled &&
-            m_activityBackgroundRecordCheck != nullptr &&
-            !m_activityBackgroundRecordCheck->isChecked())
-        {
-            if (m_refreshTimer != nullptr)
-            {
-                m_refreshTimer->stop();
-            }
-            // 页面自动暂停刷新时同步后台停止唯一 CSwitch 会话，避免无人消费仍常驻高频事件。
-            stopCpuCoreUsageCapture();
         }
         if (currentPage == m_threadPage)
         {
@@ -7641,29 +7730,14 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
     const std::uint32_t cpuCount = m_logicalCpuCount;
     auto previousCache = m_cacheByIdentity;
     auto previousCounters = m_counterSampleByIdentity;
-    ensureProcessNetworkTrafficCaptureStarted();
-    auto networkTrafficSnapshot = snapshotProcessNetworkTrafficCounters();
-    // CPU核心列可见或详情窗口需要数据时，才常驻同一个系统级 CSwitch 会话。
-    // 强制刷新若来自隐藏页面或不需要逐核心数据，也不能偷偷保留高频会话。
-    const bool cpuCoreUsageDemanded =
-        isProcessColumnVisible(TableColumn::CpuCore) ||
-        std::any_of(
-            m_detailWindowByIdentity.cbegin(),
-            m_detailWindowByIdentity.cend(),
-            [](const auto& detailWindowPair)
-            {
-                return detailWindowPair.second != nullptr;
-            });
-    const bool cpuCoreCaptureAllowed =
-        isProcessActivityRefreshAllowedNow() && cpuCoreUsageDemanded;
-    if (cpuCoreCaptureAllowed)
-    {
-        ensureCpuCoreUsageCaptureStarted();
-    }
-    else if (m_cpuCoreUsageCaptureStarted)
-    {
-        stopCpuCoreUsageCapture();
-    }
+    syncProcessEtwCaptureDemand();
+    const auto networkService = m_processNetworkTrafficCaptureStarted
+        ? m_processNetworkTrafficService : nullptr;
+    const auto networkLifecycle = m_processNetworkCaptureLifecycle;
+    const auto networkCaptureGeneration = networkLifecycle->Generation();
+    const bool resetNetworkBaseline = m_processNetworkBaselineResetRequired;
+    const bool cpuCoreCaptureAllowed = m_cpuCoreUsageCaptureStarted;
+    const std::uint64_t cpuCoreCaptureGeneration = m_cpuCoreCaptureLifecycle->Generation();
     const std::shared_ptr<ks::process::ProcessCpuCoreEtwMonitor> cpuCoreUsageService =
         cpuCoreCaptureAllowed ? m_cpuCoreUsageService : nullptr;
     const std::chrono::steady_clock::time_point cpuCoreSnapshotNow =
@@ -7718,18 +7792,48 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
         forceUiRefresh,
         previousCache = std::move(previousCache),
         previousCounters = std::move(previousCounters),
-        networkTrafficSnapshot = std::move(networkTrafficSnapshot),
+        networkService,
+        networkLifecycle,
+        networkCaptureGeneration,
+        resetNetworkBaseline,
         cpuCoreUsageService,
+        cpuCoreCaptureLifecycle = m_cpuCoreCaptureLifecycle,
+        cpuCoreCaptureGeneration,
         cpuCoreSnapshotDue,
         previousCpuCoreUsageSnapshot]() mutable {
+        std::unordered_map<std::uint32_t, NetworkTrafficCounters> networkTrafficSnapshot;
+        const bool networkSnapshotValid = networkService != nullptr &&
+            networkLifecycle->SnapshotIfCurrent(networkCaptureGeneration, [&]()
+            {
+                networkTrafficSnapshot = ProcessDock::snapshotProcessNetworkTrafficCounters(networkService);
+            });
+        if (resetNetworkBaseline || !networkSnapshotValid)
+        {
+            // Preserve CPU/IO/memory baselines. The first post-pause network interval starts
+            // at this snapshot and cannot spread hidden time across an instantaneous rate.
+            for (auto& pair : previousCounters)
+            {
+                const auto cached = previousCache.find(pair.first);
+                const auto counter = cached == previousCache.end()
+                    ? networkTrafficSnapshot.end()
+                    : networkTrafficSnapshot.find(cached->second.record.pid);
+                pair.second.networkRxBytes = counter == networkTrafficSnapshot.end() ? 0 : counter->second.rxBytes;
+                pair.second.networkTxBytes = counter == networkTrafficSnapshot.end() ? 0 : counter->second.txBytes;
+            }
+        }
+
         // 先在工作线程构造完整 PID/TID×核心快照，ETW 回调锁竞争不会占用 GUI 事件循环。
         std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> cpuCoreUsageSnapshot =
             previousCpuCoreUsageSnapshot;
         if (cpuCoreUsageService != nullptr && cpuCoreSnapshotDue)
         {
             // 即使异步 Start 尚未完成也取得带处理器拓扑的失效态快照，让 UI 画灰槽而非假 0%。
-            cpuCoreUsageSnapshot = std::make_shared<ks::process::CpuCoreUsageSnapshot>(
-                cpuCoreUsageService->SnapshotAndReset());
+            cpuCoreUsageSnapshot.reset();
+            (void)cpuCoreCaptureLifecycle->SnapshotIfCurrent(cpuCoreCaptureGeneration, [&]()
+            {
+                cpuCoreUsageSnapshot = std::make_shared<ks::process::CpuCoreUsageSnapshot>(
+                    cpuCoreUsageService->SnapshotAndReset());
+            });
         }
 
         ProcessDock::RefreshResult refreshResult = ProcessDock::buildRefreshResult(
@@ -7744,6 +7848,9 @@ void ProcessDock::requestAsyncRefresh(const bool forceRefresh)
             networkTrafficSnapshot,
             cpuCount);
         refreshResult.cpuCoreUsageSnapshot = std::move(cpuCoreUsageSnapshot);
+        refreshResult.cpuCoreCaptureGeneration = cpuCoreCaptureGeneration;
+        refreshResult.networkCaptureGeneration = networkCaptureGeneration;
+        refreshResult.networkSnapshotValid = networkSnapshotValid;
 
         if (guard == nullptr)
         {
@@ -7807,13 +7914,20 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     const auto elapsedMs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - m_lastRefreshStartTime).count());
 
+    if (refreshResult.networkSnapshotValid &&
+        refreshResult.networkCaptureGeneration == m_processNetworkCaptureLifecycle->Generation())
+    {
+        m_processNetworkBaselineResetRequired = false;
+    }
+
     restorePersistedAffinityForNewProcesses(refreshResult);
 
     // 逐核心快照与本轮进程缓存来自同一次 ticket；暂停后到达的旧结果不得复活最后一帧。
     const std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> previousCpuCoreSnapshot =
         m_latestCpuCoreUsageSnapshot;
     if (m_monitoringEnabled &&
-        m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire))
+        m_cpuCoreUsageCaptureDesired->load(std::memory_order_acquire) &&
+        refreshResult.cpuCoreCaptureGeneration == m_cpuCoreCaptureLifecycle->Generation())
     {
         m_latestCpuCoreUsageSnapshot = std::move(refreshResult.cpuCoreUsageSnapshot);
     }
@@ -7879,6 +7993,7 @@ void ProcessDock::applyRefreshResult(RefreshResult refreshResult, const bool for
     // 每轮刷新立即为全部进程映像投递后台图标查询，表格不再等待滚动空闲期。
     queueProcessIconExtractionsForCurrentProcesses();
 
+    appendCurrentPerformanceSamplesToDetailWindows();
     appendProcessActivitySample();
     if (!isProcessListPageVisibleForRecording() && !isProcessActivityTableSnapshotActive())
     {
@@ -9530,26 +9645,12 @@ bool ProcessDock::isProcessListPageVisibleForRecording() const
     return m_sideTabWidget != nullptr &&
         m_processListPage != nullptr &&
         m_sideTabWidget->currentWidget() == m_processListPage &&
-        m_processListPage->isVisible();
+        m_processListPage->isVisible() && !window()->isMinimized();
 }
 
 bool ProcessDock::isProcessActivityRefreshAllowedNow() const
 {
-    // 刷新允许逻辑只关心“是否应该继续枚举列表”：
-    // - 暂停按钮关闭后不再刷新；
-    // - 当前在进程列表页时允许刷新；
-    // - 后台保持开关允许离开进程列表页后继续刷新。
-    if (!m_monitoringEnabled)
-    {
-        return false;
-    }
-
-    if (m_activityBackgroundRecordCheck != nullptr && m_activityBackgroundRecordCheck->isChecked())
-    {
-        return true;
-    }
-
-    return isProcessListPageVisibleForRecording();
+    return currentEtwCaptureDemand().RefreshAllowed();
 }
 
 bool ProcessDock::isProcessActivityRecordingAllowedNow() const
@@ -9557,7 +9658,8 @@ bool ProcessDock::isProcessActivityRecordingAllowedNow() const
     // 记录允许逻辑在刷新允许之上额外叠加“不记录历史”：
     // - 这样可以继续更新下方列表；
     // - 同时不污染上方时间轴样本。
-    if (!isProcessActivityRefreshAllowedNow())
+    // Visible independent details require sampling, not implicit background history.
+    if (!currentEtwCaptureDemand().RecordingAllowed())
     {
         return false;
     }
@@ -9704,10 +9806,6 @@ void ProcessDock::appendProcessActivitySample()
     {
         m_activityChartWidget->notifySampleAppended();
     }
-    if (!m_activitySamples.empty())
-    {
-        appendProcessActivitySampleToDetailWindows(m_activitySamples.back());
-    }
     refreshProcessActivityTimeline(removedSampleCount);
     refreshProcessActivityChart();
     updateProcessActivityStatusLabel();
@@ -9751,36 +9849,39 @@ void ProcessDock::synchronizeDetailWindowPerformanceHistory(
     detailWindow->setPerformanceHistory(std::move(history));
 }
 
-void ProcessDock::appendProcessActivitySampleToDetailWindows(const ProcessActivitySample& sample)
+void ProcessDock::appendCurrentPerformanceSamplesToDetailWindows()
 {
+    if (!m_monitoringEnabled)
+    {
+        return;
+    }
+    // Preserve canonical history for every opened detail while global recording is
+    // authorized. Presentation still belongs to the detail's visible-page gate.
+    const bool archiveAllOpenDetails = isProcessActivityRecordingAllowedNow();
+    const std::int64_t sampleTime = QDateTime::currentMSecsSinceEpoch();
     for (const auto& detailWindowPair : m_detailWindowByIdentity)
     {
         ProcessDetailWindow* const detailWindow = detailWindowPair.second.data();
-        if (detailWindow == nullptr)
+        if (detailWindow == nullptr ||
+            (!archiveAllOpenDetails && (!detailWindow->isVisible() || detailWindow->isMinimized())))
         {
             continue;
         }
-
-        const auto processPointIt = std::find_if(
-            sample.processes.cbegin(),
-            sample.processes.cend(),
-            [&detailWindowPair](const ProcessActivityProcessPoint& processPoint) {
-                return processPoint.identityKey == detailWindowPair.first;
-            });
-        if (processPointIt == sample.processes.cend())
+        const auto cached = m_cacheByIdentity.find(detailWindowPair.first);
+        if (cached == m_cacheByIdentity.end() || cached->second.isExitedInLatestRound)
         {
             continue;
         }
-
+        const auto& record = cached->second.record;
         ProcessDetailWindow::PerformanceHistorySample detailSample;
-        detailSample.unixMilliseconds = sample.unixMilliseconds;
-        detailSample.cpuPercent = processPointIt->cpuPercent;
-        detailSample.cpuCorePercent = processPointIt->cpuCorePercent;
-        detailSample.memoryMB = processPointIt->workingSetMB;
-        detailSample.diskMBps = processPointIt->diskMBps;
-        detailSample.networkRxKBps = processPointIt->netRxKBps;
-        detailSample.networkTxKBps = processPointIt->netTxKBps;
-        detailSample.gpuPercent = processPointIt->gpuPercent;
+        detailSample.unixMilliseconds = sampleTime;
+        detailSample.cpuPercent = record.cpuPercent;
+        detailSample.cpuCorePercent = record.cpuCorePercent;
+        detailSample.memoryMB = record.workingSetMB;
+        detailSample.diskMBps = record.diskMBps;
+        detailSample.networkRxKBps = record.netRxKBps;
+        detailSample.networkTxKBps = record.netTxKBps;
+        detailSample.gpuPercent = record.gpuPercent;
         detailWindow->appendPerformanceHistorySample(detailSample);
     }
 }
@@ -18005,6 +18106,7 @@ void ProcessDock::openProcessDetailsPlaceholder()
     connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
         m_detailWindowByIdentity.erase(identityKey);
         m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+        syncProcessEtwCaptureDemand();
     });
 
     // “转到父进程”由详情窗口发信号到这里统一处理。
@@ -18083,6 +18185,7 @@ void ProcessDock::openSelectedProcessHotkeyScanner()
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
@@ -18171,6 +18274,7 @@ void ProcessDock::openSelectedProcessInjectionPage()
         connect(detailWindow, &QObject::destroyed, this, [this, identityKey]() {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
         connect(detailWindow, &ProcessDetailWindow::requestOpenProcessByPid, this, [this](const std::uint32_t parentPid) {
             openProcessDetailWindowByPid(parentPid);
@@ -18244,6 +18348,7 @@ void ProcessDock::showProcessDetailWindowForRecord(
         {
             m_detailWindowByIdentity.erase(identityKey);
             m_detailWindowLastSyncTimeByIdentity.erase(identityKey);
+            syncProcessEtwCaptureDemand();
         });
     connect(
         detailWindow,
