@@ -4,6 +4,7 @@
 #include "../../MonitorDock/WinApiMonitorProtocol.h"
 #include "../../Framework/PrivilegeElevationPrompt.h"
 #include "../../Internationalization/LanguageManager.h"
+#include "../../UI/TableInteractionSupport.h"
 
 #include <QApplication>
 #include <QBrush>
@@ -19,6 +20,8 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScrollBar>
+#include <QTimer>
 #include <QSignalBlocker>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -34,6 +37,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <functional>
 
 // ============================================================
 // ClipboardGuardPage.Session.cpp
@@ -831,36 +835,93 @@ namespace ks::misc
 
     }
 
+    void ClipboardGuardPage::scheduleEventProjection()
+    {
+        if (m_projectionScheduled || !isVisible()) return;
+        m_projectionScheduled = true;
+        QTimer::singleShot(0, this, [this]()
+        {
+            m_projectionScheduled = false;
+            flushPendingRows();
+        });
+    }
+
     void ClipboardGuardPage::flushPendingRows()
     {
-        updateRuntimeStatus();
-        const auto rowList = m_inbox->take(kUiFlushRowLimit);
-        if (rowList.empty() || m_eventTable == nullptr)
-        {
-            return;
-        }
+        // Sampling, matching and native protection continue while hidden. Only
+        // item construction/painting is demand-driven; the existing inbox owns
+        // every accepted row until projected or explicitly counted as evicted.
+        if (!m_eventTable || !isVisible() || !m_eventTable->isVisible()) return;
+        const QPointer<ClipboardGuardPage> self(this);
+        if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this,
+                QStringLiteral("clipboard_guard_events"), { m_eventTable },
+                [self]() { if (self) self->flushPendingRows(); })) return;
 
+        QElapsedTimer budget;
+        budget.start();
+        if (m_projectionRows.empty())
+        {
+            auto rows = m_inbox->take(kUiFlushRowLimit);
+            for (auto& row : rows) m_projectionRows.push_back(std::move(row));
+        }
+        if (m_projectionRows.empty()) { updateRuntimeStatus(); return; }
+
+        auto* const scrollbar = m_eventTable->verticalScrollBar();
+        const bool followTail = scrollbar && scrollbar->value() >= scrollbar->maximum() - 1;
         const bool updatesEnabled = m_eventTable->updatesEnabled();
+        const bool sortingEnabled = m_eventTable->isSortingEnabled();
         m_eventTable->setUpdatesEnabled(false);
-        for (const ClipboardGuardEventRow& rowValue : rowList)
+        // A whole row is installed before sorting can relocate it; item roles,
+        // selection and the identity used by quick rules/call-stack stay aligned.
+        if (sortingEnabled) m_eventTable->setSortingEnabled(false);
+        std::size_t projected = 0;
+        while (!m_projectionRows.empty() && projected < kUiFlushRowLimit
+            && (projected == 0 || budget.elapsed() < kProjectionBudgetMs))
         {
-            appendEventRow(rowValue);
+            appendEventRow(m_projectionRows.front());
+            m_projectionRows.pop_front();
+            ++projected;
         }
-        const int removeCount = std::max(0, m_eventTable->rowCount() - 6000);
-        if (removeCount > 0 && m_eventTable->model() != nullptr)
-        {
-            m_eventTable->model()->removeRows(0, removeCount);
-            m_evictedRows += static_cast<std::uint64_t>(removeCount);
-        }
+        trimRetainedEventRows();
+        if (sortingEnabled) m_eventTable->setSortingEnabled(true);
         m_eventTable->setUpdatesEnabled(updatesEnabled);
-        m_eventTable->scrollToBottom();
+        if (followTail) m_eventTable->scrollToBottom();
+        updateRuntimeStatus();
+        if (!m_projectionRows.empty() || m_inbox->counts().pending != 0)
+            scheduleEventProjection();
+    }
+
+    void ClipboardGuardPage::trimRetainedEventRows()
+    {
+        const int excess = m_eventTable->rowCount() - kRetainedEventRows;
+        if (excess <= 0) return;
+        std::vector<int> removeRows;
+        removeRows.reserve(static_cast<std::size_t>(excess));
+        for (int i = 0; i < excess; ++i)
+        {
+            removeRows.push_back(m_retainedEventAnchors.front()->row());
+            m_retainedEventAnchors.pop_front();
+        }
+        // Retain the latest arrivals even under a user sort. Delete descending
+        // contiguous spans to keep the other anchor pointers and selection valid.
+        std::sort(removeRows.begin(), removeRows.end(), std::greater<int>());
+        for (std::size_t i = 0; i < removeRows.size();)
+        {
+            const int last = removeRows[i];
+            int first = last;
+            while (++i < removeRows.size() && removeRows[i] == first - 1) --first;
+            m_eventTable->model()->removeRows(first, last - first + 1);
+            m_evictedRows += static_cast<std::uint64_t>(last - first + 1);
+        }
     }
 
     void ClipboardGuardPage::appendEventRow(const ClipboardGuardEventRow& rowValue)
     {
         const int row = m_eventTable->rowCount();
         m_eventTable->insertRow(row);
-        m_eventTable->setItem(row, ColumnTime, createReadOnlyItem(rowValue.timeText));
+        auto* const timeItem = createReadOnlyItem(rowValue.timeText);
+        m_eventTable->setItem(row, ColumnTime, timeItem);
+        m_retainedEventAnchors.push_back(timeItem);
         m_eventTable->setItem(row, ColumnProcess, createReadOnlyItem(rowValue.processText));
         m_eventTable->setItem(row, ColumnPid, createReadOnlyItem(QString::number(rowValue.pid)));
         m_eventTable->setItem(row, ColumnOperation, createReadOnlyItem(rowValue.operationText));
@@ -883,7 +944,9 @@ namespace ks::misc
 
     void ClipboardGuardPage::updateRuntimeStatus()
     {
-        if (!m_runtime || !m_runtime->hasStarted() || !m_statusLabel) return;
+        if (!isVisible() || !m_runtime || !m_runtime->hasStarted() || !m_statusLabel) return;
+        if (m_statusUpdateClock.isValid() && m_statusUpdateClock.elapsed() < 200) return;
+        m_statusUpdateClock.start();
         const auto value = m_runtime->summary();
         const auto counts = m_inbox->counts();
         QString text = ks::i18n::sourceText(QStringLiteral("规则 %1 条，当前受保护进程 %2 个。"))
@@ -892,7 +955,8 @@ namespace ks::misc
             text += ks::i18n::sourceText(QStringLiteral(" 有 %1 个进程处理失败，最后一次错误：%2"))
                 .arg(value.failureCount).arg(value.lastError);
         text += ks::i18n::sourceText(QStringLiteral(" | Agent 丢失=%1，UI 丢失=%2，已移出表格=%3，待显示=%4"))
-            .arg(counts.agentDropped).arg(counts.dropped).arg(m_evictedRows).arg(counts.pending);
+            .arg(counts.agentDropped).arg(counts.dropped).arg(m_evictedRows)
+            .arg(counts.pending + m_projectionRows.size());
         if (m_statusLabel->text() != text) m_statusLabel->setText(text);
     }
 

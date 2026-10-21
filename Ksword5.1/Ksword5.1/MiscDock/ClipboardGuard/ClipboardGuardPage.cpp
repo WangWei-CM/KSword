@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include "../../UI/SegmentedControl.h"
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -66,6 +67,13 @@ namespace ks::misc
         // CancelSynchronousIo, reader join and pipe/session handle cleanup finish.
         m_runtime->requestStop();
         m_runtime.reset();
+    }
+
+    void ClipboardGuardPage::showEvent(QShowEvent* const event)
+    {
+        QWidget::showEvent(event);
+        m_statusUpdateClock.invalidate();
+        scheduleEventProjection();
     }
 
     void ClipboardGuardPage::notifyPageActivated()

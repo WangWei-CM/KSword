@@ -17,6 +17,7 @@
 #include "../../ArkDriverClient/ArkDriverClient.h"
 
 #include <QString>
+#include <QElapsedTimer>
 #include "../../UI/AsyncCleanupRegistry.h"
 #include <condition_variable>
 #include <optional>
@@ -39,6 +40,7 @@ class QLineEdit;
 class QMenu;
 class QPoint;
 class QPushButton;
+class QShowEvent;
 class QTableWidget;
 class QTableWidgetItem;
 class QTimer;
@@ -207,6 +209,9 @@ namespace ks::misc
             ColumnCount
         };
 
+    protected:
+        void showEvent(QShowEvent* event) override;
+
     private:
         // ---- ClipboardGuardPage.cpp：UI 骨架、A/B 列组 ----
         void initializeUi();
@@ -244,6 +249,8 @@ namespace ks::misc
         void loadRulesFromDriver();
         void refreshProcessListAndSessionsAsync();
         void flushPendingRows();
+        void scheduleEventProjection();
+        void trimRetainedEventRows();
         void appendEventRow(const ClipboardGuardEventRow& rowValue);
         void updateRuntimeStatus();
 
@@ -272,6 +279,14 @@ namespace ks::misc
         const std::shared_ptr<ClipboardGuardInbox> m_inbox;
         std::shared_ptr<ClipboardGuardRuntime> m_runtime;
         std::uint64_t m_evictedRows = 0;
+        // One value slice survives budget yields; never capture accepted rows in
+        // a latest-wins UI callback. Anchors belong to this existing table only.
+        std::deque<ClipboardGuardEventRow> m_projectionRows;
+        std::deque<QTableWidgetItem*> m_retainedEventAnchors;
+        bool m_projectionScheduled = false;
+        QElapsedTimer m_statusUpdateClock;
+        static constexpr int kProjectionBudgetMs = 4;
+        static constexpr int kRetainedEventRows = 6000;
         static constexpr std::size_t kUiFlushRowLimit = 160;
         QTimer* m_uiFlushTimer = nullptr;
         QTimer* m_processPollTimer = nullptr;
