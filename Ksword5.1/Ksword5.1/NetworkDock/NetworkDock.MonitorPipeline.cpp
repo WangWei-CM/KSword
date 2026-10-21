@@ -430,7 +430,8 @@ void NetworkDock::flushPendingPacketsToUi()
         if (heartbeatSecond != m_packetTimelineLastHeartbeatSecond)
         {
             m_packetTimelineLastHeartbeatSecond = heartbeatSecond;
-            m_packetTimelineRateBucketBySecond.try_emplace(heartbeatSecond, PacketTimelineRateBucket{});
+            // Idle zeroes are implicit; elapsed idle duration must not allocate
+            // one permanent hash node per second. Projection supplies zero edges.
             refreshPacketTimelineRange();
             refreshPacketTimelineRatePoints();
         }
@@ -1043,10 +1044,15 @@ void NetworkDock::refreshPacketTimelineRatePoints()
     // - Y 值直接为该秒累计字节，等价于 B/s。
     const std::uint64_t visibleEndSecond = m_packetTimelineRangeEnd100ns / kTimelineSecond100ns;
     std::vector<std::uint64_t> secondIndexList;
-    secondIndexList.reserve(m_packetTimelineRateBucketBySecond.size() + 2);
+    secondIndexList.reserve(m_packetTimelineRateBucketBySecond.size() * 3 + 2);
     for (const auto& bucketPair : m_packetTimelineRateBucketBySecond)
     {
-        secondIndexList.push_back(bucketPair.first);
+        const auto second = bucketPair.first;
+        secondIndexList.push_back(second);
+        // Preserve every nonzero sample and the exact zero baseline before/after
+        // an idle gap. Interior collinear zeroes carry no additional rate data.
+        if (second > 0) secondIndexList.push_back(second - 1);
+        if (second < visibleEndSecond) secondIndexList.push_back(second + 1);
     }
     secondIndexList.push_back(0);
     secondIndexList.push_back(visibleEndSecond);
@@ -1316,7 +1322,7 @@ void NetworkDock::removePacketTimelineRateSample(
             : 0;
     }
 
-    if (bucket.uploadBytes == 0 && bucket.downloadBytes == 0 && !m_packetTimelineSessionActive)
+    if (bucket.uploadBytes == 0 && bucket.downloadBytes == 0)
     {
         m_packetTimelineRateBucketBySecond.erase(iterator);
     }
