@@ -47,6 +47,9 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <utility>
 #include <sstream>
 
 namespace
@@ -924,21 +927,26 @@ void ProcessDock::refreshCrossViewAsync()
         ksword::ark::ProcessCrossViewResult processResult = client.queryProcessCrossView();
         ksword::ark::ThreadCrossViewResult threadResult = client.queryThreadCrossView();
 
-        QMetaObject::invokeMethod(qApp, [guardThis, ticket, processResult = std::move(processResult), threadResult = std::move(threadResult)]() mutable {
+        using Snapshot = std::pair<ksword::ark::ProcessCrossViewResult, ksword::ark::ThreadCrossViewResult>;
+        // 回调/菜单屏障可以复制闭包，但不再深复制两份完整证据；只在 GUI 消费一次。
+        const auto pendingSnapshot = std::make_shared<std::optional<Snapshot>>(
+            std::in_place, std::move(processResult), std::move(threadResult));
+        QMetaObject::invokeMethod(qApp, [guardThis, ticket, pendingSnapshot]() mutable {
             if (guardThis == nullptr || guardThis->m_crossViewRefreshTicket != ticket)
             {
                 return;
             }
-            auto applySnapshot = [
-                guardThis,
-                ticket,
-                processSnapshot = std::move(processResult),
-                threadSnapshot = std::move(threadResult)]() mutable
+            auto applySnapshot = [guardThis, ticket, pendingSnapshot]() mutable
             {
-                if (guardThis == nullptr || guardThis->m_crossViewRefreshTicket != ticket)
+                if (guardThis == nullptr || guardThis->m_crossViewRefreshTicket != ticket
+                    || !pendingSnapshot->has_value())
                 {
                     return;
                 }
+                Snapshot snapshot = std::move(pendingSnapshot->value());
+                pendingSnapshot->reset();
+                auto& processSnapshot = snapshot.first;
+                auto& threadSnapshot = snapshot.second;
 
                 guardThis->m_crossViewRefreshInProgress = false;
                 if (guardThis->m_crossViewRefreshButton != nullptr)
@@ -946,25 +954,28 @@ void ProcessDock::refreshCrossViewAsync()
                     guardThis->m_crossViewRefreshButton->setEnabled(true);
                 }
 
-                guardThis->m_lastProcessCrossViewResult = processSnapshot;
-                guardThis->m_lastThreadCrossViewResult = threadSnapshot;
-                guardThis->m_processCrossViewCache = processSnapshot.entries;
-                guardThis->m_threadCrossViewCache = threadSnapshot.entries;
+                // 每类只持有一份完整规范行；Result 保留全部 IO/计数/capability 元信息。
+                guardThis->m_processCrossViewCache = std::move(processSnapshot.entries);
+                guardThis->m_threadCrossViewCache = std::move(threadSnapshot.entries);
+                guardThis->m_lastProcessCrossViewResult = std::move(processSnapshot);
+                guardThis->m_lastThreadCrossViewResult = std::move(threadSnapshot);
+                const auto& processMetadata = guardThis->m_lastProcessCrossViewResult;
+                const auto& threadMetadata = guardThis->m_lastThreadCrossViewResult;
                 guardThis->invalidateCrossViewTables();
 
                 QString statusText;
-                if (!processSnapshot.io.ok || !threadSnapshot.io.ok)
+                if (!processMetadata.io.ok || !threadMetadata.io.ok)
                 {
                     // 将底层 IO 诊断转换为用户可读说明：
                     // - 输入：ArkDriverClient 的 unsupported 标记和 io.message；
                     // - 处理：保留“未集成/驱动过旧”的明确语义，其余交给 friendlyDriverDetail 归一化；
                     // - 返回：状态栏短文本，不直接暴露 DeviceIoControl 等底层字符串。
-                    const QString processMessageText = processSnapshot.unsupported
+                    const QString processMessageText = processMetadata.unsupported
                         ? QStringLiteral("进程未集成/驱动过旧")
-                        : friendlyDriverDetail(narrowToQString(processSnapshot.io.message));
-                    const QString threadMessageText = threadSnapshot.unsupported
+                        : friendlyDriverDetail(narrowToQString(processMetadata.io.message));
+                    const QString threadMessageText = threadMetadata.unsupported
                         ? QStringLiteral("线程未集成/驱动过旧")
-                        : friendlyDriverDetail(narrowToQString(threadSnapshot.io.message));
+                        : friendlyDriverDetail(narrowToQString(threadMetadata.io.message));
                     statusText = QStringLiteral("状态：%1 / %2")
                         .arg(processMessageText)
                         .arg(threadMessageText);
@@ -975,12 +986,12 @@ void ProcessDock::refreshCrossViewAsync()
                 else
                 {
                     statusText = QStringLiteral("状态：进程 %1/%2，线程 %3/%4，missingCaps=0x%5/0x%6")
-                        .arg(processSnapshot.entries.size())
-                        .arg(processSnapshot.totalCount)
-                        .arg(threadSnapshot.entries.size())
-                        .arg(threadSnapshot.totalCount)
-                        .arg(static_cast<qulonglong>(processSnapshot.missingCapabilityMask), 0, 16)
-                        .arg(static_cast<qulonglong>(threadSnapshot.missingCapabilityMask), 0, 16);
+                        .arg(guardThis->m_processCrossViewCache.size())
+                        .arg(processMetadata.totalCount)
+                        .arg(guardThis->m_threadCrossViewCache.size())
+                        .arg(threadMetadata.totalCount)
+                        .arg(static_cast<qulonglong>(processMetadata.missingCapabilityMask), 0, 16)
+                        .arg(static_cast<qulonglong>(threadMetadata.missingCapabilityMask), 0, 16);
                     guardThis->m_crossViewStatusLabel->setStyleSheet(
                         QStringLiteral("color:%1; font-weight:700;")
                             .arg(KswordTheme::SuccessColor().name(QColor::HexRgb)));
