@@ -288,9 +288,10 @@ void NetworkDock::initializeTrafficMonitorTab()
         static const QIcon placeholder(QStringLiteral(":/Icon/process_main.svg"));
         return found == m_processIconCacheByPid.constEnd() ? placeholder : found.value();
     };
-    m_packetTable->requestMetadata = [this](const auto& packet)
+    m_packetTable->requestMetadata = [this](std::uint64_t sequence)
     {
-        if (isPacketProjectionVisible()) requestPacketMetadata(packet);
+        const auto found = m_packetBySequence.find(sequence);
+        if (isPacketProjectionVisible() && found != m_packetBySequence.end()) requestPacketMetadata(*found->second);
     };
     // Uniform natural row height avoids per-record section measurements during
     // an atomic batch insertion, including the final tail-follow layout.

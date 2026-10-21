@@ -887,15 +887,17 @@ void NetworkDock::requestPacketTableProjection()
             auto next = std::make_shared<PacketMonitorValues>(); next->version = input.version;
             QHash<qulonglong, PacketMonitorValues::Row> cached;
             if (input.previous) for (const auto& row : input.previous->canonical)
-                cached.insert(row->record->packet->sequenceId, row);
+                cached.insert(row->sequenceId, row);
             for (const auto& record : input.records)
             {
                 if (token.isCanceled()) return PacketMonitorCommit{};
                 const auto& packet = *record->packet;
                 auto row = cached.value(packet.sequenceId);
-                if (!row || row->record != record)
+                if (!row || row->record.lock() != record)
                 {
                     auto value = std::make_shared<PacketMonitorRow>(); value->record = record;
+                    value->sequenceId = packet.sequenceId; value->processId = packet.processId;
+                    value->remoteAddress = toQString(packet.remoteAddress); value->domainPending = record->domain.isEmpty();
                     const QString source = packetSourceDisplayText(packet);
                     value->cells = {toQString(ks::network::FormatUnixTimestampMs(packet.captureTimestampMs, false)),
                         toQString(ks::network::PacketProtocolToString(packet.protocol)),
@@ -931,13 +933,13 @@ void NetworkDock::requestPacketTableProjection()
                     if (compared != 0) return input.sortOrder == Qt::AscendingOrder ? compared < 0 : compared > 0;
                     if (!input.previous) return false;
                     const auto missing = static_cast<int>(input.previous->rows.size());
-                    return input.previous->positions.value(left->record->packet->sequenceId, missing)
-                        < input.previous->positions.value(right->record->packet->sequenceId, missing);
+                    return input.previous->positions.value(left->sequenceId, missing)
+                        < input.previous->positions.value(right->sequenceId, missing);
                 });
             const auto finish = [](std::shared_ptr<PacketMonitorValues> value)
             {
                 for (int row = 0; row < static_cast<int>(value->rows.size()); ++row)
-                    value->positions.insert(value->rows[row]->record->packet->sequenceId, row);
+                    value->positions.insert(value->rows[row]->sequenceId, row);
                 return ks::ui::RetainCompleteExportSnapshot<PacketMonitorValues>(value);
             };
             result.target = finish(next);
@@ -946,7 +948,7 @@ void NetworkDock::requestPacketTableProjection()
             QSet<qulonglong> oldKeys;
             if (input.previous) for (const auto& row : input.previous->rows)
             {
-                const auto key = row->record->packet->sequenceId;
+                const auto key = row->sequenceId;
                 oldKeys.insert(key);
                 const int target = result.target->positions.value(key, -1);
                 if (target >= 0)
@@ -957,15 +959,15 @@ void NetworkDock::requestPacketTableProjection()
             }
             reordered->rows = survivors->rows;
             if (input.previous) for (const auto& row : input.previous->rows)
-                if (!result.target->positions.contains(row->record->packet->sequenceId)) reordered->rows.push_back(row);
+                if (!result.target->positions.contains(row->sequenceId)) reordered->rows.push_back(row);
             auto appended = std::make_shared<PacketMonitorValues>(); appended->rows = survivors->rows;
             for (const auto& row : result.target->rows)
-                if (!oldKeys.contains(row->record->packet->sequenceId)) appended->rows.push_back(row);
+                if (!oldKeys.contains(row->sequenceId)) appended->rows.push_back(row);
             const auto sameOrder = [](const auto& left, const auto& right)
             {
                 if (left.size() != right.size()) return false;
                 for (std::size_t row = 0; row < left.size(); ++row)
-                    if (left[row]->record->packet->sequenceId != right[row]->record->packet->sequenceId) return false;
+                    if (left[row]->sequenceId != right[row]->sequenceId) return false;
                 return true;
             };
             result.reorderOld = input.previous && !sameOrder(input.previous->rows, reordered->rows);

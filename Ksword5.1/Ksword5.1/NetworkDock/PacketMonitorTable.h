@@ -22,7 +22,11 @@ struct PacketMonitorRecord
 };
 struct PacketMonitorRow
 {
-    std::shared_ptr<const PacketMonitorRecord> record;
+    std::weak_ptr<const PacketMonitorRecord> record;
+    std::uint64_t sequenceId = 0;
+    std::uint32_t processId = 0;
+    QString remoteAddress;
+    bool domainPending = false;
     QStringList cells;
 };
 struct PacketMonitorValues
@@ -49,7 +53,7 @@ class PacketMonitorTable final : public ks::ui::TableActionTableView
         QStringList headers;
         std::function<void(int, Qt::SortOrder)> sortRequest;
         std::function<QIcon(quint32)> icon;
-        std::function<void(const ks::network::PacketRecord&)> metadata;
+        std::function<void(std::uint64_t)> metadata;
         int rowCount(const QModelIndex& parent = {}) const override
         { return parent.isValid() || !values ? 0 : static_cast<int>(values->rows.size()); }
         int columnCount(const QModelIndex& parent = {}) const override
@@ -59,12 +63,12 @@ class PacketMonitorTable final : public ks::ui::TableActionTableView
             if (!index.isValid() || !values || index.row() < 0 || index.row() >= rowCount()
                 || index.column() < 0 || index.column() >= columnCount()) return {};
             const auto& row = *values->rows[index.row()];
-            if (metadata && ((role == Qt::DisplayRole && index.column() == 8 && row.record->domain.isEmpty())
-                || (role == Qt::DecorationRole && index.column() == 5))) metadata(*row.record->packet);
+            if (metadata && ((role == Qt::DisplayRole && index.column() == 8 && row.domainPending)
+                || (role == Qt::DecorationRole && index.column() == 5))) metadata(row.sequenceId);
             if (role == Qt::DisplayRole) return ks::i18n::displayText(row.cells.value(index.column()));
-            if (role == Qt::UserRole && index.column() == 0) return QVariant::fromValue<qulonglong>(row.record->packet->sequenceId);
-            if (role == Qt::UserRole && index.column() == 8) return QString::fromUtf8(row.record->packet->remoteAddress.c_str());
-            if (role == Qt::DecorationRole && index.column() == 5 && icon) return icon(row.record->packet->processId);
+            if (role == Qt::UserRole && index.column() == 0) return QVariant::fromValue<qulonglong>(row.sequenceId);
+            if (role == Qt::UserRole && index.column() == 8) return row.remoteAddress;
+            if (role == Qt::DecorationRole && index.column() == 5 && icon) return icon(row.processId);
             return {};
         }
         Qt::ItemFlags flags(const QModelIndex& index) const override
@@ -89,7 +93,7 @@ class PacketMonitorTable final : public ks::ui::TableActionTableView
             mapped.reserve(oldIndices.size());
             for (const auto& index : oldIndices)
             {
-                const auto sequence = values->rows[index.row()]->record->packet->sequenceId;
+                const auto sequence = values->rows[index.row()]->sequenceId;
                 const int row = next->positions.value(sequence, -1);
                 mapped.push_back(row < 0 ? QModelIndex{} : createIndex(row, index.column()));
             }
@@ -135,14 +139,14 @@ class PacketMonitorTable final : public ks::ui::TableActionTableView
 public:
     std::function<void(int, Qt::SortOrder)> sortRequested;
     std::function<QIcon(quint32)> processIcon;
-    std::function<void(const ks::network::PacketRecord&)> requestMetadata;
+    std::function<void(std::uint64_t)> requestMetadata;
     explicit PacketMonitorTable(QWidget* parent) : TableActionTableView(parent), m_values(new Model(this))
     {
         setModel(m_values);
         setProperty("ks_i18n_preserve_model_data", true);
         m_values->sortRequest = [this](int column, Qt::SortOrder order) { if (sortRequested) sortRequested(column, order); };
         m_values->icon = [this](quint32 pid) { return processIcon ? processIcon(pid) : QIcon{}; };
-        m_values->metadata = [this](const auto& packet) { if (requestMetadata) requestMetadata(packet); };
+        m_values->metadata = [this](std::uint64_t sequence) { if (requestMetadata) requestMetadata(sequence); };
         ks::ui::InstallTableHeaderClickSorting(this);
         ks::ui::RegisterCompleteExportTableProducer(this, [this]()
         {
