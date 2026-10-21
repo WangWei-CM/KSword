@@ -2823,7 +2823,7 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
             }
             return result;
         },
-        [owner, prepared, models](const Result& result, std::uint64_t ticket) {
+        [owner, prepared, models](Result& result, std::uint64_t ticket) {
             if (!owner || !owner->m_crossDiffOperation->isCurrent(ticket)) return true;
             owner->m_crossDiffRequestedSource.reset();
             const auto retry = [owner]() {
@@ -2868,7 +2868,7 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
             owner->m_r0UdpStatusText = prepared->r0UdpStatusText;
             for (std::size_t i = 0; i < models.size(); ++i)
             {
-                if (!current() || !models[i] || !models[i]->setPreparedRows(result[i])) { retry(); return true; }
+                if (!current() || !models[i] || !models[i]->setPreparedRows(std::move(result[i]))) { retry(); return true; }
             }
             if (!current()) { retry(); return true; }
             owner->applyCrossViewSearchFilter();

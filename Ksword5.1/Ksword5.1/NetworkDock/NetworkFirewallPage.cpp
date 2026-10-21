@@ -3514,7 +3514,7 @@ void NetworkFirewallPage::presentPendingFirewallValues()
                             : std::vector<Model::ColumnChange>{{0, ColumnCount - 1, {}}};
                     }, value.revision);
             },
-            [owner, model, sourceRevision = request.sourceRevision](const Model::PreparedRows& result, std::uint64_t ticket) {
+            [owner, model, sourceRevision = request.sourceRevision](Model::PreparedRows& result, std::uint64_t ticket) {
                 if (!owner || !owner->m_eventDiffOperation->isCurrent(ticket)) return true;
                 owner->m_eventDiffRequestedRevision.reset();
                 auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_eventTable->model());
@@ -3526,7 +3526,7 @@ void NetworkFirewallPage::presentPendingFirewallValues()
                 if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
                     QStringLiteral("firewall_event_value_projection"), {owner->m_eventTable},
                     [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
-                if (!owner->m_eventValueModel->setPreparedRows(result))
+                if (!owner->m_eventValueModel->setPreparedRows(std::move(result)))
                 { owner->presentPendingFirewallValues(); return true; }
                 if (!owner) return true;
                 if (owner->m_eventSourceRevision != sourceRevision)
@@ -3886,7 +3886,7 @@ void NetworkFirewallPage::appendRulesToTable(
                         : std::vector<Model::ColumnChange>{{0, RuleColumnCount - 1, {}}};
                 }, value.revision), false};
         },
-        [owner, model, sourceRevision = request.sourceRevision](const Result& result, std::uint64_t ticket) {
+        [owner, model, sourceRevision = request.sourceRevision](Result& result, std::uint64_t ticket) {
             if (!owner || !owner->m_ruleDiffOperation->isCurrent(ticket)) return true;
             owner->m_ruleDiffRequestedRevision.reset();
             auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_ruleTable->model());
@@ -3898,7 +3898,7 @@ void NetworkFirewallPage::appendRulesToTable(
             if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
                 QStringLiteral("firewall-rule-table-append"), {owner->m_ruleTable},
                 [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return true;
-            if (!result.unchanged && !owner->m_ruleValueModel->setPreparedRows(result.plan))
+            if (!result.unchanged && !owner->m_ruleValueModel->setPreparedRows(std::move(result.plan)))
             { owner->presentPendingFirewallValues(); return true; }
             if (!owner) return true;
             if (owner->m_ruleSourceRevision != sourceRevision)
