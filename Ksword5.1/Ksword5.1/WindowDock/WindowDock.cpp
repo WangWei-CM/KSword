@@ -2941,9 +2941,11 @@ WindowDock::WindowDock(QWidget* parent)
     : QWidget(parent)
 {
     m_auditOperation = new ks::ui::AsyncOperation(this);
+    m_windowDetailOperation = new ks::ui::AsyncOperation(this);
     initializeUi();
     initializeConnections();
     m_auditOperation->setStateChangedCallback([this] { reconcileAuditRefreshState(); });
+    m_windowDetailOperation->setStateChangedCallback([this] { reconcileWindowDetailState(); });
 
     // 初始状态：
     // - 窗口列表页由内嵌 OtherDock 保持原有行为；
@@ -2981,6 +2983,7 @@ WindowDock::WindowDock(QWidget* parent)
 WindowDock::~WindowDock()
 {
     m_auditOperation->close();
+    m_windowDetailOperation->close();
     ks::window::retireSnapshotValues(std::move(m_cachedSessionSummary), std::move(m_cachedHotkeyHookSummary),
         std::move(m_cachedDisplaySummary), std::move(m_cachedWindowsRows), std::move(m_cachedGuiThreadRows),
         std::move(m_cachedSessionRows), std::move(m_cachedHotkeyRows), std::move(m_cachedHookRows),
@@ -3029,6 +3032,8 @@ void WindowDock::showEvent(QShowEvent* showEventPointer)
     QWidget::showEvent(showEventPointer);
     if (!alive) return;
     reconcileAuditRefreshState();
+    if (!alive) return;
+    reconcileWindowDetailState();
 }
 
 void WindowDock::initializeUi()
@@ -3981,8 +3986,18 @@ void WindowDock::updateSelectedWindowSnapshotDetail(const int currentRow)
     }
 }
 
+void WindowDock::reconcileWindowDetailState()
+{
+    if (!m_windowDetailRefreshing.load() || m_windowDetailOperation->isBusy() || m_windowDetailOperation->isInFlight()) return;
+    m_windowDetailRefreshing.store(false);
+    updateSelectedWindowSnapshotDetail(m_windowsTable ? m_windowsTable->currentRow() : -1);
+}
+
 void WindowDock::requestSelectedWindowRuntimeDetail()
 {
+    const QPointer<WindowDock> requestOwner(this);
+    reconcileWindowDetailState();
+    if (!requestOwner) return;
     // 单 HWND runtime detail：
     // - 输入来自当前窗口表选中行；
     // - 处理：后台只读调用 ArkDriverClient wrapper，不在 UI 线程阻塞；
@@ -4008,6 +4023,7 @@ void WindowDock::requestSelectedWindowRuntimeDetail()
     const std::uint64_t hwndValue = parseUInt64Text(cellText(0), 0U);
     const std::uint32_t processId = parseUInt32Text(cellText(1), 0U);
     const std::uint32_t threadId = parseUInt32Text(cellText(2), 0U);
+    const quint64 auditRevision = m_auditViewRevision;
     if (hwndValue == 0U)
     {
         m_windowDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("当前行没有有效 HWND，不能执行单窗口 detail 查询。")));
@@ -4022,56 +4038,71 @@ void WindowDock::requestSelectedWindowRuntimeDetail()
     }
 
     updateSelectedWindowSnapshotDetail(currentRow);
+    if (!requestOwner) return;
     const ks::ui::FieldDocument snapshot = m_windowDetailEditor->document();
     if (m_queryWindowDetailButton != nullptr)
     {
         m_queryWindowDetailButton->setEnabled(false);
     }
+    if (!requestOwner) return;
     auto pending = snapshot;
     pending.section(QStringLiteral("Win32K Window Runtime Detail"));
     pending.note(QStringLiteral("正在后台按需查询 HWND=%1 ...").arg(formatUInt64Hex(hwndValue)));
     m_windowDetailEditor->setDocument(pending);
+    if (!requestOwner) return;
 
-    QPointer<WindowDock> safeThis(this);
-    std::thread([safeThis, hwndValue, processId, threadId, snapshot]()
+    struct Request
     {
-        auto detail = snapshot;
-        const auto runtime = win32kWindowRuntimeDocument(hwndValue, processId, threadId);
-        const auto catalog = win32kPublicPdbCatalogPreview();
-        detail.nodes += runtime.nodes;
-        detail.nodes += catalog.nodes;
-        if (safeThis.isNull())
-        {
-            return;
-        }
-
-        const bool invokeOk = QMetaObject::invokeMethod(
-            safeThis.data(),
-            [safeThis, hwndValue, detail]()
-            {
-                if (safeThis.isNull())
-                {
-                    return;
-                }
-                safeThis->m_windowDetailRefreshing.store(false);
-                if (safeThis->m_queryWindowDetailButton != nullptr)
-                {
-                    safeThis->m_queryWindowDetailButton->setEnabled(true);
-                }
-                if (safeThis->m_windowDetailEditor != nullptr)
-                {
-                    const int row = safeThis->m_windowsTable->currentRow();
-                    const QString currentHwnd = row >= 0 ? safeThis->m_windowsTable->cell(row, 0).toString()
-                        : safeThis->m_cachedWindowsRows.value(0).value(0);
-                    if (parseUInt64Text(currentHwnd, 0U) == hwndValue)
-                        safeThis->m_windowDetailEditor->setDocument(detail);
-                }
-            },
-            Qt::QueuedConnection);
-
-        if (!invokeOk && !safeThis.isNull())
-        {
-            safeThis->m_windowDetailRefreshing.store(false);
-        }
-    }).detach();
+        std::uint64_t hwnd = 0;
+        std::uint32_t pid = 0, tid = 0;
+        quint64 auditRevision = 0;
+        ks::ui::FieldDocument snapshot;
+    };
+    m_windowDetailOperation->submit<Request, std::shared_ptr<const ks::ui::FieldDocument>>(
+        Request{hwndValue, processId, threadId, auditRevision, snapshot},
+        [](const Request& request, const ks::ui::AsyncOperationToken&) {
+            auto detail = request.snapshot;
+            const auto runtime = win32kWindowRuntimeDocument(request.hwnd, request.pid, request.tid);
+            const auto catalog = win32kPublicPdbCatalogPreview();
+            detail.nodes += runtime.nodes;
+            detail.nodes += catalog.nodes;
+            return ks::window::makeSnapshotValue(std::move(detail));
+        },
+        [this, hwndValue, processId, threadId, auditRevision](
+            const std::shared_ptr<const ks::ui::FieldDocument>& detail, std::uint64_t ticket) {
+            const QPointer<WindowDock> alive(this);
+            m_windowDetailRefreshing.store(false);
+            const int row = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const auto cell = [this, row](int column) {
+                return row >= 0 ? m_windowsTable->cell(row, column).toString() : m_cachedWindowsRows.value(0).value(column);
+            };
+            const bool sameTarget = auditRevision == m_auditViewRevision
+                && parseUInt64Text(cell(0), 0U) == hwndValue
+                && parseUInt32Text(cell(1), 0U) == processId && parseUInt32Text(cell(2), 0U) == threadId;
+            if (sameTarget && m_windowDetailEditor) m_windowDetailEditor->setDocument(*detail);
+            else updateSelectedWindowSnapshotDetail(row);
+            if (!alive || !m_windowDetailOperation->isCurrent(ticket)) return true;
+            const int currentRow = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const QString currentHwnd = currentRow >= 0 ? m_windowsTable->cell(currentRow, 0).toString()
+                : m_cachedWindowsRows.value(0).value(0);
+            if (m_queryWindowDetailButton) m_queryWindowDetailButton->setEnabled(parseUInt64Text(currentHwnd, 0U) != 0U);
+            return true;
+        },
+        [this, hwndValue, processId, threadId, auditRevision](std::exception_ptr) {
+            const QPointer<WindowDock> alive(this);
+            const auto failedGeneration = m_windowDetailOperation->generation();
+            m_windowDetailRefreshing.store(false);
+            updateSelectedWindowSnapshotDetail(m_windowsTable ? m_windowsTable->currentRow() : -1);
+            if (!alive || !m_windowDetailOperation->isCurrent(failedGeneration) || !m_windowDetailEditor) return;
+            const int currentRow = m_windowsTable ? m_windowsTable->currentRow() : -1;
+            const auto currentCell = [this, currentRow](int column) {
+                return currentRow >= 0 ? m_windowsTable->cell(currentRow, column).toString()
+                    : m_cachedWindowsRows.value(0).value(column);
+            };
+            if (auditRevision != m_auditViewRevision || parseUInt64Text(currentCell(0), 0U) != hwndValue
+                || parseUInt32Text(currentCell(1), 0U) != processId || parseUInt32Text(currentCell(2), 0U) != threadId) return;
+            auto failure = m_windowDetailEditor->document();
+            failure.note(QStringLiteral("后台任务发生异常。"));
+            m_windowDetailEditor->setDocument(failure);
+        });
 }

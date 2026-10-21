@@ -102,6 +102,7 @@ private:
     // - 输入：当前窗口表选中行；
     // - 处理：后台按需调用 ArkDriverClient::queryWin32kWindowDetail；
     // - 返回：无，结果回投到 m_windowDetailEditor。
+    void reconcileWindowDetailState();
     void requestSelectedWindowRuntimeDetail();
 
 private:
@@ -136,6 +137,7 @@ private:
     ks::ui::ImmutableValueTable* m_deviceTable = nullptr;      // m_deviceTable：GPU/显示/watchdog 设备审计表。
 
     ks::ui::AsyncOperation* m_auditOperation = nullptr;
+    ks::ui::AsyncOperation* m_windowDetailOperation = nullptr;
     quint64 m_auditViewRevision = 0, m_summaryViewRevision = ~quint64(0);
 
     // 刷新控制。
