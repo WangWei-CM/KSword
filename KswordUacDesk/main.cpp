@@ -1,4 +1,5 @@
 #include "UacDesk.h"
+#include "UacScanWorker.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -274,6 +275,8 @@ int main(int argc, char* argv[])
     const QString executable = QCoreApplication::applicationFilePath();
     const QStringList args = QCoreApplication::arguments();
     const QString stage = valueAfter(args, QStringLiteral("--ksword-uac-stage="));
+    if (stage.compare(QStringLiteral("collector"), Qt::CaseInsensitive) == 0)
+        return runUacScanCollector(args);
     KSWORD_UAC_DIAGNOSTIC_LOG(QStringLiteral("process-entry: stage=%1 executable=%2").arg(stage, executable));
     if (stage.compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0)
         return runAdmin(executable, args);

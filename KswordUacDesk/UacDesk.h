@@ -29,6 +29,8 @@ class QLabel;
 class QEvent;
 class QMouseEvent;
 class QPushButton;
+class UacScanWorker;
+struct UacScanCancellation;
 
 struct ProcessIdentity
 {
@@ -94,6 +96,13 @@ struct ProcessActionState
     QString reason;
 };
 
+struct UacScanOriginHint
+{
+    bool monitorRunning = false;
+    DWORD consentPid = 0;
+    quint64 discoveredAtMs = 0;
+};
+
 class ProcessInspector final
 {
 public:
@@ -132,7 +141,10 @@ public:
     void start();
     void stop();
     bool etwAvailable() const { return m_etwAvailable.load(); }
-    std::optional<UacOriginEvidence> readConsentOrigin(DWORD sessionId);
+    UacScanOriginHint scanOriginHint() const
+    {
+        return {m_running.load(), m_consentPid.load(), m_lastConsentDiscoveryMs.load()};
+    }
     std::optional<ProcessIdentity> takeUacOrigin(DWORD sessionId, quint64 uacObservedAtMs,
                                                   const QString& targetPath);
 
@@ -190,8 +202,6 @@ private:
     std::atomic<DWORD> m_appInfoPid{0};
     std::atomic<DWORD> m_consentPid{0};
     std::atomic<quint64> m_lastConsentDiscoveryMs{0};
-    QMutex m_consentMutex;
-    QString m_lastOriginKey;
     quint64 m_lastAppInfoPidRefreshMs = 0;
     std::atomic_bool m_running{false};
     std::atomic_bool m_etwStop{false};
@@ -211,12 +221,12 @@ private:
 class UacWindowScanner final
 {
 public:
-    static UacApplicationIdentity scan(const std::atomic_bool* cancel = nullptr);
+    static UacApplicationIdentity scan(const UacScanCancellation* cancel = nullptr);
     static BOOL CALLBACK enumChildProc(HWND hwnd, LPARAM lParam);
 
 private:
     static BOOL CALLBACK enumWindowProc(HWND hwnd, LPARAM lParam);
-    static QString readUiAutomationName(HWND hwnd, const std::atomic_bool* cancel);
+    static QString readUiAutomationName(HWND hwnd, const UacScanCancellation* cancel);
 };
 
 class UacDeskWindow final : public QMainWindow
@@ -257,10 +267,9 @@ private:
     bool m_dragging = false;
     QPoint m_dragOffset;
     HWND m_positionedUacWindow = nullptr;
-    std::atomic_bool m_scanRunning{false};
     std::atomic_bool m_scanStop{false};
     std::atomic<quint64> m_scanGeneration{0};
-    std::thread m_scanThread;
+    std::unique_ptr<UacScanWorker> m_scanWorker;
     std::atomic_bool m_actionRunning{false};
     std::atomic_bool m_launchRunning{false};
     std::thread m_actionThread;
