@@ -4984,7 +4984,7 @@ bool HardwareDock::eventFilter(QObject* watchedObject, QEvent* eventObject)
     if (eventObject != nullptr && eventObject->type() == QEvent::MouseButtonDblClick
         && (m_utilizationFloatingMode == UtilizationFloatingMode::None
             || m_utilizationFollowTarget != nullptr)
-        && m_sideTabWidget != nullptr && m_sideTabWidget->currentWidget() == m_utilizationPage
+        && m_sideTabWidget != nullptr && currentHardwarePage() == m_utilizationPage
         && eventWidget != nullptr)
     {
         const auto* mouseEvent = static_cast<QMouseEvent*>(eventObject);
@@ -5048,14 +5048,8 @@ void HardwareDock::showEvent(QShowEvent* showEventPointer)
 {
     QWidget::showEvent(showEventPointer);
 
-    // R0 证据页构造后会立即发起驱动查询；欢迎页只复用本 Dock 的用户态
-    // 性能采样，因此必须把该页延迟到用户真正打开硬件 Dock 后再创建。
-    if (m_r0EvidencePage == nullptr && m_sideTabWidget != nullptr)
-    {
-        initializeR0EvidenceTab();
-    }
-
     startPerformanceSampling(SamplingScope::HardwareDetails);
+    ensureCurrentHardwarePageInitialized();
     refreshStaticHardwareTexts(false);
 
     // splitter 在 Dock 首次显示前可能还没有最终宽度，因此分两轮尝试应用
@@ -5110,10 +5104,6 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
         }
 
         HardwareDock* dockPointer = safeThis.data();
-        if (dockPointer->m_coreChartEntries.empty())
-        {
-            dockPointer->initializeCoreCharts();
-        }
         dockPointer->initializePerformanceCounters();
         dockPointer->refreshCpuTopologyStaticInfo();
         dockPointer->refreshSystemVolumeInfo();
@@ -5131,6 +5121,113 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
             dockPointer->m_refreshTimer->start();
         }
     });
+}
+
+void HardwareDock::registerLazyHardwarePage(void (HardwareDock::*initialize)(),
+    const QString& title, const QString& titleKey, const QString& tip, const QString& tipKey)
+{
+    // Stable page identities keep Taskbar/global-search routes valid across first creation.
+    auto* host = new QWidget(m_sideTabWidget);
+    host->setProperty("ksword_page_frame_host", true);
+    configureCompressibleWidget(host, QSizePolicy::Expanding, QSizePolicy::Expanding);
+    host->setAutoFillBackground(false); // No descendant QWidget skin on the lazy shell.
+    auto* layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    const int index = m_sideTabWidget->addTab(host, title);
+    ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, host, titleKey, title);
+    m_sideTabWidget->setTabToolTip(index, tip);
+    ks::i18n::LanguageManager::instance().bindTabToolTip(m_sideTabWidget, host, tipKey, tip);
+    m_lazyHardwarePages.push_back({host, nullptr, initialize, title, titleKey, tip, tipKey});
+}
+
+int HardwareDock::addHardwarePageTab(QWidget* content, const QString& title)
+{
+    if (m_buildingHardwareHost == nullptr) return m_sideTabWidget->addTab(content, title);
+    for (auto& page : m_lazyHardwarePages)
+    {
+        if (page.host == m_buildingHardwareHost)
+        {
+            page.content = content;
+            page.host->layout()->addWidget(content);
+            return m_sideTabWidget->indexOf(page.host);
+        }
+    }
+    return -1;
+}
+
+QWidget* HardwareDock::currentHardwarePage() const
+{
+    if (m_sideTabWidget == nullptr) return nullptr;
+    QWidget* const host = m_sideTabWidget->currentWidget();
+    for (const auto& page : m_lazyHardwarePages)
+        if (page.host == host) return page.content != nullptr ? page.content : page.host;
+    return host;
+}
+
+void HardwareDock::ensureCurrentHardwarePageInitialized()
+{
+    if (!m_hardwareDetailsSamplingEnabled || !isVisible() || m_sideTabWidget == nullptr
+        || m_hardwarePageInitializing) return;
+    QWidget* const currentHost = m_sideTabWidget->currentWidget();
+    if (currentHost == m_utilizationPage)
+    {
+        if (!m_utilizationDetailsInitialized)
+        {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(m_utilizationPage);
+            m_utilizationDetailsInitialized = true;
+            initializeUtilizationCpuSubTab();
+            initializeUtilizationMemorySubTab();
+            initializeCoreCharts();
+            restoreUtilizationHistory();
+        }
+        else ks::ui::PrepareWidgetThemeBindingsForShow(m_utilizationPage);
+        return;
+    }
+    for (auto& page : m_lazyHardwarePages)
+    {
+        if (page.host != currentHost) continue;
+        if (page.content == nullptr)
+        {
+            const ks::ui::ScopedWidgetThemePreparation themePreparation(page.host);
+            m_hardwarePageInitializing = true;
+            m_buildingHardwareHost = page.host;
+            (this->*page.initialize)();
+            // Original factories bind their content; restore the stable host's translated chrome.
+            ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, page.host, page.titleKey, page.title);
+            ks::i18n::LanguageManager::instance().bindTabToolTip(m_sideTabWidget, page.host, page.tipKey, page.tip);
+            m_buildingHardwareHost = nullptr;
+            m_hardwarePageInitializing = false;
+            if (page.content == m_cpuPage)
+            {
+                updateCpuDetailTable(m_lastPerformanceSample.coreUsage, m_lastPerformanceSample.powerInfo);
+            }
+            refreshStaticHardwareTexts(false);
+        }
+        else
+        {
+            ks::ui::PrepareWidgetThemeBindingsForShow(page.host);
+        }
+        // Existing specialized factories keep their original single-instance lifecycle.
+        if (page.content == m_diskMonitorHostPage) ensureDiskMonitorTabInitialized();
+        if (page.content == m_otherDevicesHostPage) ensureOtherDevicesTabInitialized();
+        return;
+    }
+}
+
+void HardwareDock::restoreUtilizationHistory()
+{
+    if (m_presentationHistory.empty()) return;
+    m_restoringUtilizationHistory = true;
+    // Re-project the same retained frames; do not collect, emit, increment identity or archive again.
+    for (const auto& frame : m_presentationHistory)
+    {
+        m_sampleCounter = frame.sampleId;
+        m_lastGpuSamples = frame.gpuSamples;
+        m_lastGpuValid = frame.gpuValid;
+        applyPerformanceSample(frame.sample);
+    }
+    m_restoringUtilizationHistory = false;
 }
 
 void HardwareDock::initializeUi()
@@ -5161,20 +5258,36 @@ void HardwareDock::initializeUi()
     // 页签顺序：性能与硬件信息 -> 设备管理 -> 底层诊断。
     // 先注册“性能监控”，让硬件 Dock 初次打开时直接显示实时数据。
     initializeUtilizationTab();
-    initializeOverviewTab();
-    initializeCpuTab();
-    initializePowerTab();
-    initializeGpuTab();
-    initializeMemoryTab();
-    initializeDiskMonitorTab();
-    initializeDeviceManagerTab();
-    initializeOtherDevicesTab();
-    initializeHwidDispatchTab();
-    initializeDeviceStackTab();
-    initializeKeyboardMouseHidTab();
-    initializeI8042AuditTab();
-    initializeUsbTopologyTab();
-    initializePnpAcpiPciTab();
+    registerLazyHardwarePage(&HardwareDock::initializeOverviewTab, QStringLiteral("硬件概览"),
+        QStringLiteral("hardware.tab.overview"), QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"), QStringLiteral("hardware.tooltip.overview"));
+    registerLazyHardwarePage(&HardwareDock::initializeCpuTab, QStringLiteral("处理器"),
+        QStringLiteral("hardware.tab.cpu"), QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"), QStringLiteral("hardware.tooltip.cpu"));
+    registerLazyHardwarePage(&HardwareDock::initializePowerTab, QStringLiteral("电源"),
+        QStringLiteral("hardware.tab.power"), QStringLiteral("管理 Windows 电源方案与受控 CPU 功耗、Turbo 和 HWP 设置"), QStringLiteral("hardware.tooltip.power"));
+    registerLazyHardwarePage(&HardwareDock::initializeGpuTab, QStringLiteral("显卡"),
+        QStringLiteral("hardware.tab.gpu"), QStringLiteral("查看显卡型号、显存与驱动信息"), QStringLiteral("hardware.tooltip.gpu"));
+    registerLazyHardwarePage(&HardwareDock::initializeMemoryTab, QStringLiteral("内存"),
+        QStringLiteral("hardware.tab.memory"), QStringLiteral("查看内存容量、模组与使用情况"), QStringLiteral("hardware.tooltip.memory"));
+    registerLazyHardwarePage(&HardwareDock::initializeDiskMonitorTab, QStringLiteral("磁盘活动"),
+        QStringLiteral("hardware.tab.disk_activity"), QStringLiteral("查看文件访问与进程磁盘读写活动"), QStringLiteral("hardware.tooltip.disk_activity"));
+    registerLazyHardwarePage(&HardwareDock::initializeDeviceManagerTab, QStringLiteral("设备管理"),
+        QStringLiteral("hardware.tab.device_manager"), QStringLiteral("搜索、查看和管理 Windows 设备"), QStringLiteral("hardware.tooltip.device_manager"));
+    registerLazyHardwarePage(&HardwareDock::initializeOtherDevicesTab, QStringLiteral("其他设备"),
+        QStringLiteral("hardware.tab.other_devices"), QStringLiteral("查看处理器、内存和显卡之外的硬件清单"), QStringLiteral("hardware.tooltip.other_devices"));
+    registerLazyHardwarePage(&HardwareDock::initializeHwidDispatchTab, QStringLiteral("硬件标识设置"),
+        QStringLiteral("hardware.tab.hwid"), QStringLiteral("查看和调整支持的磁盘与网络硬件标识"), QStringLiteral("hardware.tooltip.hwid"));
+    registerLazyHardwarePage(&HardwareDock::initializeDeviceStackTab, QStringLiteral("设备驱动链"),
+        QStringLiteral("hardware.tab.device_stack"), QStringLiteral("检查设备节点、驱动对象与附加驱动关系"), QStringLiteral("hardware.tooltip.device_stack"));
+    registerLazyHardwarePage(&HardwareDock::initializeKeyboardMouseHidTab, QStringLiteral("键盘与鼠标"),
+        QStringLiteral("hardware.tab.keyboard_mouse"), QStringLiteral("检查键盘、鼠标与其他输入设备状态"), QStringLiteral("hardware.tooltip.keyboard_mouse"));
+    registerLazyHardwarePage(&HardwareDock::initializeI8042AuditTab, QStringLiteral("i8042prt 审计"),
+        QStringLiteral("hardware.tab.i8042_audit"), QStringLiteral("精确验证 i8042prt 映像描述符、键鼠端点归属与设备栈关系"), QStringLiteral("hardware.tooltip.i8042_audit"));
+    registerLazyHardwarePage(&HardwareDock::initializeUsbTopologyTab, QStringLiteral("USB 设备"),
+        QStringLiteral("hardware.tab.usb"), QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"), QStringLiteral("hardware.tooltip.usb"));
+    registerLazyHardwarePage(&HardwareDock::initializePnpAcpiPciTab, QStringLiteral("系统总线"),
+        QStringLiteral("hardware.tab.system_bus"), QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"), QStringLiteral("hardware.tooltip.system_bus"));
+    registerLazyHardwarePage(&HardwareDock::initializeR0EvidenceTab, QStringLiteral("底层硬件检查"),
+        QStringLiteral("hardware.tab.r0_evidence"), QStringLiteral("查看处理器寄存器与系统表的底层只读检查结果"), QStringLiteral("hardware.tooltip.r0_evidence"));
 
     if (m_sideTabWidget != nullptr)
     {
@@ -5185,12 +5298,13 @@ void HardwareDock::initializeUi()
             [this](const int tabIndexValue)
             {
                 Q_UNUSED(tabIndexValue);
-                if (m_sideTabWidget == nullptr || m_utilizationPage == nullptr)
+                ensureCurrentHardwarePageInitialized();
+                if (m_sideTabWidget == nullptr)
                 {
                     return;
                 }
 
-                QWidget* currentTabWidget = m_sideTabWidget->currentWidget();
+                QWidget* currentTabWidget = currentHardwarePage();
                 refreshStaticHardwareTexts(false);
                 if (currentTabWidget == m_diskMonitorHostPage)
                 {
@@ -5220,7 +5334,7 @@ void HardwareDock::initializeUi()
                     return;
                 }
 
-                if (m_sideTabWidget->currentWidget() != m_utilizationPage)
+                if (currentHardwarePage() != m_utilizationPage)
                 {
                     return;
                 }
@@ -5248,7 +5362,7 @@ void HardwareDock::initializeOverviewTab()
     m_overviewEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_overviewLayout->addWidget(m_overviewEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_overviewPage, QStringLiteral("硬件概览"));
+    const int tabIndex = addHardwarePageTab(m_overviewPage, QStringLiteral("硬件概览"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_overviewPage, QStringLiteral("hardware.tab.overview"), QStringLiteral("硬件概览"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"));
@@ -5334,11 +5448,11 @@ void HardwareDock::initializeUtilizationTab()
     // splitter 可用宽度把左侧校准到 300px，之后完全保留用户拖动结果。
     m_utilizationBodySplitter->setSizes({ 300, 360 });
 
-    initializeUtilizationCpuSubTab();
-    initializeUtilizationMemorySubTab();
-    initializeUtilizationDiskSubTab();
-    initializeUtilizationNetworkSubTab();
-    initializeUtilizationGpuSubTab();
+    // Keep the actual CPU/memory navigation identities without constructing detailed views.
+    m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
+    m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
     initializeUtilizationSidebarCards();
 
     connect(
@@ -5353,7 +5467,7 @@ void HardwareDock::initializeUtilizationTab()
     m_utilizationSidebarList->setCurrentRow(0);
     syncUtilizationSidebarSelection(0);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_utilizationPage, QStringLiteral("性能监控"));
+    const int tabIndex = addHardwarePageTab(m_utilizationPage, QStringLiteral("性能监控"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_utilizationPage, QStringLiteral("hardware.tab.utilization"), QStringLiteral("性能监控"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("实时查看处理器、内存、磁盘、网络和显卡使用情况"));
@@ -7106,7 +7220,7 @@ void HardwareDock::adjustUtilizationChartHeights()
 
 void HardwareDock::initializeUtilizationCpuSubTab()
 {
-    m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
+    if (m_utilizationCpuSubPage == nullptr) m_utilizationCpuSubPage = new QWidget(m_utilizationDetailStack);
     configureCompressibleWidget(m_utilizationCpuSubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationCpuSubPage);
     QVBoxLayout* cpuSubLayout = new QVBoxLayout(m_utilizationCpuSubPage);
@@ -7212,12 +7326,12 @@ void HardwareDock::initializeUtilizationCpuSubTab()
     detailLayout->addWidget(m_cpuUtilTertiaryDetailLabel, 3);
     cpuSubLayout->addLayout(detailLayout, 0);
 
-    m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
+    if (m_utilizationDetailStack->indexOf(m_utilizationCpuSubPage) < 0) m_utilizationDetailStack->addWidget(m_utilizationCpuSubPage);
 }
 
 void HardwareDock::initializeUtilizationMemorySubTab()
 {
-    m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
+    if (m_utilizationMemorySubPage == nullptr) m_utilizationMemorySubPage = new QWidget(m_utilizationDetailStack);
     configureCompressibleWidget(m_utilizationMemorySubPage, QSizePolicy::Expanding, QSizePolicy::Expanding);
     appendTransparentBackgroundStyle(m_utilizationMemorySubPage);
     QVBoxLayout* memorySubLayout = new QVBoxLayout(m_utilizationMemorySubPage);
@@ -7282,7 +7396,7 @@ void HardwareDock::initializeUtilizationMemorySubTab()
     detailLayout->addWidget(m_memoryUtilSecondaryDetailLabel, 1);
     memorySubLayout->addLayout(detailLayout, 0);
 
-    m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
+    if (m_utilizationDetailStack->indexOf(m_utilizationMemorySubPage) < 0) m_utilizationDetailStack->addWidget(m_utilizationMemorySubPage);
 }
 
 void HardwareDock::initializeUtilizationDiskSubTab()
@@ -7766,7 +7880,7 @@ void HardwareDock::initializeCpuTab()
     installHardwareAuditCopyMenu(m_cpuDetailTable);
     m_cpuLayout->addWidget(m_cpuDetailTable, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_cpuPage, QStringLiteral("处理器"));
+    const int tabIndex = addHardwarePageTab(m_cpuPage, QStringLiteral("处理器"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_cpuPage, QStringLiteral("hardware.tab.cpu"), QStringLiteral("处理器"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"));
@@ -7778,7 +7892,7 @@ void HardwareDock::initializePowerTab()
 {
     // 电源页拥有独立的 Windows 电源方案与受控 R0 CPU 调节逻辑。
     m_powerPage = new HardwarePowerPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_powerPage,
         QStringLiteral("电源"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7803,7 +7917,7 @@ void HardwareDock::initializeR0EvidenceTab()
     // - 处理：把 CPU/MSR/IDT/GDT 只读证据作为硬件 Dock 的独立顶部页签；
     // - 返回：无，页面由 Qt 父子树托管。
     m_r0EvidencePage = new HardwareR0EvidencePage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_r0EvidencePage,
         QStringLiteral("底层硬件检查"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7826,7 +7940,7 @@ void HardwareDock::initializeGpuTab()
     m_gpuEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_gpuLayout->addWidget(m_gpuEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_gpuPage, QStringLiteral("显卡"));
+    const int tabIndex = addHardwarePageTab(m_gpuPage, QStringLiteral("显卡"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_gpuPage, QStringLiteral("hardware.tab.gpu"), QStringLiteral("显卡"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看显卡型号、显存与驱动信息"));
@@ -7845,7 +7959,7 @@ void HardwareDock::initializeMemoryTab()
     m_memoryEditor->setPresentation(ks::ui::StructuredFieldView::Presentation::Tree);
     m_memoryLayout->addWidget(m_memoryEditor, 1);
 
-    const int tabIndex = m_sideTabWidget->addTab(m_memoryPage, QStringLiteral("内存"));
+    const int tabIndex = addHardwarePageTab(m_memoryPage, QStringLiteral("内存"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_memoryPage, QStringLiteral("hardware.tab.memory"), QStringLiteral("内存"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看内存容量、模组与使用情况"));
@@ -7866,7 +7980,7 @@ void HardwareDock::initializeDiskMonitorTab()
             QStringLiteral("硬盘监控待加载"),
             QStringLiteral("切换到本页后再启动文件 ETW 与进程 IO 采样，避免拖慢硬件页首次打开。")),
         1);
-    const int tabIndex = m_sideTabWidget->addTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
+    const int tabIndex = addHardwarePageTab(m_diskMonitorHostPage, QStringLiteral("磁盘活动"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_diskMonitorHostPage, QStringLiteral("hardware.tab.disk_activity"), QStringLiteral("磁盘活动"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看文件访问与进程磁盘读写活动"));
@@ -7881,7 +7995,7 @@ void HardwareDock::initializeDeviceManagerTab()
     // - 处理：直接创建页面，页面自身控制后台刷新和搜索；
     // - 返回：无，作为硬件 Dock 的独立 Tab 呈现。
     m_deviceManagerPage = new HardwareDeviceManagerPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(m_deviceManagerPage, QStringLiteral("设备管理"));
+    const int tabIndex = addHardwarePageTab(m_deviceManagerPage, QStringLiteral("设备管理"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_deviceManagerPage, QStringLiteral("hardware.tab.device_manager"), QStringLiteral("设备管理"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("搜索、查看和管理 Windows 设备"));
@@ -7896,7 +8010,7 @@ void HardwareDock::initializeHwidDispatchTab()
     // - 处理：新增 EASY-HWID-SPOOFER Dispatch-only 集成页；
     // - 返回：无返回值，页面由 Qt 父子树释放。
     m_hwidDispatchPage = new HardwareHwidDispatchPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
+    const int tabIndex = addHardwarePageTab(m_hwidDispatchPage, QStringLiteral("硬件标识设置"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_hwidDispatchPage, QStringLiteral("hardware.tab.hwid"), QStringLiteral("硬件标识设置"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看和调整支持的磁盘与网络硬件标识"));
@@ -7917,7 +8031,7 @@ void HardwareDock::initializeOtherDevicesTab()
             QStringLiteral("其他设备待加载"),
             QStringLiteral("切换到本页后再异步枚举设备清单，减少硬件 Dock 初次点击耗时。")),
         1);
-    const int tabIndex = m_sideTabWidget->addTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
+    const int tabIndex = addHardwarePageTab(m_otherDevicesHostPage, QStringLiteral("其他设备"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_otherDevicesHostPage, QStringLiteral("hardware.tab.other_devices"), QStringLiteral("其他设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看处理器、内存和显卡之外的硬件清单"));
@@ -7933,7 +8047,7 @@ void HardwareDock::initializeDeviceStackTab()
         QStringLiteral("对比系统设备记录与内核设备栈，帮助发现异常关联；本页为只读。"),
         &m_deviceStackEditor,
         &m_deviceStackTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
+    const int tabIndex = addHardwarePageTab(m_deviceStackPage, QStringLiteral("设备驱动链"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_deviceStackPage, QStringLiteral("hardware.tab.device_stack"), QStringLiteral("设备驱动链"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查设备节点、驱动对象与附加驱动关系"));
@@ -7949,7 +8063,7 @@ void HardwareDock::initializeKeyboardMouseHidTab()
         QStringLiteral("只读审计：键盘、鼠标、HID 与输入设备状态，默认不做消息截获与输入抓取。"),
         &m_keyboardMouseHidEditor,
         &m_keyboardMouseHidTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
+    const int tabIndex = addHardwarePageTab(m_keyboardMouseHidPage, QStringLiteral("键盘与鼠标"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_keyboardMouseHidPage, QStringLiteral("hardware.tab.keyboard_mouse"), QStringLiteral("键盘与鼠标"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查键盘、鼠标与其他输入设备状态"));
@@ -7960,7 +8074,7 @@ void HardwareDock::initializeKeyboardMouseHidTab()
 void HardwareDock::initializeI8042AuditTab()
 {
     m_i8042AuditPage = new HardwareI8042AuditPage(m_sideTabWidget);
-    const int tabIndex = m_sideTabWidget->addTab(
+    const int tabIndex = addHardwarePageTab(
         m_i8042AuditPage,
         QStringLiteral("i8042prt 审计"));
     ks::i18n::LanguageManager::instance().bindTab(
@@ -7986,7 +8100,7 @@ void HardwareDock::initializeUsbTopologyTab()
         QStringLiteral("只读审计：USB 拓扑、控制器、Hub、端口与设备树关系。"),
         &m_usbTopologyEditor,
         &m_usbTopologyTable);
-    const int tabIndex = m_sideTabWidget->addTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
+    const int tabIndex = addHardwarePageTab(m_usbTopologyPage, QStringLiteral("USB 设备"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_usbTopologyPage, QStringLiteral("hardware.tab.usb"), QStringLiteral("USB 设备"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"));
@@ -8001,7 +8115,7 @@ void HardwareDock::initializePnpAcpiPciTab()
         QStringLiteral("即插即用与系统总线"),
         QStringLiteral("只读审计：PnP、ACPI、PCI、DevNode 状态与 cross-view 风险标记。"),
         &m_pnpAcpiPciEditor);
-    const int tabIndex = m_sideTabWidget->addTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
+    const int tabIndex = addHardwarePageTab(m_pnpAcpiPciPage, QStringLiteral("系统总线"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_sideTabWidget, m_pnpAcpiPciPage, QStringLiteral("hardware.tab.system_bus"), QStringLiteral("系统总线"));
     m_sideTabWidget->setTabToolTip(tabIndex, QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"));
@@ -8103,6 +8217,11 @@ void HardwareDock::initializeCoreCharts()
 
     const DWORD logicalProcessorCount = std::max<DWORD>(1, ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
     const int coreCount = static_cast<int>(logicalProcessorCount);
+    while (m_coreHistory.size() < static_cast<std::size_t>(coreCount))
+    {
+        m_coreHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+        m_coreBaselineHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+    }
     const CpuCoreGridShape gridShape = chooseCpuCoreGridShape(coreCount);
     m_cpuCoreGridColumnCount = gridShape.columnCount;
     m_cpuCoreGridRowCount = gridShape.rowCount;
@@ -8137,10 +8256,11 @@ void HardwareDock::initializeCoreCharts()
         chartEntry.lineSeries->setColor(
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Cpu));
         chartEntry.baselineSeries = new QLineSeries(chartEntry.containerWidget);
-        for (int indexValue = 0; indexValue < m_historyLength; ++indexValue)
+        const auto index = static_cast<std::size_t>(coreIndex);
+        if (index < m_coreHistory.size())
         {
-            chartEntry.lineSeries->append(indexValue, 0.0);
-            chartEntry.baselineSeries->append(indexValue, 0.0);
+            ks::ui::MetricChartBinding::ForSeries(chartEntry.lineSeries, m_historyLength)->setHistory(m_coreHistory[index]);
+            ks::ui::MetricChartBinding::ForSeries(chartEntry.baselineSeries, m_historyLength)->setHistory(m_coreBaselineHistory[index]);
         }
 
         QChart* chart = new QChart();
@@ -9195,7 +9315,17 @@ void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
     double gpuUsagePercent = 0.0;
     double gpuUsageAveragePercent = 0.0;
     std::vector<GpuUsageSample> gpuSampleList;
-    m_metricGpuValid = sampleGpuUsages(&gpuSampleList);
+    if (m_restoringUtilizationHistory)
+    {
+        gpuSampleList = m_lastGpuSamples;
+        m_metricGpuValid = m_lastGpuValid;
+    }
+    else
+    {
+        m_metricGpuValid = sampleGpuUsages(&gpuSampleList);
+        m_lastGpuSamples = gpuSampleList;
+        m_lastGpuValid = m_metricGpuValid;
+    }
     if (m_metricGpuValid)
     {
         double gpuUsageSum = 0.0;
@@ -9217,43 +9347,65 @@ void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
     const auto& powerInfoList = sample.powerInfo;
     m_lastCpuSpeedGhz = sample.cpuSpeedGhz;
     m_metricSampleTimeMs = sample.sampleTimeMs;
-    ++m_sampleCounter;
-    pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
-    pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
-    pushBoundedHistorySample(&m_gpuUsageHistoryPercent, gpuUsagePercent);
-    pushBoundedHistorySample(
-        &m_diskAggregateHistoryBytesPerSec,
-        std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec));
-    pushBoundedHistorySample(
-        &m_networkAggregateHistoryBytesPerSec,
-        std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec));
-    if (m_hardwareDetailsSamplingEnabled)
+    if (!m_restoringUtilizationHistory)
+    {
+        ++m_sampleCounter;
+        pushBoundedHistorySample(&m_cpuUsageHistoryPercent, totalCpuUsage);
+        pushBoundedHistorySample(&m_memoryUsageHistoryPercent, memoryUsagePercent);
+        pushBoundedHistorySample(&m_gpuUsageHistoryPercent, gpuUsagePercent);
+        pushBoundedHistorySample(
+            &m_diskAggregateHistoryBytesPerSec,
+            std::max(0.0, diskReadBytesPerSec) + std::max(0.0, diskWriteBytesPerSec));
+        pushBoundedHistorySample(
+            &m_networkAggregateHistoryBytesPerSec,
+            std::max(0.0, networkRxBytesPerSec) + std::max(0.0, networkTxBytesPerSec));
+        while (m_coreHistory.size() < coreUsageList.size())
+        {
+            m_coreHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+            m_coreBaselineHistory.push_back(std::make_shared<ks::ui::MetricHistory>(m_historyLength));
+        }
+        for (std::size_t index = 0; index < m_coreHistory.size(); ++index)
+        {
+            const bool valid = m_metricCpuValid && index < coreUsageList.size()
+                && index < m_metricCoreValid.size() && m_metricCoreValid[index];
+            const double value = index < coreUsageList.size() ? coreUsageList[index] : 0.0;
+            m_coreHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, value, valid});
+            m_coreBaselineHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, 0.0, valid});
+        }
+        m_presentationHistory.push_back({sample, gpuSampleList, m_metricGpuValid, m_sampleCounter});
+        while (m_presentationHistory.size() > static_cast<std::size_t>(m_historyLength))
+            m_presentationHistory.pop_front();
+    }
+    if (!m_restoringUtilizationHistory && m_hardwareDetailsSamplingEnabled)
     {
         requestAsyncR0HardwareHealthRefresh();
     }
     updateOverviewText(totalCpuUsage, memoryUsagePercent);
-    updateUtilizationView(
-        coreUsageList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
-    updateAdditionalDiskUtilizationDevices(diskSampleList);
-    updateAdditionalNetworkUtilizationDevices(networkSampleList);
-    updateAdditionalGpuUtilizationDevices(gpuSampleList);
+    if (m_utilizationDetailsInitialized)
+    {
+        updateUtilizationView(
+            coreUsageList,
+            memoryUsagePercent,
+            diskReadBytesPerSec,
+            diskWriteBytesPerSec,
+            networkRxBytesPerSec,
+            networkTxBytesPerSec,
+            gpuUsagePercent);
+        updateAdditionalDiskUtilizationDevices(diskSampleList);
+        updateAdditionalNetworkUtilizationDevices(networkSampleList);
+        updateAdditionalGpuUtilizationDevices(gpuSampleList);
+        updateTaskManagerDetailLabels(
+            coreUsageList,
+            powerInfoList,
+            memoryUsagePercent,
+            diskReadBytesPerSec,
+            diskWriteBytesPerSec,
+            networkRxBytesPerSec,
+            networkTxBytesPerSec,
+            gpuUsagePercent);
+    }
     updateCpuDetailTable(coreUsageList, powerInfoList);
-    updateTaskManagerDetailLabels(
-        coreUsageList,
-        powerInfoList,
-        memoryUsagePercent,
-        diskReadBytesPerSec,
-        diskWriteBytesPerSec,
-        networkRxBytesPerSec,
-        networkTxBytesPerSec,
-        gpuUsagePercent);
-    emit performanceSnapshotChanged(
+    if (!m_restoringUtilizationHistory) emit performanceSnapshotChanged(
         totalCpuUsage,
         memoryUsagePercent,
         diskReadAverageBytesPerSec,
@@ -9266,11 +9418,11 @@ void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
     // 周期刷新策略：
     // - 传感器每 5 秒异步更新一次；
     // - 静态文本每 60 秒异步更新一次（兼顾信息时效与系统开销）。
-    if ((m_sampleCounter % 5) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 5) == 1)
     {
         requestAsyncSensorRefresh();
     }
-    if ((m_sampleCounter % 60) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 60) == 1)
     {
         requestAsyncStaticInfoRefresh();
     }
@@ -9731,7 +9883,8 @@ bool HardwareDock::sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut)
     }
 
     // 详情页创建与卡片注册只能在 UI 线程做，因此放在快照回到本线程之后。
-    for (int sampleIndex = 0; sampleIndex < static_cast<int>(sampleListOut->size()); ++sampleIndex)
+    for (int sampleIndex = 0; m_utilizationDetailsInitialized
+        && sampleIndex < static_cast<int>(sampleListOut->size()); ++sampleIndex)
     {
         ensureGpuUtilizationDevice(
             (*sampleListOut)[static_cast<std::size_t>(sampleIndex)],
@@ -10961,7 +11114,7 @@ void HardwareDock::updateTaskManagerDetailLabels(
             .arg(m_r0PhysicalMemoryDetailText));
     }
 
-    if ((m_sampleCounter % 15) == 1)
+    if (!m_restoringUtilizationHistory && (m_sampleCounter % 15) == 1)
     {
         refreshSystemVolumeInfo();
     }
@@ -11825,7 +11978,7 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
         // 这样自动刷新不再每 60 秒连续提交 Device/Input/USB 三个大体积 R0 查询。
         std::uint32_t deviceAuditRefreshMask = 0U;
         QWidget* const currentPage = m_sideTabWidget != nullptr
-            ? m_sideTabWidget->currentWidget()
+            ? currentHardwarePage()
             : nullptr;
         if (currentPage == m_deviceStackPage)
         {

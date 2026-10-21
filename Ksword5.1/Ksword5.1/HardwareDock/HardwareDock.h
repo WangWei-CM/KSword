@@ -23,6 +23,9 @@
 #include <QWidget>
 
 #include <array>
+#include "../../../shared/ui/MetricHistory.h"
+#include <deque>
+
 #include <atomic>   // std::atomic_bool：异步探测任务互斥。
 #include <cstdint>  // std::uint64_t：保存采样累计值与时间戳。
 #include <memory>
@@ -465,6 +468,29 @@ private:
     void createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer);
     void createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer);
 
+    struct LazyHardwarePage
+    {
+        QWidget* host = nullptr;
+        QWidget* content = nullptr;
+        void (HardwareDock::*initialize)() = nullptr;
+        QString title;
+        QString titleKey;
+        QString tip;
+        QString tipKey;
+    };
+    void registerLazyHardwarePage(void (HardwareDock::*initialize)(), const QString& title,
+        const QString& titleKey, const QString& tip, const QString& tipKey);
+    int addHardwarePageTab(QWidget* content, const QString& title);
+    QWidget* currentHardwarePage() const;
+    void ensureCurrentHardwarePageInitialized();
+    void restoreUtilizationHistory();
+    std::vector<LazyHardwarePage> m_lazyHardwarePages;
+    QWidget* m_buildingHardwareHost = nullptr;
+    bool m_hardwarePageInitializing = false;
+    bool m_utilizationDetailsInitialized = false;
+    bool m_restoringUtilizationHistory = false;
+    std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreHistory;
+    std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreBaselineHistory;
     // ===================== 采样与刷新 =====================
     void initializePerformanceCounters();
     void refreshAllViews();
@@ -502,6 +528,16 @@ private:
     std::shared_ptr<SamplingReceipt> m_samplingReceipt;
     std::shared_ptr<ks::ui::AsyncUiDispatcher> m_samplingDispatcher;
     PerformanceSample m_lastPerformanceSample;
+    struct PresentationSample
+    {
+        PerformanceSample sample;
+        std::vector<GpuUsageSample> gpuSamples;
+        bool gpuValid = false;
+        int sampleId = 0;
+    };
+    std::deque<PresentationSample> m_presentationHistory;
+    std::vector<GpuUsageSample> m_lastGpuSamples;
+    bool m_lastGpuValid = false;
 
     bool sampleGpuUsages(std::vector<GpuUsageSample>* sampleListOut);
     bool sampleGpuUsage(double* gpuUsagePercentOut);
