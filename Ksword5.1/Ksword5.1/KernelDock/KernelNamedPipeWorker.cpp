@@ -373,7 +373,7 @@ namespace
     // enumerateNamedPipeDirectory：
     // - 输入 api：已解析的 NT API；directoryPath：一个候选 NPFS 目录；
     // - 处理逻辑：打开目录后循环 NtQueryDirectoryFile，处理 STATUS_NO_MORE_FILES、缓冲不足和权限失败；
-    // - 返回结果：true 表示该目录完整枚举到结束或达到保护上限，rowsOut 追加成功解析的条目。
+    // - 返回结果：true 表示枚举到结束或达到保护上限；仅 STATUS_NO_MORE_FILES 表示完整，rowsOut 保留已解析条目。
     bool enumerateNamedPipeDirectory(
         const NtFileDirectoryApi& api,
         const QString& directoryPath,
@@ -541,6 +541,12 @@ KernelNamedPipeSnapshot runKernelNamedPipeSnapshotTask()
         const bool queryOk = enumerateNamedPipeDirectory(api, candidatePath, directoryStatus, collectedRows);
         snapshot.anyQuerySucceeded = snapshot.anyQuerySucceeded || queryOk;
         snapshot.directories.push_back(directoryStatus);
+        // A successful row-limit stop is still partial; only NO_MORE_FILES completes an alias.
+        // Keep rows and diagnostics from earlier attempts when compatibility fallback was needed.
+        if (queryOk && directoryStatus.lastStatus == static_cast<std::uint32_t>(kStatusNoMoreFiles))
+        {
+            break;
+        }
     }
 
     deduplicateAndSortRows(collectedRows);
