@@ -6,6 +6,7 @@
 
 #include <QDynamicPropertyChangeEvent>
 #include <QPersistentModelIndex>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTableWidget>
@@ -291,14 +292,22 @@ namespace ks::monitor
         void apply(const Matches& result)
         {
             if (m_closed || m_suspended || result.revision != m_revision) return;
+            QSet<QPersistentModelIndex> newlyExcluded, newlyIncluded;
             for (const auto& [id, version, matched] : result.rows)
             {
                 const auto found = m_indexes.find(id);
                 if (found == m_indexes.end() || !found->second.isValid() || m_versions[id] != version) continue;
-                if (matched) m_excluded.remove(found->second); else m_excluded.insert(found->second);
+                const auto& index = found->second;
+                const bool excluded = m_excluded.contains(index);
+                if (matched && excluded) { m_excluded.remove(index); newlyIncluded.insert(index); }
+                else if (!matched && !excluded) { m_excluded.insert(index); newlyExcluded.insert(index); }
                 m_pending.remove(id);
             }
-            ks::ui::ApplyTableRowFilterIncrementally(m_table, m_excluded);
+            // An append/update result changes only its validated identities. Do
+            // not copy or normalize the complete retained exclusion set again.
+            const QPointer<EventFilterProjection> guard(this);
+            ks::ui::ApplyTableRowFilterDelta(m_table, newlyExcluded, newlyIncluded);
+            if (!guard) return;
             if (!m_pending.isEmpty()) schedule();
             notify();
         }
