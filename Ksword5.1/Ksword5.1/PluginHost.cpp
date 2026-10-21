@@ -1462,10 +1462,25 @@ namespace
     // window as QPlainTextEdit::maximumBlockCount without building hidden text.
     void appendPluginTextProjection(std::deque<QString>& pending, const QString& text)
     {
-        const QStringList lines = text.split(QLatin1Char('\n'));
+        constexpr int maximumLines = 2000;
+        // Locate the retained tail before allocating lines. A multiline log
+        // record can exceed the whole viewport; its discarded prefix must not
+        // allocate one QString per line, including while the page is hidden.
+        qsizetype begin = text.size();
+        for (int count = 1; begin > 0; ++count) {
+            const qsizetype newline = text.lastIndexOf(QLatin1Char('\n'), begin - 1);
+            if (newline < 0) { begin = 0; break; }
+            if (count == maximumLines) {
+                begin = newline + 1;
+                pending.clear(); // These 2000 new lines replace the previous tail.
+                break;
+            }
+            begin = newline;
+        }
+        const QStringList lines = (begin == 0 ? text : text.mid(begin)).split(QLatin1Char('\n'));
         for (const QString& line : lines) {
             pending.push_back(line);
-            if (pending.size() > 2000) pending.pop_front();
+            if (pending.size() > maximumLines) pending.pop_front();
         }
     }
 
@@ -1786,7 +1801,8 @@ namespace
         }
         void schedulePresentation()
         {
-            if (m_presentationScheduled) return;
+            // showEvent/currentChanged project retained state on return.
+            if (!isVisible() || m_presentationScheduled) return;
             m_presentationScheduled = true;
             QTimer::singleShot(0, this, [this]() { m_presentationScheduled = false; presentVisibleOutput(); });
         }
@@ -2280,7 +2296,8 @@ namespace
         }
         void scheduleTabDiagnostics()
         {
-            if (m_diagnosticsScheduled) return;
+            // Parent Show and the existing diagnostic toggle resume this tail.
+            if (m_diagnosticsScheduled || !m_diagnostics->isVisible() || m_pendingDiagnostics.empty()) return;
             m_diagnosticsScheduled = true;
             QTimer::singleShot(0, this, [this]() {
                 m_diagnosticsScheduled = false;
