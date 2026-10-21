@@ -955,6 +955,55 @@ void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFi
     finish();
 }
 
+void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t rowCount,
+    std::function<void(std::size_t)> fillRow, std::function<void()> finalize,
+    std::function<void()> onReady)
+{
+    const QPointer<QTableWidget> tableGuard(table);
+    const QPointer<KernelDock> owner(this);
+    auto* timer = new QTimer(table);
+    timer->setSingleShot(true);
+    const QPointer<QTimer> timerGuard(timer);
+    const bool wasForceDisabled = table->testAttribute(Qt::WA_ForceDisabled);
+    table->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+    table->setEnabled(false);
+    connect(timer, &QTimer::timeout, this,
+        [this, owner, tableGuard, timerGuard, rowCount, wasForceDisabled,
+            cursor = std::size_t{0}, initialized = false, fillRow = std::move(fillRow),
+            finalize = std::move(finalize), onReady = std::move(onReady)]() mutable {
+        if (!owner || !tableGuard || !timerGuard) return;
+        const auto resume = [timerGuard]() { if (timerGuard) timerGuard->start(0); };
+        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(tableGuard,
+            QStringLiteral("kernel_result_source_projection"), {tableGuard}, resume)) return;
+        QElapsedTimer budget;
+        budget.start();
+        if (!initialized)
+        {
+            initialized = true;
+            tableGuard->setSortingEnabled(false);
+            resetKernelResultFilterCache(tableGuard);
+            tableGuard->setRowCount(0);
+            tableGuard->setRowCount(static_cast<int>(rowCount));
+            if (!owner || !tableGuard || !timerGuard) return;
+        }
+        int rows = 0;
+        while (cursor < rowCount)
+        {
+            fillRow(cursor++);
+            if (!owner || !tableGuard || !timerGuard) return;
+            if (++rows >= 64 || budget.elapsed() >= 4) break;
+        }
+        if (cursor < rowCount) { resume(); return; }
+        timerGuard->deleteLater();
+        finalize(); // Preserve the original final sort/filter before readiness.
+        if (!owner || !tableGuard) return;
+        tableGuard->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+        tableGuard->setEnabled(!wasForceDisabled);
+        if (onReady) onReady();
+    });
+    timer->start(0);
+}
+
 void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_atomTable == nullptr)
@@ -990,90 +1039,50 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()
         return;
     }
 
-    // Keep the refresh gate until publication finishes, so m_atomRows cannot be
-    // replaced while this cursor reads it. No second native snapshot is retained.
-    auto* timer = new QTimer(m_atomTable);
-    timer->setSingleShot(true);
-    const QPointer<QTimer> timerGuard(timer);
+    ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
     const QPointer<KernelDock> owner(this);
-    const bool wasForceDisabled = m_atomTable->testAttribute(Qt::WA_ForceDisabled);
-    m_atomTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
-    m_atomTable->setEnabled(false);
-    connect(timer, &QTimer::timeout, this,
-        [this, owner, timerGuard, searchFields, wasForceDisabled,
-            sourceIndex = std::size_t{0}, initialized = false,
-            onReady = std::move(onReady)]() mutable {
-        if (!owner || !timerGuard) return;
-        const auto resume = [timerGuard]() { if (timerGuard) timerGuard->start(0); };
-        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(m_atomTable,
-            QStringLiteral("kernel_atom_source_projection"), {m_atomTable}, resume)) return;
-        QElapsedTimer budget;
-        budget.start();
-        if (!initialized)
+    publishKernelResultRows(m_atomTable, m_atomRows.size(),
+        [this, searchFields](const std::size_t sourceIndex) {
+        const KernelAtomEntry& entry = m_atomRows[sourceIndex];
+        const QString valueText = QString::number(entry.atomValue);
+        const QString hexText = QStringLiteral("0x%1")
+            .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
+            .toUpper();
+
+        const int rowIndex = static_cast<int>(sourceIndex);
+
+        auto* valueItem = new QTableWidgetItem(valueText);
+        valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+        valueItem->setData(KernelSearchFieldsRole, searchFields(entry));
+        auto* hexItem = new QTableWidgetItem(hexText);
+        auto* nameItem = new QTableWidgetItem(entry.atomNameText);
+        auto* sourceItem = new QTableWidgetItem(entry.sourceText);
+        auto* statusItem = new QTableWidgetItem(entry.statusText);
+
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        hexItem->setFlags(hexItem->flags() & ~Qt::ItemIsEditable);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        sourceItem->setFlags(sourceItem->flags() & ~Qt::ItemIsEditable);
+        statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
+
+        if (!entry.querySucceeded)
         {
-            initialized = true;
-            ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
-            m_atomTable->setSortingEnabled(false);
-            resetKernelResultFilterCache(m_atomTable);
-            m_atomTable->setRowCount(0);
-            m_atomTable->setRowCount(static_cast<int>(m_atomRows.size()));
-            if (!owner || !timerGuard) return;
+            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
         }
-        int rows = 0;
-        while (sourceIndex < m_atomRows.size())
-        {
-            const KernelAtomEntry& entry = m_atomRows[sourceIndex];
-            const QString valueText = QString::number(entry.atomValue);
-            const QString hexText = QStringLiteral("0x%1")
-                .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
-                .toUpper();
 
-            const int rowIndex = static_cast<int>(sourceIndex);
-
-            auto* valueItem = new QTableWidgetItem(valueText);
-            valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            valueItem->setData(KernelSearchFieldsRole, searchFields(entry));
-            auto* hexItem = new QTableWidgetItem(hexText);
-            auto* nameItem = new QTableWidgetItem(entry.atomNameText);
-            auto* sourceItem = new QTableWidgetItem(entry.sourceText);
-            auto* statusItem = new QTableWidgetItem(entry.statusText);
-
-            valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
-            hexItem->setFlags(hexItem->flags() & ~Qt::ItemIsEditable);
-            nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
-            sourceItem->setFlags(sourceItem->flags() & ~Qt::ItemIsEditable);
-            statusItem->setFlags(statusItem->flags() & ~Qt::ItemIsEditable);
-
-            if (!entry.querySucceeded)
-            {
-                statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
-            }
-
-            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
-            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
-            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
-            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
-            m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
-            rememberKernelResultFilterRow(m_atomTable, rowIndex);
-            ++sourceIndex;
-            if (!owner || !timerGuard) return;
-            if (++rows >= 64 || budget.elapsed() >= 4) break;
-        }
-        if (sourceIndex < m_atomRows.size()) { resume(); return; }
-        timerGuard->deleteLater();
-        m_atomTable->setSortingEnabled(true);
-        if (!owner) return;
-        // Atom search fields contain only values from the accepted source rows;
-        // they have no LanguageManager-dependent formatting.
-        m_atomTable->setProperty(KernelSearchLanguageProperty,
-            ks::i18n::LanguageManager::instance().currentLanguageId());
-        applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
-        if (!owner) return;
-        m_atomTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
-        m_atomTable->setEnabled(!wasForceDisabled);
-        if (onReady) onReady();
-    });
-    timer->start(0);
+        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
+        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
+        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
+        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
+        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
+        rememberKernelResultFilterRow(m_atomTable, rowIndex);
+        }, [this, owner]() {
+            m_atomTable->setSortingEnabled(true);
+            if (!owner) return;
+            m_atomTable->setProperty(KernelSearchLanguageProperty,
+                ks::i18n::LanguageManager::instance().currentLanguageId());
+            applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
+        }, std::move(onReady));
 }
 
 void KernelDock::rebuildNtQueryTable()

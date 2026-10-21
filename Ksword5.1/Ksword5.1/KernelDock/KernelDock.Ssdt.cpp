@@ -395,11 +395,10 @@ void KernelDock::refreshSsdtAsync()
                 return;
             }
 
-            guardThis->m_ssdtRefreshRunning.store(false);
-            guardThis->m_refreshSsdtButton->setEnabled(true);
-
             if (!success)
             {
+                guardThis->m_ssdtRefreshRunning.store(false);
+                guardThis->m_refreshSsdtButton->setEnabled(true);
                 guardThis->m_ssdtStatusLabel->setText(kernelText("kernel.ssdt.status.failed", QStringLiteral("状态：刷新失败")));
                 guardThis->m_ssdtStatusLabel->setStyleSheet(statusLabelStyle(KswordTheme::ErrorHex()));
                 guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(errorText));
@@ -407,33 +406,38 @@ void KernelDock::refreshSsdtAsync()
             }
 
             guardThis->m_ssdtRows = std::move(resultRows);
-            guardThis->rebuildSsdtTable(true);
+            guardThis->rebuildSsdtTable(true, [=]() {
+                if (!guardThis) return;
+                guardThis->m_ssdtRefreshRunning.store(false);
+                guardThis->m_refreshSsdtButton->setEnabled(true);
 
-            std::size_t unresolvedCount = 0U;
-            for (const KernelSsdtEntry& entry : guardThis->m_ssdtRows)
-            {
-                if (!entry.indexResolved)
+
+                std::size_t unresolvedCount = 0U;
+                for (const KernelSsdtEntry& entry : guardThis->m_ssdtRows)
                 {
-                    ++unresolvedCount;
+                    if (!entry.indexResolved)
+                    {
+                        ++unresolvedCount;
+                    }
                 }
-            }
 
-            guardThis->m_ssdtStatusLabel->setText(
-                kernelText("kernel.ssdt.status.summary", QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项"))
-                .arg(guardThis->m_ssdtRows.size())
-                .arg(unresolvedCount));
-            guardThis->m_ssdtStatusLabel->setStyleSheet(
-                statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
+                guardThis->m_ssdtStatusLabel->setText(
+                    kernelText("kernel.ssdt.status.summary", QStringLiteral("状态：已刷新 %1 项，未解析索引 %2 项"))
+                    .arg(guardThis->m_ssdtRows.size())
+                    .arg(unresolvedCount));
+                guardThis->m_ssdtStatusLabel->setStyleSheet(
+                    statusLabelStyle(unresolvedCount == 0U ? KswordTheme::SuccessHex() : KswordTheme::WarningHex()));
 
-            const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_ssdtTable);
-            if (firstVisibleRow >= 0)
-            {
-                guardThis->m_ssdtTable->setCurrentCell(firstVisibleRow, 0);
-            }
-            else
-            {
-                guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.ssdt.empty", QStringLiteral("当前环境未返回可见 SSDT 条目。"))));
-            }
+                const int firstVisibleRow = guardThis->firstKernelResultRow(guardThis->m_ssdtTable);
+                if (firstVisibleRow >= 0)
+                {
+                    guardThis->m_ssdtTable->setCurrentCell(firstVisibleRow, 0);
+                }
+                else
+                {
+                    guardThis->m_ssdtDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.ssdt.empty", QStringLiteral("当前环境未返回可见 SSDT 条目。"))));
+                }
+            });
             };
 
             if (guardThis == nullptr)
@@ -453,7 +457,7 @@ void KernelDock::refreshSsdtAsync()
     }).detach();
 }
 
-void KernelDock::rebuildSsdtTable(const bool sourceChanged)
+void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()> onReady)
 {
     if (m_ssdtTable == nullptr)
     {
@@ -467,6 +471,7 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
     if (!sourceChanged)
     {
+        if (m_ssdtTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
         if (m_ssdtTable->property(KernelSearchLanguageProperty).toString() != language)
         {
             resetKernelResultFilterCache(m_ssdtTable);
@@ -488,52 +493,47 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
     }
 
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
-    m_ssdtTable->setSortingEnabled(false);
-    resetKernelResultFilterCache(m_ssdtTable);
-    m_ssdtTable->setRowCount(0);
-    m_ssdtTable->setRowCount(static_cast<int>(m_ssdtRows.size()));
+    publishKernelResultRows(m_ssdtTable, m_ssdtRows.size(),
+        [this, searchFields](const std::size_t sourceIndex) {
+            const KernelSsdtEntry& entry = m_ssdtRows[sourceIndex];
+            const QString indexText = entry.indexResolved
+                ? QString::number(entry.serviceIndex)
+                : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
+            const QString zwAddressText = formatAddressHex(entry.zwRoutineAddress);
+            const QString serviceAddressText = formatAddressHex(entry.serviceRoutineAddress);
+            const QString slotAddressText =
+                formatAddressHex(entry.tableEntryAddress);
 
-    for (std::size_t sourceIndex = 0; sourceIndex < m_ssdtRows.size(); ++sourceIndex)
-    {
-        const KernelSsdtEntry& entry = m_ssdtRows[sourceIndex];
-        const QString indexText = entry.indexResolved
-            ? QString::number(entry.serviceIndex)
-            : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
-        const QString zwAddressText = formatAddressHex(entry.zwRoutineAddress);
-        const QString serviceAddressText = formatAddressHex(entry.serviceRoutineAddress);
-        const QString slotAddressText =
-            formatAddressHex(entry.tableEntryAddress);
+            const int rowIndex = static_cast<int>(sourceIndex);
 
-        const int rowIndex = static_cast<int>(sourceIndex);
+            auto* indexItem = new QTableWidgetItem(indexText);
+            indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
+            indexItem->setData(KernelSearchFieldsRole, searchFields(entry));
+            auto* serviceNameItem = new QTableWidgetItem(safeText(entry.serviceNameText));
+            auto* zwAddressItem = new QTableWidgetItem(zwAddressText);
+            auto* serviceAddressItem = new QTableWidgetItem(serviceAddressText);
+            auto* slotAddressItem = new QTableWidgetItem(slotAddressText);
+            auto* moduleItem = new QTableWidgetItem(safeText(entry.moduleNameText));
 
-        auto* indexItem = new QTableWidgetItem(indexText);
-        indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-        indexItem->setData(KernelSearchFieldsRole, searchFields(entry));
-        auto* serviceNameItem = new QTableWidgetItem(safeText(entry.serviceNameText));
-        auto* zwAddressItem = new QTableWidgetItem(zwAddressText);
-        auto* serviceAddressItem = new QTableWidgetItem(serviceAddressText);
-        auto* slotAddressItem = new QTableWidgetItem(slotAddressText);
-        auto* moduleItem = new QTableWidgetItem(safeText(entry.moduleNameText));
+            indexItem->setFlags(indexItem->flags() & ~Qt::ItemIsEditable);
+            serviceNameItem->setFlags(serviceNameItem->flags() & ~Qt::ItemIsEditable);
+            zwAddressItem->setFlags(zwAddressItem->flags() & ~Qt::ItemIsEditable);
+            serviceAddressItem->setFlags(serviceAddressItem->flags() & ~Qt::ItemIsEditable);
+            slotAddressItem->setFlags(slotAddressItem->flags() & ~Qt::ItemIsEditable);
+            moduleItem->setFlags(moduleItem->flags() & ~Qt::ItemIsEditable);
 
-        indexItem->setFlags(indexItem->flags() & ~Qt::ItemIsEditable);
-        serviceNameItem->setFlags(serviceNameItem->flags() & ~Qt::ItemIsEditable);
-        zwAddressItem->setFlags(zwAddressItem->flags() & ~Qt::ItemIsEditable);
-        serviceAddressItem->setFlags(serviceAddressItem->flags() & ~Qt::ItemIsEditable);
-        slotAddressItem->setFlags(slotAddressItem->flags() & ~Qt::ItemIsEditable);
-        moduleItem->setFlags(moduleItem->flags() & ~Qt::ItemIsEditable);
-
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
-        m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
-        rememberKernelResultFilterRow(m_ssdtTable, rowIndex);
-    }
-
-    m_ssdtTable->setSortingEnabled(true);
-    m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
-    applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
+            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
+            rememberKernelResultFilterRow(m_ssdtTable, rowIndex);
+        }, [this, language]() {
+            m_ssdtTable->setSortingEnabled(true);
+            m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
+            applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
+        }, std::move(onReady));
 }
 
 void KernelDock::restoreSelectedSsdtBaseline()
