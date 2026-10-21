@@ -614,6 +614,15 @@ namespace
         }
     }
 
+    constexpr const char* DetailChartExposureProperty = "ksword_detail_chart_exposed";
+    bool detailChartPageExposed(const QWidget* page)
+    {
+        // Native spontaneous Hide need not clear QWidget::isVisible().
+        return page != nullptr && page->isVisible()
+            && page->property(DetailChartExposureProperty).toBool()
+            && !page->window()->isMinimized();
+    }
+
     class ProcessPerformanceHistoryChartWidget final : public QWidget
     {
     public:
@@ -2359,6 +2368,26 @@ void ProcessDetailWindow::setCpuCoreViewSample(CpuCoreViewSample sample)
     refreshCpuCoreView(true);
 }
 
+void ProcessDetailWindow::scheduleChartPresentationRestore()
+{
+    if (m_chartPresentationRestoreQueued)
+    {
+        return;
+    }
+    m_chartPresentationRestoreQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_chartPresentationRestoreQueued = false;
+        if (m_performanceChartsDirty && detailChartPageExposed(m_performanceTab))
+        {
+            refreshPerformanceHistoryCharts();
+        }
+        if (m_cpuCorePresentationDirty && detailChartPageExposed(m_cpuCoreTab))
+        {
+            refreshCpuCoreView();
+        }
+    });
+}
+
 bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
 {
     if (event != nullptr && event->type() == QEvent::Show
@@ -2367,16 +2396,27 @@ bool ProcessDetailWindow::eventFilter(QObject* watched, QEvent* event)
     {
         QTimer::singleShot(0, this, [this] { requestInitialRefreshForCurrentTab(); });
     }
-    // Show 已设置可见标志；这里只提交已有数据，不枚举、不重建页面或修改根主题。
-    if (event != nullptr && event->type() == QEvent::Show)
+    if (event != nullptr && (watched == m_performanceTab || watched == m_cpuCoreTab))
     {
-        if (watched == m_performanceTab && m_performanceChartsDirty)
+        if (event->type() == QEvent::Hide)
         {
-            refreshPerformanceHistoryCharts();
+            watched->setProperty(DetailChartExposureProperty, false);
+            if (watched == m_performanceTab) m_performanceChartsDirty = true;
+            else m_cpuCorePresentationDirty = true;
         }
-        else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+        else if (event->type() == QEvent::Show)
         {
-            refreshCpuCoreView();
+            watched->setProperty(DetailChartExposureProperty, true);
+            // Populate an ordinary first Show before paint, then cover native restore ordering.
+            if (watched == m_performanceTab && m_performanceChartsDirty)
+            {
+                refreshPerformanceHistoryCharts();
+            }
+            else if (watched == m_cpuCoreTab && m_cpuCorePresentationDirty)
+            {
+                refreshCpuCoreView();
+            }
+            scheduleChartPresentationRestore();
         }
     }
     return QWidget::eventFilter(watched, event);
@@ -2389,6 +2429,13 @@ void ProcessDetailWindow::changeEvent(QEvent* event)
     // 自己写palette/QSS产生的同步事件不能落到数据刷新路径。
     if (event == nullptr || m_themeStyleApplying)
     {
+        return;
+    }
+
+    if (event->type() == QEvent::WindowStateChange)
+    {
+        // Also retry after state publication: a native Show can precede clearing Minimized.
+        scheduleChartPresentationRestore();
         return;
     }
 
@@ -4125,7 +4172,7 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 {
     m_performanceChartsDirty = true;
     // 数据入队和1800点裁剪仍在每次样本更新执行；只有不可见的图形转换延后。
-    if (m_performanceHistoryStatusLabel == nullptr || !m_performanceTab->isVisible())
+    if (m_performanceHistoryStatusLabel == nullptr || !detailChartPageExposed(m_performanceTab))
     {
         return;
     }
@@ -4368,7 +4415,7 @@ void ProcessDetailWindow::refreshCpuCoreView(const bool appendHistory)
         static_cast<CpuThreadUsageCardGridWidget*>(m_threadCpuCoreGrid)->setThreadValues(
             sample.threads, multipleProcessorGroups);
     }
-    if (!m_cpuCoreTab->isVisible())
+    if (!detailChartPageExposed(m_cpuCoreTab))
     {
         return;
     }

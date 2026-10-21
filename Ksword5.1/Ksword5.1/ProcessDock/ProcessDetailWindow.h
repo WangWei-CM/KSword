@@ -383,8 +383,9 @@ private:
     // 参数 event：变更事件对象。
     // 返回：无。
     void changeEvent(QEvent* event) override;
-    // 仅观察性能/核心页的显示事件，在首次可见时提交隐藏期间保留的最新图形投影。
+    // Observe actual chart-host exposure; native minimized widgets may remain logically visible.
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void scheduleChartPresentationRestore();
 
     void initializeUi();
     // applyThemeStyle 作用：
@@ -859,6 +860,7 @@ private:
     QWidget* m_performanceGpuChart = nullptr;          // GPU 图表。
     std::deque<PerformanceHistorySample> m_performanceHistory; // 当前详情窗口的定长历史序列。
     bool m_performanceChartsDirty = true; // 历史始终保留，隐藏时只延后拆分图表向量。
+    bool m_chartPresentationRestoreQueued = false; // Coalesce lifetime-owned native restore retries.
 
     // ======== CPU 核心页控件与区间快照 ========
     QLabel* m_cpuCoreTitleLabel = nullptr;             // 页面标题，主题切换时刷新前景色。
