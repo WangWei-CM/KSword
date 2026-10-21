@@ -21,6 +21,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <map>
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -126,7 +127,16 @@ struct FileAuditPageState {
     HWND status = nullptr;
     HWND loadingOverlay = nullptr;
     int currentTab = kAuditMinifilterTabIndex;
-    std::vector<AuditRow> rows;
+    using AuditRows = std::shared_ptr<const std::vector<AuditRow>>;
+    struct CachedAudit {
+        std::wstring target;
+        AuditRows rows;
+        int selected = -1;
+        int top = 0;
+    };
+    std::map<int, CachedAudit> snapshots;
+    AuditRows rows = std::make_shared<const std::vector<AuditRow>>();
+    std::wstring displayedTarget;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>> refreshTask;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<FileIntegrityActionResult>> integrityTask;
 };
@@ -1210,11 +1220,35 @@ std::vector<AuditRow> QueryRowsForAuditTab(const int tab, const std::wstring& ta
 // audit page state; processing deletes old rows and inserts new text rows; no
 // value is returned.
 void PopulateAuditList(FileAuditPageState& state) {
-    Ksword::Ui::ScopedListViewRedrawLock redrawLock(state.list);
-    Ksword::Ui::ClearListViewRows(state.list);
-    for (const AuditRow& row : state.rows) {
-        Ksword::Ui::InsertListViewTextRow(state.list, { row.item, row.source, row.status, row.value, row.detail });
+    // Native owner-data asks only for visible text; the canonical typed rows
+    // remain the source for navigation, copying and full TSV export.
+    ListView_SetItemCountEx(state.list, static_cast<int>(state.rows->size()),
+        LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    ::InvalidateRect(state.list, nullptr, FALSE);
+}
+
+const std::wstring& AuditCell(const AuditRow& row, const int column) {
+    switch (column) {
+    case 0: return row.item;
+    case 1: return row.source;
+    case 2: return row.status;
+    case 3: return row.value;
+    case 4: return row.detail;
+    default: { static const std::wstring empty; return empty; }
     }
+}
+
+std::wstring AuditRowText(const AuditRow& row) {
+    return Ksword::Features::AuditCommon::BuildTsv({},
+        { { row.item, row.source, row.status, row.value, row.detail } });
+}
+
+std::wstring AuditRowsTsv(const std::vector<AuditRow>& rows) {
+    std::wstring text = L"项目\t数据来源\t状态/降级\t值\t详情\r\n";
+    for (const auto& row : rows) {
+        text += AuditRowText(row);
+    }
+    return text;
 }
 
 // SelectAuditListRowAtPoint keeps the typed row model and the native ListView
@@ -1252,10 +1286,10 @@ int SelectAuditListRowAtPoint(FileAuditPageState& state, POINT screenPoint, int*
 // strings never become navigation inputs.
 std::uint32_t MappedProcessIdAtAuditRow(const FileAuditPageState& state, const int rowIndex) {
     if (state.currentTab != kAuditSectionTabIndex || rowIndex < 0 ||
-        static_cast<std::size_t>(rowIndex) >= state.rows.size()) {
+        static_cast<std::size_t>(rowIndex) >= state.rows->size()) {
         return 0U;
     }
-    return state.rows[static_cast<std::size_t>(rowIndex)].relatedProcessId;
+    return (*state.rows)[static_cast<std::size_t>(rowIndex)].relatedProcessId;
 }
 
 void OpenMappedProcessDetails(FileAuditPageState& state, const std::uint32_t processId) {
@@ -1282,7 +1316,8 @@ void OpenMappedProcessDetails(FileAuditPageState& state, const std::uint32_t pro
 void ShowFileAuditContextMenu(FileAuditPageState& state, POINT screenPoint) {
     int column = 0;
     const int selectedRow = SelectAuditListRowAtPoint(state, screenPoint, &column);
-    const bool hasSelection = selectedRow >= 0;
+    const auto rows = state.rows;
+    const bool hasSelection = selectedRow >= 0 && static_cast<std::size_t>(selectedRow) < rows->size();
     // Capture the typed PID before TrackPopupMenu enters its nested message
     // loop. A completed refresh cannot then substitute a same-index row.
     const std::uint32_t mappedProcessId = MappedProcessIdAtAuditRow(state, selectedRow);
@@ -1308,17 +1343,17 @@ void ShowFileAuditContextMenu(FileAuditPageState& state, POINT screenPoint) {
     case kAuditMenuCopyCell:
         Ksword::Features::AuditCommon::CopyTextToClipboard(
             state.hwnd,
-            Ksword::Features::AuditCommon::GetAuditTableCellText(state.list, selectedRow, column));
+            hasSelection ? AuditCell((*rows)[static_cast<std::size_t>(selectedRow)], column) : std::wstring{});
         break;
     case kAuditMenuCopyRow:
         Ksword::Features::AuditCommon::CopyTextToClipboard(
             state.hwnd,
-            Ksword::Features::AuditCommon::GetSelectedAuditTableRowText(state.list));
+            hasSelection ? AuditRowText((*rows)[static_cast<std::size_t>(selectedRow)]) : std::wstring{});
         break;
     case kAuditMenuCopyAll:
         Ksword::Features::AuditCommon::CopyTextToClipboard(
             state.hwnd,
-            Ksword::Features::AuditCommon::BuildAuditTableTsv(state.list));
+            AuditRowsTsv(*rows));
         break;
     case kAuditMenuOpenMappedProcess:
         OpenMappedProcessDetails(state, mappedProcessId);
@@ -1375,13 +1410,41 @@ void RefreshAuditRows(FileAuditPageState& state) {
             if (snapshot->tab != state.currentTab || snapshot->targetPath != TextFromWindow(state.targetEdit)) {
                 return;
             }
-            state.rows = std::move(snapshot->rows);
+            state.rows = std::make_shared<const std::vector<AuditRow>>(std::move(snapshot->rows));
+            state.displayedTarget = TrimmedPath(snapshot->targetPath);
+            auto& cached = state.snapshots[state.currentTab];
+            cached.target = state.displayedTarget;
+            cached.rows = state.rows;
             PopulateAuditList(state);
             SetAuditStatus(state,
                 L"状态：" + AuditTabName(state.currentTab) +
-                L" 只读审计完成，行数=" + std::to_wstring(state.rows.size()) +
+                L" 只读审计完成，行数=" + std::to_wstring(state.rows->size()) +
                 L"。灰/黄状态表示驱动不支持、数据不可用或权限不足。");
         });
+}
+
+void ActivateAuditRows(FileAuditPageState& state) {
+    const std::wstring target = TrimmedPath(TextFromWindow(state.targetEdit));
+    const auto found = state.snapshots.find(state.currentTab);
+    if (found == state.snapshots.end() || !found->second.rows || found->second.target != target) {
+        RefreshAuditRows(state);
+        return;
+    }
+    const auto& cached = found->second;
+    state.rows = cached.rows;
+    state.displayedTarget = cached.target;
+    PopulateAuditList(state);
+    ListView_SetItemState(state.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    if (cached.selected >= 0 && static_cast<std::size_t>(cached.selected) < state.rows->size()) {
+        ListView_SetItemState(state.list, cached.selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    if (cached.top >= 0 && static_cast<std::size_t>(cached.top) < state.rows->size()) {
+        ListView_EnsureVisible(state.list, cached.top, FALSE);
+    }
+    Ksword::Ui::SetLoadingOverlay(state.loadingOverlay, false);
+    SetAuditStatus(state, L"状态：" + AuditTabName(state.currentTab) +
+        L" 只读审计完成，行数=" + std::to_wstring(state.rows->size()) +
+        L"。灰/黄状态表示驱动不支持、数据不可用或权限不足。");
 }
 
 // ApplyFileIntegrityPreset mirrors Ksword5.1's ArkDriverClient file-integrity
@@ -1463,7 +1526,18 @@ void ApplyFileIntegrityPreset(FileAuditPageState& state, const unsigned long rid
                 SetAuditStatus(state, L"状态：文件完整性后台任务异常结束。");
                 return;
             }
-            state.rows.push_back(std::move(result->row));
+            auto updated = std::make_shared<std::vector<AuditRow>>(*state.rows);
+            updated->push_back(std::move(result->row));
+            state.rows = std::move(updated);
+            // A successful mutation changes the target evidence. Keep its
+            // receipt visible but require a new collection on the next visit.
+            if (result->success) state.snapshots.clear();
+            else {
+                const auto cached = state.snapshots.find(state.currentTab);
+                if (cached != state.snapshots.end() && cached->second.target == state.displayedTarget) {
+                    cached->second.rows = state.rows;
+                }
+            }
             PopulateAuditList(state);
             SetAuditStatus(state, result->statusText);
             if (!result->success) {
@@ -1539,7 +1613,7 @@ bool CreateAuditControls(FileAuditPageState& state) {
     state.refreshButton = Ksword::Ui::CreateButton(state.hwnd, kAuditRefreshButtonId, L"刷新", 0, 0, 0, 0);
     state.integrityButton = Ksword::Ui::CreateButton(state.hwnd, kAuditIntegrityButtonId, L"设置完整性", 0, 0, 0, 0);
     state.tab = Ksword::Ui::CreateTabControl(state.hwnd, kAuditInnerTabId, 0, 0, 0, 0);
-    state.list = Ksword::Ui::CreateReportListView(state.tab, kAuditListId, 0, 0, 0, 0);
+    state.list = Ksword::Ui::CreateReportListView(state.tab, kAuditListId, 0, 0, 0, 0, LVS_OWNERDATA);
     state.status = Ksword::Ui::CreateText(state.hwnd, kAuditStatusId, L"状态：等待刷新。", 0, 0, 0, 0);
     state.loadingOverlay = Ksword::Ui::CreateLoadingOverlay(state.tab, kAuditLoadingOverlayId, { 0, 0, 1, 1 });
     if (!state.targetEdit || !state.refreshButton || !state.integrityButton || !state.tab || !state.list || !state.status || !state.loadingOverlay) {
@@ -1584,9 +1658,13 @@ bool RegisterAuditClass() {
                 LayoutAuditChildren(*state);
                 state->refreshTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<AuditRefreshSnapshot>>(hwnd, kMsgAuditRefreshCompleted);
                 state->integrityTask = std::make_unique<Ksword::Ui::AsyncSnapshotTask<FileIntegrityActionResult>>(hwnd, kMsgFileIntegrityCompleted);
-                RefreshAuditRows(*state);
             }
             return 0;
+        case WM_SHOWWINDOW:
+            if (state && wParam && state->refreshTask) {
+                ActivateAuditRows(*state);
+            }
+            break;
         case WM_SIZE:
             if (state) {
                 LayoutAuditChildren(*state);
@@ -1629,11 +1707,25 @@ bool RegisterAuditClass() {
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
                 if (header && header->hwndFrom == state->tab && header->code == TCN_SELCHANGE) {
+                    auto cached = state->snapshots.find(state->currentTab);
+                    if (cached != state->snapshots.end() && cached->second.rows == state->rows) {
+                        cached->second.selected = ListView_GetNextItem(state->list, -1, LVNI_SELECTED);
+                        cached->second.top = ListView_GetTopIndex(state->list);
+                    }
                     const LRESULT selected = ::SendMessageW(state->tab, TCM_GETCURSEL, 0, 0);
                     if (selected >= 0) {
                         state->currentTab = static_cast<int>(selected);
                     }
-                    RefreshAuditRows(*state);
+                    ActivateAuditRows(*state);
+                    return 0;
+                }
+                if (header && header->hwndFrom == state->list && header->code == LVN_GETDISPINFOW) {
+                    auto* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
+                    if ((info->item.mask & LVIF_TEXT) && info->item.pszText && info->item.cchTextMax > 0 &&
+                        info->item.iItem >= 0 && static_cast<std::size_t>(info->item.iItem) < state->rows->size()) {
+                        const auto& text = AuditCell((*state->rows)[static_cast<std::size_t>(info->item.iItem)], info->item.iSubItem);
+                        ::wcsncpy_s(info->item.pszText, static_cast<std::size_t>(info->item.cchTextMax), text.c_str(), _TRUNCATE);
+                    }
                     return 0;
                 }
                 if (header && header->hwndFrom == state->list && header->code == NM_RCLICK) {
@@ -1707,7 +1799,7 @@ HWND CreateFileAuditPage(HWND parent, const RECT& bounds) {
         return nullptr;
     }
     auto* state = new FileAuditPageState();
-    HWND hwnd = ::CreateWindowExW(0, kFileAuditClass, L"FileAudit", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+    HWND hwnd = ::CreateWindowExW(0, kFileAuditClass, L"FileAudit", WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         bounds.left, bounds.top, Width(bounds), Height(bounds), parent, nullptr, ::GetModuleHandleW(nullptr), state);
     if (!hwnd) {
         delete state;
@@ -1779,6 +1871,11 @@ bool RegisterHostClass() {
             if (state) {
                 const auto* header = reinterpret_cast<const NMHDR*>(lParam);
                 if (header && header->hwndFrom == state->tab && header->code == TCN_SELCHANGE) {
+                    auto cached = state->snapshots.find(state->currentTab);
+                    if (cached != state->snapshots.end() && cached->second.rows == state->rows) {
+                        cached->second.selected = ListView_GetNextItem(state->list, -1, LVNI_SELECTED);
+                        cached->second.top = ListView_GetTopIndex(state->list);
+                    }
                     const LRESULT selected = ::SendMessageW(state->tab, TCM_GETCURSEL, 0, 0);
                     if (selected >= 0) {
                         state->currentTab = static_cast<int>(selected);
