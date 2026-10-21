@@ -18,6 +18,7 @@
 #include <cstdint> // std::uint32_t/std::uint64_t：审计进程身份字段。
 #include <deque>  // std::deque：实时事件队列按固定上限 O(1) 淘汰最旧项。
 #include <mutex>  // std::mutex：实时回调队列保护。
+#include <memory>
 #include <thread> // std::thread：可等待的历史/规则刷新线程。
 #include <vector> // std::vector：事件批量回投。
 
@@ -28,7 +29,7 @@ class QPoint;
 class QPushButton;
 class QTabWidget;
 class QTableView;
-namespace ks::ui { template<class RowT> class FlatTableModel; }
+namespace ks::ui { template<class RowT> class FlatTableModel; class AsyncOperation; }
 class QTimer;
 class QVBoxLayout;
 class QSplitter;
@@ -195,9 +196,6 @@ private:
     // - 无输入参数；
     // - 无返回值。
     void applyFilterToRows();
-
-    // applyFilterToRowRange 作用：只刷新指定行区间的筛选状态，避免实时追加时反复扫描全表。
-    void applyFilterToRowRange(int firstRow, int rowCount);
 
     // flushLiveEventsToUi 作用：
     // - 周期性从实时队列取出事件并追加到 UI；
@@ -383,6 +381,10 @@ private:
     QTableView* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
     ks::ui::FlatTableModel<FirewallEventEntry>* m_eventValueModel = nullptr;
     ks::ui::FlatTableModel<FirewallRuleEntry>* m_ruleValueModel = nullptr;
+    ks::ui::AsyncOperation* m_eventFilterOperation = nullptr;
+    ks::ui::AsyncOperation* m_ruleFilterOperation = nullptr;
+    std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventFilterSource;
+    std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleFilterSource;
     std::vector<FirewallEventEntry> m_eventEntryList;
     quint64 m_nextEventIdentity = 0;
     bool m_eventProjectionDirty = false;

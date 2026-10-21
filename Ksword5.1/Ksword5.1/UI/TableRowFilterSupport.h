@@ -2,6 +2,7 @@
 
 #include <QPersistentModelIndex>
 #include <QSet>
+#include <functional>
 
 class QTableView;
 
@@ -23,6 +24,16 @@ namespace ks::ui
     // keeps its existing filtering status while projectionPending() is true.
     void ApplyTableRowFilterIncrementally(QTableView* tableView,
         const QSet<QPersistentModelIndex>& excludedRows);
+    // Immutable value filters can retain their own stable row keys instead of
+    // allocating a persistent index for every exclusion. The fast GUI predicate
+    // reads the current model row; it must follow that row's stable value key
+    // across sorting/insertion/removal. Canonical acceptance is immediate and
+    // the complete visibility replay is budgeted, including after model changes.
+    // Requires ExclusiveSharedIdentity ownership. An empty predicate clears the
+    // business layer. Other filter layers compose. Use a complete filter to
+    // switch back to the persistent-index API before submitting index deltas.
+    void ApplyTableRowFilterPredicateIncrementally(QTableView* tableView,
+        std::function<bool(const QModelIndex&)> excluded);
     // Incremental append/trim producers compute a pure value delta on their
     // worker, validate the source generation, then create only changed indexes.
     // This edits the existing canonical business layer in O(delta) average work;

@@ -24,6 +24,7 @@ public:
     void insertAt(int at) { beginInsertRows({},at,at); ids.insert(at,++next); endInsertRows(); }
     void removeAt(int at) { beginRemoveRows({},at,at); ids.removeAt(at); endRemoveRows(); }
     void resetRows(int count) { beginResetModel(); ids.clear(); while (count--) ids.push_back(++next); endResetModel(); }
+    int persistentCount() const { return int(persistentIndexList().size()); }
     void reverseRows()
     {
         emit layoutAboutToBeChanged();
@@ -55,6 +56,67 @@ struct Host : QObject
     }
     bool isFrozen(int row) const { return frozen.contains(QPersistentModelIndex(model->index(row,0))); }
 };
+static void checkValuePredicates()
+{
+    Model model; model.resetRows(2048);
+    Host host(&model);
+    ks::ui::TableRowFilterIdentityState state(&model,{},
+        [&](int row) { return host.hidden.at(row); },
+        [&](int row) { return host.isFrozen(row); },
+        [&](int row,bool hidden) { ++host.writes; host.hidden[row]=hidden; }, []() {}, {}, nullptr, true);
+    const auto excluded = [](const QModelIndex& index) { return index.data().toInt()%3==0; };
+    const auto drain = [&]() {
+        for(int turn=0;state.projectionPending()&&turn<10000;++turn) QCoreApplication::processEvents();
+        check(!state.projectionPending(),"value projection terminates");
+    };
+    const auto verify = [&]() {
+        for(int row=0;row<model.rowCount();++row)
+            check(host.hidden.at(row)==(state.excludes(row)||host.isFrozen(row)),"value projection equals canonical layers");
+    };
+    bool captureOpen=true;
+    std::function<void()> resume;
+    state.setProjectionDeferrer([&](std::function<void()> retry) {
+        if(!captureOpen) return false;
+        resume=std::move(retry); return true;
+    });
+    state.setBusinessPredicate(excluded);
+    check(model.persistentCount()==0,"value acceptance creates no per-row persistent exclusions");
+    for(int row=0;row<model.rowCount();++row)
+        check(state.businessExcludes(model.index(row,2))==excluded(model.index(row,0)),"complete canonical predicate precedes projection");
+    QCoreApplication::processEvents();
+    check(host.writes==0&&bool(resume),"capture barrier defers value projection");
+    captureOpen=false; std::exchange(resume,{})(); drain(); verify();
+    state.setSearch(7,true);host.frozen.insert(model.index(8,0));host.hidden[8]=true;
+    model.reverseRows(); drain(); verify();
+    model.insertAt(5);model.removeAt(19);drain();verify();
+    model.removeFirstColumn();model.insertFirstColumn();drain();verify();
+    state.setBusinessPredicate({});drain();verify();
+    state.setBusinessPredicate(excluded);drain();
+    state.setBusiness({model.index(3,0)},true);drain();verify();
+    state.setBusinessDelta({model.index(4,0)},{model.index(3,0)});drain();verify();
+    check(!state.businessExcludes(model.index(3,0))&&state.businessExcludes(model.index(4,0)),"complete index filter permits subsequent deltas");
+    state.clearSearch();host.frozen.clear();
+    for(int size : {2048,23,0,31})
+    {
+        state.setBusinessPredicate([](const QModelIndex&) { return true; });drain();
+        model.resetRows(size);drain();
+        for(int row=0;row<size;++row) check(!host.hidden.at(row),"reset clears old positional predicate bits");
+    }
+    bool replaceDuringWrite=true;
+    auto* reentrant=new ks::ui::TableRowFilterIdentityState(&model,{},
+        [&](int row) { return host.hidden.at(row); },[](int) { return false; },
+        [&](int row,bool hidden) { host.hidden[row]=hidden; },[]() {},{},nullptr,true);
+    reentrant->setProjectionDeferrer([&](std::function<void()>) {
+        if(replaceDuringWrite) { replaceDuringWrite=false;reentrant->setBusinessPredicate([](const QModelIndex&) { return false; }); }
+        return false;
+    });
+    reentrant->setBusinessPredicate([](const QModelIndex&) { return true; });
+    for(int turn=0;reentrant->projectionPending()&&turn<1000;++turn) QCoreApplication::processEvents();
+    check(!reentrant->projectionPending(),"reentrant replacement converges on latest predicate");
+    for(int row=0;row<model.rowCount();++row) check(!host.hidden.at(row),"superseded predicate does not restore old visibility");
+    delete reentrant;
+    QCoreApplication::processEvents();
+}
 int main(int argc,char** argv)
 {
     QCoreApplication app(argc,argv);
@@ -145,5 +207,6 @@ int main(int argc,char** argv)
         [&](int row,bool value) { host.hidden[row]=value; },[]() { std::abort(); });
     ephemeral->setBusiness({model.index(1,0)});delete ephemeral;
     QCoreApplication::processEvents();
+    checkValuePredicates();
     std::printf("PASS %d pure QtCore filter identity checks\n",checks);
 }

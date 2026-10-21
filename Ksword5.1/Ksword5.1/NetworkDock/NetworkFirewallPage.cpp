@@ -8,6 +8,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/FlatTableModel.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
@@ -2625,6 +2626,8 @@ NetworkFirewallPage::~NetworkFirewallPage()
     // 并清空回投 owner，再限时等待在跑任务收敛。等待超时也不死等——任务继续跑到底
     // 同样安全，它们只会发现 owner 已空并放弃回投。
     m_shuttingDown.store(true);
+    if (m_eventFilterOperation) m_eventFilterOperation->close();
+    if (m_ruleFilterOperation) m_ruleFilterOperation->close();
     if (m_eventTable) m_eventTable->removeEventFilter(this);
     if (m_ruleTable)
     {
@@ -3492,6 +3495,7 @@ void NetworkFirewallPage::presentPendingFirewallValues()
             [owner]() { if (owner) owner->presentPendingFirewallValues(); })) return;
         m_eventProjectionDirty = false;
         m_eventValueModel->setRows(m_eventEntryList);
+        m_eventFilterSource.reset();
         applyFilterToRows();
     }
     if (m_ruleProjectionDirty && m_ruleTable && m_ruleTable->isVisible())
@@ -3528,12 +3532,6 @@ void NetworkFirewallPage::applyResolvedHostnames(const QHash<QString, QString>& 
 void NetworkFirewallPage::applyFilterToRows()
 {
     if (!m_eventTable) return;
-    applyFilterToRowRange(0, m_eventTable->model()->rowCount());
-}
-
-void NetworkFirewallPage::applyFilterToRowRange(const int firstRow, const int rowCount)
-{
-    if (!m_eventTable) return;
     m_eventFilterDirty = true;
     if (!m_eventTable->isVisible() || m_eventProjectionDirty) return;
     const QPointer<NetworkFirewallPage> owner(this);
@@ -3542,29 +3540,56 @@ void NetworkFirewallPage::applyFilterToRowRange(const int firstRow, const int ro
         [owner]() { if (owner) owner->applyFilterToRows(); })) return;
     const auto filter = m_searchEdit ? m_searchEdit->text().trimmed().toCaseFolded() : QString();
     const bool dropOnly = m_dropOnlyCheck && m_dropOnlyCheck->isChecked();
-    if (filter.isEmpty() && !dropOnly && firstRow <= 0 && rowCount >= m_eventTable->model()->rowCount())
+    if (filter.isEmpty() && !dropOnly)
     {
-        ks::ui::ApplyTableRowFilterIncrementally(m_eventTable, {});
+        if (m_eventFilterOperation) m_eventFilterOperation->cancel();
+        ks::ui::ApplyTableRowFilterPredicateIncrementally(m_eventTable, {});
         clearFilteredFirewallSelection(m_eventTable);
         m_eventFilterDirty = false;
         return;
     }
-    QSet<QPersistentModelIndex> excluded;
-    QSet<QPersistentModelIndex> included;
-    const int end = std::min(m_eventTable->model()->rowCount(), firstRow + rowCount);
-    const bool fullRange = firstRow <= 0 && end == m_eventTable->model()->rowCount();
-    for (int row = std::max(0, firstRow); row < end; ++row)
-    {
-        const auto identity = m_eventTable->model()->index(row, ColumnName);
-        const bool textMatches = filter.isEmpty() || identity.data(Qt::UserRole + 2).toString().contains(filter);
-        const bool dropMatches = !dropOnly || identity.data(Qt::UserRole).toBool();
-        if (!textMatches || !dropMatches) excluded.insert(QPersistentModelIndex(identity));
-        else if (!fullRange) included.insert(QPersistentModelIndex(identity));
-    }
-    if (fullRange) ks::ui::ApplyTableRowFilterIncrementally(m_eventTable, excluded);
-    else ks::ui::ApplyTableRowFilterDelta(m_eventTable, excluded, included);
-    clearFilteredFirewallSelection(m_eventTable);
-    if (firstRow <= 0 && end == m_eventTable->model()->rowCount()) m_eventFilterDirty = false;
+    // Copy the immutable value vector once per published source, never walk the
+    // proxy/model roles or construct exclusions on the GUI for each search.
+    if (!m_eventFilterSource)
+        m_eventFilterSource = std::make_shared<const std::vector<FirewallEventEntry>>(m_eventValueModel->rows());
+    struct Request { std::shared_ptr<const std::vector<FirewallEventEntry>> source; QString filter; bool dropOnly; };
+    using Excluded = std::shared_ptr<const QSet<quint64>>;
+    const Request request{m_eventFilterSource, filter, dropOnly};
+    if (!m_eventFilterOperation) m_eventFilterOperation = new ks::ui::AsyncOperation(this);
+    m_eventFilterDirty = false;
+    m_eventFilterOperation->submit<Request, Excluded>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Excluded {
+            auto excluded = std::make_shared<QSet<quint64>>();
+            for (const auto& entry : *value.source)
+            {
+                if (token.isCanceled()) return {};
+                if ((!value.filter.isEmpty() && !entry.searchDocumentText.contains(value.filter))
+                    || (value.dropOnly && !entry.isDrop)) excluded->insert(entry.displayIdentity);
+            }
+            return excluded;
+        },
+        [owner, request](const Excluded& excluded, std::uint64_t ticket) {
+            if (!owner || !excluded || !owner->m_eventFilterOperation->isCurrent(ticket)
+                || owner->m_eventFilterSource != request.source
+                || owner->m_eventProjectionDirty
+                || (owner->m_searchEdit ? owner->m_searchEdit->text().trimmed().toCaseFolded() : QString()) != request.filter
+                || (owner->m_dropOnlyCheck && owner->m_dropOnlyCheck->isChecked()) != request.dropOnly) return true;
+            if (!owner->m_eventTable->isVisible()) { owner->m_eventFilterDirty = true; return true; }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall_event_filter"), {owner->m_eventTable},
+                [owner]() { if (owner) owner->applyFilterToRows(); })) return true;
+            const QPointer<FirewallEventModel> model = owner->m_eventValueModel;
+            const QPointer<QSortFilterProxyModel> proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_eventTable->model());
+            ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_eventTable,
+                [model, proxy, excluded](const QModelIndex& index) {
+                    if (!model || !proxy) return false;
+                    const auto* entry = model->rowAt(proxy->mapToSource(index).row());
+                    return entry && excluded->contains(entry->displayIdentity);
+                });
+            if (owner) clearFilteredFirewallSelection(owner->m_eventTable);
+            return true;
+        },
+        [owner](std::exception_ptr) { if (owner) owner->m_eventFilterDirty = true; });
 }
 
 void NetworkFirewallPage::flushLiveEventsToUi()
@@ -3799,7 +3824,10 @@ void NetworkFirewallPage::appendRulesToTable(
     const auto& published = m_ruleValueModel->rows();
     if (published.size() != ruleList.size()
         || !std::equal(published.cbegin(), published.cend(), ruleList.cbegin(), sameFirewallRule))
+    {
         m_ruleValueModel->setRows(ruleList);
+        m_ruleFilterSource.reset();
+    }
     m_ruleProjectionDirty = false;
     m_ruleFilterDirty = true;
     applyRuleFilterToRows();
@@ -3820,24 +3848,69 @@ void NetworkFirewallPage::applyRuleFilterToRows()
     const bool enabledOnly = m_ruleEnabledOnlyCheck && m_ruleEnabledOnlyCheck->isChecked();
     if (filter.isEmpty() && !enabledOnly)
     {
-        ks::ui::ApplyTableRowFilterIncrementally(m_ruleTable, {});
+        if (m_ruleFilterOperation) m_ruleFilterOperation->cancel();
+        ks::ui::ApplyTableRowFilterPredicateIncrementally(m_ruleTable, {});
         clearFilteredFirewallSelection(m_ruleTable);
         m_ruleFilterDirty = false;
         updateRuleActionButtons();
         return;
     }
-    QSet<QPersistentModelIndex> excluded;
-    for (int row = 0; row < m_ruleTable->model()->rowCount(); ++row)
-    {
-        const auto identity = m_ruleTable->model()->index(row, RuleColumnName);
-        const bool textMatches = filter.isEmpty() || identity.data(Qt::UserRole + 2).toString().contains(filter);
-        const bool enabledMatches = !enabledOnly || identity.data(Qt::UserRole + 1).toBool();
-        if (!textMatches || !enabledMatches) excluded.insert(QPersistentModelIndex(identity));
-    }
-    ks::ui::ApplyTableRowFilterIncrementally(m_ruleTable, excluded);
-    clearFilteredFirewallSelection(m_ruleTable);
+    if (!m_ruleFilterSource)
+        m_ruleFilterSource = std::make_shared<const std::vector<FirewallRuleEntry>>(m_ruleValueModel->rows());
+    struct Request { std::shared_ptr<const std::vector<FirewallRuleEntry>> source; QString filter; bool enabledOnly; };
+    struct ExcludedRows { QSet<QString> keys, duplicateKeys; std::vector<bool> rows; };
+    using Excluded = std::shared_ptr<const ExcludedRows>;
+    const Request request{m_ruleFilterSource, filter, enabledOnly};
+    if (!m_ruleFilterOperation) m_ruleFilterOperation = new ks::ui::AsyncOperation(this);
     m_ruleFilterDirty = false;
-    updateRuleActionButtons();
+    m_ruleFilterOperation->submit<Request, Excluded>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Excluded {
+            auto excluded = std::make_shared<ExcludedRows>();
+            QSet<QString> seen;
+            excluded->rows.reserve(value.source->size());
+            for (const auto& entry : *value.source)
+            {
+                if (token.isCanceled()) return {};
+                if (seen.contains(entry.fingerprintText)) excluded->duplicateKeys.insert(entry.fingerprintText);
+                else seen.insert(entry.fingerprintText);
+                const bool hidden = (!value.filter.isEmpty() && !entry.searchDocumentText.contains(value.filter))
+                    || (value.enabledOnly && !entry.enabled);
+                excluded->rows.push_back(hidden);
+                if (hidden) excluded->keys.insert(entry.fingerprintText);
+            }
+            return excluded;
+        },
+        [owner, request](const Excluded& excluded, std::uint64_t ticket) {
+            if (!owner || !excluded || !owner->m_ruleFilterOperation->isCurrent(ticket)
+                || owner->m_ruleFilterSource != request.source
+                || owner->m_ruleProjectionDirty
+                || (owner->m_ruleSearchEdit ? owner->m_ruleSearchEdit->text().trimmed().toCaseFolded() : QString()) != request.filter
+                || (owner->m_ruleEnabledOnlyCheck && owner->m_ruleEnabledOnlyCheck->isChecked()) != request.enabledOnly) return true;
+            if (!owner->m_ruleTable->isVisible()) { owner->m_ruleFilterDirty = true; return true; }
+            if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
+                QStringLiteral("firewall_rule_filter"), {owner->m_ruleTable},
+                [owner]() { if (owner) owner->applyRuleFilterToRows(); })) return true;
+            const QPointer<FirewallRuleModel> model = owner->m_ruleValueModel;
+            const QPointer<QSortFilterProxyModel> proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_ruleTable->model());
+            ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_ruleTable,
+                [model, proxy, excluded](const QModelIndex& index) {
+                    if (!model || !proxy) return false;
+                    const int sourceRow = proxy->mapToSource(index).row();
+                    const auto* entry = model->rowAt(sourceRow);
+                    if (!entry) return false;
+                    // Duplicate-key snapshots already reset in FlatTableModel.
+                    // Keep their per-source-row outcomes distinct until then.
+                    if (excluded->duplicateKeys.contains(entry->fingerprintText))
+                        return sourceRow >= 0 && sourceRow < static_cast<int>(excluded->rows.size())
+                            && excluded->rows[static_cast<std::size_t>(sourceRow)];
+                    return excluded->keys.contains(entry->fingerprintText);
+                });
+            if (owner) clearFilteredFirewallSelection(owner->m_ruleTable);
+            if (owner) owner->updateRuleActionButtons();
+            if (owner) owner->updateRuleDetailEditor();
+            return true;
+        },
+        [owner](std::exception_ptr) { if (owner) owner->m_ruleFilterDirty = true; });
 }
 
 void NetworkFirewallPage::updateRuleActionButtons()

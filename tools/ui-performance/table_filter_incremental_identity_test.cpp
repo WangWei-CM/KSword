@@ -1,4 +1,5 @@
 #include "TableRowFilterIdentityState.h"
+#include "TableSearchFilterSnapshot.h"
 #include <QAbstractTableModel>
 #include <QCoreApplication>
 #include <QElapsedTimer>

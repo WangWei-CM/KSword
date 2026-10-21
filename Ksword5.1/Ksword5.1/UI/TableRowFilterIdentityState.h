@@ -41,10 +41,14 @@ namespace ks::ui
                     if (parent == m_root)
                     {
                         if (!m_exclusiveBusinessOwnership) { captureRows(first,last); scheduleCapture(); }
+                        if (m_businessPredicate || m_projectAllRows) restartValueProjection();
                         notifyChanged();
                     }
                 });
-            connect(model, &QAbstractItemModel::rowsRemoved, this, [this]() { notifyChanged(); });
+            connect(model, &QAbstractItemModel::rowsRemoved, this, [this]() {
+                if (m_businessPredicate || m_projectAllRows) restartValueProjection();
+                notifyChanged();
+            });
             // A first-column removal must not invalidate the business row anchor.
             // Reanchor before Qt invalidates removed cells; normalize again after
             // insert/remove/move so column zero remains the public row identity.
@@ -82,6 +86,14 @@ namespace ks::ui
                 QSet<int> rows = affectedRows();
                 rows.unite(m_oldRows);
                 m_oldRows.clear();
+                if (m_businessPredicate || m_projectAllRows)
+                {
+                    // Header hidden bits stay positional while the predicate
+                    // follows stable values. Replay all positions in slices.
+                    restartValueProjection();
+                    notifyChanged();
+                    return;
+                }
                 if (m_incrementalBusiness)
                 {
                     // Reordering changes logical header positions as well as
@@ -109,6 +121,7 @@ namespace ks::ui
                 capturePending();
                 m_resetOwnedRows = affectedRows();
                 m_resetOwnedRows.unite(m_oldRows);
+                m_resetValueProjection = m_businessPredicate || m_projectAllRows;
                 m_resetSentinel = identity(0);
                 m_resetBaselinePending = true;
                 for (const auto& id : m_legacy)
@@ -117,6 +130,8 @@ namespace ks::ui
                 // signal. Cancel canonical exclusions first so its real
                 // unfreezeAllRows cannot restore old business/search bits.
                 m_business.clear(); m_search.clear(); m_projectionRows.clear();
+                m_businessPredicate = {};
+                m_projectAllRows = false;
                 ++m_projectionEpoch;
                 notifyChanged();
                 if (!m_exclusiveBusinessOwnership)
@@ -158,13 +173,20 @@ namespace ks::ui
         { return m_model == model && m_root == root; }
 
         bool businessExcludes(const QModelIndex& index) const
-        { return m_business.contains(identity(index)); }
+        {
+            if (m_businessPredicate)
+                return index.isValid() && index.model() == m_model && m_businessPredicate(index);
+            return m_business.contains(identity(index));
+        }
 
         bool excludes(int row) const
         {
-            const auto id = identity(row);
-            return id.isValid() && (m_business.contains(id) || m_search.contains(id)
-                || m_legacy.contains(id));
+            const auto index = m_model ? m_model->index(row, 0, m_root) : QModelIndex();
+            if (!index.isValid()) return false;
+            if (m_businessPredicate && m_businessPredicate(index)) return true;
+            if (m_business.isEmpty() && m_search.isEmpty() && m_legacy.isEmpty()) return false;
+            const auto id = identity(index);
+            return m_business.contains(id) || m_search.contains(id) || m_legacy.contains(id);
         }
 
         bool legacyExcludes(int row)
@@ -182,7 +204,7 @@ namespace ks::ui
             scheduleCapture();
         }
 
-        bool projectionPending() const { return !m_projectionRows.isEmpty(); }
+        bool projectionPending() const { return m_projectAllRows || !m_projectionRows.isEmpty(); }
         void setExclusiveBusinessOwnership(bool exclusive)
         {
             if (!prepareResetGeneration()) return;
@@ -214,6 +236,12 @@ namespace ks::ui
         {
             if (!prepareResetGeneration()) return;
             capturePending();
+            if (m_businessPredicate)
+            {
+                m_businessPredicate = {};
+                restartValueProjection();
+                notifyChanged();
+            }
             QSet<QPersistentModelIndex> next;
             next.reserve(excluded.size());
             for (const auto& index : excluded)
@@ -236,6 +264,20 @@ namespace ks::ui
             if (incremental) scheduleProjection(); else flushProjection();
         }
 
+        void setBusinessPredicate(std::function<bool(const QModelIndex&)> excluded)
+        {
+            if (!prepareResetGeneration()) return;
+            Q_ASSERT(m_exclusiveBusinessOwnership);
+            if (!m_exclusiveBusinessOwnership) return;
+            capturePending();
+            if (!excluded && !m_businessPredicate && m_business.isEmpty()) return;
+            m_business.clear();
+            m_businessPredicate = std::move(excluded);
+            m_incrementalBusiness = true;
+            restartValueProjection();
+            notifyChanged(); // complete canonical value set before any row write
+        }
+
         // Producer-computed differences avoid rebuilding/normalizing the full
         // canonical exclusion set on every append or small condition delta.
         // Added exclusions win if both inputs normalize to the same row.
@@ -245,6 +287,10 @@ namespace ks::ui
         {
             if (!prepareResetGeneration()) return;
             capturePending();
+            // A delta cannot describe the prior predicate's full key set.
+            // Producers must finish that mode with a complete business filter.
+            Q_ASSERT(!m_businessPredicate);
+            if (m_businessPredicate) return;
             m_incrementalBusiness = true;
             QSet<QPersistentModelIndex> added, removed;
             added.reserve(excluded.size()); removed.reserve(included.size());
@@ -337,6 +383,7 @@ namespace ks::ui
                 if (id.isValid()) m_projectionRows.insert(id);
             }
             m_resetOwnedRows.clear();
+            if (std::exchange(m_resetValueProjection, false)) restartValueProjection();
             if (!m_exclusiveBusinessOwnership) { captureRows(0,count()-1); scheduleCapture(); }
             notifyChanged();
             scheduleProjection();
@@ -353,7 +400,8 @@ namespace ks::ui
             {
                 if (!id.isValid()) continue;
                 if (!m_hidden(id.row())) { changed |= m_legacy.remove(id); continue; }
-                if (!m_frozen(id.row()) && !m_business.contains(id) && !m_search.contains(id)
+                if (!m_frozen(id.row()) && !businessExcludes(id) && !m_search.contains(id)
+                    && !m_projectAllRows
                     && !m_projectionRows.contains(id) && !m_legacy.contains(id))
                 { m_legacy.insert(id); changed = true; }
             }
@@ -390,14 +438,28 @@ namespace ks::ui
         {
             const bool hadPending = projectionPending();
             const QPointer<TableRowFilterIdentityState> alive(this);
-            while (!m_projectionRows.isEmpty())
+            while (projectionPending())
             {
+                if (m_projectionRows.isEmpty())
+                {
+                    if (m_projectionNextRow >= count()) { m_projectAllRows = false; continue; }
+                    apply(m_projectionNextRow++);
+                    if (!alive) return;
+                    continue;
+                }
                 auto it = m_projectionRows.begin();
                 const QPersistentModelIndex id = *it;
                 m_projectionRows.erase(it);
                 if (id.isValid()) { apply(id.row()); if (!alive) return; }
             }
             if (hadPending) notifyChanged();
+        }
+        void restartValueProjection()
+        {
+            m_projectAllRows = true;
+            m_projectionNextRow = 0;
+            ++m_projectionEpoch;
+            scheduleProjection();
         }
         void scheduleProjection()
         {
@@ -415,8 +477,17 @@ namespace ks::ui
                 QElapsedTimer budget;
                 budget.start();
                 int work = 0;
-                while (!m_projectionRows.isEmpty() && work < 256 && budget.elapsed() < 4)
+                while (projectionPending() && work < 256 && budget.elapsed() < 4)
                 {
+                    if (m_projectionRows.isEmpty())
+                    {
+                        if (m_projectionNextRow >= count()) { m_projectAllRows = false; continue; }
+                        ++work;
+                        apply(m_projectionNextRow++);
+                        if (!alive) return;
+                        if (epoch != m_projectionEpoch) { scheduleProjection(); return; }
+                        continue;
+                    }
                     auto it = m_projectionRows.begin();
                     const QPersistentModelIndex id = *it;
                     m_projectionRows.erase(it);
@@ -449,8 +520,12 @@ namespace ks::ui
         bool m_exclusiveBusinessOwnership = false;
         bool m_writingProjection = false;
         bool m_resetBaselinePending = false;
+        bool m_resetValueProjection = false;
         QPersistentModelIndex m_resetSentinel;
         QSet<QPersistentModelIndex> m_projectionRows;
+        std::function<bool(const QModelIndex&)> m_businessPredicate;
+        bool m_projectAllRows = false;
+        int m_projectionNextRow = 0;
         std::function<bool(std::function<void()>)> m_deferProjection;
         quint64 m_projectionEpoch = 0;
         bool m_projectionScheduled = false;

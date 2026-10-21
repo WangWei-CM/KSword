@@ -1598,8 +1598,10 @@ namespace ks::ui
     bool isRowHiddenByFreeze(const QTableView* tableView, const int row)
     {
         if (tableView == nullptr || tableView->model() == nullptr || row < 0) return false;
+        const auto frozen = tableView->property(kFrozenRowIdentitiesProperty).toList();
+        if (frozen.isEmpty()) return false;
         const auto id = QPersistentModelIndex(tableView->model()->index(row, 0, tableView->rootIndex()));
-        for (const auto& value : tableView->property(kFrozenRowIdentitiesProperty).toList())
+        for (const auto& value : frozen)
             if (value.value<QPersistentModelIndex>() == id && id.isValid()) return true;
         return false;
     }
@@ -1655,7 +1657,7 @@ namespace ks::ui
                     // Hidden views retain canonical identities and queued deltas;
                     // their own Show event resumes projection without retry timers.
                     if (!guard || !guard->isVisible()) return true;
-                    return DeferTableUiCommitIfContextMenuOpen(guard.data(),
+                    return DeferTablePresentationIfValueCaptureOpen(guard.data(),
                         QStringLiteral("table_row_filter_projection"), {guard.data()}, std::move(resume));
                 });
             }
@@ -1691,6 +1693,12 @@ namespace ks::ui
         const QSet<QPersistentModelIndex>& included)
     {
         if (auto* state = rowFilterState(filterSource(table), true)) state->setBusinessDelta(excluded, included);
+    }
+    void ApplyTableRowFilterPredicateIncrementally(QTableView* table,
+        std::function<bool(const QModelIndex&)> excluded)
+    {
+        if (auto* state = rowFilterState(filterSource(table), true))
+            state->setBusinessPredicate(std::move(excluded));
     }
     bool IsTableRowFilterProjectionPending(const QTableView* table)
     {

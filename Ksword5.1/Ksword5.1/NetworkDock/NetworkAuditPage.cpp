@@ -79,8 +79,10 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #ifndef NOMINMAX
@@ -2828,7 +2830,14 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
         QSet<quint32> processIds;
         std::array<QVector<int>, 3> columns;
     };
-    using Matches = std::array<std::vector<bool>, 3>;
+    struct ExcludedKeys
+    {
+        // Keys borrow immutable source strings; keep that value owner alive.
+        std::shared_ptr<const CrossViewPresentation> source;
+        std::unordered_set<std::string_view> keys, duplicateKeys;
+        std::unordered_set<const CrossViewValueRow*> duplicateRows;
+    };
+    using Matches = std::array<std::shared_ptr<const ExcludedKeys>, 3>;
     Request request{m_displayedCrossView,
         m_crossSearchEdit ? m_crossSearchEdit->text().trimmed().toCaseFolded() : QString(),
         m_processFilterSet, {}};
@@ -2859,10 +2868,16 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
             [owner]() { if (owner) owner->applyCrossViewSearchFilter(); })) return true;
         const std::array<QTableView*, 3> currentTables{owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable};
         const bool active = !request.filter.isEmpty() || !request.processIds.isEmpty();
+        const std::array<std::size_t, 3> sourceSizes{request.source->tcpRows.size(),
+            request.source->udpRows.size(), request.source->summaryRows.size()};
         // Check all captured columns before publishing any table, including a hidden-column change in flight.
         for (std::size_t i = 0; i < currentTables.size(); ++i)
         {
             if (!currentTables[i]) continue;
+            auto* proxy = qobject_cast<QSortFilterProxyModel*>(currentTables[i]->model());
+            if (!proxy || !proxy->sourceModel()
+                || proxy->sourceModel()->rowCount() != static_cast<int>(sourceSizes[i])
+                || (active && !matches[i])) return true;
             QVector<int> columns;
             for (int column = 0; column < currentTables[i]->model()->columnCount(); ++column)
                 if (!currentTables[i]->isColumnHidden(column)) columns.append(column);
@@ -2877,17 +2892,24 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
             QTableView* const table = currentTables[i];
             if (!table) continue;
             auto* proxy = qobject_cast<QSortFilterProxyModel*>(table->model());
-            if (!proxy || (active && proxy->sourceModel()->rowCount() != static_cast<int>(matches[i].size()))) return true;
-            QSet<QPersistentModelIndex> excluded;
-            if (active)
-                for (int row = 0; row < proxy->rowCount(); ++row)
-                {
-                    const QModelIndex identity = proxy->index(row, 0);
-                    const int sourceRow = proxy->mapToSource(identity).row();
-                    if (sourceRow < 0 || sourceRow >= static_cast<int>(matches[i].size())) return true;
-                    if (!matches[i][static_cast<std::size_t>(sourceRow)]) excluded.insert(QPersistentModelIndex(identity));
-                }
-            ks::ui::ApplyTableRowFilterIncrementally(table, excluded);
+            using Model = ks::ui::FlatTableModel<CrossViewValue>;
+            const QPointer<Model> model = dynamic_cast<Model*>(proxy->sourceModel());
+            if (!model) return true;
+            const auto excluded = active ? matches[i] : std::shared_ptr<const ExcludedKeys>();
+            if (!excluded || excluded->keys.empty())
+                ks::ui::ApplyTableRowFilterPredicateIncrementally(table, {});
+            else
+                ks::ui::ApplyTableRowFilterPredicateIncrementally(table,
+                    [proxy = QPointer<QSortFilterProxyModel>(proxy), model, excluded](const QModelIndex& index) {
+                        if (!proxy || !model) return false;
+                        const auto* row = model->rowAt(proxy->mapToSource(index).row());
+                        if (!row) return false;
+                        // The existing keyed model resets duplicate-key sources;
+                        // within that source, distinguish each immutable value.
+                        if (excluded->duplicateKeys.find((*row)->identity) != excluded->duplicateKeys.end())
+                            return excluded->duplicateRows.find(row->get()) != excluded->duplicateRows.end();
+                        return excluded->keys.find((*row)->identity) != excluded->keys.end();
+                    });
             if (!current()) return true;
             if (auto* selection = table->selectionModel())
             {
@@ -2922,7 +2944,15 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
                 &value.source->tcpRows, &value.source->udpRows, &value.source->summaryRows};
             for (std::size_t i = 0; i < rows.size(); ++i)
             {
-                result[i].reserve(rows[i]->size());
+                auto excluded = std::make_shared<ExcludedKeys>();
+                excluded->source = value.source;
+                std::unordered_set<std::string_view> seen;
+                seen.reserve(rows[i]->size());
+                for (const auto& row : *rows[i])
+                {
+                    if (token.isCanceled()) return Matches{};
+                    if (!seen.insert(row->identity).second) excluded->duplicateKeys.insert(row->identity);
+                }
                 for (const auto& row : *rows[i])
                 {
                     if (token.isCanceled()) return Matches{};
@@ -2934,8 +2964,14 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
                             if (column < row->searchFields.size() && row->searchFields.at(column).contains(value.filter))
                             { matched = true; break; }
                     }
-                    result[i].push_back(matched);
+                    if (!matched)
+                    {
+                        excluded->keys.insert(row->identity);
+                        if (excluded->duplicateKeys.find(row->identity) != excluded->duplicateKeys.end())
+                            excluded->duplicateRows.insert(row.get());
+                    }
                 }
+                result[i] = std::move(excluded);
             }
             return result;
         },
