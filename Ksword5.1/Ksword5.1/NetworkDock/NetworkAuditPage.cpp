@@ -60,6 +60,7 @@
 #include <QShowEvent>
 #include <QEvent>
 #include <QSortFilterProxyModel>
+#include <QScopeGuard>
 #include <QItemSelectionModel>
 #include <QSplitter>
 #include <QStringList>
@@ -2839,6 +2840,7 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
                     && owner->m_crossLanguageGeneration == prepared->languageGeneration;
             };
             if (!current() || !owner->m_crossViewPage->isVisible()) { retry(); return true; }
+            if (owner->m_projectionInProgress) { retry(); return true; }
             const std::array<QTableView*, 3> currentTables{owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable};
             for (std::size_t i = 0; i < models.size(); ++i)
             {
@@ -2849,6 +2851,18 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
             if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
                 QStringLiteral("network-audit-visible-snapshot"),
                 {owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable}, retry)) return true;
+            // Preparation finishes outside presentVisibleSnapshot(): retain its
+            // original guard across the actual three-model publication as well.
+            owner->m_projectionInProgress = true;
+            owner->m_projectionRequestedWhileBusy = false;
+            const auto finishProjection = qScopeGuard([owner, source = prepared->source]() {
+                if (!owner) return;
+                owner->m_projectionInProgress = false;
+                if (owner->m_projectionRequestedWhileBusy || owner->m_latestAuditSnapshot != source)
+                    QTimer::singleShot(0, owner, [owner]() {
+                        if (owner) owner->presentVisibleSnapshot();
+                    });
+            });
             owner->m_displayedCrossView = prepared;
             owner->m_r0TcpStatusText = prepared->r0TcpStatusText;
             owner->m_r0UdpStatusText = prepared->r0UdpStatusText;
