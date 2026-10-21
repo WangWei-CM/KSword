@@ -865,7 +865,7 @@ private:
     // rebuildCallbackEnumTable：
     // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
     // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
-    void rebuildCallbackEnumTable(bool sourceChanged = false);
+    void rebuildCallbackEnumTable(bool sourceChanged = false, std::function<void()> onReady = {});
     void prepareMinifilterCallbackTree();
 
     // rebuildShadowSsdtTable：
