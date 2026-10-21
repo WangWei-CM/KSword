@@ -283,7 +283,7 @@ private:
     struct ObjectNamespaceTreeCache {
         HWND hwnd = nullptr;
         bool initialized = false;
-        std::vector<std::unique_ptr<KernelObjectNamespaceTreeNodeState>> nodes;
+        std::shared_ptr<KernelValueProjection> projection;
     };
     std::unordered_map<KernelFeatureId, ObjectNamespaceTreeCache> objectNamespaceTrees_;
     HWND objectNamespaceTree_ = nullptr;
@@ -291,7 +291,16 @@ private:
     std::wstring objectNamespaceSelectedKind_;
     std::wstring objectNamespaceSelectedPath_;
     std::wstring objectNamespaceSelectedDescription_;
-    std::vector<std::unique_ptr<KernelObjectNamespaceTreeNodeState>> objectNamespaceTreeNodeStorage_;
+    std::shared_ptr<KernelValueProjection> objectNamespaceProjection_;
+    struct ObjectTreeProjectionCommit {
+        HWND host=nullptr;
+        std::shared_ptr<KernelValueProjection> projection,replacement,retired;
+        std::size_t next=0;bool adopted=false;
+    };
+    std::array<std::shared_ptr<ObjectTreeProjectionCommit>,2> treeProjectionCommits_;
+    bool committingTreeProjection_=false;
+    void BeginObjectTreeProjection(std::shared_ptr<KernelValueProjection> projection);
+    void PumpObjectTreeProjection();
     HWND resultList_ = nullptr;
     HWND propertyList_ = nullptr;
     HWND summaryList_ = nullptr;

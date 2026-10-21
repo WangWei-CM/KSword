@@ -26,6 +26,8 @@ public:
         result_->requestId=requestId;
         const auto feature=input_->source->featureId;
         switch(feature) {
+        case KernelFeatureId::ObjectNamespaceOverview:
+        case KernelFeatureId::ObjectDirectoryRecursive:
         case KernelFeatureId::NamedPipe:
         case KernelFeatureId::BaseNamedObjects:
         case KernelFeatureId::SymbolicLink:
@@ -52,6 +54,13 @@ public:
         case KernelFeatureId::DriverIntegrity:
         case KernelFeatureId::KernelCpuIntegrity: RebuildIntegrityEvidenceListFromCache(feature); break;
         default: RebuildKernelHookListFromCache(feature); break;
+        }
+        result_->nativeTreeHandles.resize(result_->treeNodes.size());
+        for(std::size_t index=0;index<result_->treeNodes.size();++index) {
+            const auto& node=result_->treeNodes[index];if(!node.state)continue;
+            const auto key=KernelTreeNodeKey(*node.state);
+            if(!input_->treeSelectedKey.empty() && key==input_->treeSelectedKey)result_->treeSelected=index+1;
+            if(!input_->treeTopKey.empty() && key==input_->treeTopKey)result_->treeTop=index+1;
         }
         result_->choices=std::move(choices_);
         result_->columns=std::move(currentColumns_);
@@ -131,7 +140,9 @@ private:
         default:return CB_ERR;
         }
     }
-    void RequireTreeValueModel() {throw std::logic_error("tree projection requires an explicit tree value model");}
+    void RequireTreeValueModel() {RebuildObjectNamespaceTreeFromCurrentRows();}
+    void ExpandTreeValue(std::size_t item){if(item>0&&item<=result_->treeNodes.size())result_->treeNodes[item-1].expand=true;}
+    void SelectTreeValue(std::size_t item){result_->treeSelected=item;}
     const KernelFeatureDescriptor* CurrentDescriptor() const {return &input_->descriptor;}
     std::vector<int> CurrentCopyColumnIndices() const {
         auto columns=PreferredCopyColumnIndices(input_->source->featureId,currentColumns_);
@@ -2706,6 +2717,206 @@ void RebuildObjectNamespaceListFromCache(const KernelFeatureId featureId) {
         SelectionDetail();
     } else {
         WriteText(detailEdit_, EmptyDetailTextForFeature(featureId));
+    }
+}
+
+void RebuildObjectNamespaceTreeFromCurrentRows() {
+    // RebuildObjectNamespaceTreeFromCurrentRows renders the original object
+    // namespace overview as a three-level Win32 TreeView. Inputs are
+    // currentRows_ and currentColumns_ already projected to the original
+    // root/directory/object schema; processing creates stable node payloads in
+    // objectNamespaceTreeNodeStorage_ and binds them to TVITEM::lParam; no value
+    // is returned.
+    result_->tree=true;result_->treeNodes.clear();
+    std::unordered_map<KernelObjectNamespaceTreeNodeState*,std::shared_ptr<KernelObjectNamespaceTreeNodeState>> owners;
+    std::unordered_map<std::wstring, std::size_t> rootItems;
+    std::unordered_map<std::wstring, std::size_t> directoryItems;
+    std::size_t firstItem = 0;
+    std::size_t firstEntryItem = 0;
+    const bool expandAll = !Text(filterEdit_).empty();
+    const auto rowText = [&](const std::vector<std::wstring>& row, std::initializer_list<const wchar_t*> names) {
+        return ReadField(row, currentColumns_, names);
+    };
+    const auto safeText = [](const std::wstring& value, const wchar_t* fallback = L"<空>") -> std::wstring {
+        return value.empty() ? std::wstring(fallback) : value;
+    };
+    const auto rootFromPath = [](const std::wstring& path) -> std::wstring {
+        if (path.empty()) {
+            return L"\\";
+        }
+        if (path == L"\\") {
+            return path;
+        }
+        const std::size_t nextSlash = path.find(L'\\', 1);
+        return nextSlash == std::wstring::npos ? path : path.substr(0, nextSlash);
+    };
+    const auto makeState = [&](const int rowIndex,
+        std::wstring kind,
+        std::wstring name,
+        std::wstring type,
+        std::wstring path,
+        std::wstring description) -> KernelObjectNamespaceTreeNodeState* {
+        auto state = std::make_shared<KernelObjectNamespaceTreeNodeState>();
+        state->rowIndex = rowIndex;
+        state->nodeKind = std::move(kind);
+        state->nodeName = std::move(name);
+        state->nodeType = std::move(type);
+        state->nodePath = std::move(path);
+        state->nodeDescription = std::move(description);
+        KernelObjectNamespaceTreeNodeState* raw = state.get();
+        owners.emplace(raw,std::move(state));
+        return raw;
+    };
+    const auto insertTreeItem = [&](std::size_t parent,
+        const std::wstring& text,
+        KernelObjectNamespaceTreeNodeState* state) -> std::size_t {
+        if (text.empty()) {
+            return 0;
+        }
+        result_->treeNodes.push_back(KernelProjectedTreeNode{parent,text,owners.at(state),false});
+        return result_->treeNodes.size();
+    };
+
+    const auto ensureRoot = [&](std::wstring rootPath, const std::wstring& description) -> std::size_t {
+        if (rootPath.empty()) {
+            rootPath = L"\\";
+        }
+        const std::wstring key = LowerInvariantKey(rootPath);
+        if (const auto found = rootItems.find(key); found != rootItems.end()) {
+            return found->second;
+        }
+        std::wstring text = rootPath + L"    [根目录]    " + safeText(description, L"<无>");
+        KernelObjectNamespaceTreeNodeState* state = makeState(
+            -1,
+            L"Root",
+            rootPath,
+            L"根目录",
+            rootPath,
+            description);
+        std::size_t item = insertTreeItem(0, text, state);
+        if (item != 0) {
+            rootItems.emplace(key, item);
+            if (firstItem == 0) {
+                firstItem = item;
+            }
+            ExpandTreeValue(item);
+        }
+        return item;
+    };
+    const auto ensureDirectory = [&](std::wstring rootPath,
+        std::wstring directoryPath,
+        const std::wstring& description) -> std::size_t {
+        if (directoryPath.empty()) {
+            directoryPath = rootPath.empty() ? L"\\" : rootPath;
+        }
+        if (rootPath.empty() || rootPath[0] != L'\\') {
+            rootPath = rootFromPath(directoryPath);
+        }
+        std::size_t rootItem = ensureRoot(rootPath, description);
+        const std::wstring key = LowerInvariantKey(rootPath + L"\n" + directoryPath);
+        if (const auto found = directoryItems.find(key); found != directoryItems.end()) {
+            return found->second;
+        }
+        std::wstring text = LeafObjectName(directoryPath) + L"    [目录]    " + directoryPath;
+        KernelObjectNamespaceTreeNodeState* state = makeState(
+            -1,
+            L"Directory",
+            LeafObjectName(directoryPath),
+            L"目录",
+            directoryPath,
+            description);
+        std::size_t item = insertTreeItem(rootItem, text, state);
+        if (item != 0) {
+            directoryItems.emplace(key, item);
+            if (firstItem == 0) {
+                firstItem = item;
+            }
+            if (rootItem != 0) {
+                ExpandTreeValue(rootItem);
+            }
+            if (expandAll) {
+                ExpandTreeValue(item);
+            }
+        }
+        return item;
+    };
+
+    for (std::size_t rowIndex = 0; rowIndex < currentRows_.size(); ++rowIndex) {
+        const std::vector<std::wstring>& row = currentRows_[rowIndex];
+        std::wstring nodeKind = rowText(row, { L"NodeKind" });
+        const std::wstring name = rowText(row, { L"名称", L"Name", L"objectName" });
+        const std::wstring type = rowText(row, { L"类型", L"Type", L"objectType" });
+        const std::wstring path = rowText(row, { L"Path", L"完整路径", L"fullPath", L"路径/说明" });
+        const std::wstring directory = rowText(row, { L"Directory", L"directoryPath", L"Parent", L"sourceDirectory", L"来源目录" });
+        std::wstring root = rowText(row, { L"rootPathText", L"Root", L"Source" });
+        const std::wstring description = rowText(row, { L"scopeDescriptionText", L"Scope", L"scope", L"Detail", L"路径/说明" });
+        const std::wstring status = rowText(row, { L"状态", L"Status", L"statusText" });
+        const std::wstring target = rowText(row, { L"符号链接目标", L"Target", L"symbolicTarget", L"targetPath" });
+        if (name.empty() && path.empty()) {
+            continue;
+        }
+
+        if (nodeKind.empty()) {
+            if (_wcsicmp(type.c_str(), L"根目录") == 0 || _wcsicmp(status.c_str(), L"根节点") == 0) {
+                nodeKind = L"Root";
+            } else if (_wcsicmp(type.c_str(), L"目录") == 0 || _wcsicmp(status.c_str(), L"已展开枚举") == 0) {
+                nodeKind = L"Directory";
+            } else {
+                nodeKind = L"ObjectEntry";
+            }
+        }
+
+        if (_wcsicmp(nodeKind.c_str(), L"Root") == 0) {
+            ensureRoot(path.empty() ? name : path, description);
+            continue;
+        }
+        if (_wcsicmp(nodeKind.c_str(), L"Directory") == 0) {
+            const std::wstring directoryPath = path.empty() ? directory : path;
+            if (root.empty() || root[0] != L'\\') {
+                root = rootFromPath(directoryPath);
+            }
+            ensureDirectory(root, directoryPath, description);
+            continue;
+        }
+
+        std::wstring directoryPath = !directory.empty() ? directory : ParentObjectPath(path);
+        if (root.empty() || root[0] != L'\\') {
+            root = rootFromPath(!directoryPath.empty() ? directoryPath : path);
+        }
+        std::size_t directoryItem = ensureDirectory(root, directoryPath, description);
+        std::wstring displayText = safeText(name, L"<未命名对象>");
+        displayText += L"    [" + safeText(type) + L"]    " + safeText(path);
+        if (!target.empty() && target != L"<无>") {
+            displayText += L"    -> " + target;
+        } else if (!status.empty()) {
+            displayText += L"    " + status;
+        }
+        KernelObjectNamespaceTreeNodeState* state = makeState(
+            static_cast<int>(rowIndex),
+            L"ObjectEntry",
+            name.empty() ? L"<未命名对象>" : name,
+            type,
+            path,
+            description);
+        const std::size_t item = insertTreeItem(directoryItem, displayText, state);
+        if (item == 0) {
+            continue;
+        }
+        if (firstItem == 0) {
+            firstItem = item;
+        }
+        if (firstEntryItem == 0) {
+            firstEntryItem = item;
+        }
+        if (expandAll && directoryItem != 0) {
+            ExpandTreeValue(directoryItem);
+        }
+    }
+
+    if (firstEntryItem != 0) {
+        SelectTreeValue( firstEntryItem);
+    } else if (firstItem != 0) {
+        SelectTreeValue( firstItem);
     }
 }
 };

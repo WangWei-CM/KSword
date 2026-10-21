@@ -22,7 +22,7 @@ struct KernelProjectionSource {
 struct KernelProjectionInput {
     std::shared_ptr<const KernelProjectionSource> source;
     KernelFeatureDescriptor descriptor;
-    std::wstring filter, moduleFilter, windowsDirectory;
+    std::wstring filter, moduleFilter, windowsDirectory,treeSelectedKey,treeTopKey;
     bool riskOnly = false;
     std::array<std::wstring,4> selectedChoices;
     std::array<bool,4> choicePresent{};
@@ -54,6 +54,8 @@ struct KernelValueProjection {
     std::array<KernelProjectedChoice,4> choices;
     bool tree = false;
     std::vector<KernelProjectedTreeNode> treeNodes;
+    std::vector<std::uintptr_t> nativeTreeHandles;
+    std::size_t treeSelected=0,treeTop=0;
     std::unordered_map<std::size_t,std::vector<std::size_t>> rowHashes;
 };
 inline int KernelFindProjectedRow(const std::vector<std::wstring>& value,const KernelValueProjection& projection) {
