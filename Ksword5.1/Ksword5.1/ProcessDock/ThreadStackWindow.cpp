@@ -47,6 +47,8 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -125,7 +127,7 @@ namespace
             return false;
         }
 
-        if (target.tebBaseAddress == 0)
+        if (basicInfo.tebBaseAddress != nullptr)
         {
             target.tebBaseAddress = reinterpret_cast<std::uint64_t>(basicInfo.tebBaseAddress);
         }
@@ -158,84 +160,80 @@ namespace
             return false;
         }
 
-        if (target.userStackBase == 0)
+        if (tib.StackBase != nullptr)
         {
             target.userStackBase = reinterpret_cast<std::uint64_t>(tib.StackBase);
         }
-        if (target.userStackLimit == 0)
+        if (tib.StackLimit != nullptr)
         {
             target.userStackLimit = reinterpret_cast<std::uint64_t>(tib.StackLimit);
         }
         return true;
     }
 
-    // queryModuleNameForAddress 作用：用 Psapi 查询地址所属模块名。
-    // 参数 processHandle：进程句柄。
-    // 参数 address：指令地址。
-    // 参数 moduleBaseOut：接收模块基址。
-    // 返回：模块名，失败返回空。
-    QString queryModuleNameForAddress(HANDLE processHandle, const std::uint64_t address, std::uint64_t* moduleBaseOut)
+    struct ModuleRange { std::uint64_t base = 0, end = 0; QString name; };
+    std::vector<ModuleRange> snapshotModules(HANDLE process)
     {
-        if (moduleBaseOut != nullptr)
+        DWORD bytes = 0;
+        (void)::EnumProcessModules(process, nullptr, 0, &bytes);
+        std::vector<HMODULE> modules(bytes / sizeof(HMODULE));
+        if (modules.empty() || !::EnumProcessModules(process, modules.data(), bytes, &bytes)) return {};
+        modules.resize(std::min(modules.size(), static_cast<std::size_t>(bytes / sizeof(HMODULE))));
+        std::vector<ModuleRange> ranges;
+        for (const auto module : modules)
         {
-            *moduleBaseOut = 0;
+            MODULEINFO info{};
+            if (!::GetModuleInformation(process, module, &info, sizeof(info))) continue;
+            wchar_t name[MAX_PATH]{};
+            const DWORD count = ::GetModuleBaseNameW(process, module, name, MAX_PATH);
+            const auto base = reinterpret_cast<std::uint64_t>(info.lpBaseOfDll);
+            ranges.push_back({base, base + info.SizeOfImage, QString::fromWCharArray(name, static_cast<int>(count))});
         }
-        if (processHandle == nullptr || address == 0)
-        {
-            return QString();
-        }
-
-        HMODULE moduleHandle = nullptr;
-        DWORD neededBytes = 0;
-        if (::EnumProcessModules(processHandle, &moduleHandle, sizeof(moduleHandle), &neededBytes) == FALSE)
-        {
-            return QString();
-        }
-
-        const int moduleCount = static_cast<int>(neededBytes / sizeof(HMODULE));
-        if (moduleCount <= 0)
-        {
-            return QString();
-        }
-
-        std::vector<HMODULE> modules(static_cast<std::size_t>(moduleCount));
-        if (::EnumProcessModules(processHandle, modules.data(), neededBytes, &neededBytes) == FALSE)
-        {
-            return QString();
-        }
-
-        for (HMODULE currentModule : modules)
-        {
-            MODULEINFO moduleInfo{};
-            if (::GetModuleInformation(processHandle, currentModule, &moduleInfo, sizeof(moduleInfo)) == FALSE)
-            {
-                continue;
-            }
-
-            const auto base = reinterpret_cast<std::uint64_t>(moduleInfo.lpBaseOfDll);
-            const auto end = base + static_cast<std::uint64_t>(moduleInfo.SizeOfImage);
-            if (address < base || address >= end)
-            {
-                continue;
-            }
-
-            wchar_t moduleName[MAX_PATH] = {};
-            const DWORD chars = ::GetModuleBaseNameW(
-                processHandle,
-                currentModule,
-                moduleName,
-                static_cast<DWORD>(std::size(moduleName)));
-            if (moduleBaseOut != nullptr)
-            {
-                *moduleBaseOut = base;
-            }
-            return chars > 0
-                ? QString::fromWCharArray(moduleName, static_cast<int>(chars))
-                : QStringLiteral("module+0x%1").arg(static_cast<qulonglong>(address - base), 0, 16).toUpper();
-        }
-
-        return QString();
+        return ranges;
     }
+
+    struct CapturedStackMemory
+    {
+        std::uint64_t low = 0, high = 0, capturedLow = 0;
+        std::vector<unsigned char> bytes;
+    };
+    thread_local const CapturedStackMemory* capturedStack = nullptr;
+    BOOL CALLBACK readCapturedStack(HANDLE process, DWORD64 address, PVOID buffer, DWORD size, LPDWORD read)
+    {
+        if (read) *read = 0;
+        const auto* snapshot = capturedStack;
+        if (snapshot && address >= snapshot->low && address < snapshot->high)
+        {
+            if (address < snapshot->capturedLow || size > snapshot->high - address) return FALSE;
+            const auto offset = static_cast<std::size_t>(address - snapshot->low);
+            std::memcpy(buffer, snapshot->bytes.data() + offset, size);
+            if (read) *read = size;
+            return TRUE;
+        }
+        SIZE_T count = 0;
+        const BOOL ok = ::ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer, size, &count);
+        if (read) *read = static_cast<DWORD>(count);
+        return ok;
+    }
+
+    struct NativeHandle
+    {
+        HANDLE value;
+        ~NativeHandle() { if (value && value != INVALID_HANDLE_VALUE) ::CloseHandle(value); }
+    };
+    struct ThreadResume
+    {
+        HANDLE thread;
+        bool suspended = false;
+        ~ThreadResume() { resume(); }
+        void resume() { if (suspended) { (void)::ResumeThread(thread); suspended = false; } }
+    };
+    struct SymbolCleanup
+    {
+        HANDLE process;
+        bool initialized;
+        ~SymbolCleanup() { if (initialized) ::SymCleanup(process); }
+    };
 
     // symbolPathText 作用：构造本进程 DbgHelp 符号路径。
     // 参数：无。
@@ -321,6 +319,7 @@ namespace
             return result;
         }
 
+        const NativeHandle processOwner{processHandle};
         HANDLE threadHandle = ::OpenThread(
             THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
             FALSE,
@@ -328,45 +327,88 @@ namespace
         if (threadHandle == nullptr)
         {
             result.diagnosticText = QStringLiteral("OpenThread failed %1").arg(::GetLastError());
-            ::CloseHandle(processHandle);
             return result;
         }
 
+        const NativeHandle threadOwner{threadHandle};
+        if (::GetProcessIdOfThread(threadHandle) != inputTarget.processId)
+        {
+            result.diagnosticText = QStringLiteral("OpenThread failed %1").arg(ERROR_INVALID_OWNER);
+            return result;
+        }
+        FILETIME processCreated{}, threadCreated{}, exited{}, kernel{}, user{};
+        const bool processTimesOk = ::GetProcessTimes(processHandle, &processCreated, &exited, &kernel, &user);
+        const bool threadTimesOk = ::GetThreadTimes(threadHandle, &threadCreated, &exited, &kernel, &user);
+        const auto timeValue = [](const FILETIME& time) { return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) | time.dwLowDateTime; };
+        const auto processTime = timeValue(processCreated), threadTime = timeValue(threadCreated);
+        if (!processTimesOk || !threadTimesOk ||
+            (inputTarget.processCreationTime100ns != 0 && inputTarget.processCreationTime100ns != processTime) ||
+            (inputTarget.threadCreationTime100ns != 0 && inputTarget.threadCreationTime100ns != threadTime))
+        {
+            result.diagnosticText = QStringLiteral("OpenThread failed %1").arg(ERROR_INVALID_OWNER);
+            return result;
+        }
+        result.enrichedTarget.processCreationTime100ns = processTime;
+        result.enrichedTarget.threadCreationTime100ns = threadTime;
         (void)queryThreadBasicInfo(threadHandle, result.enrichedTarget, diagnosticLines);
         (void)readUserStackLimitsFromTeb(processHandle, result.enrichedTarget, diagnosticLines);
-
-        // Serialize the entire DbgHelp session before suspending the thread.
-        // Pool ETL and dump symbolization use the same process-wide lock.
-        const std::lock_guard<std::mutex> symbolsLock(ks::dbghelp::SerializationMutex());
-        const bool symbolsReady = initializeSymbols(processHandle, diagnosticLines);
-        DWORD suspendResult = ::SuspendThread(threadHandle);
-        if (suspendResult == static_cast<DWORD>(-1))
+        CapturedStackMemory snapshot;
+        snapshot.low = result.enrichedTarget.userStackLimit;
+        snapshot.high = result.enrichedTarget.userStackBase;
+        if (snapshot.low == 0 || snapshot.high <= snapshot.low ||
+            snapshot.high - snapshot.low > std::numeric_limits<std::size_t>::max())
         {
-            result.diagnosticText = QStringLiteral("SuspendThread failed %1").arg(::GetLastError());
-            if (symbolsReady)
-            {
-                ::SymCleanup(processHandle);
-            }
-            ::CloseHandle(threadHandle);
-            ::CloseHandle(processHandle);
+            result.diagnosticText = QStringLiteral("Read TEB stack limits failed %1").arg(ERROR_INVALID_ADDRESS);
             return result;
         }
-
+        // Allocate before pausing, including for a thread in this process.
+        snapshot.bytes.resize(static_cast<std::size_t>(snapshot.high - snapshot.low));
         CONTEXT context{};
         context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        if (::GetThreadContext(threadHandle, &context) == FALSE)
+        ThreadResume resume{threadHandle};
+        if (::SuspendThread(threadHandle) == static_cast<DWORD>(-1))
         {
-            diagnosticLines << QStringLiteral("GetThreadContext failed %1").arg(::GetLastError());
-            (void)::ResumeThread(threadHandle);
-            if (symbolsReady)
-            {
-                ::SymCleanup(processHandle);
-            }
-            ::CloseHandle(threadHandle);
-            ::CloseHandle(processHandle);
-            result.diagnosticText = diagnosticLines.join(QStringLiteral(" | "));
+            result.diagnosticText = QStringLiteral("SuspendThread failed %1").arg(::GetLastError());
             return result;
         }
+        resume.suspended = true;
+        const BOOL contextOk = ::GetThreadContext(threadHandle, &context);
+        DWORD captureError = contextOk ? ERROR_SUCCESS : ::GetLastError();
+#if defined(_M_X64)
+        snapshot.capturedLow = context.Rsp;
+#elif defined(_M_IX86)
+        snapshot.capturedLow = context.Esp;
+#else
+        snapshot.capturedLow = 0;
+#endif
+        SIZE_T capturedBytes = 0;
+        bool stackOk = contextOk && snapshot.capturedLow >= snapshot.low && snapshot.capturedLow < snapshot.high;
+        if (stackOk)
+        {
+            const auto offset = static_cast<std::size_t>(snapshot.capturedLow - snapshot.low);
+            const auto count = static_cast<std::size_t>(snapshot.high - snapshot.capturedLow);
+            stackOk = ::ReadProcessMemory(processHandle, reinterpret_cast<LPCVOID>(snapshot.capturedLow),
+                snapshot.bytes.data() + offset, count, &capturedBytes) && capturedBytes == count;
+            if (!stackOk) captureError = ::GetLastError();
+        }
+        else if (contextOk) captureError = ERROR_INVALID_ADDRESS;
+        // No symbol lock, module enumeration, network symbol access or formatting
+        // occurs while the target is stopped. The walk reads immutable stack bytes.
+        resume.resume();
+        if (!stackOk)
+        {
+            result.diagnosticText = QStringLiteral("GetThreadContext failed %1").arg(captureError);
+            return result;
+        }
+        const auto modules = snapshotModules(processHandle);
+        const std::lock_guard<std::mutex> symbolsLock(ks::dbghelp::SerializationMutex());
+        const bool symbolsReady = initializeSymbols(processHandle, diagnosticLines);
+        const SymbolCleanup symbols{processHandle, symbolsReady};
+        struct StackReadScope
+        {
+            explicit StackReadScope(const CapturedStackMemory& memory) { capturedStack = &memory; }
+            ~StackReadScope() { capturedStack = nullptr; }
+        } stackReadScope(snapshot);
 
         STACKFRAME64 stackFrame{};
         DWORD machineType = IMAGE_FILE_MACHINE_AMD64;
@@ -399,7 +441,7 @@ namespace
                 threadHandle,
                 &stackFrame,
                 &context,
-                nullptr,
+                readCapturedStack,
                 SymFunctionTableAccess64,
                 SymGetModuleBase64,
                 nullptr);
@@ -416,7 +458,11 @@ namespace
             row.index = static_cast<std::uint32_t>(result.frames.size());
             row.address = static_cast<std::uint64_t>(stackFrame.AddrPC.Offset);
             std::uint64_t moduleBase = 0;
-            row.moduleName = queryModuleNameForAddress(processHandle, row.address, &moduleBase);
+            for (const auto& module : modules)
+            {
+                if (row.address >= module.base && row.address < module.end)
+                { moduleBase = module.base; row.moduleName = module.name; break; }
+            }
             row.symbolName = symbolsReady ? resolveSymbol(processHandle, row.address, &row.displacement) : QString();
             if (row.symbolName.isEmpty())
             {
@@ -427,14 +473,6 @@ namespace
             row.modeText = QStringLiteral("User");
             result.frames.push_back(std::move(row));
         }
-
-        (void)::ResumeThread(threadHandle);
-        if (symbolsReady)
-        {
-            ::SymCleanup(processHandle);
-        }
-        ::CloseHandle(threadHandle);
-        ::CloseHandle(processHandle);
 
         result.ok = !result.frames.empty();
         result.elapsedMs = static_cast<std::uint64_t>(

@@ -1322,6 +1322,8 @@ void ProcessDetailWindow::openSelectedThreadStackWindow()
     ThreadStackTarget target{};
     target.processId = selectedThread->processId != 0 ? selectedThread->processId : m_baseRecord.pid;
     target.threadId = selectedThread->threadId;
+    target.threadCreationTime100ns = selectedThread->createTime100ns;
+    target.processCreationTime100ns = m_baseRecord.creationTime100ns;
     target.processName = QString::fromStdString(
         m_baseRecord.processName.empty() ? std::string("Unknown") : m_baseRecord.processName);
     target.processPath = QString::fromStdString(m_baseRecord.imagePath);

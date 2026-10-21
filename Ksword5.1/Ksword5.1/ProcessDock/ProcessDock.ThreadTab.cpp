@@ -2133,6 +2133,7 @@ void ProcessDock::openThreadStackWindow()
     ThreadStackTarget target{};
     target.processId = threadRecord->ownerPid;
     target.threadId = threadRecord->threadId;
+    target.threadCreationTime100ns = threadRecord->createTime100ns;
     target.processName = QString::fromStdString(threadRecord->ownerProcessName);
     target.startAddress = threadRecord->startAddress;
     target.win32StartAddress = threadRecord->win32StartAddress;
@@ -2152,6 +2153,7 @@ void ProcessDock::openThreadStackWindow()
             !cachePair.second.record.imagePath.empty())
         {
             target.processPath = QString::fromStdString(cachePair.second.record.imagePath);
+            target.processCreationTime100ns = cachePair.second.record.creationTime100ns;
             break;
         }
     }

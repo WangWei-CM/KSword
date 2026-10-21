@@ -28,6 +28,7 @@ struct ThreadStackTarget
 {
     std::uint32_t processId = 0;        // 目标进程 PID。
     std::uint32_t threadId = 0;         // 目标线程 TID。
+    std::uint64_t processCreationTime100ns = 0, threadCreationTime100ns = 0;
     QString processName;                // 进程名，仅展示。
     QString processPath;                // 进程路径，仅展示和符号辅助。
     std::uint64_t startAddress = 0;     // 线程启动地址，仅展示。
