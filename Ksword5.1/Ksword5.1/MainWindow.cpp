@@ -11827,11 +11827,7 @@ void MainWindow::setupDockLayout()
 #if KSWORD_PERF_TRACE_ENABLED
     // 采集：注册现场上下文（当前 Dock），并记录 Dock 切换标记，
     // 只标明观察时的 Dock；心跳整个区间不归因于末尾页签。
-    // ADS 的 focusedDockWidget() 只有 FocusHighlighting 打开时才有值，
-    // 因此现场提供者按“ADS 焦点 → Qt 焦点祖先 → 当前可见 DockArea”依次回退。
-    // 提供者存活期长于窗口本身，必须用 QPointer 兜住已经销毁的主窗口。
-    const QPointer<MainWindow> windowGuard(this);
-    const QPointer<ads::CDockManager> dockManagerGuard(m_pDockManager);
+    // 现场仅由既有 Dock 信号更新，不为诊断重复扫描 UI 树。
     const auto describePerfDock = [](ads::CDockWidget* dockWidget) -> QString
     {
         if (dockWidget == nullptr)
@@ -11853,68 +11849,7 @@ void MainWindow::setupDockLayout()
         }
         return description;
     };
-    ks::ui::SetPerfTraceContextProvider([windowGuard, dockManagerGuard]() -> QString
-        {
-            if (windowGuard == nullptr || dockManagerGuard == nullptr)
-            {
-                return QString();
-            }
-            ads::CDockWidget* currentDock = dockManagerGuard->focusedDockWidget();
-            if (currentDock == nullptr)
-            {
-                for (QWidget* widget = QApplication::focusWidget(); widget != nullptr;
-                    widget = widget->parentWidget())
-                {
-                    if (auto* dock = qobject_cast<ads::CDockWidget*>(widget))
-                    {
-                        currentDock = dock;
-                        break;
-                    }
-                }
-            }
-            if (currentDock == nullptr)
-            {
-                for (QWidget* widget = QApplication::widgetAt(QCursor::pos()); widget != nullptr;
-                    widget = widget->parentWidget())
-                {
-                    if (auto* dock = qobject_cast<ads::CDockWidget*>(widget))
-                    {
-                        currentDock = dock;
-                        break;
-                    }
-                }
-            }
-            if (currentDock == nullptr)
-            {
-                const auto areas = dockManagerGuard->findChildren<ads::CDockAreaWidget*>();
-                for (ads::CDockAreaWidget* area : areas)
-                {
-                    if (area != nullptr && area->isVisible() && area->currentDockWidget() != nullptr)
-                    {
-                        currentDock = area->currentDockWidget();
-                        break;
-                    }
-                }
-            }
-            if (currentDock == nullptr)
-            {
-                return QString();
-            }
-            QString description = currentDock->windowTitle();
-            if (description.isEmpty())
-            {
-                description = currentDock->property("ks_lazy_key").toString();
-            }
-            if (!currentDock->objectName().isEmpty())
-            {
-                if (!description.isEmpty())
-                {
-                    description += QLatin1Char(' ');
-                }
-                description += QLatin1Char('[') + currentDock->objectName() + QLatin1Char(']');
-            }
-            return description;
-        });
+    ks::ui::InitializePerfTrace();
 
     const auto connectPerfDockArea = [describePerfDock](ads::CDockAreaWidget* area)
     {

@@ -3,8 +3,6 @@
 #include <QElapsedTimer>
 #include <QString>
 
-#include <functional>
-
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
 // 重新构建后在 exe 同目录读取 ksword_perf_trace.jsonl；也可用 KSWORD_PERF_TRACE 指定路径。
@@ -36,8 +34,8 @@ namespace ks::ui
     void RecordPerfSpanNs(const char* operationToken, const QString& targetLabel,
         qint64 durationNs, qint64 itemCount = -1);
 
-    // GUI 宿主注册现场提供者；只在注册/焦点改变时刷新缓存，记录和 writer 不查询 UI。
-    void SetPerfTraceContextProvider(std::function<QString()> provider);
+    // GUI 宿主初始化诊断；Dock 标记直接维护观察缓存，不注册 UI 查询回调。
+    void InitializePerfTrace();
 
     // 作用域计时器：构造时开始计时，析构时自动记录，允许提前结束或补充计数。
     class PerfScope final
@@ -72,7 +70,7 @@ namespace ks::ui
     inline qint64 PerfTraceNowMs() { return 0; }
     inline qint64 PerfTraceNowNs() { return 0; }
     inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}
-    inline void SetPerfTraceContextProvider(std::function<QString()>) {}
+    inline void InitializePerfTrace() {}
 
     // 关闭时的作用域计时器空实现：签名与开启时一致，调用点不需要条件编译。
     class PerfScope final

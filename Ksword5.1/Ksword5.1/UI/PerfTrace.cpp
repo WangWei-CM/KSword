@@ -18,6 +18,7 @@
 #include <QUuid>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -221,29 +222,18 @@ namespace ks::ui
 
         void recordMark(const char* operation, const QString& target)
         {
+            // The existing Dock signal already supplies identity; never rediscover it by UI scans.
+            if (std::strncmp(operation, "perf_dock_", 10) == 0)
+            {
+                std::lock_guard<std::mutex> lock(m_contextMutex);
+                m_cachedContext = target;
+            }
             enqueue(makeRecord("mark", operation, target));
-        }
-
-        // Called by the existing GUI host. Refresh only on focus change, never per record.
-        void setContextProvider(std::function<QString()> provider)
-        {
-            Q_ASSERT(QThread::currentThread() == thread());
-            m_contextProvider = std::move(provider);
-            refreshContext();
         }
 
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
         {
-            if (event && watched && event->type() == QEvent::FocusIn && !m_contextRefreshPending)
-            {
-                m_contextRefreshPending = true;
-                QTimer::singleShot(0, this, [this]()
-                {
-                    m_contextRefreshPending = false;
-                    refreshContext();
-                });
-            }
             if (event && watched && event->type() == QEvent::MouseButtonPress)
             {
                 const QString label = tabBarLabelFor(watched);
@@ -336,13 +326,6 @@ namespace ks::ui
             enqueue(std::move(record));
         }
 
-        void refreshContext()
-        {
-            const QString context = m_contextProvider ? m_contextProvider() : QString();
-            std::lock_guard<std::mutex> lock(m_contextMutex);
-            m_cachedContext = context;
-        }
-
         TraceRecord makeRecord(const char* event, const char* operation, const QString& target)
         {
             TraceRecord record;
@@ -393,11 +376,9 @@ namespace ks::ui
         const std::shared_ptr<TraceWriterState> m_writer;
         std::mutex m_contextMutex;
         QString m_cachedContext;
-        std::function<QString()> m_contextProvider;
         QTimer m_heartbeat;
         qint64 m_previousHeartbeatNs = 0;
         std::atomic<quint64> m_nextScopeId{1};
-        bool m_contextRefreshPending = false;
     };
 
     void RecordPerfSpan(const char* operation, const QString& target, qint64 durationMs)
@@ -423,9 +404,9 @@ namespace ks::ui
     qint64 PerfTraceNowMs() { return referenceClock().elapsed(); }
     qint64 PerfTraceNowNs() { return referenceClock().nsecsElapsed(); }
 
-    void SetPerfTraceContextProvider(std::function<QString()> provider)
+    void InitializePerfTrace()
     {
-        PerfTrace::instance().setContextProvider(std::move(provider));
+        (void)PerfTrace::instance();
     }
 
     PerfScope::PerfScope(const char* operation, QString target)

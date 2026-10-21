@@ -406,10 +406,11 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 ## 性能采集与 Dock 现场（2026-10-18）
 
-- `QApplication` 全局事件过滤器在 `QWidget::event()` 前收到 Paint/LayoutRequest；要测量事件分发后的耗时，应给目标控件投递一次 queued 回调，并以控件属性合并同一轮待测事件，避免逐帧日志和重复计时。当前仅覆盖 `QTableWidget`/`QScrollArea` 及其 viewport/content，记录 `perf_scroll_paint`、`perf_scroll_layout`。
-- ADS 的 `CDockManager::focusedDockWidget()` 受 `FocusHighlighting` 配置控制，关闭时恒为 `nullptr`。性能现场应按 ADS 焦点、Qt 焦点祖先、鼠标所在控件祖先、当前可见 DockArea 的顺序回退；Dock 切页应监听 `CDockAreaWidget::currentChanged`，不能只依赖 `focusedDockWidgetChanged`。
-- 性能 `last` 操作标记必须带单调时钟有效期；滚轮等高频入口可写入短期标记，否则旧页签操作会污染后续停顿归因。编译采集阶段保持 `KSWORD_PERF_TRACE_ENABLED=1`，发布前改回 `0`。
-- 关闭阶段 `QPointer<MainWindow>` 可能在派生类析构期间仍非空，而其 DockManager 子对象已先行销毁；异步性能上下文必须同时捕获 `QPointer<CDockManager>`，并在对象树查询（尤其 `findChildren`）前检查管理器存活，不能只检查宿主窗口。
+- `QApplication` 全局过滤器在 `QWidget::event()` 前收到 Paint/LayoutRequest；入口至 queued 回调只代表可重叠的墙钟/队列延迟，不是该事件的 CPU 耗时或实际呈现。指标已更名 `perf_scroll_paint_queue_latency`/`perf_scroll_layout_queue_latency`，合并状态仅存采集器，不写控件动态属性。范围仍仅为既有表格/滚动壳，不能宣称全控件事件测量。
+- Dock 现场直接缓存既有 `currentChanged`/`focusedDockWidgetChanged` 标记给出的身份；注册初态单独记录。不要每条记录或焦点变化时重新 `widgetAt`/`findChildren` 查 UI 树。主窗口只显式 `InitializePerfTrace`，旧现场查询回调已删除。
+- 心跳明确保存整个单调 ns 区间并标为未归因；末尾 Dock 标记不能解释此前整段工作。已有 `PerfScope` 记录配对 scope_id 起止；UUID/UTC/Qt/构建戳和 writer 读取的 EXE SHA256 区分会话。没有测得 input-to-ready/present、notify self CPU 或实际 FPS。
+- trace 默认 `KSWORD_PERF_TRACE_ENABLED=0`；MainWindow 诊断连接/动态属性/扫描块也由宏隔离。开启后仅值记录进入 2048 项有界队列，JSON/EXE hash/QFile 全由纯值 writer 处理，溢出记录丢弃数。退出关闭 admission 后异步 drain，不在 GUI 等 I/O；进程终止或 OS 写入阻塞仍可丢尾，不能声称持久化退出屏障。
+- `perf_scroll_driver_sync_work` 用 ns 记录包括最后一帧的同步驱动；动画墙钟另有 completed/canceled/replaced。正常帧等待不叫阻塞，驱动次数和滚动值变化不叫呈现帧数。此轮仅静态检查，累计构建与实际诊断/GUI仍待用户验收。
 
 ## 移动滚动画布的不透明契约（2026-10-20）
 
