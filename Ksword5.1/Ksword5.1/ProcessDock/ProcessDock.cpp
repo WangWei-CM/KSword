@@ -1,6 +1,7 @@
 #include "ProcessDock.h"
 #include "ProcessActivitySeriesCache.h"
 #include "../UI/TableContextMenu.h"
+#include "../UI/RetainedCleanupJob.h"
 #include "../UI/FlatButtonTheme.h"
 #include "ProcessAffinityUtils.h"
 #include "ProcessAffinityPersistence.h"
@@ -163,6 +164,38 @@
 
 namespace
 {
+    template<typename Service>
+    bool stopProcessEtwCaptureService(Service& service)
+    {
+        if (!service.StopChecked() || service.SnapshotHealth().cleanupPending) return false;
+        if constexpr (std::is_same_v<Service, ks::network::ProcessNetworkEtwMonitor>) service.PruneCounters({});
+        else (void)service.SnapshotAndReset();
+        return true;
+    }
+
+    template<typename Service>
+    void releaseUnadmittedProcessEtwValue(std::shared_ptr<Service> service)
+    {
+        QThreadPool::globalInstance()->start(QRunnable::create([service = std::move(service)]() mutable {
+            service.reset();
+        }));
+    }
+
+    template<typename Service>
+    std::shared_ptr<ks::ui::RetainedCleanupJob> makeProcessEtwCleanupOwner(
+        const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
+        const std::shared_ptr<Service>& service)
+    {
+        return ks::ui::RetainedCleanupJob::create([lifecycle, service]() {
+            lifecycle->Close(); // state only; rejects a queued/new Start before taking the backend gate
+            const auto operationGuard = lifecycle->LockBackgroundOperation();
+            bool stopped = false;
+            try { stopped = stopProcessEtwCaptureService(*service); } catch (...) {}
+            lifecycle->CompleteStop(stopped);
+            return stopped; // false retains the value owner and shutdown lease for explicit Retry
+        }, 0, [lifecycle]() { lifecycle->Close(); }); // synchronous value-only stop signal
+    }
+
     template<typename Service, typename StartedCallback>
     void requestProcessEtwCapture(
         const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
@@ -170,46 +203,39 @@ namespace
         const bool desired,
         StartedCallback startedCallback)
     {
-        if (service == nullptr || !lifecycle->Request(desired))
-        {
-            return;
-        }
+        if (service == nullptr || !lifecycle->Request(desired)) return;
         QRunnable* task = QRunnable::create([lifecycle, service, startedCallback]()
         {
             using Operation = ks::process::ProcessEtwCaptureLifecycle::Operation;
             for (;;)
             {
-                const auto operation = lifecycle->NextOperation();
-                if (operation == Operation::None)
-                {
-                    return;
-                }
-                // NextOperation released the short state lock before this potentially slow
-                // backend gate. GUI Request never takes the gate and remains nonblocking.
+                // Choose the operation inside the backend gate. A retained close
+                // cannot finish and then be overtaken by a previously chosen Start.
                 const auto operationGuard = lifecycle->LockBackgroundOperation();
+                const auto operation = lifecycle->NextOperation();
                 switch (operation)
                 {
                 case Operation::Start:
                 {
-                    const bool started = service->Start();
-                    lifecycle->CompleteStart(started);
+                    bool started = false;
+                    bool ownedResources = false;
+                    try
+                    {
+                        started = service->Start();
+                        ownedResources = service->SnapshotHealth().cleanupPending;
+                    }
+                    catch (...) { ownedResources = true; }
+                    lifecycle->CompleteStart(started, ownedResources);
                     startedCallback(started, *service);
                     break;
                 }
                 case Operation::Stop:
-                    service->Stop();
-                    // There is no remaining consumer. Release completed interval storage here,
-                    // after callbacks are joined, rather than retaining hidden PID/TID churn.
-                    if constexpr (std::is_same_v<Service, ks::network::ProcessNetworkEtwMonitor>)
-                    {
-                        service->PruneCounters({});
-                    }
-                    else
-                    {
-                        (void)service->SnapshotAndReset();
-                    }
-                    lifecycle->CompleteStop();
+                {
+                    bool stopped = false;
+                    try { stopped = stopProcessEtwCaptureService(*service); } catch (...) {}
+                    lifecycle->CompleteStop(stopped);
                     break;
+                }
                 case Operation::None:
                     return;
                 }
@@ -4654,9 +4680,23 @@ ProcessDock::~ProcessDock()
     m_processIconPathsInFlight.clear();
 
     // Only publish stop intent here. The worker owns Start/Stop/join and all late service references.
-    stopProcessNetworkTrafficCapture();
-    stopCpuCoreUsageCapture();
-    // Even an already stopped monitor calls Stop in its destructor. Transfer the Dock's last
+    if (m_processNetworkCaptureOwner != nullptr)
+    {
+        m_processNetworkTrafficCaptureStarted = false;
+        m_processNetworkBaselineResetRequired = true;
+        m_processNetworkCaptureLifecycle->Close();
+        m_processNetworkCaptureOwner->requestCleanup();
+    }
+    else stopProcessNetworkTrafficCapture();
+    if (m_cpuCoreCaptureOwner != nullptr)
+    {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        m_cpuCoreCaptureLifecycle->Close();
+        m_cpuCoreCaptureOwner->requestCleanup();
+    }
+    else stopCpuCoreUsageCapture();
+    // Retained cleanup jobs keep failed STOP identities beyond the Dock. Even an already stopped monitor calls Stop in its destructor. Transfer the Dock's last
     // references to a worker, so service destruction cannot acquire ETW lifecycle locks on GUI.
     QRunnable* releaseCaptureOwners = QRunnable::create([
         networkService = std::move(m_processNetworkTrafficService),
@@ -4758,15 +4798,35 @@ void ProcessDock::syncProcessEtwCaptureDemand()
 
 void ProcessDock::ensureProcessNetworkTrafficCaptureStarted()
 {
-    if (m_processNetworkTrafficCaptureStarted)
+    if (m_processNetworkTrafficService == nullptr)
+        m_processNetworkTrafficService = std::make_shared<ks::network::ProcessNetworkEtwMonitor>();
+    if (m_processNetworkCaptureOwner == nullptr || m_processNetworkCaptureOwner->isComplete())
     {
+        m_processNetworkTrafficCaptureStarted = false;
+        // Reopen changes only value state. New Start still requires fresh admission.
+        if (!m_processNetworkCaptureLifecycle->Reopen()) return;
+        m_processNetworkCaptureOwner = makeProcessEtwCleanupOwner(m_processNetworkCaptureLifecycle, m_processNetworkTrafficService);
+        if (m_processNetworkCaptureOwner == nullptr)
+        {
+            m_processNetworkCaptureLifecycle->Close();
+            // create(null) may already retain a cleanup closure for this epoch.
+            // Its late Stop must never see a service reused by later admission.
+            const auto nextGeneration = m_processNetworkCaptureLifecycle->Generation() + 1;
+            releaseUnadmittedProcessEtwValue(std::move(m_processNetworkTrafficService));
+            m_processNetworkCaptureLifecycle = std::make_shared<ks::process::ProcessEtwCaptureLifecycle>(nextGeneration);
+            m_processNetworkBaselineResetRequired = true;
+            return;
+        }
+        m_processNetworkBaselineResetRequired = true;
+    }
+    if (m_processNetworkCaptureOwner->isCleanupRequested())
+    {
+        m_processNetworkTrafficCaptureStarted = false;
+        m_processNetworkBaselineResetRequired = true;
         return;
     }
+    if (m_processNetworkTrafficCaptureStarted && !m_processNetworkCaptureLifecycle->CleanupPending()) return;
     m_processNetworkTrafficCaptureStarted = true;
-    if (m_processNetworkTrafficService == nullptr)
-    {
-        m_processNetworkTrafficService = std::make_shared<ks::network::ProcessNetworkEtwMonitor>();
-    }
     requestProcessEtwCapture(
         m_processNetworkCaptureLifecycle, m_processNetworkTrafficService, true,
         [](const bool started, const ks::network::ProcessNetworkEtwMonitor& service)
@@ -4811,16 +4871,38 @@ void ProcessDock::stopProcessNetworkTrafficCapture()
 
 void ProcessDock::ensureCpuCoreUsageCaptureStarted()
 {
-    m_cpuCoreUsageCaptureDesired->store(true, std::memory_order_release);
-    if (m_cpuCoreUsageCaptureStarted)
+    if (m_cpuCoreUsageService == nullptr)
+        m_cpuCoreUsageService = std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
+    if (m_cpuCoreCaptureOwner == nullptr || m_cpuCoreCaptureOwner->isComplete())
     {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        if (!m_cpuCoreCaptureLifecycle->Reopen()) return;
+        m_cpuCoreCaptureOwner = makeProcessEtwCleanupOwner(m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService);
+        if (m_cpuCoreCaptureOwner == nullptr)
+        {
+            m_cpuCoreCaptureLifecycle->Close();
+            const auto nextGeneration = m_cpuCoreCaptureLifecycle->Generation() + 1;
+            releaseUnadmittedProcessEtwValue(std::move(m_cpuCoreUsageService));
+            m_cpuCoreCaptureLifecycle = std::make_shared<ks::process::ProcessEtwCaptureLifecycle>(nextGeneration);
+            m_latestCpuCoreUsageSnapshot.reset();
+            m_lastCpuCoreUsageSnapshotTime = {};
+            return;
+        }
+        m_latestCpuCoreUsageSnapshot.reset();
+        m_lastCpuCoreUsageSnapshotTime = {};
+    }
+    if (m_cpuCoreCaptureOwner->isCleanupRequested())
+    {
+        m_cpuCoreUsageCaptureStarted = false;
+        m_cpuCoreUsageCaptureDesired->store(false, std::memory_order_release);
+        m_latestCpuCoreUsageSnapshot.reset();
+        m_lastCpuCoreUsageSnapshotTime = {};
         return;
     }
+    m_cpuCoreUsageCaptureDesired->store(true, std::memory_order_release);
+    if (m_cpuCoreUsageCaptureStarted && !m_cpuCoreCaptureLifecycle->CleanupPending()) return;
     m_cpuCoreUsageCaptureStarted = true;
-    if (m_cpuCoreUsageService == nullptr)
-    {
-        m_cpuCoreUsageService = std::make_shared<ks::process::ProcessCpuCoreEtwMonitor>();
-    }
     requestProcessEtwCapture(
         m_cpuCoreCaptureLifecycle, m_cpuCoreUsageService, true,
         [](const bool started, const ks::process::ProcessCpuCoreEtwMonitor& service)

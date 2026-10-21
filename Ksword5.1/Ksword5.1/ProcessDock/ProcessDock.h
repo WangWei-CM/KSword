@@ -92,6 +92,7 @@ namespace ks::network
 namespace ks::ui
 {
     class StructuredFieldView;
+    class RetainedCleanupJob;
     template<typename RowT>
     class FlatTableModel;
 }
@@ -1375,6 +1376,8 @@ private:
     std::shared_ptr<std::atomic_bool> m_cpuCoreUsageCaptureDesired =
         std::make_shared<std::atomic_bool>(false); // 后台 Start 返回后读取的期望状态，解决快速开始/暂停竞态。
     bool m_etwDemandSyncScheduled = false; // 合并详情/主窗口生命周期事件。
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_processNetworkCaptureOwner;
+    std::shared_ptr<ks::ui::RetainedCleanupJob> m_cpuCoreCaptureOwner;
     std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_processNetworkCaptureLifecycle =
         std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
     std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_cpuCoreCaptureLifecycle =
