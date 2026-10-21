@@ -957,7 +957,7 @@ void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFi
 
 void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t rowCount,
     std::function<void(std::size_t)> fillRow, std::function<void()> finalize,
-    std::function<void()> onReady, const bool rebuildSource)
+    std::function<void()> onReady, const bool rebuildSource, QLineEdit* firstFilter)
 {
     const QPointer<QTableWidget> tableGuard(table);
     const QPointer<KernelDock> owner(this);
@@ -981,15 +981,19 @@ void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t 
     timer->setProperty("was_sorting_enabled", wasSortingEnabled);
     timer->setSingleShot(true);
     const QPointer<QTimer> timerGuard(timer);
+    const QPointer<QLineEdit> filterGuard(firstFilter);
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
     table->setProperty(ks::ui::TablePresentationPreparingProperty, true);
     if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
     table->setEnabled(false);
     if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
     connect(timer, &QTimer::timeout, this,
-        [this, owner, tableGuard, timerGuard, rowCount, wasForceDisabled, wasSortingEnabled,
+        [this, owner, tableGuard, timerGuard, filterGuard, rowCount, wasForceDisabled, wasSortingEnabled,
             rebuildSource, language,
-            cursor = std::size_t{0}, initialized = false, fillRow = std::move(fillRow),
+            cursor = std::size_t{0}, initialized = false, finalized = false,
+            filterInitialized = false, filterCursor = 0, filterKeyword = QString(),
+            filterRevision = quint64{0}, excluded = QSet<QPersistentModelIndex>(), hasDeferredMatch = false,
+            fillRow = std::move(fillRow),
             finalize = std::move(finalize), onReady = std::move(onReady)]() mutable {
         if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
         const auto resume = [timerGuard]() {
@@ -1021,7 +1025,72 @@ void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t 
             if (++rows >= 64 || budget.elapsed() >= 4) break;
         }
         if (!staleLanguage && cursor < rowCount) { resume(); return; }
-        if (!staleLanguage) finalize(); // Source publication retains its original final sort/filter.
+        if (!staleLanguage && !finalized)
+        {
+            finalized = true;
+            finalize(); // Keep the original final sort, then yield before matching.
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            if (filterGuard) { resume(); return; }
+        }
+        if (filterGuard && !staleLanguage)
+        {
+            const QString keyword = filterGuard->text().trimmed();
+            const quint64 revision = ks::ui::TableRowFilterIdentityRevision(tableGuard);
+            const int separatorRow = tableGuard == m_callbackEnumTable ? m_callbackEnumSeparatorIndex.row() : -1;
+            if (!filterInitialized || keyword != filterKeyword || revision != filterRevision)
+            {
+                filterInitialized = true;
+                filterCursor = 0;
+                filterKeyword = keyword;
+                filterRevision = revision;
+                excluded.clear();
+                hasDeferredMatch = keyword.isEmpty() && separatorRow >= 0
+                    && separatorRow + 1 < tableGuard->rowCount();
+            }
+            budget.restart();
+            int processed = 0;
+            while (!keyword.isEmpty() && filterCursor < tableGuard->rowCount()
+                && processed < 256 && budget.elapsed() < 4)
+            {
+                const int row = filterCursor++;
+                ++processed;
+                if (row == separatorRow) continue;
+                const auto* item = tableGuard->item(row, 0);
+                bool matched = false;
+                if (item != nullptr)
+                {
+                    const QStringList fields = item->data(KernelSearchFieldsRole).toStringList();
+                    matched = std::any_of(fields.cbegin(), fields.cend(), [&keyword](const QString& field) {
+                        return field.contains(keyword, Qt::CaseInsensitive);
+                    });
+                }
+                if (!matched) excluded.insert(QPersistentModelIndex(tableGuard->model()->index(row, 0)));
+                else if (separatorRow >= 0 && row > separatorRow) hasDeferredMatch = true;
+            }
+            if (!keyword.isEmpty() && filterCursor < tableGuard->rowCount()) { resume(); return; }
+            if (separatorRow >= 0 && !hasDeferredMatch)
+                excluded.insert(QPersistentModelIndex(tableGuard->model()->index(separatorRow, 0)));
+            ks::ui::SetTableRowFilterBusinessOwnership(tableGuard,
+                ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            ks::ui::ApplyTableRowFilterIncrementally(tableGuard, excluded);
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            if (const QPointer<QItemSelectionModel> selection = tableGuard->selectionModel())
+            {
+                QItemSelection deselect;
+                for (const QModelIndex& index : selection->selectedRows())
+                    if (ks::ui::IsTableRowExcludedByFilter(tableGuard, index.row()))
+                        deselect.select(tableGuard->model()->index(index.row(), 0),
+                            tableGuard->model()->index(index.row(), tableGuard->columnCount() - 1));
+                if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
+                if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty() || !selection) return;
+                if (ks::ui::IsTableRowExcludedByFilter(tableGuard, tableGuard->currentRow()))
+                    selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+            }
+            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
+            if (filterGuard && filterGuard->text().trimmed() != filterKeyword)
+            { filterInitialized = false; resume(); return; }
+        }
         if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
         if (!rebuildSource) tableGuard->setSortingEnabled(wasSortingEnabled);
         if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
@@ -1115,8 +1184,7 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()
             if (!owner) return;
             m_atomTable->setProperty(KernelSearchLanguageProperty,
                 ks::i18n::LanguageManager::instance().currentLanguageId());
-            applyKernelResultFilter(m_atomTable, m_atomFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_atomFilterEdit);
 }
 
 void KernelDock::rebuildNtQueryTable()

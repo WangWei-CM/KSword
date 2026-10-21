@@ -534,8 +534,7 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()
         }, [this, language]() {
             m_ssdtTable->setSortingEnabled(true);
             m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_ssdtTable, m_ssdtFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_ssdtFilterEdit);
 }
 
 void KernelDock::restoreSelectedSsdtBaseline()

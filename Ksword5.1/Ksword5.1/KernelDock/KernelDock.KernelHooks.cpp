@@ -2682,8 +2682,7 @@ void KernelDock::rebuildShadowSsdtTable(const bool sourceChanged, std::function<
         }, [this, language]() {
             m_shadowSsdtTable->setSortingEnabled(true);
             m_shadowSsdtTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_shadowSsdtTable, m_shadowSsdtFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_shadowSsdtFilterEdit);
 }
 
 void KernelDock::rebuildInlineHookTable(const bool sourceChanged, std::function<void()> onReady)
@@ -2767,8 +2766,7 @@ void KernelDock::rebuildInlineHookTable(const bool sourceChanged, std::function<
         }, [this, language]() {
             m_inlineHookTable->setSortingEnabled(true);
             m_inlineHookTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_inlineHookTable, m_inlineHookFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_inlineHookFilterEdit);
 }
 
 void KernelDock::rebuildIatEatHookTable(const bool sourceChanged, std::function<void()> onReady)
@@ -2839,8 +2837,7 @@ void KernelDock::rebuildIatEatHookTable(const bool sourceChanged, std::function<
         }, [this, language]() {
             m_iatEatHookTable->setSortingEnabled(true);
             m_iatEatHookTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_iatEatHookTable, m_iatEatHookFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_iatEatHookFilterEdit);
 }
 
 void KernelDock::rebuildTimerDpcTable(const bool sourceChanged, std::function<void()> onReady)
@@ -2910,8 +2907,7 @@ void KernelDock::rebuildTimerDpcTable(const bool sourceChanged, std::function<vo
         }, [this, language]() {
             m_timerDpcTable->setSortingEnabled(true);
             m_timerDpcTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_timerDpcTable, m_timerDpcFilterEdit);
-        }, std::move(onReady));
+        }, std::move(onReady), true, m_timerDpcFilterEdit);
 }
 
 bool KernelDock::currentShadowSsdtSourceIndex(std::size_t& sourceIndexOut) const

@@ -2703,10 +2703,11 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::functio
             }
         }, [this, language]() {
             m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
-            applyKernelResultFilter(m_callbackEnumTable, m_callbackEnumFilterEdit, m_callbackEnumSeparatorIndex.row());
+        }, [this, owner = QPointer<KernelDock>(this), onReady = std::move(onReady)]() mutable {
             m_minifilterCallbackFilterDirty = true;
             prepareMinifilterCallbackTree();
-        }, std::move(onReady));
+            if (owner && onReady) onReady();
+        }, true, m_callbackEnumFilterEdit);
 }
 
 void KernelDock::prepareMinifilterCallbackTree()
