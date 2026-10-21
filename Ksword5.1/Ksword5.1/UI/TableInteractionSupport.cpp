@@ -8,6 +8,8 @@
 #include "TableFreezeSupport.h"
 #include "TableHeaderSortingSupport.h"
 #include "TableSnapshotCompare.h"
+#include "CompleteExportCapture.h"
+#include "AsyncOperation.h"
 #include "TableSearchSupport.h"
 #include "VisibleTableWidget.h"
 #include "ResultTableHost.h"
@@ -588,18 +590,30 @@ namespace
                 });
 
             m_table->installEventFilter(this);
+            if (m_table->viewport()) m_table->viewport()->installEventFilter(this);
             rebuildSnapshotControls();
             updateControls();
         }
 
         ~TableActionBar() override
         {
+            m_snapshotClosing = true;
+            if (m_snapshotCapture) m_snapshotCapture->close();
+            if (m_snapshotOperation) m_snapshotOperation->close();
+            releaseSnapshotCaptureLease();
             closeFreezeMenuBarrier();
         }
 
     protected:
         bool eventFilter(QObject* source, QEvent* event) override
         {
+            if (event && event->type() == QEvent::KeyPress
+                && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape
+                && (m_snapshotCaptureInProgress || m_pauseCaptureInProgress || m_comparisonInProgress))
+            {
+                cancelSnapshotWork();
+                return true;
+            }
             // Frozen sections are already published by the controller after model
             // resets/inserts/removes. Observe that state without polling or repolishing.
             if ((source == m_table || source == activeTableView()) && event != nullptr && event->type() == QEvent::DynamicPropertyChange)
@@ -981,6 +995,59 @@ namespace
             }
         }
 
+        struct ComparisonInput
+        {
+            TableSnapshot earlier, later;
+            QSet<int> ignored;
+        };
+
+        void ensureSnapshotOperations()
+        {
+            if (!m_snapshotCapture) m_snapshotCapture = new ks::ui::CompleteExportCapture(this);
+            if (m_snapshotOperation) return;
+            m_snapshotOperation = new ks::ui::AsyncOperation(this);
+            m_snapshotOperation->setStateChangedCallback([this]()
+            {
+                if (m_snapshotClosing || m_cancelingSnapshotWork) return;
+                // Delivery may be dropped while the owner still exists. Release
+                // only the UI busy state; no source/business work is restarted.
+                if (!m_snapshotOperation->isBusy() && !m_snapshotCapture->isBusy())
+                {
+                    m_snapshotCaptureInProgress = m_pauseCaptureInProgress = m_comparisonInProgress = false;
+                    const QPointer<TableActionBar> alive(this);
+                    releaseSnapshotCaptureLease();
+                    if (alive) updateControls();
+                }
+            });
+        }
+
+        void beginSnapshotCaptureLease()
+        {
+            m_snapshotCoordinator = ks::ui::UiCommitCoordinator::forApplication();
+            if (m_snapshotCoordinator && !m_snapshotCaptureLease)
+            { m_snapshotCaptureLease = true; m_snapshotCoordinator->beginValueCapture(m_table); }
+        }
+
+        void releaseSnapshotCaptureLease()
+        {
+            if (!m_snapshotCaptureLease) return;
+            m_snapshotCaptureLease = false;
+            if (m_snapshotCoordinator) m_snapshotCoordinator->endValueCapture(m_table);
+        }
+
+        void cancelSnapshotWork()
+        {
+            const QPointer<TableActionBar> alive(this);
+            m_cancelingSnapshotWork = true;
+            if (m_snapshotCapture) m_snapshotCapture->cancel();
+            if (m_snapshotOperation) m_snapshotOperation->cancel();
+            releaseSnapshotCaptureLease();
+            if (!alive) return;
+            m_cancelingSnapshotWork = false;
+            m_snapshotCaptureInProgress = m_pauseCaptureInProgress = m_comparisonInProgress = false;
+            updateControls();
+        }
+
         bool pauseRefresh()
         {
             if (m_refreshPaused)
@@ -988,7 +1055,7 @@ namespace
                 return true;
             }
             if (m_table.isNull() || m_table->model() == nullptr ||
-                m_inComparison || m_pauseCaptureInProgress)
+                m_inComparison || m_pauseCaptureInProgress || m_snapshotCaptureInProgress || m_comparisonInProgress)
             {
                 return false;
             }
@@ -998,63 +1065,68 @@ namespace
             const QPointer<QAbstractItemModel> modelGuard(m_table->model());
             m_pauseCaptureInProgress = true;
             updateControls();
-            const TableSnapshot snapshot = TableSnapshotCompareEngine::capture(
-                m_table.data(),
-                localizedSourceText("视图已冻结"),
-                0,
-                kSnapshotCaptureLimits);
-            if (actionBarGuard.isNull())
+            if (!actionBarGuard) return false;
+            ensureSnapshotOperations();
+            beginSnapshotCaptureLease();
+            if (!actionBarGuard) return false;
+            const auto finished = [this, actionBarGuard, tableGuard, modelGuard](TableSnapshot snapshot)
             {
-                return false;
-            }
-            m_pauseCaptureInProgress = false;
-            if (tableGuard.isNull() || modelGuard.isNull() ||
-                m_table != tableGuard || tableGuard->model() != modelGuard ||
-                snapshot.sourceInvalidated)
-            {
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("冻结视图失败"),
-                    localizedSourceText("表格在捕获期间已重建，请重试。"));
-                updateControls();
-                return false;
-            }
-
-            if (snapshot.isTruncated())
-            {
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("冻结视图已截断"),
-                    localizedSourceText(
-                        "表格规模超过冻结视图快照的安全上限，当前冻结视图保留 %1/%2 行和 %3/%4 列；恢复实时视图后可回到完整实时表格。")
-                        .arg(snapshot.rows.size())
-                        .arg(snapshot.sourceRowCount)
-                        .arg(snapshot.visibleColumns.size())
-                        .arg(snapshot.sourceColumnCount));
-                if (actionBarGuard.isNull() || tableGuard.isNull() ||
-                    modelGuard.isNull() || m_table != tableGuard ||
-                    tableGuard->model() != modelGuard)
+                if (!actionBarGuard || m_snapshotClosing || m_cancelingSnapshotWork) return;
+                releaseSnapshotCaptureLease();
+                if (!actionBarGuard) return;
+                m_pauseCaptureInProgress = false;
+                if (tableGuard.isNull() || modelGuard.isNull() ||
+                    m_table != tableGuard || tableGuard->model() != modelGuard ||
+                    snapshot.sourceInvalidated)
                 {
-                    updateControls();
-                    return false;
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("冻结视图失败"),
+                        localizedSourceText("表格在捕获期间已重建，请重试。"));
+                    if (actionBarGuard) updateControls();
+                    return;
                 }
-            }
 
-            m_pauseModel = new TablePausedSnapshotModel(snapshot, this);
-            auto* pausedView = new ComparisonTableView(m_table.data());
-            m_pauseOverlay = pausedView;
-            configurePausedOverlay(pausedView, snapshot);
-            pausedView->installEventFilter(this);
+                if (snapshot.isTruncated())
+                {
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("冻结视图已截断"),
+                        localizedSourceText(
+                            "表格规模超过冻结视图快照的安全上限，当前冻结视图保留 %1/%2 行和 %3/%4 列；恢复实时视图后可回到完整实时表格。")
+                            .arg(snapshot.rows.size())
+                            .arg(snapshot.sourceRowCount)
+                            .arg(snapshot.visibleColumns.size())
+                            .arg(snapshot.sourceColumnCount));
+                    if (actionBarGuard.isNull() || tableGuard.isNull() ||
+                        modelGuard.isNull() || m_table != tableGuard ||
+                        tableGuard->model() != modelGuard)
+                    {
+                        if (actionBarGuard) updateControls();
+                        return;
+                    }
+                }
 
-            m_frozenPaneController->setTargetTable(nullptr);
-            suspendOriginalTablePainting();
-            m_refreshPaused = true;
-            pausedView->show();
-            updatePosition();
-            pausedView->raise();
-            pausedView->setFocus(Qt::OtherFocusReason);
-            m_frozenPaneController->setTargetTable(pausedView);
-            updateControls();
+                m_pauseModel = new TablePausedSnapshotModel(snapshot, this);
+                auto* pausedView = new ComparisonTableView(m_table.data());
+                m_pauseOverlay = pausedView;
+                configurePausedOverlay(pausedView, snapshot);
+                pausedView->installEventFilter(this);
+
+                m_frozenPaneController->setTargetTable(nullptr);
+                suspendOriginalTablePainting();
+                m_refreshPaused = true;
+                pausedView->show();
+                updatePosition();
+                pausedView->raise();
+                pausedView->setFocus(Qt::OtherFocusReason);
+                m_frozenPaneController->setTargetTable(pausedView);
+                updateControls();
+                return;
+            };
+            if (!TableSnapshotCompareEngine::captureAsync(m_table, m_snapshotCapture, m_snapshotOperation,
+                localizedSourceText("视图已冻结"), 0, finished, kSnapshotCaptureLimits))
+            { TableSnapshot failed; failed.sourceInvalidated = true; finished(std::move(failed)); }
             return true;
         }
 
@@ -1134,7 +1206,7 @@ namespace
         {
             if (m_table.isNull() ||
                 m_inComparison ||
-                m_snapshotCaptureInProgress ||
+                m_snapshotCaptureInProgress || m_pauseCaptureInProgress || m_comparisonInProgress ||
                 m_table->model() == nullptr)
             {
                 return;
@@ -1142,112 +1214,116 @@ namespace
 
             const quint64 sequence = m_nextSnapshotOrdinal++;
             const QString label = TableSnapshotCompareEngine::snapshotLabelForOrdinal(sequence);
+            const QPointer<TableActionBar> actionBarGuard(this);
             m_snapshotCaptureInProgress = true;
             updateControls();
 
-            QPointer<TableActionBar> actionBarGuard(this);
-            TableSnapshot snapshot = TableSnapshotCompareEngine::capture(
-                m_table.data(),
-                label,
-                sequence,
-                kSnapshotCaptureLimits);
-            if (actionBarGuard.isNull())
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            beginSnapshotCaptureLease();
+            if (!actionBarGuard) return;
+            const auto finished = [this, actionBarGuard](TableSnapshot snapshot)
             {
-                return;
-            }
-            m_snapshotCaptureInProgress = false;
-            if (snapshot.sourceInvalidated)
-            {
+                if (!actionBarGuard || m_snapshotClosing || m_cancelingSnapshotWork) return;
+                releaseSnapshotCaptureLease();
+                if (!actionBarGuard) return;
+                m_snapshotCaptureInProgress = false;
+                if (snapshot.sourceInvalidated)
+                {
+                    updateControls();
+                    QMessageBox::warning(
+                        this,
+                        localizedSourceText("快照采集限制"),
+                        localizedSourceText("采集期间源表已关闭，或其数据、布局、表头可见状态发生变化。本次快照已整份丢弃；请在源表稳定后重试。"));
+                    return;
+                }
+
+                m_snapshots.push_back(std::move(snapshot));
+                const TableSnapshot& retainedSnapshot = m_snapshots.back();
+
+                QStringList limitMessages;
+                bool retainedPartialSnapshot = false;
+                if (retainedSnapshot.truncatedByRowLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 已截断：源表共 %2 行，仅访问 %3 行并保留 %4 行。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.sourceRowCount)
+                            .arg(retainedSnapshot.visitedSourceRows)
+                            .arg(retainedSnapshot.rows.size()));
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 行硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumRows));
+                }
+                if (retainedSnapshot.truncatedByColumnLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 仅扫描源表前 %2/%3 列，并保留其中 %4 个可见列。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.visitedSourceColumns)
+                            .arg(retainedSnapshot.sourceColumnCount)
+                            .arg(retainedSnapshot.visibleColumns.size()));
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 列硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumColumns));
+                }
+                if (retainedSnapshot.truncatedByByteLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("已达到单份快照的 %1 MiB 估算内存硬上限。")
+                            .arg(kSnapshotCaptureLimits.maximumEstimatedBytes / kBytesPerMiB));
+                }
+                if (retainedSnapshot.truncatedByValueLimit)
+                {
+                    retainedPartialSnapshot = true;
+                    limitMessages.push_back(
+                        localizedSourceText("快照 %1 中有 %2 个表头值和 %3 个单元格值超过单值上限，另有 %4 个不支持的显示值类型；相关值已截断或留空。")
+                            .arg(retainedSnapshot.label)
+                            .arg(retainedSnapshot.truncatedHeaderValueCount)
+                            .arg(retainedSnapshot.truncatedCellValueCount)
+                            .arg(retainedSnapshot.unsupportedDisplayValueCount));
+                    limitMessages.push_back(
+                        localizedSourceText("单个表头最多保留 %1 个字符，单个单元格最多保留 %2 个字符。")
+                            .arg(kSnapshotCaptureLimits.maximumHeaderCharacters)
+                            .arg(kSnapshotCaptureLimits.maximumCellCharacters));
+                }
+
+                const TableSnapshotRetentionResult retention =
+                    TableSnapshotCompareEngine::enforceRetentionLimits(
+                        m_snapshots,
+                        kSnapshotRetentionLimits);
+                if (!retention.evictedLabels.isEmpty())
+                {
+                    limitMessages.push_back(
+                        localizedSourceText("为满足最多 %1 份快照、总估算内存不超过 %2 MiB 的硬上限，已淘汰最旧的 %3 份快照：%4。")
+                            .arg(kSnapshotRetentionLimits.maximumSnapshots)
+                            .arg(kSnapshotRetentionLimits.maximumEstimatedBytes / kBytesPerMiB)
+                            .arg(retention.evictedLabels.size())
+                            .arg(retention.evictedLabels.join(QStringLiteral(", "))));
+                }
+                if (retainedPartialSnapshot)
+                {
+                    limitMessages.push_back(
+                        localizedSourceText("已保留的部分仍可继续参与快照比较。"));
+                }
+
+                pruneSnapshotSelections();
+                rebuildSnapshotControls();
                 updateControls();
-                QMessageBox::warning(
-                    this,
-                    localizedSourceText("快照采集限制"),
-                    localizedSourceText("采集期间源表已关闭，或其数据、布局、表头可见状态发生变化。本次快照已整份丢弃；请在源表稳定后重试。"));
-                return;
-            }
-
-            m_snapshots.push_back(std::move(snapshot));
-            const TableSnapshot& retainedSnapshot = m_snapshots.back();
-
-            QStringList limitMessages;
-            bool retainedPartialSnapshot = false;
-            if (retainedSnapshot.truncatedByRowLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 已截断：源表共 %2 行，仅访问 %3 行并保留 %4 行。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.sourceRowCount)
-                        .arg(retainedSnapshot.visitedSourceRows)
-                        .arg(retainedSnapshot.rows.size()));
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 行硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumRows));
-            }
-            if (retainedSnapshot.truncatedByColumnLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 仅扫描源表前 %2/%3 列，并保留其中 %4 个可见列。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.visitedSourceColumns)
-                        .arg(retainedSnapshot.sourceColumnCount)
-                        .arg(retainedSnapshot.visibleColumns.size()));
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 列硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumColumns));
-            }
-            if (retainedSnapshot.truncatedByByteLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("已达到单份快照的 %1 MiB 估算内存硬上限。")
-                        .arg(kSnapshotCaptureLimits.maximumEstimatedBytes / kBytesPerMiB));
-            }
-            if (retainedSnapshot.truncatedByValueLimit)
-            {
-                retainedPartialSnapshot = true;
-                limitMessages.push_back(
-                    localizedSourceText("快照 %1 中有 %2 个表头值和 %3 个单元格值超过单值上限，另有 %4 个不支持的显示值类型；相关值已截断或留空。")
-                        .arg(retainedSnapshot.label)
-                        .arg(retainedSnapshot.truncatedHeaderValueCount)
-                        .arg(retainedSnapshot.truncatedCellValueCount)
-                        .arg(retainedSnapshot.unsupportedDisplayValueCount));
-                limitMessages.push_back(
-                    localizedSourceText("单个表头最多保留 %1 个字符，单个单元格最多保留 %2 个字符。")
-                        .arg(kSnapshotCaptureLimits.maximumHeaderCharacters)
-                        .arg(kSnapshotCaptureLimits.maximumCellCharacters));
-            }
-
-            const TableSnapshotRetentionResult retention =
-                TableSnapshotCompareEngine::enforceRetentionLimits(
-                    m_snapshots,
-                    kSnapshotRetentionLimits);
-            if (!retention.evictedLabels.isEmpty())
-            {
-                limitMessages.push_back(
-                    localizedSourceText("为满足最多 %1 份快照、总估算内存不超过 %2 MiB 的硬上限，已淘汰最旧的 %3 份快照：%4。")
-                        .arg(kSnapshotRetentionLimits.maximumSnapshots)
-                        .arg(kSnapshotRetentionLimits.maximumEstimatedBytes / kBytesPerMiB)
-                        .arg(retention.evictedLabels.size())
-                        .arg(retention.evictedLabels.join(QStringLiteral(", "))));
-            }
-            if (retainedPartialSnapshot)
-            {
-                limitMessages.push_back(
-                    localizedSourceText("已保留的部分仍可继续参与快照比较。"));
-            }
-
-            pruneSnapshotSelections();
-            rebuildSnapshotControls();
-            updateControls();
-            if (!limitMessages.isEmpty())
-            {
-                QMessageBox::information(
-                    this,
-                    localizedSourceText("快照采集限制"),
-                    limitMessages.join(QStringLiteral("\n\n")));
-            }
+                if (!limitMessages.isEmpty())
+                {
+                    QMessageBox::information(
+                        this,
+                        localizedSourceText("快照采集限制"),
+                        limitMessages.join(QStringLiteral("\n\n")));
+                }
+            };
+            if (!TableSnapshotCompareEngine::captureAsync(m_table, m_snapshotCapture, m_snapshotOperation,
+                label, sequence, finished, kSnapshotCaptureLimits))
+            { TableSnapshot failed; failed.sourceInvalidated = true; finished(std::move(failed)); }
         }
 
         void enterCleanupMode()
@@ -1661,7 +1737,7 @@ namespace
         {
             if (m_table.isNull() ||
                 m_cleanupMode ||
-                m_comparisonInProgress ||
+                m_comparisonInProgress || m_snapshotCaptureInProgress || m_pauseCaptureInProgress ||
                 m_selectedSnapshotSequences.size() != 2)
             {
                 return;
@@ -1750,57 +1826,69 @@ namespace
             m_ignoredSourceColumns.unite(TableSnapshotCompareEngine::defaultIgnoredColumnIndexes(*later));
             m_comparisonInProgress = true;
             updateControls();
-            const TableComparisonResult comparison = TableSnapshotCompareEngine::compare(
-                *earlier,
-                *later,
-                m_ignoredSourceColumns,
-                QVector<int>(),
-                kSnapshotComparisonLimits,
-                [sourceStillValid]()
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            m_snapshotOperation->submit<ComparisonInput, TableComparisonResult>({*earlier, *later, m_ignoredSourceColumns},
+                [](const ComparisonInput& value, const ks::ui::AsyncOperationToken& token)
+                { return TableSnapshotCompareEngine::compare(value.earlier, value.later, value.ignored,
+                    {}, kSnapshotComparisonLimits, [&token]() { return token.isCanceled(); }); },
+                [this, actionBarGuard, sourceStillValid](const TableComparisonResult& comparison, std::uint64_t)
                 {
-                    return !sourceStillValid();
-                });
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            m_comparisonInProgress = false;
-            if (!sourceStillValid() || comparison.cancelled)
-            {
-                updateControls();
-                return;
-            }
-            showComparisonLimitWarning(comparison);
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            if (!sourceStillValid())
-            {
-                updateControls();
-                return;
-            }
-            m_comparisonModel = new TableComparisonModel(comparison, this);
-            m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    m_comparisonInProgress = false;
+                    if (!m_selectedSnapshotSequences.contains(comparison.earlierSnapshot.sequence)
+                        || !m_selectedSnapshotSequences.contains(comparison.laterSnapshot.sequence))
+                    { updateControls(); return true; }
+                    if (m_ignoredSourceColumns != comparison.ignoredSourceColumns)
+                    {
+                        updateControls();
+                        if (m_inComparison) QTimer::singleShot(0, this, [this]() { refreshComparison(); });
+                        return true;
+                    }
+                    if (!sourceStillValid() || comparison.cancelled)
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    showComparisonLimitWarning(comparison);
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    if (!sourceStillValid())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    m_comparisonModel = new TableComparisonModel(comparison, this);
+                    m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
 
-            auto* comparisonView = new ComparisonTableView(m_table.data());
-            m_comparisonOverlay = comparisonView;
-            configureComparisonOverlay(comparisonView, comparison);
-            comparisonView->installEventFilter(this);
-            comparisonView->setProperty(kComparisonActiveProperty, true);
+                    auto* comparisonView = new ComparisonTableView(m_table.data());
+                    m_comparisonOverlay = comparisonView;
+                    configureComparisonOverlay(comparisonView, comparison);
+                    comparisonView->installEventFilter(this);
+                    comparisonView->setProperty(kComparisonActiveProperty, true);
 
-            m_frozenPaneController->setTargetTable(nullptr);
-            suspendOriginalTablePainting();
-            m_inComparison = true;
-            comparisonView->show();
-            updatePosition();
-            comparisonView->raise();
-            comparisonView->setFocus(Qt::OtherFocusReason);
-            updateControls();
+                    m_frozenPaneController->setTargetTable(nullptr);
+                    suspendOriginalTablePainting();
+                    m_inComparison = true;
+                    comparisonView->show();
+                    updatePosition();
+                    comparisonView->raise();
+                    comparisonView->setFocus(Qt::OtherFocusReason);
+                    updateControls();
+                    return true;
+                },
+                [this, actionBarGuard](std::exception_ptr)
+                { if (actionBarGuard) { m_comparisonInProgress = false; updateControls(); } });
         }
 
         void showCurrentView()
         {
+            if (m_comparisonInProgress) cancelSnapshotWork();
             if (!m_inComparison)
             {
                 return;
@@ -1846,42 +1934,53 @@ namespace
             {
                 std::swap(earlier, later);
             }
+            const QPointer<TableActionBar> actionBarGuard(this);
             m_comparisonInProgress = true;
             updateControls();
-            const QPointer<TableActionBar> actionBarGuard(this);
-            const TableComparisonResult comparison = TableSnapshotCompareEngine::compare(
-                *earlier,
-                *later,
-                m_ignoredSourceColumns,
-                QVector<int>(),
-                kSnapshotComparisonLimits,
-                [actionBarGuard]()
+            if (!actionBarGuard) return;
+            ensureSnapshotOperations();
+            m_snapshotOperation->submit<ComparisonInput, TableComparisonResult>({*earlier, *later, m_ignoredSourceColumns},
+                [](const ComparisonInput& value, const ks::ui::AsyncOperationToken& token)
+                { return TableSnapshotCompareEngine::compare(value.earlier, value.later, value.ignored,
+                    {}, kSnapshotComparisonLimits, [&token]() { return token.isCanceled(); }); },
+                [this, actionBarGuard](const TableComparisonResult& comparison, std::uint64_t)
                 {
-                    return actionBarGuard.isNull() || actionBarGuard->m_table.isNull();
-                });
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            m_comparisonInProgress = false;
-            if (comparison.cancelled || m_table.isNull() || m_comparisonModel.isNull())
-            {
-                updateControls();
-                return;
-            }
-            showComparisonLimitWarning(comparison);
-            if (actionBarGuard.isNull())
-            {
-                return;
-            }
-            if (m_table.isNull() || m_comparisonModel.isNull())
-            {
-                updateControls();
-                return;
-            }
-            m_comparisonModel->setComparison(comparison);
-            m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
-            updateControls();
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    m_comparisonInProgress = false;
+                    if (!m_selectedSnapshotSequences.contains(comparison.earlierSnapshot.sequence)
+                        || !m_selectedSnapshotSequences.contains(comparison.laterSnapshot.sequence))
+                    { updateControls(); return true; }
+                    if (m_ignoredSourceColumns != comparison.ignoredSourceColumns)
+                    {
+                        updateControls();
+                        if (m_inComparison) QTimer::singleShot(0, this, [this]() { refreshComparison(); });
+                        return true;
+                    }
+                    if (comparison.cancelled || m_table.isNull() || m_comparisonModel.isNull())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    showComparisonLimitWarning(comparison);
+                    if (actionBarGuard.isNull())
+                    {
+                        return true;
+                    }
+                    if (m_table.isNull() || m_comparisonModel.isNull())
+                    {
+                        updateControls();
+                        return true;
+                    }
+                    m_comparisonModel->setComparison(comparison);
+                    m_comparisonModel->setShowDifferencesOnly(m_differenceOnlyCheckBox->isChecked());
+                    updateControls();
+                    return true;
+                },
+                [this, actionBarGuard](std::exception_ptr)
+                { if (actionBarGuard) { m_comparisonInProgress = false; updateControls(); } });
         }
 
         void showIgnoredColumnsMenu()
@@ -2178,6 +2277,12 @@ namespace
             applyModeVisibility();
         }
 
+        ks::ui::CompleteExportCapture* m_snapshotCapture = nullptr;
+        ks::ui::AsyncOperation* m_snapshotOperation = nullptr;
+        QPointer<ks::ui::UiCommitCoordinator> m_snapshotCoordinator;
+        bool m_snapshotCaptureLease = false;
+        bool m_snapshotClosing = false;
+        bool m_cancelingSnapshotWork = false;
         QPointer<QTableView> m_table;
         QToolButton* m_moreButton = nullptr; // 自适应收纳入口，窄表格才显示。
         QMenu* m_moreMenu = nullptr; // 按需重建的动作镜像，原按钮继续持有业务状态。

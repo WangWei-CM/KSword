@@ -13,6 +13,8 @@ class QTableView;
 
 namespace ks::ui
 {
+    class CompleteExportCapture;
+    class AsyncOperation;
     // TableSnapshotColumn keeps the source-model column identity as well as the text displayed
     // in the column header.  sourceColumn lets two snapshots remain comparable after users move
     // a header section.
@@ -152,12 +154,19 @@ namespace ks::ui
     public:
         // capture collects visible columns in visual-header order and visible rows in their
         // current visual order.  It also records the optional kswordSnapshotKeyColumns property.
-        // Capture stays on the model's UI thread and yields to its event loop between bounded
-        // chunks; it never moves or accesses a QAbstractItemModel from a worker thread.
+        // Synchronous compatibility entry: model access stays on its owner thread without
+        // a nested event pump. UI actions use captureAsync for genuinely queued chunks.
         static TableSnapshot capture(
             QTableView* tableView,
             const QString& label,
             quint64 sequence,
+            const TableSnapshotCaptureLimits& limits = TableSnapshotCaptureLimits());
+
+        // Uses the existing queued GUI capture and value worker controllers.
+        // Callers cancel/close both controllers; no model is read by the worker.
+        static quint64 captureAsync(QTableView* tableView, CompleteExportCapture* capture,
+            AsyncOperation* operation, const QString& label, quint64 sequence,
+            std::function<void(TableSnapshot)> completed,
             const TableSnapshotCaptureLimits& limits = TableSnapshotCaptureLimits());
 
         // Returns the sum of retained estimated snapshot bytes with saturating arithmetic.

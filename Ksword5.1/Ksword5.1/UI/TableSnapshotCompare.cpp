@@ -3,6 +3,8 @@
 #include "../Internationalization/LanguageManager.h"
 #include "../theme.h"
 #include "TableFreezeSupport.h"
+#include "CompleteExportCapture.h"
+#include "AsyncOperation.h"
 
 #include <QAbstractItemModel>
 #include <QBitArray>
@@ -385,10 +387,6 @@ namespace
             {
                 return true;
             }
-            if (QCoreApplication::instance() != nullptr)
-            {
-                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
-            }
             if (shouldCancel && shouldCancel())
             {
                 result.cancelled = true;
@@ -587,19 +585,14 @@ namespace
             header.contains(trimmedKeyword, Qt::CaseInsensitive);
     }
 
-    QVector<int> declaredKeyColumns(
-        QTableView* tableView,
+    QVector<int> declaredKeyColumnsFromProperty(
+        const QVariant& rawProperty,
+        const int sourceColumnCount,
         const ks::ui::TableSnapshot& snapshot,
         const int maximumEntries,
         const int maximumEntryCharacters)
     {
         QVector<int> result;
-        if (tableView == nullptr || tableView->model() == nullptr)
-        {
-            return result;
-        }
-
-        const QVariant rawProperty = tableView->property(kSnapshotKeyColumnsProperty);
         if (!rawProperty.isValid() || rawProperty.isNull())
         {
             return result;
@@ -649,12 +642,11 @@ namespace
             }
         }
 
-        const QAbstractItemModel* model = tableView->model();
         for (const QVariant& entry : entryList)
         {
             bool numericColumn = false;
             const int sourceColumn = entry.toInt(&numericColumn);
-            if (numericColumn && sourceColumn >= 0 && sourceColumn < model->columnCount())
+            if (numericColumn && sourceColumn >= 0 && sourceColumn < sourceColumnCount)
             {
                 if (!result.contains(sourceColumn))
                 {
@@ -682,6 +674,14 @@ namespace
             }
         }
         return result;
+    }
+
+    QVector<int> declaredKeyColumns(QTableView* tableView, const ks::ui::TableSnapshot& snapshot,
+        int maximumEntries, int maximumEntryCharacters)
+    {
+        return tableView && tableView->model() ? declaredKeyColumnsFromProperty(
+            tableView->property(kSnapshotKeyColumnsProperty), tableView->model()->columnCount(),
+            snapshot, maximumEntries, maximumEntryCharacters) : QVector<int>{};
     }
 
     QColor earlierOnlyColor()
@@ -735,7 +735,6 @@ namespace ks::ui
         const int maximumColumns = std::max(0, limits.maximumColumns);
         const int maximumCellCharacters = std::max(0, limits.maximumCellCharacters);
         const int maximumHeaderCharacters = std::max(0, limits.maximumHeaderCharacters);
-        const int eventLoopYieldRows = std::max(1, limits.eventLoopYieldRows);
         const quint64 maximumEstimatedBytes = std::max(
             limits.maximumEstimatedBytes,
             snapshot.estimatedBytes);
@@ -877,20 +876,6 @@ namespace ks::ui
              visualRow < rowsToVisit && !snapshot.truncatedByByteLimit;
              ++visualRow)
         {
-            if (visualRow > 0 && visualRow % eventLoopYieldRows == 0)
-            {
-                if (QCoreApplication::instance() != nullptr)
-                {
-                    QCoreApplication::processEvents(
-                        QEventLoop::ExcludeUserInputEvents,
-                        5);
-                }
-                if (!sourceStateIsStable())
-                {
-                    discardInvalidatedSnapshot(snapshot);
-                    break;
-                }
-            }
 
             ++snapshot.visitedSourceRows;
             const int sourceRow = visualRow < verticalState.logicalIndexes.size()
@@ -1001,6 +986,205 @@ namespace ks::ui
         snapshot.keyColumns.squeeze();
         snapshot.estimatedBytes = estimatedSnapshotStorageBytes(snapshot);
         return snapshot;
+    }
+
+    quint64 TableSnapshotCompareEngine::captureAsync(QTableView* tableView,
+        CompleteExportCapture* capture, AsyncOperation* operation, const QString& label,
+        quint64 sequence, std::function<void(TableSnapshot)> completed,
+        const TableSnapshotCaptureLimits& limits)
+    {
+        if (!tableView || !tableView->model() || !capture || !operation
+            || capture->isBusy() || operation->isBusy()
+            || QThread::currentThread() != tableView->thread()
+            || QThread::currentThread() != tableView->model()->thread()
+            || IsTableRowFilterProjectionPending(tableView)) return 0;
+        struct Values
+        {
+            TableSnapshot snapshot;
+            HeaderCaptureState horizontal, vertical;
+            QVariant declaredKeys;
+            quint64 maximumBytes = 0, rowBytes = 0;
+            int rowSource = -1, columns = 0, rows = 0;
+            bool verifying = false;
+        };
+        auto values = std::make_shared<Values>();
+        auto& snapshot = values->snapshot;
+        snapshot.label = label; snapshot.sequence = sequence;
+        snapshot.capturedAt = QDateTime::currentDateTime();
+        snapshot.sourceRowCount = tableView->model()->rowCount();
+        snapshot.sourceColumnCount = tableView->model()->columnCount();
+        if (snapshot.sourceRowCount < 0 || snapshot.sourceColumnCount < 0) return 0;
+        snapshot.estimatedBytes = estimatedSnapshotStorageBytes(snapshot);
+        values->maximumBytes = std::max(limits.maximumEstimatedBytes, snapshot.estimatedBytes);
+        values->rows = std::min(snapshot.sourceRowCount, std::max(0, limits.maximumRows));
+        values->columns = std::min(snapshot.sourceColumnCount, std::max(0, limits.maximumColumns));
+        if (values->columns == std::numeric_limits<int>::max()) return 0;
+        values->declaredKeys = tableView->property(kSnapshotKeyColumnsProperty);
+        const auto initializeHeader = [](QHeaderView* header, int count)
+        {
+            auto state = captureHeaderState(header, 0);
+            state.logicalIndexes.resize(count); state.sectionSizes.resize(count); state.hiddenSections.resize(count);
+            return state;
+        };
+        const QPointer<QTableView> view(tableView);
+        const QPointer<QAbstractItemModel> model(tableView->model());
+        const QPointer<QHeaderView> horizontal(tableView->horizontalHeader()), vertical(tableView->verticalHeader());
+        values->horizontal = initializeHeader(horizontal, values->columns);
+        values->vertical = initializeHeader(vertical, values->rows);
+        snapshot.sortColumn = values->horizontal.sortSection; snapshot.sortOrder = values->horizontal.sortOrder;
+        const auto readSection = [](QHeaderView* header, HeaderCaptureState& state, int visual)
+        {
+            const int logical = header ? header->logicalIndex(visual) : visual;
+            state.logicalIndexes[visual] = logical;
+            state.sectionSizes[visual] = header && logical >= 0 ? header->sectionSize(logical) : -1;
+            state.hiddenSections.setBit(visual, header && logical >= 0 && header->isSectionHidden(logical));
+            return logical;
+        };
+        const auto headerMetadataMatches = [](QHeaderView* header, const HeaderCaptureState& state)
+        { return header && header->count() == state.sectionCount && header->sortIndicatorSection() == state.sortSection
+            && header->sortIndicatorOrder() == state.sortOrder && header->isHidden() == state.headerHidden; };
+        const auto matchesSection = [](QHeaderView* header, const HeaderCaptureState& state, int visual)
+        {
+            if (!header) return state.sectionCount == 0;
+            const int logical = state.logicalIndexes.at(visual);
+            return header->count() == state.sectionCount && header->sortIndicatorSection() == state.sortSection
+                && header->sortIndicatorOrder() == state.sortOrder && header->isHidden() == state.headerHidden
+                && header->logicalIndex(visual) == logical && logical >= 0
+                && header->sectionSize(logical) == state.sectionSizes.at(visual)
+                && header->isSectionHidden(logical) == state.hiddenSections.testBit(visual);
+        };
+        auto port = MakeCompleteExportTableViewCapturePort(tableView, {}, sequence,
+            [values, view](int ordinal)
+            {
+                if (values->verifying || ordinal >= values->rows || values->snapshot.truncatedByByteLimit) return false;
+                ++values->snapshot.visitedSourceRows;
+                const int row = values->vertical.logicalIndexes.at(ordinal);
+                return row >= 0 && row < values->snapshot.sourceRowCount && !IsTableRowExcludedByFilter(view, row)
+                    && (!values->vertical.hiddenSections.testBit(ordinal) || isRowHiddenByFreeze(view, row));
+            },
+            [values, horizontal, view, readSection](int visual)
+            {
+                // One empty sentinel keeps zero-visible-column rows and final
+                // header validation in the same bounded capture state machine.
+                if (visual == values->columns) return true;
+                const int logical = readSection(horizontal, values->horizontal, visual);
+                if (values->snapshot.truncatedByByteLimit) return false;
+                ++values->snapshot.visitedSourceColumns;
+                return logical >= 0 && logical < values->snapshot.sourceColumnCount
+                    && (!values->horizontal.hiddenSections.testBit(visual) || isColumnHiddenByFreeze(view, logical));
+            },
+            [view]() { return view ? TableRowFilterIdentityRevision(view) : 0; },
+            []() { return ks::i18n::LanguageManager::instance().currentLanguageId(); });
+        // The shared adapter already observes data/layout/geometry. Keep the
+        // original extra sort/count invalidation signals local to this capture.
+        const auto headerObserver = std::make_shared<QObject>();
+        const auto invalidate = [values]() { values->snapshot.sourceInvalidated = true; };
+        for (QHeaderView* header : {horizontal.data(), vertical.data()})
+        {
+            if (!header) continue;
+            QObject::connect(header, &QHeaderView::sortIndicatorChanged, headerObserver.get(), invalidate);
+            QObject::connect(header, &QHeaderView::sectionCountChanged, headerObserver.get(), invalidate);
+        }
+        const auto originalValid = port.valid;
+        port.valid = [originalValid, view, horizontal, vertical, headerObserver, values, headerMetadataMatches]()
+        { (void)headerObserver; return originalValid && originalValid() && view
+            && view->horizontalHeader() == horizontal && view->verticalHeader() == vertical
+            && headerMetadataMatches(horizontal, values->horizontal) && headerMetadataMatches(vertical, values->vertical); };
+        port.rowCount = [values]() { return values->rows; };
+        port.columnCount = [values]() { return values->columns + 1; };
+        port.rowAvailable = [values, vertical, horizontal, readSection, matchesSection](std::uint64_t ordinal)
+        {
+            if (ordinal == 0) values->snapshot.truncatedByColumnLimit = !values->snapshot.truncatedByByteLimit
+                && values->columns < values->snapshot.sourceColumnCount;
+            if (ordinal < static_cast<std::uint64_t>(values->rows))
+            { readSection(vertical, values->vertical, static_cast<int>(ordinal)); return true; }
+            values->verifying = true;
+            const auto check = ordinal - static_cast<std::uint64_t>(values->rows);
+            if (check >= static_cast<std::uint64_t>(std::max(values->rows, values->columns))) return false;
+            // Final full header check is itself queued/budgeted, once only.
+            if ((check < static_cast<std::uint64_t>(values->rows) && !matchesSection(vertical, values->vertical, static_cast<int>(check)))
+                || (check < static_cast<std::uint64_t>(values->columns) && !matchesSection(horizontal, values->horizontal, static_cast<int>(check))))
+            { values->snapshot.sourceInvalidated = true; return false; }
+            return true;
+        };
+        port.header = [values, model, limits](int visual)
+        {
+            if (visual == values->columns) return QString{};
+            const int column = values->horizontal.logicalIndexes.at(visual);
+            const auto text = boundedDisplayText(model->headerData(column, Qt::Horizontal, Qt::DisplayRole), std::max(0, limits.maximumHeaderCharacters));
+            recordBoundedDisplayValue(values->snapshot, text, true);
+            TableSnapshotColumn entry{column, text.text};
+            const auto bytes = estimatedColumnStorageBytes(entry);
+            if (!canRetainEstimatedBytes(values->snapshot.estimatedBytes, bytes, values->maximumBytes))
+            { values->snapshot.truncatedByByteLimit = true; return QString{}; }
+            values->snapshot.visibleColumns.push_back(std::move(entry)); values->snapshot.estimatedBytes += bytes;
+            return text.text;
+        };
+        port.rowCaptured = [values](int ordinal)
+        {
+            values->rowSource = values->vertical.logicalIndexes.at(ordinal);
+            values->rowBytes = saturatingAdd(sizeof(TableSnapshotRow), static_cast<quint64>(values->snapshot.visibleColumns.size()) * sizeof(QString));
+            if (!canRetainEstimatedBytes(values->snapshot.estimatedBytes, values->rowBytes, values->maximumBytes))
+                values->snapshot.truncatedByByteLimit = true;
+        };
+        port.cell = [values, model, limits](int, int visual)
+        {
+            if (values->snapshot.truncatedByByteLimit) return QString{};
+            if (visual == values->columns)
+            {
+                values->snapshot.rows.push_back({values->rowSource, {}});
+                values->snapshot.estimatedBytes += values->rowBytes;
+                return QString{};
+            }
+            const int column = values->horizontal.logicalIndexes.at(visual);
+            const auto index = model->index(values->rowSource, column);
+            const auto text = boundedDisplayText(model ? model->data(index, Qt::DisplayRole) : QVariant{}, std::max(0, limits.maximumCellCharacters));
+            recordBoundedDisplayValue(values->snapshot, text, false);
+            values->rowBytes = saturatingAdd(values->rowBytes, estimatedTextStorageBytes(text.text));
+            if (!canRetainEstimatedBytes(values->snapshot.estimatedBytes, values->rowBytes, values->maximumBytes))
+            { values->snapshot.truncatedByByteLimit = true; return QString{}; }
+            return text.text;
+        };
+        const QPointer<AsyncOperation> worker(operation);
+        return capture->start(std::move(port), [values, worker, completed = std::move(completed), limits]
+            (const CompleteExportCaptureStatus& status, std::shared_ptr<const CompleteExportCapturedTable> captured)
+        {
+            if (!worker) return;
+            if (status.phase != CompleteExportCapturePhase::Completed || values->snapshot.sourceInvalidated || !captured)
+            { auto failed = values->snapshot; discardInvalidatedSnapshot(failed); if (completed) completed(std::move(failed)); return; }
+            struct Input { Values values; std::shared_ptr<const CompleteExportCapturedTable> captured; };
+            const auto failed = [completed](std::exception_ptr)
+            { TableSnapshot snapshot; discardInvalidatedSnapshot(snapshot); if (completed) completed(std::move(snapshot)); };
+            const auto accepted = worker->submit<Input, TableSnapshot>({*values, std::move(captured)},
+                [limits](const Input& input, const AsyncOperationToken& token)
+                {
+                    auto snapshot = input.values.snapshot;
+                    for (qsizetype row = 0; row < snapshot.rows.size(); ++row)
+                    {
+                        if (token.isCanceled()) { discardInvalidatedSnapshot(snapshot); return snapshot; }
+                        snapshot.rows[row].values.reserve(snapshot.visibleColumns.size());
+                        for (qsizetype column = 0; column < snapshot.visibleColumns.size(); ++column)
+                        {
+                            auto value = input.captured->cell(static_cast<std::size_t>(row), static_cast<std::size_t>(column)).text();
+                            value.squeeze();
+                            snapshot.rows[row].values.push_back(std::move(value));
+                        }
+                    }
+                    if (!snapshot.truncatedByByteLimit)
+                    {
+                        snapshot.truncatedByRowLimit = input.values.rows < snapshot.sourceRowCount;
+                    }
+                    const auto keys = declaredKeyColumnsFromProperty(input.values.declaredKeys, snapshot.sourceColumnCount,
+                        snapshot, std::max(0, limits.maximumColumns), std::max(0, limits.maximumHeaderCharacters));
+                    if (canRetainEstimatedBytes(snapshot.estimatedBytes, static_cast<quint64>(keys.size()) * sizeof(int), input.values.maximumBytes)) snapshot.keyColumns = keys;
+                    else snapshot.truncatedByByteLimit = true;
+                    snapshot.visibleColumns.squeeze(); snapshot.rows.squeeze(); snapshot.keyColumns.squeeze();
+                    snapshot.estimatedBytes = estimatedSnapshotStorageBytes(snapshot);
+                    return snapshot;
+                },
+                [completed](const TableSnapshot& snapshot, std::uint64_t) { if (completed) completed(snapshot); return true; }, failed);
+            if (!accepted) failed({});
+        });
     }
 
     quint64 TableSnapshotCompareEngine::totalEstimatedBytes(
