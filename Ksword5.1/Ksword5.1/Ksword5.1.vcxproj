@@ -1470,6 +1470,14 @@
     <Error Condition="'$(QtAdvancedDockingRuntimeSource)'==''" Text="Qt Advanced Docking runtime is not configured for $(Configuration)|$(Platform)." />
     <Error Condition="!Exists('$(QtAdvancedDockingRuntimeSource)')" Text="Qt Advanced Docking runtime was not found: $(QtAdvancedDockingRuntimeSource)" />
     <Copy SourceFiles="$(QtAdvancedDockingRuntimeSource)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <PropertyGroup>
+      <QtAdvancedDockingLicenseDir>$(MSBuildProjectDirectory)\..\..\third_party\qt_advanced_docking_system\</QtAdvancedDockingLicenseDir>
+      <QtAdvancedDockingNoticeTargetDir>$(TargetDir)licenses\third_party\</QtAdvancedDockingNoticeTargetDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(QtAdvancedDockingNoticeTargetDir)" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)LICENSE.txt" DestinationFiles="$(QtAdvancedDockingNoticeTargetDir)qt-advanced-docking-system-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)NOTICE.md" DestinationFiles="$(QtAdvancedDockingNoticeTargetDir)qt-advanced-docking-system-NOTICE.md" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtAdvancedDockingLicenseDir)qt-advanced-docking-system-5.1.1-ksword-source.zip" DestinationFolder="$(QtAdvancedDockingNoticeTargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyKswordLicenseAndCovenant" AfterTargets="Build">
     <PropertyGroup>

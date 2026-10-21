@@ -8190,7 +8190,9 @@ void MainWindow::showLicenseFromMenu()
     }
 
     const QStringList supplementaryLegalFiles{
-        QStringLiteral("COMMUNITY_COVENANT.md")
+        QStringLiteral("COMMUNITY_COVENANT.md"),
+        QStringLiteral("licenses/third_party/qt-advanced-docking-system-NOTICE.md"),
+        QStringLiteral("licenses/third_party/qt-advanced-docking-system-LICENSE.txt")
     };
     for (const QString& legalFileName : supplementaryLegalFiles)
     {

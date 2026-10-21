@@ -4,6 +4,8 @@
 - Version: **5.1.1**, tag `v5.1.1`
 - Commit: `023ce95934fecfd4cf5c672c9c404fabe0f54923`
 - License: LGPL-2.1-or-later; original license is retained in `LICENSE.txt`.
+- Copyright (C) 2017 Uwe Kindler. Additional copyright notices are retained
+  in the individual library source files.
 - Windows artifacts: x64, Qt **6.9.3 MSVC2022**, MSVC v143, shared CRT
   (`/MD` Release and `/MDd` Debug).
 
@@ -20,8 +22,33 @@ libraries and deployed DLL names agree. The tracked local patch
 inactive docks are hidden without detaching their parent; actual removal still
 detaches, and only the active dock participates in layout. All other upstream
 source and the public ABI remain unchanged.
+KSword modification date: **2026-10-21**. The modified source file carries
+the dated modification notice and retains its original copyright/license header.
 Do not simply rename an upstream DLL: its import library would still reference
 the upstream filename.
+
+## Distribution of the modified library
+
+The modified ADS library and its patch remain licensed under LGPL-2.1-or-later;
+KSword's separate application license does not restrict the library's rights.
+Distribute the following files with every copy of the modified DLL:
+
+- `licenses/third_party/qt-advanced-docking-system-LICENSE.txt`
+- `licenses/third_party/qt-advanced-docking-system-NOTICE.md`
+- `licenses/third_party/qt-advanced-docking-system-5.1.1-ksword-source.zip`
+
+The source ZIP contains all ADS library source modules/resources/interfaces,
+upstream and KSword CMake build files, retained license texts, the exact patch,
+and build instructions. Unused upstream demos, screenshots and Python bindings
+are outside this C++ DLL's corresponding source. The main project copies this
+material alongside the DLL; release packaging must preserve that directory.
+An upstream URL or a patch alone is not the source delivery for this build.
+
+Users may replace the shared DLL with an interface-compatible modified version.
+Do not add a signature/hash lock that prevents that replacement, or terms that
+forbid modification for the user's own use or reverse engineering for debugging
+such modifications. The DLL hashes in test manifests identify builds; they do
+not enforce a runtime replacement restriction. See LGPL 2.1 sections 2, 4 and 6.
 
 ## Rebuild
 

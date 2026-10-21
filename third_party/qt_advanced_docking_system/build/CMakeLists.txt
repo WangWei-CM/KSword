@@ -8,7 +8,7 @@ if(NOT EXISTS "${KSWORD_ADS_SOURCE_DIR}/src/CMakeLists.txt")
 endif()
 # Require the tracked KSword same-area parent patch before producing runtime DLLs.
 file(SHA256 "${KSWORD_ADS_SOURCE_DIR}/src/DockAreaWidget.cpp" KSWORD_ADS_AREA_SHA256)
-if(NOT KSWORD_ADS_AREA_SHA256 STREQUAL "db214f880d93199cb0689c8a1b2759899318d4776f2a693259ce7302b50ffef9")
+if(NOT KSWORD_ADS_AREA_SHA256 STREQUAL "0bc3a915640433e055b511f02760e955b82149c526a5c62ef617b84bdf4bbd01")
     message(FATAL_ERROR "Apply patches/0001-keep-inactive-dock-parent.patch to the pinned ADS source first")
 endif()
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)

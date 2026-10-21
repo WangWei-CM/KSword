@@ -12,6 +12,7 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - QADS 已升级到 **5.1.1**（`v5.1.1`，commit `023ce95934fecfd4cf5c672c9c404fabe0f54923`）。版本、许可证与复现步骤见 `third_party/qt_advanced_docking_system/NOTICE.md`；CMake 包装保留 `qtadvanceddocking[d].dll/.lib` 文件名，避免改名 DLL 后 import library 仍指向上游新文件名。`include/ads/ads_version.h` 是构建生成的必要头文件，升级时须与其余头文件、Release/Debug import library 和 DLL 一起更新。
 - 2026-10-21 同区 Dock 切页性能补丁：`third_party/qt_advanced_docking_system/patches/0001-keep-inactive-dock-parent.patch` 仅把 `CDockAreaLayout::setCurrentIndex` 的旧页 `setParent(nullptr)` 改为 `hide()`，保留同区父级与渲染上下文；活动布局仍只计当前页。真正移动、移除、浮动、恢复和销毁路径保持原语义。重建必须应用补丁，包装 CMake 检查源文件 SHA256；Release/Debug DLL 与导入库必须成套覆盖，禁止只换 exe。公共头及导出符号保持一致；实际布局恢复、浮动、跨 DPI、GPU/软件、主题和关闭验收由用户手测，不以编译通过认定。
+- 修改 ADS 后的分发材料：`third_party/qt_advanced_docking_system/qt-advanced-docking-system-5.1.1-ksword-source.zip` 保存完整库模块/资源/接口和上下游 CMake、原许可、带日期的修改源文件及补丁；主工程 CopyQtAdvancedDockingRuntime 同步复制 LICENSE/NOTICE/source.zip 到 `licenses/third_party/`。打包须保留该目录；源码包随源码/DLL变更重做，不能只放上游链接。版本 SHA 用于测试定位，不能限制用户替换兼容 LGPL DLL。
 - ADS 5.x 默认跟随 palette 自动加载内部 QSS。KSword 必须在创建 `CDockManager` 前设置 `DisableStylesheet=true`；仅在外观应用末尾 `setStyleSheet("")` 不够，后续 palette 事件仍会重新加载默认样式。`include/ads/` 属于上游头文件，Git 用 `-text` 保留混合 LF/CRLF，避免升级产生整文件换行 diff。
 
 ## UI 主题架构
