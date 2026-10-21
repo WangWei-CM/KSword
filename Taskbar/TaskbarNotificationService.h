@@ -8,6 +8,17 @@
 
 class QWidget;
 
+// Only the required UTF-16 preview and scan position survive between turns.
+struct TaskbarClipboardPreviewState
+{
+    QString text;
+    qsizetype offset = 0;
+    bool pendingSpace = false;
+    bool truncated = false;
+    bool done = false;
+    bool valid = false;
+};
+
 // TaskbarNotificationKind 区分三类普通通知，以便由设置页独立启停。
 enum class TaskbarNotificationKind
 {
@@ -104,12 +115,14 @@ private:
 
     // enqueueClipboardText：在 GUI 线程读取并规范化剪贴板 Unicode 文本，然后加入普通队列。
     void enqueueClipboardText();
+    void processClipboardPreviewChunk();
+    void finishClipboardPreview(quint64 ticket, const QString& text);
 
     // handleDeviceChange：把符合条件且未重复的设备消息加入普通队列。
     void handleDeviceChange(quintptr wParam, qintptr lParam);
 
     // enqueueNotification：把一条普通消息追加到 FIFO 队列，队列过长时丢弃最旧项。
-    void enqueueNotification(const TaskbarNotificationView& notification);
+    void enqueueNotification(const TaskbarNotificationView& notification, quint64 pendingClipboard = 0);
 
     // updateCurrentNormalNotification：切换至下一条普通通知；不会影响地震优先级。
     void updateCurrentNormalNotification();
@@ -132,7 +145,12 @@ private:
     TaskbarEarthquakeClient* m_earthquakeClient; // 进程唯一地震接收器，不由服务拥有生命周期。
     QTimer m_tickTimer;                           // 100ms 轮播和地震状态刷新时钟。
     TaskbarNotificationView m_currentNotification; // 所有屏幕共享的当前展示内容。
-    QList<TaskbarNotificationView> m_queue;       // 等待展示的剪贴板和设备接入消息。
+    struct QueuedNotification { TaskbarNotificationView notification; quint64 clipboardTicket = 0; };
+    struct ClipboardJob { quint64 ticket = 0; quint32 sequence = 0; TaskbarClipboardPreviewState state; };
+    QList<QueuedNotification> m_queue;       // 等待展示的剪贴板和设备接入消息。
+    QList<ClipboardJob> m_clipboardJobs;
+    QTimer m_clipboardTimer;
+    quint64 m_nextClipboardTicket = 0;
     qint64 m_currentNormalStartedMs = 0;          // 当前普通通知的单调时钟开始值。
     qint64 m_currentNormalDurationMs = 6000;      // 当前消息时长，包含 1 秒的中央区域过渡预算。
     int m_notificationDurationSeconds = 5;        // 普通消息正文完整滞留秒数，设置页可调整。

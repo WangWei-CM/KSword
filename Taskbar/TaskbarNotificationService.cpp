@@ -5,6 +5,9 @@
 #include <QDateTime>
 #include <QGuiApplication>
 #include <QSettings>
+#include <QPointer>
+#include <algorithm>
+#include <limits>
 #include <QWidget>
 
 #ifndef NOMINMAX
@@ -47,6 +50,52 @@ namespace
             return text;
         }
         return text.left(maximumCharacters) + QStringLiteral("...");
+    }
+
+    constexpr qsizetype kClipboardPreviewCharacters = 120;
+    constexpr qsizetype kClipboardInputBudget = 8192;
+
+    // Exactly QString::simplified()+left(120), with bounded input/output work.
+    // The borrowed native buffer is used only while the clipboard is open/locked.
+    void consumeClipboardPreview(TaskbarClipboardPreviewState& state,
+        const wchar_t* source, qsizetype available, qsizetype budget)
+    {
+        if (state.done || source == nullptr || budget <= 0) return;
+        state.text.reserve(kClipboardPreviewCharacters);
+        qsizetype consumed = 0;
+        while (state.offset < available && consumed < budget)
+        {
+            const QChar character(static_cast<ushort>(source[state.offset++]));
+            ++consumed;
+            if (character.isNull())
+            {
+                state.done = state.valid = true;
+                return;
+            }
+            if (character.isSpace())
+            {
+                if (!state.text.isEmpty()) state.pendingSpace = true;
+                continue;
+            }
+            if (state.pendingSpace)
+            {
+                if (state.text.size() == kClipboardPreviewCharacters)
+                {
+                    state.done = state.valid = state.truncated = true;
+                    return;
+                }
+                state.text.append(QChar(u' '));
+                state.pendingSpace = false;
+            }
+            if (state.text.size() == kClipboardPreviewCharacters)
+            {
+                state.done = state.valid = state.truncated = true;
+                return;
+            }
+            state.text.append(character);
+        }
+        // A malformed buffer without NUL is never read beyond GlobalSize.
+        if (state.offset >= available) state.done = true;
     }
 
     // deviceVolumeDescription 把 DBT_DEVTYP_VOLUME 位图转换为用户可读的盘符列表。
@@ -160,11 +209,16 @@ TaskbarNotificationService::TaskbarNotificationService(TaskbarEarthquakeClient* 
     m_tickTimer.setInterval(100);
     connect(&m_tickTimer, &QTimer::timeout, this, &TaskbarNotificationService::advancePresentation);
     m_tickTimer.start();
+    m_clipboardTimer.setSingleShot(true);
+    m_clipboardTimer.setInterval(0);
+    connect(&m_clipboardTimer, &QTimer::timeout, this,
+        &TaskbarNotificationService::processClipboardPreviewChunk);
     refreshEarthquakePresentation();
 }
 
 TaskbarNotificationService::~TaskbarNotificationService()
 {
+    m_clipboardTimer.stop();
     // 销毁时先移除原生过滤器，随后注销通知句柄，避免退出过程中回调到已析构服务。
     qApp->removeNativeEventFilter(this);
     unregisterDeviceNotifications();
@@ -227,6 +281,14 @@ void TaskbarNotificationService::setClipboardNotificationsEnabled(bool enabled)
         return;
     }
     m_clipboardNotificationsEnabled = enabled;
+    if (!enabled)
+    {
+        m_clipboardTimer.stop();
+        m_clipboardJobs.clear();
+        m_queue.removeIf([](const QueuedNotification& entry) { return entry.clipboardTicket != 0; });
+        if (!m_earthquakeActive && m_currentNotification.title.isEmpty())
+            QTimer::singleShot(0, this, &TaskbarNotificationService::updateCurrentNormalNotification);
+    }
     saveSettings();
     emit settingsChanged();
 }
@@ -332,39 +394,79 @@ bool TaskbarNotificationService::handleNativeMessage(void* message, qintptr* res
 
 void TaskbarNotificationService::enqueueClipboardText()
 {
-    // 按用户要求只提取 CF_UNICODETEXT；不读取文件、位图和图标，也不在 Taskbar 中显示图片。
-    const HWND messageWindowHandle = m_messageWindow != nullptr ? reinterpret_cast<HWND>(m_messageWindow->winId()) : nullptr;
-    if (messageWindowHandle == nullptr || ::OpenClipboard(messageWindowHandle) == FALSE)
-    {
-        return;
-    }
-
-    const HANDLE clipboardData = ::GetClipboardData(CF_UNICODETEXT);
-    const wchar_t* source = clipboardData != nullptr ? static_cast<const wchar_t*>(::GlobalLock(clipboardData)) : nullptr;
-    if (source == nullptr)
-    {
-        ::CloseClipboard();
-        return;
-    }
-
-    QString text = QString::fromWCharArray(source);
-    ::GlobalUnlock(clipboardData);
-    ::CloseClipboard();
-    text.replace(QChar(u'\r'), QChar(u' '));
-    text.replace(QChar(u'\n'), QChar(u' '));
-    text.replace(QChar(u'\t'), QChar(u' '));
-    text = text.simplified();
-    if (text.isEmpty())
-    {
-        return;
-    }
-
+    const quint32 sequence = ::GetClipboardSequenceNumber();
+    if (sequence == 0) return;
+    ClipboardJob job;
+    job.ticket = ++m_nextClipboardTicket;
+    job.sequence = sequence;
+    m_clipboardJobs.push_back(job);
     TaskbarNotificationView notification;
     notification.kind = TaskbarNotificationKind::Clipboard;
     notification.source = QStringLiteral("剪贴板");
     notification.title = QStringLiteral("剪贴板新内容");
-    notification.body = truncateText(text, 120);
-    enqueueNotification(notification);
+    const QPointer<TaskbarNotificationService> guard(this);
+    enqueueNotification(notification, job.ticket);
+    if (guard == nullptr) return;
+    if (!m_clipboardTimer.isActive()) m_clipboardTimer.start();
+}
+
+void TaskbarNotificationService::processClipboardPreviewChunk()
+{
+    if (m_clipboardJobs.isEmpty()) return;
+    ClipboardJob job = m_clipboardJobs.first();
+    const QPointer<TaskbarNotificationService> guard(this);
+    const HWND window = m_messageWindow != nullptr ? reinterpret_cast<HWND>(m_messageWindow->winId()) : nullptr;
+    bool available = false;
+    if (m_clipboardNotificationsEnabled && window != nullptr &&
+        ::GetClipboardSequenceNumber() == job.sequence && ::OpenClipboard(window) != FALSE)
+    {
+        struct Close { ~Close() { ::CloseClipboard(); } } close;
+        // All clipboard APIs remain on the listener thread. Native provider wait
+        // is separate from the bounded normalization below and remains unmeasured.
+        const HANDLE data = ::GetClipboardData(CF_UNICODETEXT);
+        const SIZE_T bytes = data != nullptr ? ::GlobalSize(data) : 0;
+        const wchar_t* source = data != nullptr ? static_cast<const wchar_t*>(::GlobalLock(data)) : nullptr;
+        if (source != nullptr)
+        {
+            struct Unlock { HANDLE data; ~Unlock() { ::GlobalUnlock(data); } } unlock {data};
+            const qsizetype characters = static_cast<qsizetype>(std::min<SIZE_T>(
+                bytes / sizeof(wchar_t), static_cast<SIZE_T>(std::numeric_limits<qsizetype>::max())));
+            if (::GetClipboardSequenceNumber() == job.sequence)
+            {
+                available = true;
+                consumeClipboardPreview(job.state, source, characters, kClipboardInputBudget);
+            }
+        }
+    }
+    if (guard == nullptr) return;
+    auto iterator = std::find_if(m_clipboardJobs.begin(), m_clipboardJobs.end(),
+        [ticket = job.ticket](const ClipboardJob& candidate) { return candidate.ticket == ticket; });
+    if (iterator == m_clipboardJobs.end()) return;
+    if (!available || job.state.done)
+    {
+        m_clipboardJobs.erase(iterator);
+        finishClipboardPreview(job.ticket, available && job.state.valid
+            ? job.state.text + (job.state.truncated ? QStringLiteral("...") : QString()) : QString());
+        if (guard == nullptr) return;
+    }
+    else *iterator = std::move(job);
+    if (!m_clipboardJobs.isEmpty()) m_clipboardTimer.start();
+}
+
+void TaskbarNotificationService::finishClipboardPreview(quint64 ticket, const QString& text)
+{
+    auto iterator = std::find_if(m_queue.begin(), m_queue.end(),
+        [ticket](const QueuedNotification& entry) { return entry.clipboardTicket == ticket; });
+    if (iterator != m_queue.end())
+    {
+        if (text.isEmpty()) m_queue.erase(iterator);
+        else
+        {
+            iterator->notification.body = text;
+            iterator->clipboardTicket = 0;
+        }
+    }
+    if (!m_earthquakeActive && m_currentNotification.title.isEmpty()) updateCurrentNormalNotification();
 }
 
 void TaskbarNotificationService::handleDeviceChange(quintptr wParam, qintptr lParam)
@@ -395,14 +497,16 @@ void TaskbarNotificationService::handleDeviceChange(quintptr wParam, qintptr lPa
     enqueueNotification(notification);
 }
 
-void TaskbarNotificationService::enqueueNotification(const TaskbarNotificationView& notification)
+void TaskbarNotificationService::enqueueNotification(const TaskbarNotificationView& notification, quint64 pendingClipboard)
 {
     // 地震预警出现时普通队列仍可继续累积，但由高优先级状态统一暂停展示。
     if (m_queue.size() >= kMaximumQueuedNotifications)
     {
-        m_queue.removeFirst();
+        const quint64 retiredTicket = m_queue.takeFirst().clipboardTicket;
+        if (retiredTicket != 0) m_clipboardJobs.removeIf(
+            [retiredTicket](const ClipboardJob& job) { return job.ticket == retiredTicket; });
     }
-    m_queue.push_back(notification);
+    m_queue.push_back({notification, pendingClipboard});
     if (!m_earthquakeActive && !m_currentNotification.title.isEmpty())
     {
         // 新消息进入队列时，当前消息继续使用用户设置的完整滞留时间。
@@ -417,7 +521,7 @@ void TaskbarNotificationService::enqueueNotification(const TaskbarNotificationVi
 void TaskbarNotificationService::updateCurrentNormalNotification()
 {
     // 取 FIFO 首项并设置含动画预算的时长，正文完整滞留秒数由设置页统一控制。
-    if (m_queue.isEmpty())
+    if (m_queue.isEmpty() || m_queue.first().clipboardTicket != 0)
     {
         const bool changed = !m_currentNotification.title.isEmpty();
         m_currentNotification = TaskbarNotificationView();
@@ -429,7 +533,7 @@ void TaskbarNotificationService::updateCurrentNormalNotification()
         return;
     }
 
-    m_currentNotification = m_queue.takeFirst();
+    m_currentNotification = m_queue.takeFirst().notification;
     m_currentNormalStartedMs = monotonicMilliseconds();
     m_currentNormalDurationMs = normalNotificationDurationMilliseconds();
     emit presentationChanged();
@@ -503,9 +607,9 @@ void TaskbarNotificationService::refreshEarthquakePresentation()
         m_earthquakeActive = false;
         m_currentNotification = TaskbarNotificationView();
         m_currentNormalStartedMs = 0;
-        if (!m_queue.isEmpty())
+        if (!m_queue.isEmpty() && m_queue.first().clipboardTicket == 0)
         {
-            m_currentNotification = m_queue.takeFirst();
+            m_currentNotification = m_queue.takeFirst().notification;
             m_currentNormalStartedMs = monotonicMilliseconds();
             m_currentNormalDurationMs = normalNotificationDurationMilliseconds();
         }
