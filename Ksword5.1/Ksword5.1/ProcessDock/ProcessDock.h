@@ -9,6 +9,8 @@
 // ============================================================
 
 #include "../Framework.h"
+#include "../UI/AsyncOperation.h"
+#include "../Internationalization/LanguageManager.h"
 #include "../ArkDriverClient/ArkDriverTypes.h"
 #include "../ksword/process/process_cpu_core_etw_monitor.h"
 #include "ProcessEtwCaptureLifecycle.h"
@@ -938,11 +940,25 @@ private:
     // - 把 R-1 安装的三条前提按顺序补齐（停常驻、释放资源、CR3 追踪、带 EPTP
     //   后端准备）；成功返回 true，失败时自己把原因报出来；
     // - 处置与注入共用。顺序是硬的，留两份副本早晚有一份会先改。
-    bool prepareHvmForArming(const QString& actionTitle, const kLogEvent& actionEvent);
+    struct HvmActionResult
+    {
+        bool ok = false;
+        std::string detail;
+        unsigned long status = 0;
+        QString advice;
+    };
+    static bool prepareHvmForArming(HvmActionResult& output, const ks::i18n::SourceTextSnapshot& translator);
+    void submitHvmAction(const QString& title, const ProcessActionTarget& target,
+        std::function<HvmActionResult()> work);
+    void continueHvmProcessDispositionAction(unsigned long operation, ProcessActionTarget target,
+        bool manualAddress, quint64 address);
+    void continueHvmInjectAction(ProcessActionTarget target, QString dllPath, quint64 address);
+    std::unique_ptr<ks::ui::AsyncOperation> m_hvmOperation;
+    std::unique_ptr<ks::ui::AsyncOperation> m_hvmPreflightOperation;
     // stepFailedRestartResident 作用：
     // - 装完之后恢复常驻；这一步失败返回 true 并单独报——东西已经装上了，只是
     //   没人在执行它，与安装失败是两回事。
-    bool stepFailedRestartResident(const QString& actionTitle, const kLogEvent& actionEvent);
+    static bool stepFailedRestartResident(HvmActionResult& output, const ks::i18n::SourceTextSnapshot& translator);
     // hvmDispositionStatusAdvice 作用：
     // - 把处置状态码翻成"接下来该做什么"；
     // - 光摆一个数字等于没说：这些码大多是前提没满足，而每条前提要做的事不同，

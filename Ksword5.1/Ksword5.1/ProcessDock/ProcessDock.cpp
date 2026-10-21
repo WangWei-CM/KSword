@@ -4673,6 +4673,8 @@ ProcessDock::ProcessDock(QWidget* parent)
 
 ProcessDock::~ProcessDock()
 {
+    if (m_hvmOperation) m_hvmOperation->close();
+    if (m_hvmPreflightOperation) m_hvmPreflightOperation->close();
     shutdownThreadPage();
     // 使已运行任务的回传结果失效，并取消尚未开始的图标查询任务。
     // 线程池析构会等待已运行任务结束，任务只使用自己的路径副本，不再访问 Dock 成员。
@@ -16553,8 +16555,8 @@ void ProcessDock::showHvmDispositionResult(
  * ALREADY_ARMED 却不知道为什么。
  */
 bool ProcessDock::stepFailedRestartResident(
-    const QString& actionTitle,
-    const kLogEvent& actionEvent)
+    HvmActionResult& output,
+    const ks::i18n::SourceTextSnapshot& translator)
 {
     const ksword::hvm::HvmCommandResult started = ksword::hvm::startResident(0UL);
 
@@ -16562,19 +16564,14 @@ bool ProcessDock::stepFailedRestartResident(
     {
         return false;
     }
-    showHvmDispositionResult(
-        actionTitle,
-        false,
-        (ks::i18n::sourceText(QStringLiteral("启动常驻（已经装上了，但常驻没起来）")) +
-            QStringLiteral("：") + started.message).toStdString(),
-        KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-        actionEvent);
+    output = {false, (translator.sourceText(QStringLiteral("启动常驻（已经装上了，但常驻没起来）")) +
+            QStringLiteral("：") + started.message).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
     return true;
 }
 
 bool ProcessDock::prepareHvmForArming(
-    const QString& actionTitle,
-    const kLogEvent& actionEvent)
+    HvmActionResult& output,
+    const ks::i18n::SourceTextSnapshot& translator)
 {
     const auto stepFailed = [&](const QString& stepName,
                                 const ksword::hvm::HvmCommandResult& r) {
@@ -16582,16 +16579,11 @@ bool ProcessDock::prepareHvmForArming(
         {
             return false;
         }
-        showHvmDispositionResult(
-            actionTitle,
-            false,
-            (stepName + QStringLiteral("：") + r.message).toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            actionEvent);
+        output = {false, (stepName + QStringLiteral("：") + r.message).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
         return true;
     };
     // 停常驻。已经停着时返回成功，不需要先查。
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("停止常驻")),
+    if (stepFailed(translator.sourceText(QStringLiteral("停止常驻")),
                    ksword::hvm::stopResident(0UL)))
     {
         return false;
@@ -16601,7 +16593,7 @@ bool ProcessDock::prepareHvmForArming(
      * 后端与 CR3 追踪都只在 PREPARE / 建 VMCS 时被读，而 ensurePrepared 在资源
      * 已就绪时不会重发 PREPARE——不先释放，这两个设置这一轮根本不会生效。
      */
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("释放资源")),
+    if (stepFailed(translator.sourceText(QStringLiteral("释放资源")),
                    ksword::hvm::releaseResources(0UL)))
     {
         return false;
@@ -16628,11 +16620,7 @@ bool ProcessDock::prepareHvmForArming(
         currentCrPolicy.ok ? currentCrPolicy.log : false);
     if (!crResult.ok)
     {
-        showHvmDispositionResult(
-            actionTitle, false,
-            crResult.message.toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_CR3_TRACKING_REQUIRED,
-            actionEvent);
+        output = {false, crResult.message.toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_CR3_TRACKING_REQUIRED, {}};
         return false;
     }
     /*
@@ -16645,15 +16633,11 @@ bool ProcessDock::prepareHvmForArming(
      */
     if (ksword::hvm::isLocalEptEnabled() || ksword::hvm::isVmFuncEnabled())
     {
-        showHvmDispositionResult(
-            actionTitle, false,
-            ks::i18n::sourceText(QStringLiteral("R-1 处置需要 EPTP 切换后端，而它与「每处理器私有 EPT」「VMFUNC」互斥。请先在虚拟化菜单里关掉这两项。")).toStdString(),
-            KSWORD_ARK_HVM_PROCESS_STATUS_EPTP_SWITCH_REQUIRED,
-            actionEvent);
+        output = {false, translator.sourceText(QStringLiteral("R-1 处置需要 EPTP 切换后端，而它与「每处理器私有 EPT」「VMFUNC」互斥。请先在虚拟化菜单里关掉这两项。")).toStdString(), KSWORD_ARK_HVM_PROCESS_STATUS_EPTP_SWITCH_REQUIRED, {}};
         return false;
     }
     ksword::hvm::setEptpSwitchEnabled(true);
-    if (stepFailed(ks::i18n::sourceText(QStringLiteral("准备资源")),
+    if (stepFailed(translator.sourceText(QStringLiteral("准备资源")),
                    ksword::hvm::ensurePrepared()))
     {
         return false;
@@ -16662,12 +16646,44 @@ bool ProcessDock::prepareHvmForArming(
     return true;
 }
 
+void ProcessDock::submitHvmAction(const QString& title, const ProcessActionTarget& target,
+    std::function<HvmActionResult()> work)
+{
+    if (!m_hvmOperation) m_hvmOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    if (m_hvmOperation->isBusy()) return;
+    const kLogEvent event;
+    const auto exceptionText = ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString();
+    m_hvmOperation->submitTransaction<std::function<HvmActionResult()>, HvmActionResult>(std::move(work),
+        [target, event, exceptionText](const std::function<HvmActionResult()>& action)
+        {
+            HvmActionResult result;
+            HANDLE raw = nullptr;
+            if (!target.isKernelOnly && !acquireProcessActionIdentityHold(target.record.pid,
+                target.record.creationTime100ns, &raw, &result.detail)) return result;
+            const ScopedProcessActionHandle identity(raw);
+            try { result = action(); }
+            catch (const std::exception& error) { result.detail = error.what(); }
+            catch (...) { result.detail = exceptionText; }
+            (result.ok ? info : err) << event << "[ProcessDock] HVM transaction completed, pid=" << target.record.pid
+                << ", identity=" << target.identityKey << ", ok=" << result.ok << ", status=" << result.status
+                << ", detail=" << result.detail << ", advice=" << result.advice.toStdString() << eol;
+            return result;
+        },
+        [this, title, event](const HvmActionResult& result, std::uint64_t)
+        { showHvmDispositionResult(title, result.ok, result.detail, result.status, event, result.advice); return true; },
+        [this, title, event, exceptionText](std::exception_ptr)
+        { showHvmDispositionResult(title, false, exceptionText, KSWORD_ARK_HVM_PROCESS_STATUS_OK, event); },
+        [event](ks::ui::AsyncOperationOutcome outcome)
+        { info << event << "[ProcessDock] HVM transaction cleanup, outcome=" << static_cast<int>(outcome) << eol; });
+}
+
 void ProcessDock::executeHvmProcessDispositionAction(
     const unsigned long operation)
 {
     // 输入：operation 取 FREEZE / TERMINATE / RELEASE。
     // 处理：解析目标页的客户线性地址，确认后下达一次 R-1 处置。
     // 返回：无返回值；结果通过消息框与日志反馈。
+    if ((m_hvmOperation && m_hvmOperation->isBusy()) || (m_hvmPreflightOperation && m_hvmPreflightOperation->isBusy())) return;
     const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
     if (actionTargets.empty())
     {
@@ -16699,7 +16715,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
 
     if (operation == KSWORD_ARK_HVM_PROCESS_OP_RELEASE)
     {
-        kLogEvent releaseEvent;
+        const QString title = ks::i18n::sourceText(QStringLiteral("%1 解除（冻结/结束）")).arg(hvmName);
+        submitHvmAction(title, target, [targetPid]
+        {
         ksword::ark::DriverClient releaseClient;
         const ksword::ark::HvmProcessResult releaseResult =
             releaseClient.controlHvmProcess(
@@ -16707,14 +16725,10 @@ void ProcessDock::executeHvmProcessDispositionAction(
                 targetPid,
                 0ULL,
                 true);
-        showHvmDispositionResult(
-            ks::i18n::sourceText(QStringLiteral("%1 解除（冻结/结束）")).arg(hvmName),
-            releaseResult.io.ok &&
-                releaseResult.response.status ==
-                    KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            releaseResult.io.message,
-            releaseResult.response.status,
-            releaseEvent);
+
+            return HvmActionResult{releaseResult.io.ok && releaseResult.response.status == KSWORD_ARK_HVM_PROCESS_STATUS_OK,
+                releaseResult.io.message, releaseResult.response.status, {}};
+        });
         return;
     }
 
@@ -16742,11 +16756,29 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 什么都没做，而那和成功在外面看不出区别——这类静默失效是这套机制最贵的
      * 失败方式，不该出现在默认路径上。
      */
-    quint64 guestLinearAddress = hvmProcessRunningThreadRip(target.record.pid);
-    if (guestLinearAddress == 0ULL)
-    {
-        guestLinearAddress = hvmProcessEntryPointAddress(target.record.pid);
-    }
+    if (!m_hvmPreflightOperation) m_hvmPreflightOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_hvmPreflightOperation->submit<ProcessActionTarget, quint64>(target,
+        [](const ProcessActionTarget& value, const ks::ui::AsyncOperationToken&)
+        {
+            HANDLE raw = nullptr; std::string detail;
+            if (!value.isKernelOnly && !acquireProcessActionIdentityHold(value.record.pid,
+                value.record.creationTime100ns, &raw, &detail)) return quint64(0);
+            const ScopedProcessActionHandle identity(raw);
+            quint64 address = hvmProcessRunningThreadRip(value.record.pid);
+            return address != 0 ? address : hvmProcessEntryPointAddress(value.record.pid);
+        },
+        [this, operation, target, manualAddress](const quint64& address, std::uint64_t)
+        { continueHvmProcessDispositionAction(operation, target, manualAddress, address); return true; },
+        [this, hvmName](std::exception_ptr)
+        { const kLogEvent event; showHvmDispositionResult(hvmName, false,
+            ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString(), 0, event); });
+}
+
+void ProcessDock::continueHvmProcessDispositionAction(const unsigned long operation,
+    ProcessActionTarget target, const bool manualAddress, quint64 guestLinearAddress)
+{
+    const auto targetPid = target.record.pid;
+    const QString hvmName = ks::settings::hvmDisplayNameLabel(ks::settings::loadAppearanceSettings().hvmDisplayName);
     if (manualAddress)
     {
     const QString defaultAddress = QStringLiteral("0x%1")
@@ -16846,6 +16878,12 @@ void ProcessDock::executeHvmProcessDispositionAction(
         << operation
         << " pid=" << targetPid
         << eol;
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    // Accept the confirmed effect before returning to the event loop. The read
+    // controller owns preflight only; the transaction retains the real outcome.
+    submitHvmAction(actionTitle, target, [operation, targetPid, guestLinearAddress, actionEvent, translator, freezing]
+        {
+            HvmActionResult output;
     ksword::ark::DriverClient driverClient;
     /*
      * 把三条前提按顺序补齐，再下达处置，最后把常驻恢复回去。
@@ -16873,9 +16911,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 那一层还顺带处理了 generation 传递、资源已就绪时不重复 PREPARE、以及把
      * 协议状态码翻成已本地化的原因——这三件如果在这里重做，就是第三份副本。
      */
-    if (!prepareHvmForArming(actionTitle, actionEvent))
+    if (!prepareHvmForArming(output, translator))
     {
-        return;
+        return output;
     }
     // 下达处置。此刻常驻是停着的，正是安装要求的状态。
     const ksword::ark::HvmProcessResult result = driverClient.controlHvmProcess(
@@ -16895,9 +16933,9 @@ void ProcessDock::executeHvmProcessDispositionAction(
          * 失败混成一句，会让人以为什么都没发生，然后下一次安装撞上 ALREADY_ARMED
          * 却不知道为什么。
          */
-        if (stepFailedRestartResident(actionTitle, actionEvent))
+        if (stepFailedRestartResident(output, translator))
         {
-            return;
+            return output;
         }
     }
     /*
@@ -16909,15 +16947,10 @@ void ProcessDock::executeHvmProcessDispositionAction(
      * 等，一个是换一页重下。
      */
     const QString successAdvice = freezing
-        ? ks::i18n::sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程可能不会立刻停住——正卡在等待或睡眠中的进程要等它再次运行到那里。若长时间没有反应，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"))
-        : ks::i18n::sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程退出可能有延迟——正卡在等待或睡眠中的进程要等它再次运行到那里，期间它会继续留在列表里。若长时间没有退出，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"));
-    showHvmDispositionResult(
-        actionTitle,
-        armed,
-        result.io.message,
-        result.response.status,
-        actionEvent,
-        successAdvice);
+        ? translator.sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程可能不会立刻停住——正卡在等待或睡眠中的进程要等它再次运行到那里。若长时间没有反应，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"))
+        : translator.sourceText(QStringLiteral("处置已装上。它在目标下一次执行到这一页时才生效，所以进程退出可能有延迟——正卡在等待或睡眠中的进程要等它再次运行到那里，期间它会继续留在列表里。若长时间没有退出，多半是这一页没被执行到：按住 Shift 重新下达可以换一个地址。"));
+    return HvmActionResult{armed, result.io.message, result.response.status, successAdvice};
+    });
 }
 
 void ProcessDock::executeHvmInjectAction(const unsigned long operation)
@@ -16925,6 +16958,7 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     // 输入：operation 取 ARM（注入 DLL）或 RELEASE（撤销）。
     // 处理：补齐前提、选 DLL、下达注入，最后恢复常驻。
     // 返回：无返回值；结果通过消息框与日志反馈。
+    if ((m_hvmOperation && m_hvmOperation->isBusy()) || (m_hvmPreflightOperation && m_hvmPreflightOperation->isBusy())) return;
     const std::vector<ProcessActionTarget> actionTargets = selectedActionTargets();
     if (actionTargets.empty())
     {
@@ -16950,20 +16984,18 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
 
     if (operation == KSWORD_ARK_HVM_INJECT_OP_RELEASE)
     {
-        kLogEvent releaseEvent;
+        const QString title = ks::i18n::sourceText(QStringLiteral("%1 撤销注入")).arg(hvmName);
+        submitHvmAction(title, target, [targetPid]
+        {
         ksword::ark::DriverClient releaseClient;
         const ksword::ark::HvmInjectResult releaseResult =
             releaseClient.controlHvmInject(
                 KSWORD_ARK_HVM_INJECT_OP_RELEASE,
                 targetPid, 0UL, 0ULL, 0ULL, nullptr, 0UL, true);
-        showHvmDispositionResult(
-            ks::i18n::sourceText(QStringLiteral("%1 撤销注入")).arg(hvmName),
-            releaseResult.io.ok &&
-                releaseResult.response.status ==
-                    KSWORD_ARK_HVM_INJECT_STATUS_OK,
-            releaseResult.io.message,
-            KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-            releaseEvent);
+
+            return HvmActionResult{releaseResult.io.ok && releaseResult.response.status == KSWORD_ARK_HVM_INJECT_STATUS_OK,
+                releaseResult.io.message, KSWORD_ARK_HVM_PROCESS_STATUS_OK, {}};
+        });
         return;
     }
 
@@ -16983,7 +17015,27 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
      * 代码上。入口点不行：它只在启动时执行一次，对已经跑起来的进程等于永远不
      * 触发，而那和成功在外面看不出区别。
      */
-    const quint64 triggerAddress = hvmProcessRunningThreadRip(targetPid);
+    if (!m_hvmPreflightOperation) m_hvmPreflightOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_hvmPreflightOperation->submit<ProcessActionTarget, quint64>(target,
+        [](const ProcessActionTarget& value, const ks::ui::AsyncOperationToken&)
+        {
+            HANDLE raw = nullptr; std::string detail;
+            if (!value.isKernelOnly && !acquireProcessActionIdentityHold(value.record.pid,
+                value.record.creationTime100ns, &raw, &detail)) return quint64(0);
+            const ScopedProcessActionHandle identity(raw);
+            return hvmProcessRunningThreadRip(value.record.pid);
+        },
+        [this, target, dllPath](const quint64& address, std::uint64_t)
+        { continueHvmInjectAction(target, dllPath, address); return true; },
+        [this, hvmName](std::exception_ptr)
+        { const kLogEvent event; showHvmDispositionResult(hvmName, false,
+            ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")).toStdString(), 0, event); });
+}
+
+void ProcessDock::continueHvmInjectAction(ProcessActionTarget target, QString dllPath, const quint64 triggerAddress)
+{
+    const auto targetPid = target.record.pid;
+    const QString hvmName = ks::settings::hvmDisplayNameLabel(ks::settings::loadAppearanceSettings().hvmDisplayName);
     if (triggerAddress == 0ULL)
     {
         QMessageBox::warning(
@@ -17028,9 +17080,13 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     warn << actionEvent
         << "[ProcessDock] executeHvmInjectAction: pid=" << targetPid
         << eol;
-    if (!prepareHvmForArming(actionTitle, actionEvent))
+    const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    submitHvmAction(actionTitle, target, [targetPid, triggerAddress, loadLibrary, dllPath, actionEvent, translator]
+        {
+            HvmActionResult output;
+    if (!prepareHvmForArming(output, translator))
     {
-        return;
+        return output;
     }
     /*
      * 路径按 UTF-16 传（LoadLibraryW），长度不含结尾的零——驱动把超出长度的部分
@@ -17055,9 +17111,9 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
     {
         // 注入只有在常驻起来之后才真的生效。这一步失败要单独报：注入**已经装上
         // 了**，只是没人在执行它。
-        if (stepFailedRestartResident(actionTitle, actionEvent))
+        if (stepFailedRestartResident(output, translator))
         {
-            return;
+            return output;
         }
     }
     /*
@@ -17070,7 +17126,7 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
      * 执行数为零时再主动给目标一次继续执行的机会：静止的进程线程全停在等待里，
      * 那一页可以一直等不到。
      */
-    QString injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上。它在目标下一次执行到那一页时才生效，所以可能不会立刻看到效果。若长时间没有反应，多半是那一页没被执行到，或这一带找不到足够长的空隙。"));
+    QString injectDetail = translator.sourceText(QStringLiteral("注入已装上。它在目标下一次执行到那一页时才生效，所以可能不会立刻看到效果。若长时间没有反应，多半是那一页没被执行到，或这一带找不到足够长的空隙。"));
     if (armed)
     {
         unsigned long long executionCount =
@@ -17092,24 +17148,19 @@ void ProcessDock::executeHvmInjectAction(const unsigned long operation)
             << eol;
         if (executionCount != 0ULL)
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("载荷已经在目标里执行过 %1 次，注入确实生效了。")).arg(executionCount);
+            injectDetail = translator.sourceText(QStringLiteral("载荷已经在目标里执行过 %1 次，注入确实生效了。")).arg(executionCount);
         }
         else if (wakenedWindows != 0U)
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上，但目标还没有执行到那一页。已向它的 %1 个窗口各投递一条空消息把消息循环唤醒（不写目标内存、不建线程），仍未触发。载荷会一直挂着，目标下次执行到那一页时自然生效。")).arg(wakenedWindows);
+            injectDetail = translator.sourceText(QStringLiteral("注入已装上，但目标还没有执行到那一页。已向它的 %1 个窗口各投递一条空消息把消息循环唤醒（不写目标内存、不建线程），仍未触发。载荷会一直挂着，目标下次执行到那一页时自然生效。")).arg(wakenedWindows);
         }
         else
         {
-            injectDetail = ks::i18n::sourceText(QStringLiteral("注入已装上，但目标当前是静止的：它的线程都停在等待里，那一页还没有被执行到，而且它没有可唤醒的顶层窗口。载荷会一直挂着，等目标自己再次运行才生效——对长期空闲的后台进程，这可能一直不发生。"));
+            injectDetail = translator.sourceText(QStringLiteral("注入已装上，但目标当前是静止的：它的线程都停在等待里，那一页还没有被执行到，而且它没有可唤醒的顶层窗口。载荷会一直挂着，等目标自己再次运行才生效——对长期空闲的后台进程，这可能一直不发生。"));
         }
     }
-    showHvmDispositionResult(
-        actionTitle,
-        armed,
-        result.io.message,
-        KSWORD_ARK_HVM_PROCESS_STATUS_OK,
-        actionEvent,
-        injectDetail);
+    return HvmActionResult{armed, result.io.message, KSWORD_ARK_HVM_PROCESS_STATUS_OK, injectDetail};
+    });
 }
 
 void ProcessDock::executeR0SetProcessHiddenAction(
