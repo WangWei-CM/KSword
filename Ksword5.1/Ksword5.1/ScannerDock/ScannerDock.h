@@ -20,6 +20,7 @@ class QPushButton;
 class QTabWidget;
 class QTableWidget;
 class QTableView;
+class QShowEvent;
 struct ScannerAsyncState;
 
 namespace ks::ui
@@ -55,6 +56,7 @@ protected:
     // changeEvent 作用：语言切换时重译固定控件和已显示的扫描结果。
     // 参数 event：Qt 事件；返回值：无。
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     static const ks::ui::PageNavigationTabDefinition& navigationDefinition(int index);
@@ -90,6 +92,8 @@ private:
     // renderResult 作用：把格式中立模型渲染为摘要、头、结构表和诊断页。
     void renderResult(const ks::scanner::BinaryScanResult& result);
     void clearResultTabs();
+    void prepareResultPresentation();
+    void refreshResultLanguage();
 
     // createReadOnlyTable 作用：创建统一只读表格；调用方负责填充行列。
     QTableWidget* createReadOnlyTable(QWidget* parent = nullptr) const;
@@ -160,6 +164,9 @@ private:
     QPushButton* m_applyPatchButton = nullptr; // m_applyPatchButton：执行安全写入。
 
     std::shared_ptr<ks::scanner::BinaryScanResult> m_lastResult; // m_lastResult：语言切换时重绘的最近结果。
+    std::shared_ptr<const ks::scanner::BinaryScanResult> m_presentedResult;
+    bool m_resultPresentationDirty = false;
+    bool m_resultLanguageDirty = false;
     QString m_statusKey; // m_statusKey：当前状态对应的语言包键。
     QString m_statusFallback; // m_statusFallback：语言包缺失时使用的中文文本。
     QStringList m_statusArguments; // m_statusArguments：依次替换状态文本中的占位符。

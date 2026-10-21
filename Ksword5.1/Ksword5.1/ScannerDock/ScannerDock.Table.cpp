@@ -403,6 +403,8 @@ QWidget* ScannerDock::createAttackPathPage(
                     ? QStringLiteral("0x%1").arg(evidence.offset, 0, 16).toUpper()
                     : translated("scanner.attack.offset.decoded", "解码后对象")));
     }
+    for (int row = 0; row < table->rowCount(); ++row)
+        table->item(row, 0)->setData(Qt::UserRole, row);
     table->resizeColumnsToContents();
     layout->addWidget(table, 1);
     return page;

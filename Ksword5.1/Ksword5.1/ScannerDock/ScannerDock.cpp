@@ -37,6 +37,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QStyle>
+#include <QShowEvent>
 #include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -407,7 +408,30 @@ void ScannerDock::retranslateUi()
 
     if (m_lastResult)
     {
+        m_resultLanguageDirty = true;
+        prepareResultPresentation();
+    }
+}
+
+void ScannerDock::showEvent(QShowEvent* event)
+{
+    prepareResultPresentation();
+    QWidget::showEvent(event);
+}
+
+void ScannerDock::prepareResultPresentation()
+{
+    if (!isVisible() || !m_lastResult) return;
+    if (m_resultPresentationDirty)
+    {
         renderResult(*m_lastResult);
+        m_resultPresentationDirty = false;
+        m_resultLanguageDirty = false;
+    }
+    else if (m_resultLanguageDirty)
+    {
+        refreshResultLanguage();
+        m_resultLanguageDirty = false;
     }
 }
 
@@ -517,7 +541,8 @@ void ScannerDock::finishScan(
 
     setScanBusy(false);
     m_lastResult = std::move(result);
-    renderResult(*m_lastResult);
+    m_resultPresentationDirty = true;
+    prepareResultPresentation();
 
     if (m_lastResult->success && m_lastResult->attackPath.matched)
     {
@@ -588,6 +613,9 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
 {
     renderAnalysisResult();
     clearResultTabs();
+    auto retired = std::move(m_presentedResult);
+    m_presentedResult = m_lastResult;
+    if (retired) QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
 
     auto* summaryTable = createReadOnlyTable(m_resultTabs);
     // 摘要字段只是短属性表，复制单元格即可，无需再占一行操作栏。
@@ -620,6 +648,7 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
     {
         const auto& field = summaryFields[static_cast<std::size_t>(row)];
         summaryTable->setItem(row, 0, new QTableWidgetItem(localizedColumnTitle(field.name)));
+        summaryTable->item(row, 0)->setData(Qt::UserRole, row);
         summaryTable->setItem(
             row,
             1,
@@ -647,6 +676,7 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
     {
         const auto& field = result.headers[static_cast<std::size_t>(row)];
         headerTable->setItem(row, 0, new QTableWidgetItem(localizedColumnTitle(field.name)));
+        headerTable->item(row, 0)->setData(Qt::UserRole, row);
         headerTable->setItem(
             row,
             1,
@@ -749,10 +779,114 @@ void ScannerDock::renderResult(const ks::scanner::BinaryScanResult& result)
                     ? QStringLiteral("0x%1").arg(diagnostic.offset, 0, 16).toUpper()
                     : QString()));
     }
+    for (int row = 0; row < diagnosticsTable->rowCount(); ++row)
+        diagnosticsTable->item(row, 0)->setData(Qt::UserRole, row);
     diagnosticsTable->resizeColumnsToContents();
     addResultNavigationTab(
         diagnosticsTable,
         translated("scanner.result.diagnostics", "诊断"));
+}
+
+void ScannerDock::refreshResultLanguage()
+{
+    if (!m_presentedResult || m_presentedResult != m_lastResult || m_resultTabs->count() == 0) return;
+    const auto& result = *m_presentedResult;
+    // Translation changes display roles without replacing views, selection, columns or the analysis snapshot.
+    for (auto* model : m_resultTabs->findChildren<QAbstractItemModel*>())
+        if (auto* scannerModel = dynamic_cast<ScannerTableModel*>(model)) scannerModel->refreshLanguage();
+    for (auto* button : m_resultTabs->findChildren<QPushButton*>())
+        if (button->property("scanner_column_group").toBool())
+            button->setToolTip(translated("scanner.column_view.tooltip",
+                "列组 %1：显示一组互补字段；可在表头右键自定义列。").arg(button->text()));
+    int tab = 0;
+    auto* summary = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab++, translated("scanner.result.summary", "摘要"));
+    std::vector<ks::scanner::BinaryField> summaryFields{
+        {"Format", ks::scanner::FormatName(result.format)},
+        {"Byte order", ks::scanner::ByteOrderName(result.byteOrder)},
+        {"File size", std::to_string(result.fileSize)}};
+    for (const auto& field : result.summary)
+    {
+        const QString name = fromUtf8(field.name).trimmed().toLower();
+        if (name != QStringLiteral("format") && name != QStringLiteral("byte order") && name != QStringLiteral("file size"))
+            summaryFields.push_back(field);
+    }
+    const QStringList fieldHeaders{translated("scanner.column.field", "字段"), translated("scanner.column.value", "值")};
+    if (summary)
+    {
+        summary->setHorizontalHeaderLabels(fieldHeaders);
+        for (int row = 0; row < summary->rowCount(); ++row)
+        {
+            const int sourceRow = summary->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(summaryFields.size())) continue;
+            const auto& field = summaryFields[static_cast<std::size_t>(sourceRow)];
+            summary->item(row, 0)->setText(localizedColumnTitle(field.name));
+            summary->item(row, 1)->setText(ks::i18n::sourceText(fromUtf8(field.value)));
+        }
+    }
+    if (!result.attackPath.evidence.empty())
+    {
+        auto* page = m_resultTabs->widget(tab);
+        m_resultTabs->setTabText(tab++, translated("scanner.result.attack_path", "攻击路径"));
+        auto* label = page->findChild<QLabel*>();
+        if (label) label->setText((result.attackPath.matched
+            ? translated("scanner.attack.verdict.detected", "检测到 EXIT / GhostSystemDriver 攻击路径：评分 %1/100，规则 %2。")
+            : translated("scanner.attack.verdict.below_threshold", "发现相关静态证据，但未达到攻击路径阈值：评分 %1/100，规则 %2。"))
+            .arg(result.attackPath.score).arg(fromUtf8(result.attackPath.ruleId)));
+        auto* table = page->findChild<QTableWidget*>();
+        if (table)
+        {
+            table->setHorizontalHeaderLabels({translated("scanner.column.severity", "级别"),
+                translated("scanner.attack.column.stage", "阶段"), translated("scanner.attack.column.evidence", "静态证据"),
+                translated("scanner.attack.column.artifact", "对象"), QStringLiteral("MITRE ATT&CK"),
+                translated("scanner.attack.column.score", "评分"), translated("scanner.column.offset", "偏移")});
+            for (int row = 0; row < table->rowCount(); ++row)
+            {
+                const int sourceRow = table->item(row, 0)->data(Qt::UserRole).toInt();
+                if (sourceRow < 0 || sourceRow >= static_cast<int>(result.attackPath.evidence.size())) continue;
+                const auto& evidence = result.attackPath.evidence[static_cast<std::size_t>(sourceRow)];
+                table->item(row, 0)->setText(attackPathSeverityText(static_cast<int>(evidence.severity)));
+                table->item(row, 1)->setText(attackPathStageText(evidence.stage));
+                table->item(row, 2)->setText(attackPathEvidenceText(evidence.code));
+                if (!evidence.hasOffset) table->item(row, 6)->setText(translated("scanner.attack.offset.decoded", "解码后对象"));
+            }
+        }
+    }
+    auto* headers = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab++, translated("scanner.result.headers", "文件头"));
+    if (headers)
+    {
+        headers->setHorizontalHeaderLabels(fieldHeaders);
+        for (int row = 0; row < headers->rowCount(); ++row)
+        {
+            const int sourceRow = headers->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(result.headers.size())) continue;
+            const auto& field = result.headers[static_cast<std::size_t>(sourceRow)];
+            headers->item(row, 0)->setText(localizedColumnTitle(field.name));
+            headers->item(row, 1)->setText(ks::i18n::sourceText(fromUtf8(field.value)));
+        }
+    }
+    for (const auto& source : result.tables)
+    {
+        QString title = localizedTableTitle(source.id, source.title);
+        if (source.truncated) title += translated("scanner.result.truncated_suffix", "（已截断）");
+        m_resultTabs->setTabText(tab++, title);
+    }
+    auto* diagnostics = qobject_cast<QTableWidget*>(m_resultTabs->widget(tab));
+    m_resultTabs->setTabText(tab, translated("scanner.result.diagnostics", "诊断"));
+    if (diagnostics)
+    {
+        diagnostics->setHorizontalHeaderLabels({translated("scanner.column.severity", "级别"),
+            translated("scanner.column.code", "代码"), translated("scanner.column.message", "说明"), translated("scanner.column.offset", "偏移")});
+        for (int row = 0; row < diagnostics->rowCount(); ++row)
+        {
+            const int sourceRow = diagnostics->item(row, 0)->data(Qt::UserRole).toInt();
+            if (sourceRow < 0 || sourceRow >= static_cast<int>(result.diagnostics.size())) continue;
+            const auto& diagnostic = result.diagnostics[static_cast<std::size_t>(sourceRow)];
+            diagnostics->item(row, 0)->setText(diagnosticSeverityText(static_cast<int>(diagnostic.severity)));
+            diagnostics->item(row, 2)->setText(localizedDiagnosticMessage(diagnostic.code, diagnostic.message));
+        }
+    }
 }
 
 void ScannerDock::beginPatch()
