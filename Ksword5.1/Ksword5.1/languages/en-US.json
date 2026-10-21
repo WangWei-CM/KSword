@@ -1739,6 +1739,8 @@
     "minidump.kind.unknown": "unknown",
     "minidump.dialog.choose_file": "Choose dump file",
     "minidump.dialog.file_filter": "Dump files (*.dmp *.mdmp *.hdmp *.kdmp);;All files (*.*)",
+    "virustotal.export.receipt_missing": "The export returned no valid receipt. Check the destination file before trying again.",
+    "virustotal.export.not_submitted": "This export request was not submitted. Try again later.",
     "minidump.dialog.invalid_file.title": "Cannot parse",
     "minidump.dialog.invalid_file.body": "Please choose an existing dump file.",
     "minidump.dialog.export_report": "Export analysis report",

@@ -1739,6 +1739,8 @@
     "minidump.kind.unknown": "未知",
     "minidump.dialog.choose_file": "选择转储文件",
     "minidump.dialog.file_filter": "转储文件 (*.dmp *.mdmp *.hdmp *.kdmp);;所有文件 (*.*)",
+    "virustotal.export.receipt_missing": "导出未返回有效回执，请检查目标文件后再重试。",
+    "virustotal.export.not_submitted": "本次导出请求未提交，请稍后重试。",
     "minidump.dialog.invalid_file.title": "无法解析",
     "minidump.dialog.invalid_file.body": "请选择一个存在的转储文件。",
     "minidump.dialog.export_report": "导出解析报告",

@@ -1,4 +1,5 @@
 #include "VirusTotalOnlineScan.h"
+#include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/ToolbarMetrics.h"
@@ -29,6 +30,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QFont>
 #include <QFrame>
@@ -1423,9 +1425,14 @@ VirusTotalOnlineScan::VirusTotalOnlineScan(QObject* parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
 {
+    m_rawExportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_rawExportOperation->setStateChangedCallback([this]() { reconcileRawExportReceipt(); });
 }
 
-VirusTotalOnlineScan::~VirusTotalOnlineScan() = default;
+VirusTotalOnlineScan::~VirusTotalOnlineScan()
+{
+    m_rawExportOperation->close();
+}
 
 void VirusTotalOnlineScan::scanFile(
     const QString& filePath,
@@ -3247,40 +3254,14 @@ void VirusTotalOnlineScan::ensureResultDialog()
         });
     QObject::connect(exportAllButton, &QPushButton::clicked, this, [this, resultDialog]()
         {
-            // 输入：当前累计原始响应文本、结构化响应数组和样本文件名。
-            // 处理：弹出保存对话框并写入包含全部 API 的 UTF-8 JSON 文件。
-            // 返回：无；失败时通过弹窗提示。
-            const QString defaultName = QStringLiteral("virustotal_%1_%2.json")
-                .arg(QFileInfo(m_filePath).completeBaseName().isEmpty()
-                    ? QStringLiteral("sample")
-                    : QFileInfo(m_filePath).completeBaseName())
-                .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-            const QString savePath = QFileDialog::getSaveFileName(
-                resultDialog,
-                QStringLiteral("导出 VirusTotal 全部 API 原始数据"),
-                QDir(QDir::homePath()).absoluteFilePath(defaultName),
-                QStringLiteral("JSON Files (*.json);;Text Files (*.txt);;All Files (*)"));
-            if (savePath.isEmpty())
-            {
-                return;
-            }
-
-            QFile outputFile(savePath);
-            if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
-            {
-                QMessageBox::warning(
-                    resultDialog,
-                    QStringLiteral("导出 VirusTotal 全部 API 原始数据"),
-                    QStringLiteral("无法写入文件：%1\n%2").arg(savePath, outputFile.errorString()));
-                return;
-            }
-            outputFile.write(buildRawExportJson());
-            outputFile.close();
+            exportAllRawResponses(resultDialog);
         });
     QObject::connect(buttonBox, &QDialogButtonBox::rejected, resultDialog, &QDialog::close);
     dialogLayout->addWidget(buttonBox, 0);
 
     ks::ui::ApplyDetailDialogChrome(resultDialog);
+    m_exportAllButton = exportAllButton;
+    m_exportAllButton->setEnabled(!m_rawExportOperation->isInFlight());
     m_resultDialog = resultDialog;
     m_resultSummaryLabel.clear();
     m_resultTabWidget = resultTabWidget;
@@ -3497,7 +3478,74 @@ void VirusTotalOnlineScan::appendRawReplyBodySection(
     appendRawTextSection(apiKind, titleText, QString::fromUtf8(bodyBytes), responseMetadata);
 }
 
-QByteArray VirusTotalOnlineScan::buildRawExportJson() const
+void VirusTotalOnlineScan::settleRawExportReceipt(const QString& errorText)
+{
+    const QPointer<QWidget> parent = m_rawExportReceiptParent;
+    m_rawExportPendingReceipt = false;
+    m_rawExportReceiptParent.clear();
+    m_rawExportReceiptPath.clear();
+    if (m_exportAllButton) m_exportAllButton->setEnabled(!m_rawExportOperation->isInFlight());
+    if (parent && !errorText.isEmpty())
+        QMessageBox::warning(parent, ks::i18n::sourceText(QStringLiteral("导出 VirusTotal 全部 API 原始数据")), errorText);
+}
+
+void VirusTotalOnlineScan::reconcileRawExportReceipt()
+{
+    if (m_exportAllButton) m_exportAllButton->setEnabled(!m_rawExportOperation->isInFlight());
+    if (m_rawExportPendingReceipt && !m_rawExportOperation->isInFlight())
+        settleRawExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。"))
+            + QLatin1Char('\n') + m_rawExportReceiptPath);
+}
+
+void VirusTotalOnlineScan::exportAllRawResponses(QDialog* dialog)
+{
+    const QPointer<VirusTotalOnlineScan> guarded(this);
+    const QPointer<QDialog> parent(dialog);
+    reconcileRawExportReceipt();
+    if (!guarded || !parent || m_rawExportOperation->isInFlight()) return;
+    const QString defaultName = QStringLiteral("virustotal_%1_%2.json")
+        .arg(QFileInfo(m_filePath).completeBaseName().isEmpty() ? QStringLiteral("sample") : QFileInfo(m_filePath).completeBaseName())
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+    const QString savePath = QFileDialog::getSaveFileName(parent,
+        QStringLiteral("导出 VirusTotal 全部 API 原始数据"), QDir(QDir::homePath()).absoluteFilePath(defaultName),
+        QStringLiteral("JSON Files (*.json);;Text Files (*.txt);;All Files (*)"));
+    if (!guarded || !parent || savePath.isEmpty()) return;
+    reconcileRawExportReceipt();
+    if (!guarded || !parent) return;
+    if (m_rawExportOperation->isInFlight())
+    {
+        QMessageBox::warning(parent, ks::i18n::sourceText(QStringLiteral("导出 VirusTotal 全部 API 原始数据")),
+            ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
+        return;
+    }
+    struct Request { QString path; QJsonObject root; } request{savePath, buildRawExportObject()};
+    struct Result { bool committed = false; QString error; };
+    m_rawExportPendingReceipt = true;
+    m_rawExportReceiptParent = parent;
+    m_rawExportReceiptPath = savePath;
+    const auto ticket = m_rawExportOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            const QByteArray bytes = QJsonDocument(input.root).toJson(QJsonDocument::Indented);
+            QSaveFile file(input.path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) { result.error = file.errorString(); return result; }
+            if (file.write(bytes) != bytes.size()) { result.error = file.errorString(); file.cancelWriting(); return result; }
+            result.committed = file.commit();
+            if (!result.committed) result.error = file.errorString();
+            return result;
+        },
+        [this, savePath](const Result& result, std::uint64_t) {
+            settleRawExportReceipt(result.committed ? QString() : ks::i18n::sourceText(QStringLiteral("无法写入文件：%1\n%2")).arg(savePath, result.error));
+            return true;
+        },
+        [this, savePath](std::exception_ptr) {
+            settleRawExportReceipt(ks::i18n::sourceText(QStringLiteral("导出未返回有效回执，请检查目标文件后再重试。")) + QLatin1Char('\n') + savePath);
+        });
+    if (!ticket && guarded && m_rawExportPendingReceipt)
+        settleRawExportReceipt(ks::i18n::sourceText(QStringLiteral("本次导出请求未提交，请稍后重试。")));
+}
+
+QJsonObject VirusTotalOnlineScan::buildRawExportObject() const
 {
     // rootObject 结构：
     // - metadata：上传来源、样本文件、analysis id、导出时间等上下文；
@@ -3538,7 +3586,7 @@ QByteArray VirusTotalOnlineScan::buildRawExportJson() const
     rootObject.insert(QStringLiteral("metadata"), metadataObject);
     rootObject.insert(QStringLiteral("local_hashes"), localHashesObject);
     rootObject.insert(QStringLiteral("apis"), apisObject);
-    return QJsonDocument(rootObject).toJson(QJsonDocument::Indented);
+    return rootObject;
 }
 
 void VirusTotalOnlineScan::updateResultSummary(const QString& summaryText)

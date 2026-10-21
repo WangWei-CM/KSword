@@ -22,6 +22,9 @@
 
 #include <array>
 #include <functional>
+#include <memory>
+
+namespace ks::ui { class AsyncOperation; }
 
 class QDialog;
 class QGroupBox;
@@ -450,12 +453,15 @@ private:
     // 返回：无。
     void updateResultSummary(const QString& summaryText);
 
-    // buildRawExportJson 作用：
+    // buildRawExportObject 作用：
     // - 把实时窗口累计的原始响应、错误文本和上传上下文打包为 UTF-8 JSON；
     // - responses 字段保留每次 upload_url/upload/analysis/error 的原始内容；
     // - raw_text 字段保留窗口中显示的原始文本，便于人工排查时逐字对照。
-    // 返回：可直接写入 .json 文件的 UTF-8 文档字节。
-    QByteArray buildRawExportJson() const;
+    // 返回：GUI 冻结的完整值快照，序列化和原子写入由独立事务执行。
+    QJsonObject buildRawExportObject() const;
+    void exportAllRawResponses(QDialog* dialog);
+    void reconcileRawExportReceipt();
+    void settleRawExportReceipt(const QString& errorText);
 
     // finalizeAutoDeleteIfNeeded 作用：
     // - 扫描成功或失败后统一处理 scanFileAndAutoDelete 创建的临时对象生命周期；
@@ -572,6 +578,12 @@ private:
         QPointer<QTreeWidget> responseTree;
         QPointer<CodeEditorWidget> rawEditor;
     };
+
+    std::unique_ptr<ks::ui::AsyncOperation> m_rawExportOperation;
+    bool m_rawExportPendingReceipt = false;
+    QPointer<QWidget> m_rawExportReceiptParent;
+    QString m_rawExportReceiptPath;
+    QPointer<QPushButton> m_exportAllButton;
 
     QNetworkAccessManager* m_networkManager = nullptr; // 网络请求管理器，负责所有 VirusTotal HTTP 调用。
     QPointer<QWidget> m_dialogParent;                  // 弹窗父控件，避免父控件提前销毁后悬空。
