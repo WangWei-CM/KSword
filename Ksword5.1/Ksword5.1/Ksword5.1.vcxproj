@@ -917,6 +917,7 @@
     <ClInclude Include="KernelDock\KernelIoctlAuditTab.h" />
     <ClInclude Include="KernelDock\KernelDockObjectNamespaceWorker.h" />
     <ClInclude Include="KernelDock\KernelDockQueryWorker.h" />
+    <ClInclude Include="RegistryDock\RegistryExternalActionSession.h" />
     <ClInclude Include="KernelDock\KernelDockSsdtWorker.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeTab.h" />
     <ClInclude Include="KernelDock\KernelNamedPipeWorker.h" />

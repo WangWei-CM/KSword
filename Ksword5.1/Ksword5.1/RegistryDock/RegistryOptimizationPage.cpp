@@ -40,7 +40,7 @@
 #include <QMetaObject>
 #include <QOperatingSystemVersion>
 #include <QPointer>
-#include <QProcess>
+#include <QSaveFile>
 #include <QPushButton>
 #include "../UI/SegmentedControl.h"
 #include <QRegularExpression>
@@ -599,12 +599,10 @@ namespace
     // - Input zipRelativePath: relative path inside registry_optimization_assets;
     // - Processing: searches runtime profiles first, then source-tree profiles for development;
     // - Return: candidate zip paths in priority order.
-    QStringList registryOptimizationAssetCandidates(const QString& zipRelativePath)
+    QStringList registryOptimizationAssetCandidates(const QString& zipRelativePath, const QString& appDir, const QString& currentDir)
     {
         QStringList candidates;
         const QString normalizedZipPath = QDir::fromNativeSeparators(zipRelativePath);
-        const QString appDir = QCoreApplication::applicationDirPath();
-        const QString currentDir = QDir::currentPath();
         candidates << QDir(appDir).filePath(QStringLiteral("profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
         candidates << QDir(appDir).filePath(QStringLiteral("../profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
         candidates << QDir(currentDir).filePath(QStringLiteral("profiles/registry_optimization_assets/%1").arg(normalizedZipPath));
@@ -944,6 +942,7 @@ RegistryOptimizationPage::RegistryOptimizationPage(QWidget* parent)
 
 RegistryOptimizationPage::~RegistryOptimizationPage()
 {
+    if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
     m_ordinaryOperation->close();
     m_profileOperation->close();
     cancelStateApply();
@@ -1788,7 +1787,7 @@ void RegistryOptimizationPage::beginStateApply(
 
 void RegistryOptimizationPage::continueStateApply()
 {
-    if (!m_stateApplyInProgress || m_stateApplyProcess != nullptr
+    if (!m_stateApplyInProgress || m_externalSession
         || m_ordinaryOperation->isBusy() || !m_stateApplyActiveAction.isEmpty()) return;
 
     if (m_stateApplyNextActionIndex >= m_stateApplyActions.size())
@@ -1922,10 +1921,12 @@ void RegistryOptimizationPage::completePendingAction(const bool actionOk, const 
 
     if (!actionOk)
     {
+        const QPointer<RegistryOptimizationPage> alive(this);
         (void)ks::ui::promptForPrivilegeFailure(
             this,
             QStringLiteral("执行系统优化"),
             errorText);
+        if (!alive) return;
     }
 
     bool actionRestartExplorer = false;
@@ -1951,7 +1952,10 @@ void RegistryOptimizationPage::completePendingAction(const bool actionOk, const 
     m_stateApplyActiveAction = QJsonObject();
     ++m_stateApplyNextActionIndex;
     m_detailText->setDocument(m_stateApplyDetailLines);
-    QTimer::singleShot(0, this, [this]() { continueStateApply(); });
+    QTimer::singleShot(0, this, [this]() {
+        if (m_stateApplyCancelRequested) cancelStateApply(m_stateApplyCancelReason);
+        else continueStateApply();
+    });
 }
 
 void RegistryOptimizationPage::finishStateApply()
@@ -1982,6 +1986,7 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
 {
     if (!m_stateApplyInProgress) return;
 
+    if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
     if (m_ordinaryOperation->isBusy())
     {
         m_stateApplyCancelRequested = true;
@@ -1993,16 +1998,6 @@ void RegistryOptimizationPage::cancelStateApply(const QString& reasonText)
     // 序列代次自增：仍在后台阻塞的广播动作完成后不再推进这一轮（或下一轮）序列。
     setProperty(kStateApplyGenerationProperty, property(kStateApplyGenerationProperty).toULongLong() + 1);
 
-    if (m_stateApplyProcess != nullptr)
-    {
-        m_stateApplyProcess->disconnect(this);
-        m_stateApplyProcess->kill();
-        m_stateApplyProcess->deleteLater();
-        m_stateApplyProcess = nullptr;
-    }
-    delete m_stateApplyTemporaryDir;
-    m_stateApplyTemporaryDir = nullptr;
-    m_stateApplyZipDestinationPath.clear();
     if (!reasonText.isEmpty())
     {
         m_stateApplyDetailLines.field(QStringLiteral("已取消"), reasonText, true);
@@ -2054,153 +2049,117 @@ bool RegistryOptimizationPage::actionRequiresExternalProcess(const QJsonObject& 
 
 bool RegistryOptimizationPage::startExternalAction(const QJsonObject& actionObject, QString* errorTextOut)
 {
-    if (errorTextOut != nullptr) errorTextOut->clear();
-    const QString familyText = jsonString(actionObject, QStringLiteral("action_family"),
-        jsonString(actionObject, QStringLiteral("action_tag"))).trimmed();
-
-    QString programPath;
-    QStringList arguments;
-    if (familyText.compare(QStringLiteral("ExplorerNotify"), Qt::CaseInsensitive) == 0)
-    {
-        const QString commandText = jsonString(actionObject, QStringLiteral("Cmd"));
-        if (commandText.isEmpty())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("ExplorerNotify Cmd 缺少命令。");
-            return false;
-        }
-        programPath = QStringLiteral("cmd.exe");
-        arguments = { QStringLiteral("/c"), commandText };
-    }
-    else if (familyText.compare(QStringLiteral("FileCreateByZIP"), Qt::CaseInsensitive) == 0)
-    {
-        const QString destinationPath = expandEnvironmentPath(jsonString(actionObject, QStringLiteral("Path")));
-        const QString zipReference = jsonString(actionObject, QStringLiteral("ZIPFile"));
-        if (destinationPath.isEmpty() || zipReference.isEmpty())
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("FileCreateByZIP 缺少 Path 或 ZIPFile。");
-            return false;
-        }
-
-        QString zipRelativePath;
-        QString entryPath;
-        if (!splitZipFileReference(zipReference, &zipRelativePath, &entryPath))
-        {
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("ZIPFile 格式无效：%1").arg(zipReference);
-            return false;
-        }
-
-        QString zipPath;
-        for (const QString& candidate : registryOptimizationAssetCandidates(zipRelativePath))
-        {
-            if (QFileInfo::exists(candidate))
-            {
-                zipPath = QDir::cleanPath(candidate);
-                break;
-            }
-        }
-        if (zipPath.isEmpty())
-        {
-            if (errorTextOut != nullptr)
-            {
-                *errorTextOut = QStringLiteral("未找到 ZIP 资产：profiles/registry_optimization_assets/%1").arg(zipRelativePath);
-            }
-            return false;
-        }
-
-        m_stateApplyTemporaryDir = new QTemporaryDir();
-        if (!m_stateApplyTemporaryDir->isValid())
-        {
-            delete m_stateApplyTemporaryDir;
-            m_stateApplyTemporaryDir = nullptr;
-            if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("无法创建临时目录用于解压 ZIP。");
-            return false;
-        }
-
-        programPath = QStringLiteral("tar.exe");
-        arguments = {
-            QStringLiteral("-xf"),
-            QDir::toNativeSeparators(zipPath),
-            QStringLiteral("-C"),
-            QDir::toNativeSeparators(m_stateApplyTemporaryDir->path()),
-            QDir::fromNativeSeparators(entryPath)
-        };
-        m_stateApplyZipDestinationPath = destinationPath;
-    }
-    else
-    {
-        if (errorTextOut != nullptr) *errorTextOut = QStringLiteral("不支持的外部动作族：%1").arg(familyText);
-        return false;
-    }
-
-    QProcess* process = new QProcess(this);
-    m_stateApplyProcess = process;
-    connect(process, &QProcess::errorOccurred, this, [this, process](const QProcess::ProcessError) {
-        if (m_stateApplyProcess != process) return;
-        const QString errorText = process->errorString();
-        m_stateApplyProcess = nullptr;
-        process->deleteLater();
-        delete m_stateApplyTemporaryDir;
-        m_stateApplyTemporaryDir = nullptr;
-        m_stateApplyZipDestinationPath.clear();
-        completePendingAction(false, errorText);
-    });
-    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-        [this, process, familyText](const int exitCode, const QProcess::ExitStatus exitStatus) {
-            if (m_stateApplyProcess != process) return;
-            const QString standardError = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
-            m_stateApplyProcess = nullptr;
-            process->deleteLater();
-
-            bool actionOk = exitStatus == QProcess::NormalExit && exitCode == 0;
-            QString errorText;
-            if (!actionOk)
-            {
-                errorText = standardError.isEmpty()
-                    ? QStringLiteral("命令退出码：%1").arg(exitCode)
-                    : standardError;
-            }
-            else if (familyText.compare(QStringLiteral("FileCreateByZIP"), Qt::CaseInsensitive) == 0)
-            {
-                QString zipRelativePath;
-                QString entryPath;
-                splitZipFileReference(jsonString(m_stateApplyActiveAction, QStringLiteral("ZIPFile")), &zipRelativePath, &entryPath);
-                const QString extractedPath = QDir(m_stateApplyTemporaryDir->path()).filePath(QDir::fromNativeSeparators(entryPath));
-                if (!QFileInfo::exists(extractedPath))
-                {
-                    actionOk = false;
-                    errorText = QStringLiteral("ZIP 中未找到条目：%1").arg(QDir::fromNativeSeparators(entryPath));
-                }
-                else
-                {
-                    const QFileInfo destinationInfo(m_stateApplyZipDestinationPath);
-                    QDir destinationDirectory = destinationInfo.dir();
-                    if (!destinationDirectory.exists() && !destinationDirectory.mkpath(QStringLiteral(".")))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法创建目标目录：%1").arg(destinationDirectory.absolutePath());
-                    }
-                    else if (QFileInfo::exists(m_stateApplyZipDestinationPath) && !QFile::remove(m_stateApplyZipDestinationPath))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法覆盖目标文件：%1").arg(m_stateApplyZipDestinationPath);
-                    }
-                    else if (!QFile::copy(extractedPath, m_stateApplyZipDestinationPath))
-                    {
-                        actionOk = false;
-                        errorText = QStringLiteral("无法复制 ZIP 条目到目标：%1").arg(m_stateApplyZipDestinationPath);
-                    }
-                }
-            }
-
-            delete m_stateApplyTemporaryDir;
-            m_stateApplyTemporaryDir = nullptr;
-            m_stateApplyZipDestinationPath.clear();
-            completePendingAction(actionOk, errorText);
+    if (errorTextOut) errorTextOut->clear();
+    auto session = ks::registry::external::Session::create();
+    if (!session) { if (errorTextOut) *errorTextOut = QString::number(ERROR_OPERATION_ABORTED); return false; }
+    auto work = session->reserve();
+    if (!work) { if (errorTextOut) *errorTextOut = QString::number(ERROR_OPERATION_ABORTED); return false; }
+    struct Request { QJsonObject action; QString appDir; QString currentDir; std::shared_ptr<ks::registry::external::Session::Work> work; };
+    const Request request{actionObject,QCoreApplication::applicationDirPath(),QDir::currentPath(),std::move(work)};
+    const quint64 generation = property(kStateApplyGenerationProperty).toULongLong();
+    m_externalSession = std::move(session);
+    m_ordinaryReceipt = false;
+    const auto ticket = m_ordinaryOperation->submitTransaction<Request,ExternalActionResult>(request,
+        [](const Request& value) { return executeExternalAction(value.action,value.appDir,value.currentDir,value.work); },
+        [this,generation](const ExternalActionResult& result,std::uint64_t) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0,this,[this,generation,result] {
+                if (m_externalSession) { m_externalSession->stop(); m_externalSession.reset(); }
+                if (!m_stateApplyInProgress || property(kStateApplyGenerationProperty).toULongLong()!=generation) return;
+                if (result.canceled) { m_stateApplyCancelRequested=true;m_stateApplyCancelReason=result.error; }
+                completePendingAction(result.ok,result.error);
+            });
+            return true;
+        }, [this](std::exception_ptr) {
+            m_ordinaryReceipt = true;
+            QTimer::singleShot(0,this,[this] { cancelStateApply(QStringLiteral("注册表操作未取得完整回执；请刷新后核对。")); });
         });
-    process->setProgram(programPath);
-    process->setArguments(arguments);
-    process->start();
-    return true;
+    if (!ticket)
+    {
+        m_ordinaryReceipt = true;
+        if (m_externalSession) {m_externalSession->stop();m_externalSession.reset();}
+        if (errorTextOut) *errorTextOut=QString::number(ERROR_OPERATION_ABORTED);
+    }
+    return ticket != 0;
+}
+
+RegistryOptimizationPage::ExternalActionResult RegistryOptimizationPage::executeExternalAction(
+    const QJsonObject& actionObject,const QString& appDir,const QString& currentDir,
+    const std::shared_ptr<ks::registry::external::Session::Work>& work)
+{
+    // Declared first: every local process/file object is destroyed before publishing physical completion.
+    struct Completion { std::shared_ptr<ks::registry::external::Session::Work> work; ~Completion(){work->finish();} } completion{work};
+    auto& runtime=*work->runtime();
+    ExternalActionResult result;
+    const auto canceled=[&]() {
+        result.canceled=true;
+        result.error=QStringLiteral("外部动作已取消；进程已结束，已提交的更改不会撤回。");
+        return result;
+    };
+    if(runtime.stopped.load())return canceled();
+    const QString familyText=jsonString(actionObject,QStringLiteral("action_family"),jsonString(actionObject,QStringLiteral("action_tag"))).trimmed();
+    QString programPath,entryPath,destinationPath;
+    QStringList arguments;
+    if(familyText.compare(QStringLiteral("ExplorerNotify"),Qt::CaseInsensitive)==0)
+    {
+        const auto commandText=jsonString(actionObject,QStringLiteral("Cmd"));
+        if(commandText.isEmpty()){result.error=QStringLiteral("ExplorerNotify Cmd 缺少命令。");return result;}
+        programPath=QStringLiteral("cmd.exe");arguments={QStringLiteral("/c"),commandText};
+    }
+    else if(familyText.compare(QStringLiteral("FileCreateByZIP"),Qt::CaseInsensitive)==0)
+    {
+        destinationPath=expandEnvironmentPath(jsonString(actionObject,QStringLiteral("Path")));
+        const auto zipReference=jsonString(actionObject,QStringLiteral("ZIPFile"));
+        if(destinationPath.isEmpty() || zipReference.isEmpty()){result.error=QStringLiteral("FileCreateByZIP 缺少 Path 或 ZIPFile。");return result;}
+        QString zipRelativePath;
+        if(!splitZipFileReference(zipReference,&zipRelativePath,&entryPath)){result.error=QStringLiteral("ZIPFile 格式无效：%1").arg(zipReference);return result;}
+        QString zipPath;
+        for(const auto& candidate:registryOptimizationAssetCandidates(zipRelativePath,appDir,currentDir))
+            if(QFileInfo::exists(candidate)){zipPath=QDir::cleanPath(candidate);break;}
+        if(zipPath.isEmpty()){result.error=QStringLiteral("未找到 ZIP 资产：profiles/registry_optimization_assets/%1").arg(zipRelativePath);return result;}
+        QTemporaryDir temporary;
+        if(!temporary.isValid()){result.error=QStringLiteral("无法创建临时目录用于解压 ZIP。");return result;}
+        runtime.temporaryRoot=temporary.path();
+        temporary.setAutoRemove(false); // Retained resource owner removes it only after actual process termination.
+        programPath=QStringLiteral("tar.exe");
+        arguments={QStringLiteral("-xf"),QDir::toNativeSeparators(zipPath),QStringLiteral("-C"),QDir::toNativeSeparators(runtime.temporaryRoot),QDir::fromNativeSeparators(entryPath)};
+    }
+    else {result.error=QStringLiteral("不支持的外部动作族：%1").arg(familyText);return result;}
+    const auto process=ks::registry::external::runProcess(runtime,programPath,arguments);
+    if(process.canceled)return canceled();
+    if(!process.ok){result.error=process.error.isEmpty()?QStringLiteral("命令退出码：%1").arg(process.exitCode):process.error;return result;}
+    if(!destinationPath.isEmpty())
+    {
+        if(runtime.stopped.load())return canceled();
+        const auto extractedPath=QDir(runtime.temporaryRoot).filePath(QDir::fromNativeSeparators(entryPath));
+        if(!QFileInfo::exists(extractedPath)){result.error=QStringLiteral("ZIP 中未找到条目：%1").arg(QDir::fromNativeSeparators(entryPath));return result;}
+        const QFileInfo destinationInfo(destinationPath);auto directory=destinationInfo.dir();
+        if(!directory.exists()&&!directory.mkpath(QStringLiteral("."))){result.error=QStringLiteral("无法创建目标目录：%1").arg(directory.absolutePath());return result;}
+        QFile input(extractedPath);QSaveFile output(destinationPath);output.setDirectWriteFallback(false);
+        const auto copyFailed=[&]() {output.cancelWriting();result.error=QStringLiteral("无法复制 ZIP 条目到目标：%1").arg(destinationPath);return result;};
+        if(!input.open(QIODevice::ReadOnly)||!output.open(QIODevice::WriteOnly))return copyFailed();
+        while(!input.atEnd())
+        {
+            if(runtime.stopped.load()){output.cancelWriting();return canceled();}
+            const auto block=input.read(1024*1024);
+            if(block.isEmpty()&&!input.atEnd())return copyFailed();
+            qint64 position=0;
+            while(position<block.size())
+            {
+                const auto written=output.write(block.constData()+position,block.size()-position);
+                if(written<=0 || written>block.size()-position)return copyFailed();
+                position+=written;
+            }
+        }
+        if(input.error()!=QFileDevice::NoError)return copyFailed();
+        if(runtime.stopped.load()){output.cancelWriting();return canceled();}
+        if(!output.commit())return copyFailed();
+        result.published=true;
+    }
+    result.ok=true;
+    result.canceled=runtime.stopped.load(); // Stop later actions without relabeling an already-published file as rolled back.
+    if(result.canceled)result.error=QStringLiteral("外部动作已取消；进程已结束，已提交的更改不会撤回。");
+    return result;
 }
 
 bool RegistryOptimizationPage::executeAction(

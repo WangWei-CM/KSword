@@ -2350,6 +2350,9 @@
     <QtMoc Include="MiscDock\BootEditor\BootEditorTab.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <ClInclude Include="RegistryDock\RegistryExternalActionSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="MiscDock\ApplicationControlPage.h">
       <Filter>Header Files</Filter>
     </ClInclude>

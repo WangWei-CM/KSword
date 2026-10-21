@@ -10,6 +10,7 @@
 // ============================================================
 
 #include "RegistryWorkbenchAccess.h"
+#include "RegistryExternalActionSession.h"
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -22,10 +23,8 @@
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QProcess;
 class QSplitter;
 class QTableWidget;
-class QTemporaryDir;
 class QTreeWidget;
 class QTimer;
 class CodeEditorWidget;
@@ -148,7 +147,10 @@ private:
     void cancelStateApply(const QString& reasonText = QString());
     void completePendingAction(bool actionOk, const QString& errorText);
     void setApplyControlsEnabled(bool enabled);
+    struct ExternalActionResult { bool ok = false; bool canceled = false; bool published = false; QString error; };
     bool startExternalAction(const QJsonObject& actionObject, QString* errorTextOut);
+    static ExternalActionResult executeExternalAction(const QJsonObject& actionObject, const QString& appDir,
+        const QString& currentDir, const std::shared_ptr<ks::registry::external::Session::Work>& work);
     static bool actionRequiresExternalProcess(const QJsonObject& actionObject);
     struct OrdinaryActionResult
     {
@@ -214,7 +216,6 @@ private:
     ks::ui::FieldDocument m_stateApplyDetailLines;         // 当前动作序列的诊断信息。
     bool m_stateApplyAllOk = true;               // 所有已完成动作是否成功。
     bool m_stateApplyRestartExplorer = false;    // 是否需要提示 Explorer 重启。
-    QProcess* m_stateApplyProcess = nullptr;     // 仅承载当前非阻塞 cmd/tar 子进程。
-    QTemporaryDir* m_stateApplyTemporaryDir = nullptr; // FileCreateByZIP 解压期间保留临时目录。
-    QString m_stateApplyZipDestinationPath;      // FileCreateByZIP 的最终目标路径。
+    std::shared_ptr<ks::registry::external::Session> m_externalSession; // Worker-local process + retained temporary-resource cleanup.
+
 };
