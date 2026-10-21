@@ -1510,6 +1510,7 @@ namespace
             return {};
         }
         int storedCount() const { return static_cast<int>(m_rows.size()); }
+        const QString& sortText(int row, int column) const { return m_rows.at(row).at(column).text; }
         bool hasUnpublishedRows() const { return m_published < storedCount(); }
         void append(const PluginResultRow& row) { m_rows.push_back(row); }
         void publish()
@@ -1526,6 +1527,27 @@ namespace
         QVector<VisualizationField> m_fields;
         QVector<PluginResultRow> m_rows;
         int m_published = 0;
+    };
+
+    class PluginResultProxyModel final : public QSortFilterProxyModel
+    {
+    public:
+        PluginResultProxyModel(PluginResultModel* source, QObject* parent)
+            : QSortFilterProxyModel(parent) { setSourceModel(source); }
+    protected:
+        bool lessThan(const QModelIndex& left, const QModelIndex& right) const override
+        {
+            if (sortRole() != Qt::DisplayRole || isSortLocaleAware())
+                return QSortFilterProxyModel::lessThan(left, right);
+            // Every DisplayRole cell in this model is already a QString prepared
+            // by the protocol worker. Compare those values directly, keeping
+            // Qt's string/case ordering without two QVariant copies per comparison.
+            const auto* source = static_cast<const PluginResultModel*>(sourceModel());
+            if (!source || left.model() != source || right.model() != source)
+                return QSortFilterProxyModel::lessThan(left, right);
+            return QString::compare(source->sortText(left.row(), left.column()),
+                source->sortText(right.row(), right.column()), sortCaseSensitivity()) < 0;
+        }
     };
 
     class PluginRunDialog final : public QDialog
@@ -1631,9 +1653,8 @@ namespace
             {
                 m_resultTable = new ks::ui::TableActionTableView(m_tabs);
                 m_resultModel = new PluginResultModel(descriptor.visualization.columns, m_resultTable);
-                auto* proxy = new QSortFilterProxyModel(m_resultTable);
+                auto* proxy = new PluginResultProxyModel(m_resultModel, m_resultTable);
                 proxy->setDynamicSortFilter(false);
-                proxy->setSourceModel(m_resultModel);
                 m_resultTable->setModel(proxy);
                 // 一次插件扫描结果保留复制/导出，避免通用快照栏挤占插件内容。
                 ks::ui::SetTableActionBarMode(m_resultTable, ks::ui::TableActionBarMode::Compact);
