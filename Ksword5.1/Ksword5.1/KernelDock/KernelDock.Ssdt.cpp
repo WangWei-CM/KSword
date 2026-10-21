@@ -491,6 +491,7 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
     m_ssdtTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_ssdtTable);
     m_ssdtTable->setRowCount(0);
+    m_ssdtTable->setRowCount(static_cast<int>(m_ssdtRows.size()));
 
     for (std::size_t sourceIndex = 0; sourceIndex < m_ssdtRows.size(); ++sourceIndex)
     {
@@ -503,8 +504,7 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged)
         const QString slotAddressText =
             formatAddressHex(entry.tableEntryAddress);
 
-        const int rowIndex = m_ssdtTable->rowCount();
-        m_ssdtTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
 
         auto* indexItem = new QTableWidgetItem(indexText);
         indexItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));

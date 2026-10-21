@@ -2576,8 +2576,8 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged)
         }
     }
 
-    // Allocate the complete row range once, before creating persistent source
-    // identities. Appending each later row used to revisit the earlier indices.
+    // Allocate the complete row range once before registering source identities,
+    // replacing per-row structural notifications with one range notification.
     m_callbackEnumTable->setRowCount(static_cast<int>(successfulSourceIndices.size()
         + deferredSourceIndices.size() + (deferredSourceIndices.empty() ? 0U : 1U)));
     int nextCallbackRow = 0;

@@ -989,6 +989,7 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
     m_atomTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_atomTable);
     m_atomTable->setRowCount(0);
+    m_atomTable->setRowCount(static_cast<int>(m_atomRows.size()));
 
     for (std::size_t sourceIndex = 0; sourceIndex < m_atomRows.size(); ++sourceIndex)
     {
@@ -998,8 +999,7 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged)
             .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
             .toUpper();
 
-        const int rowIndex = m_atomTable->rowCount();
-        m_atomTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
 
         auto* valueItem = new QTableWidgetItem(valueText);
         valueItem->setData(Qt::UserRole, static_cast<qulonglong>(sourceIndex));

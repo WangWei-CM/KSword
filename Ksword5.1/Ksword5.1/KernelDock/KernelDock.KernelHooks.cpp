@@ -2620,6 +2620,7 @@ void KernelDock::rebuildShadowSsdtTable(const bool sourceChanged)
     m_shadowSsdtTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_shadowSsdtTable);
     m_shadowSsdtTable->setRowCount(0);
+    m_shadowSsdtTable->setRowCount(static_cast<int>(m_shadowSsdtRows.size()));
 
     for (std::size_t sourceIndex = 0U; sourceIndex < m_shadowSsdtRows.size(); ++sourceIndex)
     {
@@ -2629,8 +2630,7 @@ void KernelDock::rebuildShadowSsdtTable(const bool sourceChanged)
         {
             matchFields.push_back(shadowSsdtColumnText(entry, static_cast<ShadowSsdtColumn>(column)));
         }
-        const int rowIndex = m_shadowSsdtTable->rowCount();
-        m_shadowSsdtTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
         for (int column = 0; column < static_cast<int>(ShadowSsdtColumn::Count); ++column)
         {
             auto* item = new QTableWidgetItem(matchFields.at(column));
@@ -2690,6 +2690,7 @@ void KernelDock::rebuildInlineHookTable(const bool sourceChanged)
     m_inlineHookTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_inlineHookTable);
     m_inlineHookTable->setRowCount(0);
+    m_inlineHookTable->setRowCount(static_cast<int>(m_inlineHookRows.size()));
 
     for (std::size_t sourceIndex = 0U; sourceIndex < m_inlineHookRows.size(); ++sourceIndex)
     {
@@ -2699,8 +2700,7 @@ void KernelDock::rebuildInlineHookTable(const bool sourceChanged)
         {
             matchFields.push_back(inlineHookColumnText(entry, static_cast<InlineHookColumn>(column)));
         }
-        const int rowIndex = m_inlineHookTable->rowCount();
-        m_inlineHookTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
         for (int column = 0; column < static_cast<int>(InlineHookColumn::Count); ++column)
         {
             auto* item = new QTableWidgetItem(matchFields.at(column));
@@ -2777,6 +2777,7 @@ void KernelDock::rebuildIatEatHookTable(const bool sourceChanged)
     m_iatEatHookTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_iatEatHookTable);
     m_iatEatHookTable->setRowCount(0);
+    m_iatEatHookTable->setRowCount(static_cast<int>(m_iatEatHookRows.size()));
 
     for (std::size_t sourceIndex = 0U; sourceIndex < m_iatEatHookRows.size(); ++sourceIndex)
     {
@@ -2786,8 +2787,7 @@ void KernelDock::rebuildIatEatHookTable(const bool sourceChanged)
         {
             matchFields.push_back(iatEatColumnText(entry, static_cast<IatEatHookColumn>(column)));
         }
-        const int rowIndex = m_iatEatHookTable->rowCount();
-        m_iatEatHookTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
         for (int column = 0; column < static_cast<int>(IatEatHookColumn::Count); ++column)
         {
             auto* item = new QTableWidgetItem(matchFields.at(column));
@@ -2849,6 +2849,7 @@ void KernelDock::rebuildTimerDpcTable(const bool sourceChanged)
     m_timerDpcTable->setSortingEnabled(false);
     resetKernelResultFilterCache(m_timerDpcTable);
     m_timerDpcTable->setRowCount(0);
+    m_timerDpcTable->setRowCount(static_cast<int>(m_timerDpcRows.size()));
     for (std::size_t sourceIndex = 0U; sourceIndex < m_timerDpcRows.size(); ++sourceIndex)
     {
         const KernelTimerDpcEntry& entry = m_timerDpcRows[sourceIndex];
@@ -2857,8 +2858,7 @@ void KernelDock::rebuildTimerDpcTable(const bool sourceChanged)
         {
             fields.push_back(timerDpcColumnText(entry, static_cast<TimerDpcColumn>(column)));
         }
-        const int rowIndex = m_timerDpcTable->rowCount();
-        m_timerDpcTable->insertRow(rowIndex);
+        const int rowIndex = static_cast<int>(sourceIndex);
         for (int column = 0; column < static_cast<int>(TimerDpcColumn::Count); ++column)
         {
             auto* item = new QTableWidgetItem(fields.at(column));
