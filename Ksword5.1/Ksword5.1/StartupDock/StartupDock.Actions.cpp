@@ -939,8 +939,113 @@ void StartupDock::applyFilterAndRefresh()
     rebuildAllTables();
 }
 
+void StartupDock::reportUnknownStartupAction()
+{
+    const QString title = m_actionReceiptTitle;
+    const QStringList targets = m_actionReceiptTargets;
+    m_actionPendingReceipt = false;
+    m_startupActionInProgress.store(false);
+    m_actionReceiptTitle.clear();
+    m_actionReceiptTargets.clear();
+    const QPointer<StartupDock> guarded(this);
+    refreshAllStartupEntries();
+    if (!guarded) return;
+    QMessageBox::warning(this, title,
+        ks::i18n::sourceText(QStringLiteral("启动项操作未返回有效回执，最终状态待核实。请刷新核对后再决定是否重试。"))
+            + QStringLiteral("\n\n") + targets.join(QLatin1Char('\n')));
+}
+
+void StartupDock::reconcileStartupActionReceipt()
+{
+    if (m_actionPendingReceipt && !m_actionOperation->isInFlight()) reportUnknownStartupAction();
+}
+
+void StartupDock::submitStartupAction(std::vector<ks::startup::StartupEntry> entries,
+    const bool remove, const bool enabled, const QString& title, const QStringList& targets,
+    std::function<void(const StartupKnownActionResults&)> completion)
+{
+    if (m_actionOperation->isInFlight())
+    {
+        m_startupActionInProgress.store(false);
+        QMessageBox::warning(this, title, ks::i18n::sourceText(QStringLiteral("本次启动项操作未提交，请稍后重试。")));
+        return;
+    }
+    struct Request { std::vector<ks::startup::StartupEntry> entries; bool remove; bool enabled; QStringList targets; } request{std::move(entries), remove, enabled, targets};
+    struct Result { StartupKnownActionResults known; std::vector<std::size_t> unknown; };
+    const QPointer<StartupDock> guarded(this);
+    const auto ticket = m_actionOperation->submitTransaction<Request, Result>(std::move(request),
+        [](const Request& input) {
+            Result result;
+            result.known.reserve(input.entries.size());
+            result.unknown.reserve(input.entries.size());
+            for (std::size_t index = 0; index < input.entries.size(); ++index)
+            {
+                ks::startup::ActionResult action;
+                try
+                {
+                    action = input.remove ? ks::startup::DeleteStartupEntry(input.entries[index])
+                        : ks::startup::SetStartupEntryEnabled(input.entries[index], input.enabled);
+                }
+                catch (...)
+                {
+                    result.unknown.push_back(index);
+                    kLogEvent auditEvent;
+                    err << auditEvent << "[StartupDock] accepted mutation outcome unknown, target="
+                        << input.targets.value(static_cast<qsizetype>(index)).toStdString() << eol;
+                    continue;
+                }
+                result.known.emplace_back(index, std::move(action));
+                const auto& receipt = result.known.back().second;
+                kLogEvent auditEvent;
+                info << auditEvent << "[StartupDock] accepted mutation receipt, target="
+                    << input.targets.value(static_cast<qsizetype>(index)).toStdString()
+                    << ", remove=" << input.remove << ", enabled=" << input.enabled
+                    << ", success=" << receipt.success << ", changed=" << receipt.changed
+                    << ", status=" << static_cast<int>(receipt.status) << ", error=" << receipt.errorCode
+                    << ", rollbackAttempted=" << receipt.rollbackAttempted << ", rollbackSucceeded=" << receipt.rollbackSucceeded << eol;
+            }
+            return result;
+        },
+        [this, title, targets, completion = std::move(completion)](const Result& result, std::uint64_t) {
+            const QPointer<StartupDock> guarded(this);
+            m_actionPendingReceipt = false;
+            m_startupActionInProgress.store(false);
+            m_actionReceiptTitle.clear();
+            m_actionReceiptTargets.clear();
+            refreshAllStartupEntries();
+            if (!guarded) return true;
+            completion(result.known);
+            if (!guarded) return true;
+            if (!result.unknown.empty())
+            {
+                QStringList unknownTargets;
+                for (const auto index : result.unknown) unknownTargets.append(targets.value(static_cast<qsizetype>(index)));
+                QMessageBox::warning(this, title,
+                    ks::i18n::sourceText(QStringLiteral("启动项操作未返回有效回执，最终状态待核实。请刷新核对后再决定是否重试。"))
+                        + QStringLiteral("\n\n") + unknownTargets.join(QLatin1Char('\n')));
+            }
+            return true;
+        },
+        [this](std::exception_ptr) { reportUnknownStartupAction(); });
+    if (!guarded) return;
+    if (ticket)
+    {
+        m_actionPendingReceipt = true;
+        m_actionReceiptTitle = title;
+        m_actionReceiptTargets = targets;
+    }
+    else
+    {
+        m_startupActionInProgress.store(false);
+        QMessageBox::warning(this, title, ks::i18n::sourceText(QStringLiteral("本次启动项操作未提交，请稍后重试。")));
+    }
+}
+
 void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
 {
+    const QPointer<StartupDock> guarded(this);
+    reconcileStartupActionReceipt();
+    if (!guarded) return;
     const QString actionText = startupToggleActionText(enabled);
     const QString operationTitle = startupText(
         "startup.dialog.toggle.operation.title",
@@ -985,7 +1090,7 @@ void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
                 .arg(startupToggleRecoveryText(entry.backendEntry.actionKind)),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
-        if (confirmButton != QMessageBox::Yes)
+        if (!guarded || confirmButton != QMessageBox::Yes)
         {
             return;
         }
@@ -1007,45 +1112,12 @@ void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
     const QString itemNameText = entry.itemNameText;
     const QString sourceTypeText = entry.sourceTypeText;
     const QString entryLocationText = entry.locationText;
-    if (m_actionThread != nullptr && m_actionThread->joinable())
-    {
-        m_actionThread->join();
-    }
-    m_actionThread = std::make_unique<std::thread>(
-        [this,
-         backendEntry,
-         enabled,
-         actionText,
-         operationTitle,
-         itemNameText,
-         sourceTypeText,
-         entryLocationText]()
-    {
-        const ks::startup::ActionResult actionResult =
-            ks::startup::SetStartupEntryEnabled(backendEntry, enabled);
-        if (m_destroying.load())
-        {
-            return;
-        }
+    submitStartupAction({backendEntry}, false, enabled, operationTitle, {itemNameText + QStringLiteral(" | ") + entryLocationText},
+        [this, operationTitle, itemNameText, sourceTypeText, entryLocationText, enabled, actionText](const StartupKnownActionResults& known) {
+            const QPointer<StartupDock> guarded(this);
+            if (known.empty()) return;
+            const auto& actionResult = known.front().second;
 
-        const bool callbackQueued = QMetaObject::invokeMethod(
-            this,
-            [this,
-             actionResult,
-             enabled,
-             actionText,
-             operationTitle,
-             itemNameText,
-             sourceTypeText,
-             entryLocationText]()
-            {
-                if (m_destroying.load())
-                {
-                    return;
-                }
-
-                m_startupActionInProgress.store(false);
-                refreshAllStartupEntries();
                 if (!actionResult.success)
                 {
                     const QString failureText = startupActionFailureText(actionResult);
@@ -1058,6 +1130,7 @@ void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
                                 this,
                                 operationTitle,
                                 static_cast<unsigned long>(actionResult.errorCode));
+                            if (!guarded) return;
                         }
                         if (!privilegePromptHandled)
                         {
@@ -1065,6 +1138,7 @@ void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
                                 this,
                                 operationTitle,
                                 failureText);
+                            if (!guarded) return;
                         }
                     }
                     if (!privilegePromptHandled)
@@ -1093,17 +1167,15 @@ void StartupDock::setStartupEntryEnabled(StartupEntry entry, const bool enabled)
                            .arg(entryLocationText)
                            .toStdString()
                     << eol;
-            },
-            Qt::QueuedConnection);
-        if (!callbackQueued)
-        {
-            m_startupActionInProgress.store(false);
-        }
-    });
+
+        });
 }
 
 void StartupDock::deleteStartupEntry(StartupEntry entry)
 {
+    const QPointer<StartupDock> guarded(this);
+    reconcileStartupActionReceipt();
+    if (!guarded) return;
     const QString operationTitle = startupText(
         "startup.dialog.delete.operation.title",
         QStringLiteral("删除启动项"));
@@ -1130,7 +1202,7 @@ void StartupDock::deleteStartupEntry(StartupEntry entry)
             .arg(startupRiskReasonText(entry.backendEntry)),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
-    if (confirmButton != QMessageBox::Yes)
+    if (!guarded || confirmButton != QMessageBox::Yes)
     {
         return;
     }
@@ -1151,41 +1223,12 @@ void StartupDock::deleteStartupEntry(StartupEntry entry)
     const QString itemNameText = entry.itemNameText;
     const QString sourceTypeText = entry.sourceTypeText;
     const QString entryLocationText = entry.locationText;
-    if (m_actionThread != nullptr && m_actionThread->joinable())
-    {
-        m_actionThread->join();
-    }
-    m_actionThread = std::make_unique<std::thread>(
-        [this,
-         backendEntry,
-         operationTitle,
-         itemNameText,
-         sourceTypeText,
-         entryLocationText]()
-    {
-        const ks::startup::ActionResult actionResult =
-            ks::startup::DeleteStartupEntry(backendEntry);
-        if (m_destroying.load())
-        {
-            return;
-        }
+    submitStartupAction({backendEntry}, true, false, operationTitle, {itemNameText + QStringLiteral(" | ") + entryLocationText},
+        [this, operationTitle, itemNameText, sourceTypeText, entryLocationText](const StartupKnownActionResults& known) {
+            const QPointer<StartupDock> guarded(this);
+            if (known.empty()) return;
+            const auto& actionResult = known.front().second;
 
-        const bool callbackQueued = QMetaObject::invokeMethod(
-            this,
-            [this,
-             actionResult,
-             operationTitle,
-             itemNameText,
-             sourceTypeText,
-             entryLocationText]()
-            {
-                if (m_destroying.load())
-                {
-                    return;
-                }
-
-                m_startupActionInProgress.store(false);
-                refreshAllStartupEntries();
                 if (!actionResult.success)
                 {
                     const QString failureText = startupActionFailureText(actionResult);
@@ -1198,6 +1241,7 @@ void StartupDock::deleteStartupEntry(StartupEntry entry)
                                 this,
                                 operationTitle,
                                 static_cast<unsigned long>(actionResult.errorCode));
+                            if (!guarded) return;
                         }
                         if (!privilegePromptHandled)
                         {
@@ -1205,6 +1249,7 @@ void StartupDock::deleteStartupEntry(StartupEntry entry)
                                 this,
                                 operationTitle,
                                 failureText);
+                            if (!guarded) return;
                         }
                     }
                     if (!privilegePromptHandled)
@@ -1234,19 +1279,17 @@ void StartupDock::deleteStartupEntry(StartupEntry entry)
                     << ", changed="
                     << (actionResult.changed ? "true" : "false")
                     << eol;
-            },
-            Qt::QueuedConnection);
-        if (!callbackQueued)
-        {
-            m_startupActionInProgress.store(false);
-        }
-    });
+
+        });
 }
 
 void StartupDock::setStartupEntriesEnabled(
     std::vector<StartupEntry> entryList,
     const bool enabled)
 {
+    const QPointer<StartupDock> guarded(this);
+    reconcileStartupActionReceipt();
+    if (!guarded) return;
     if (entryList.size() <= 1)
     {
         if (!entryList.empty())
@@ -1306,7 +1349,7 @@ void StartupDock::setStartupEntriesEnabled(
                 .arg(actionableEntryList.size()),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No);
-        if (confirmButton != QMessageBox::Yes)
+        if (!guarded || confirmButton != QMessageBox::Yes)
         {
             return;
         }
@@ -1324,37 +1367,15 @@ void StartupDock::setStartupEntriesEnabled(
         return;
     }
 
-    if (m_actionThread != nullptr && m_actionThread->joinable())
-    {
-        m_actionThread->join();
-    }
-    m_actionThread = std::make_unique<std::thread>(
-        [this, actionableEntryList, enabled, actionText, operationTitle]()
-    {
-        std::vector<std::pair<StartupEntry, ks::startup::ActionResult>> actionResultList;
-        actionResultList.reserve(actionableEntryList.size());
-        for (const StartupEntry& entry : actionableEntryList)
-        {
-            actionResultList.emplace_back(
-                entry,
-                ks::startup::SetStartupEntryEnabled(entry.backendEntry, enabled));
-        }
-        if (m_destroying.load())
-        {
-            return;
-        }
+    std::vector<ks::startup::StartupEntry> acceptedEntries;
+    QStringList targets;
+    for (const auto& item : actionableEntryList) { acceptedEntries.push_back(item.backendEntry); targets.append(item.itemNameText + QStringLiteral(" | ") + item.locationText); }
+    submitStartupAction(std::move(acceptedEntries), false, enabled, operationTitle, targets,
+        [this, entries = std::move(actionableEntryList), operationTitle, enabled, actionText](const StartupKnownActionResults& known) {
+            const QPointer<StartupDock> guarded(this);
+            std::vector<std::pair<StartupEntry, ks::startup::ActionResult>> actionResultList;
+            for (const auto& value : known) if (value.first < entries.size()) actionResultList.emplace_back(entries[value.first], value.second);
 
-        const bool callbackQueued = QMetaObject::invokeMethod(
-            this,
-            [this, actionResultList, enabled, actionText, operationTitle]()
-            {
-                if (m_destroying.load())
-                {
-                    return;
-                }
-
-                m_startupActionInProgress.store(false);
-                refreshAllStartupEntries();
                 QStringList failureTextList;
                 bool privilegePromptHandled = false;
                 for (const auto& actionResultEntry : actionResultList)
@@ -1375,6 +1396,7 @@ void StartupDock::setStartupEntriesEnabled(
                                     this,
                                     operationTitle,
                                     failureText);
+                            if (!guarded) return;
                         }
                         failureTextList.push_back(
                             QStringLiteral("%1：%2").arg(entry.itemNameText, failureText));
@@ -1411,17 +1433,15 @@ void StartupDock::setStartupEntriesEnabled(
                             .arg(actionText)
                             .arg(failureTextList.join(QStringLiteral("\n\n"))));
                 }
-            },
-            Qt::QueuedConnection);
-        if (!callbackQueued)
-        {
-            m_startupActionInProgress.store(false);
-        }
-    });
+
+        });
 }
 
 void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
 {
+    const QPointer<StartupDock> guarded(this);
+    reconcileStartupActionReceipt();
+    if (!guarded) return;
     if (entryList.size() <= 1)
     {
         if (!entryList.empty())
@@ -1457,7 +1477,7 @@ void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
             .arg(entryList.size()),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
-    if (confirmButton != QMessageBox::Yes)
+    if (!guarded || confirmButton != QMessageBox::Yes)
     {
         return;
     }
@@ -1474,37 +1494,15 @@ void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
         return;
     }
 
-    if (m_actionThread != nullptr && m_actionThread->joinable())
-    {
-        m_actionThread->join();
-    }
-    m_actionThread = std::make_unique<std::thread>(
-        [this, entryList, operationTitle]()
-    {
-        std::vector<std::pair<StartupEntry, ks::startup::ActionResult>> actionResultList;
-        actionResultList.reserve(entryList.size());
-        for (const StartupEntry& entry : entryList)
-        {
-            actionResultList.emplace_back(
-                entry,
-                ks::startup::DeleteStartupEntry(entry.backendEntry));
-        }
-        if (m_destroying.load())
-        {
-            return;
-        }
+    std::vector<ks::startup::StartupEntry> acceptedEntries;
+    QStringList targets;
+    for (const auto& item : entryList) { acceptedEntries.push_back(item.backendEntry); targets.append(item.itemNameText + QStringLiteral(" | ") + item.locationText); }
+    submitStartupAction(std::move(acceptedEntries), true, false, operationTitle, targets,
+        [this, entries = std::move(entryList), operationTitle](const StartupKnownActionResults& known) {
+            const QPointer<StartupDock> guarded(this);
+            std::vector<std::pair<StartupEntry, ks::startup::ActionResult>> actionResultList;
+            for (const auto& value : known) if (value.first < entries.size()) actionResultList.emplace_back(entries[value.first], value.second);
 
-        const bool callbackQueued = QMetaObject::invokeMethod(
-            this,
-            [this, actionResultList, operationTitle]()
-            {
-                if (m_destroying.load())
-                {
-                    return;
-                }
-
-                m_startupActionInProgress.store(false);
-                refreshAllStartupEntries();
                 QStringList failureTextList;
                 bool privilegePromptHandled = false;
                 for (const auto& actionResultEntry : actionResultList)
@@ -1525,6 +1523,7 @@ void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
                                     this,
                                     operationTitle,
                                     failureText);
+                            if (!guarded) return;
                         }
                         failureTextList.push_back(
                             QStringLiteral("%1：%2").arg(entry.itemNameText, failureText));
@@ -1559,13 +1558,8 @@ void StartupDock::deleteStartupEntries(std::vector<StartupEntry> entryList)
                             .arg(operationTitle)
                             .arg(failureTextList.join(QStringLiteral("\n\n"))));
                 }
-            },
-            Qt::QueuedConnection);
-        if (!callbackQueued)
-        {
-            m_startupActionInProgress.store(false);
-        }
-    });
+
+        });
 }
 
 int StartupDock::findEntryIndexByTableRow(const StartupCategory category, const int row) const

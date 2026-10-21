@@ -10,6 +10,8 @@ using namespace startup_dock_detail;
 StartupDock::StartupDock(QWidget* parent)
     : QWidget(parent)
 {
+    m_actionOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    m_actionOperation->setStateChangedCallback([this]() { reconcileStartupActionReceipt(); });
     m_exportOperation = std::make_unique<ks::ui::AsyncOperation>(this);
     m_exportOperation->setStateChangedCallback([this]() { reconcileExportReceipt(); });
     m_iconOperation = std::make_unique<ks::ui::AsyncOperation>(this);
@@ -40,10 +42,7 @@ StartupDock::~StartupDock()
     {
         m_tableRebuildTimer->stop();
     }
-    if (m_actionThread != nullptr && m_actionThread->joinable())
-    {
-        m_actionThread->join();
-    }
+    m_actionOperation->close();
     if (m_refreshThread != nullptr && m_refreshThread->joinable())
     {
         m_refreshThread->join();

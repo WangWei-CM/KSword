@@ -23,6 +23,7 @@
 #include <cstdint>  // std::uint32_t：PID、状态值与标识字段。
 #include <deque>    // std::deque：按枚举完成顺序缓存阶段结果。
 #include <memory>   // std::unique_ptr：后台线程对象托管。
+#include <functional>
 #include <thread>   // std::thread：后台枚举线程。
 #include <vector>   // std::vector：启动项缓存与分页表格重建。
 
@@ -199,6 +200,11 @@ private:
     void openSelectedFileProperties(StartupCategory category, QTableWidget* tableWidget);
     void openSelectedRegistryLocation(StartupCategory category, QTableWidget* tableWidget);
     void copySelectedRow(StartupCategory category, QTableWidget* tableWidget);
+    using StartupKnownActionResults = std::vector<std::pair<std::size_t, ks::startup::ActionResult>>;
+    void submitStartupAction(std::vector<ks::startup::StartupEntry> entries, bool remove, bool enabled,
+        const QString& title, const QStringList& targets, std::function<void(const StartupKnownActionResults&)> completion);
+    void reconcileStartupActionReceipt();
+    void reportUnknownStartupAction();
     void setStartupEntryEnabled(StartupEntry entry, bool enabled);
     void setStartupEntriesEnabled(std::vector<StartupEntry> entryList, bool enabled);
     void deleteStartupEntry(StartupEntry entry);
@@ -299,6 +305,9 @@ private:
     std::atomic_bool m_startupActionInProgress{ false }; // m_startupActionInProgress：可逆启停动作是否进行中。
     std::atomic_bool m_destroying{ false };        // m_destroying：析构已开始，后台线程不再投递 UI 回调。
     std::unique_ptr<std::thread> m_refreshThread;  // m_refreshThread：后台枚举线程对象。
-    std::unique_ptr<std::thread> m_actionThread;   // m_actionThread：受管理的启动项修改工作线程。
+    std::unique_ptr<ks::ui::AsyncOperation> m_actionOperation;
+    bool m_actionPendingReceipt = false;
+    QString m_actionReceiptTitle;
+    QStringList m_actionReceiptTargets;   // m_actionThread：受管理的启动项修改工作线程。
     int m_progressPid = 0;                         // m_progressPid：启动项枚举进度任务 PID。
 };
