@@ -5,6 +5,7 @@
 #include <QAbstractItemView>
 #include <QAbstractButton>
 #include <QAction>
+#include <QActionEvent>
 #include <QApplication>
 #include <QChildEvent>
 #include <QCache>
@@ -25,6 +26,7 @@
 #include <QMutexLocker>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPair>
 #include <QPersistentModelIndex>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
@@ -132,6 +134,7 @@ namespace
     constexpr int kRuntimeHeaderAppliedRole = Qt::UserRole + 1520;
     constexpr int kRuntimeModelSourceRole = Qt::UserRole + 1521;
     constexpr int kRuntimeModelAppliedRole = Qt::UserRole + 1522;
+    constexpr qsizetype kMaximumRuntimeModelRoots = 128;
 
     // containsHanCharacters 作用：判断文本是否含汉字（BMP 内的 CJK 统一表意文字及扩展 A）。
     bool containsHanCharacters(const QStringView text)
@@ -330,6 +333,11 @@ namespace
         if (dirtyAncestorOut != nullptr) *dirtyAncestorOut = nullptr;
         for (QObject* current = object; current != nullptr; current = current->parent())
         {
+            if (current->property("ks_i18n_preserve_data_text").toBool())
+            {
+                if (dirtyAncestorOut != nullptr) *dirtyAncestorOut = nullptr;
+                return current;
+            }
             const bool managed = current->property(kRuntimeManagedProperty).toBool();
             const bool dirty = current->property(kRuntimeDirtyProperty).toBool();
             if (managed) managedAncestor = current;
@@ -341,25 +349,6 @@ namespace
             if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
         }
         return managedAncestor;
-    }
-
-    QObject* runtimeTranslationRoot(QObject* object)
-    {
-        if (QWidget* widget = qobject_cast<QWidget*>(object))
-        {
-            return widget->window() != nullptr ? widget->window() : widget;
-        }
-
-        QObject* currentObject = object;
-        while (currentObject != nullptr)
-        {
-            if (QWidget* parentWidget = qobject_cast<QWidget*>(currentObject))
-            {
-                return parentWidget->window() != nullptr ? parentWidget->window() : parentWidget;
-            }
-            currentObject = currentObject->parent();
-        }
-        return object;
     }
 
     void appendUniqueDirectory(QStringList* directoryList, const QString& directoryPath)
@@ -1589,6 +1578,18 @@ struct ks::i18n::LanguageManager::State
     QCache<QString, QString> packedSourceResults{ kSourceCacheBytes };
     QString sourceLanguageId;
     quint64 sourceGeneration = 0;
+    // GUI-only model projections survive ordinary repaint passes. Actual model
+    // notifications invalidate them; language generation invalidates by value.
+    struct RuntimeModelState
+    {
+        QList<QPointer<QObject>> owners;
+        quint64 revision = 1;
+        using Stamp = QPair<quint64, quint64>; // language generation, model mutation revision
+        QHash<QPersistentModelIndex, Stamp> itemRoots;
+        QHash<QPersistentModelIndex, Stamp> headerRoots;
+        QHash<QPersistentModelIndex, QHash<int, Stamp>> comboRoots;
+    };
+    QHash<QAbstractItemModel*, RuntimeModelState> runtimeModels;
     // GUI-thread queue: a pending ancestor covers pending descendants.
     QList<QPointer<QObject>> pendingRuntimeRoots;
     bool runtimeDrainPending = false;
@@ -2462,7 +2463,7 @@ void ks::i18n::LanguageManager::scheduleRuntimeTranslation(QObject* object)
         {
             if (!root.isNull())
             {
-                applyRuntimeTranslations(root.data());
+                applyRuntimeTranslations(root.data(), true);
             }
         }
     });
@@ -2493,7 +2494,7 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
         if (event->type() == QEvent::Show && dirtyAncestor != nullptr)
         {
             const QPointer<QObject> guardedWatched(watched);
-            applyRuntimeTranslations(dirtyAncestor);
+            applyRuntimeTranslations(dirtyAncestor, true);
             return guardedWatched.isNull(); // Consume an event whose receiver was destroyed.
         }
         if (managedAncestor != nullptr) return QObject::eventFilter(watched, event);
@@ -2509,15 +2510,27 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     {
         QChildEvent* childEvent = static_cast<QChildEvent*>(event);
         QObject* targetObject = childEvent->child() != nullptr ? childEvent->child() : watched;
-        scheduleRuntimeTranslation(runtimeTranslationRoot(targetObject));
+        scheduleRuntimeTranslation(targetObject);
         break;
     }
     case QEvent::Show:
+    {
+        // Prepare this newly visible branch before its first paint. Hidden
+        // sibling pages are not part of a local Show event.
+        const QPointer<QObject> guardedWatched(watched);
+        applyRuntimeTranslations(watched, true);
+        return guardedWatched.isNull();
+    }
     case QEvent::PolishRequest:
+        scheduleRuntimeTranslation(watched);
+        break;
     case QEvent::ActionAdded:
     case QEvent::ActionChanged:
-        scheduleRuntimeTranslation(runtimeTranslationRoot(watched));
+    {
+        const auto* actionEvent = static_cast<QActionEvent*>(event);
+        scheduleRuntimeTranslation(actionEvent->action());
         break;
+    }
     case QEvent::LayoutRequest:
     case QEvent::UpdateRequest:
     {
@@ -2543,13 +2556,89 @@ bool ks::i18n::LanguageManager::eventFilter(QObject* watched, QEvent* event)
     return QObject::eventFilter(watched, event);
 }
 
-void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
+void ks::i18n::LanguageManager::observeRuntimeModel(QAbstractItemModel* model, QObject* owner)
+{
+    auto found = m_state->runtimeModels.find(model);
+    if (found == m_state->runtimeModels.end())
+    {
+        found = m_state->runtimeModels.insert(model, State::RuntimeModelState{});
+        const auto invalidate = [this, model]()
+        {
+            auto current = m_state->runtimeModels.find(model);
+            if (current == m_state->runtimeModels.end()) return;
+            ++current->revision;
+            // Count even synchronous writes from source callbacks during our
+            // pass. Never cache a projection that changed while being read.
+            // Keep referenced cache nodes alive until the current pass exits;
+            // their old revision already makes every previous stamp stale.
+            // The historical Chinese baseline keeps its original no-runtime-
+            // queue policy; its revision still changes for later explicit work.
+            if (m_applyingRuntimeTranslations || isHistoricalChineseLanguage(m_currentLanguageId)) return;
+            current->itemRoots.clear();
+            current->headerRoots.clear();
+            current->comboRoots.clear();
+            const auto owners = current->owners;
+            for (const QPointer<QObject>& target : owners)
+            {
+                if (target.isNull() || target->property(kRuntimeDirtyProperty).toBool()) continue;
+                if (runtimeManagedAncestor(target.data()) != nullptr) continue;
+                if (const auto* view = qobject_cast<QAbstractItemView*>(target.data());
+                    view != nullptr && view->model() != model) continue;
+                if (const auto* combo = qobject_cast<QComboBox*>(target.data());
+                    combo != nullptr && combo->model() != model) continue;
+                markRuntimeTranslationDirty(target.data());
+            }
+        };
+        connect(model, &QAbstractItemModel::dataChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::headerDataChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsInserted, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsRemoved, this, invalidate);
+        connect(model, &QAbstractItemModel::rowsMoved, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsInserted, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsRemoved, this, invalidate);
+        connect(model, &QAbstractItemModel::columnsMoved, this, invalidate);
+        connect(model, &QAbstractItemModel::layoutChanged, this, invalidate);
+        connect(model, &QAbstractItemModel::modelReset, this, invalidate);
+        connect(model, &QObject::destroyed, this, [this, model]()
+        {
+            m_state->runtimeModels.remove(model);
+        });
+    }
+    // Root navigation can change without a model notification. Bound retained
+    // projection keys; eviction only makes the next visit translate again.
+    if (found->itemRoots.size() >= kMaximumRuntimeModelRoots
+        || found->headerRoots.size() >= kMaximumRuntimeModelRoots
+        || found->comboRoots.size() >= kMaximumRuntimeModelRoots)
+    {
+        found->itemRoots.clear();
+        found->headerRoots.clear();
+        found->comboRoots.clear();
+    }
+    auto& owners = found->owners;
+    owners.erase(std::remove_if(owners.begin(), owners.end(),
+        [](const QPointer<QObject>& target) { return target.isNull(); }), owners.end());
+    if (!owners.contains(QPointer<QObject>(owner))) owners.append(QPointer<QObject>(owner));
+}
+
+void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object, const bool visibleOnly)
 {
     if (object == nullptr || m_applyingRuntimeTranslations)
     {
         return;
     }
 
+    // Localized event roots must still honor an ancestor's canonical data
+    // ownership marker, including a marker assigned after ChildAdded queued it.
+    for (QObject* current = object; current != nullptr; current = current->parent())
+    {
+        if (current->property("ks_i18n_preserve_data_text").toBool()) return;
+        if (const auto* widget = qobject_cast<const QWidget*>(current); widget != nullptr && widget->isWindow()) break;
+    }
+    quint64 languageGeneration = 0;
+    {
+        QMutexLocker locker(&m_state->sourceCacheMutex);
+        languageGeneration = m_state->sourceGeneration;
+    }
     QScopedValueRollback<bool> translationGuard(m_applyingRuntimeTranslations, true);
     QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedModelRoots;
     QHash<QAbstractItemModel*, QSet<QPersistentModelIndex>> translatedHeaderRoots;
@@ -2623,7 +2712,7 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
     };
 
     std::function<void(QObject*)> visitObject;
-    visitObject = [this, &translateModelItems, &translatedModelRoots, &translatedHeaderRoots, &visitObject](QObject* currentObject) {
+    visitObject = [this, visibleOnly, languageGeneration, &translateModelItems, &translatedModelRoots, &translatedHeaderRoots, &visitObject](QObject* currentObject) {
         if (currentObject == nullptr || currentObject->property("ks_i18n_preserve_data_text").toBool())
         {
             return;
@@ -2632,6 +2721,16 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
         const bool explicitlyDirty = currentObject->property(kRuntimeDirtyProperty).toBool();
         if (currentObject->property(kRuntimeManagedProperty).toBool() && !explicitlyDirty)
             return;
+        if (visibleOnly)
+        {
+            if (const auto* widget = qobject_cast<const QWidget*>(currentObject); widget != nullptr && !widget->isVisible())
+            {
+                // Retain one unknown/explicitly dirty boundary, not a walk
+                // through hidden pages or an opt-in producer's clean subtree.
+                currentObject->setProperty(kRuntimeDirtyProperty, true);
+                return;
+            }
+        }
         if (explicitlyDirty) currentObject->setProperty(kRuntimeDirtyProperty, QVariant());
 
         if (QAction* action = qobject_cast<QAction*>(currentObject))
@@ -2825,31 +2924,42 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                 kRuntimePlaceholderAppliedProperty,
                 comboBox->placeholderText(),
                 [comboBox](const QString& value) { comboBox->setPlaceholderText(value); });
-            if (!preserveModelDataText(comboBox, comboBox->model()))
+            QAbstractItemModel* comboModel = comboBox->model();
+            if (!preserveModelDataText(comboBox, comboModel) && comboModel != nullptr)
             {
-                for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
+                observeRuntimeModel(comboModel, comboBox);
+                auto& comboState = m_state->runtimeModels[comboModel];
+                auto& generations = comboState.comboRoots[QPersistentModelIndex(comboBox->rootModelIndex())];
+                if (generations.size() >= kMaximumRuntimeModelRoots) generations.clear();
+                const auto stamp = qMakePair(languageGeneration, comboState.revision);
+                if (generations.value(comboBox->modelColumn()) != stamp)
                 {
-                    const ManagedTextResult result = resolveManagedText(
-                        *this,
-                        comboBox->itemText(itemIndex),
-                        comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
-                        comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
-                    if (result.clearMetadata)
+                    for (int itemIndex = 0; itemIndex < comboBox->count(); ++itemIndex)
                     {
-                        comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
-                        comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
-                        continue;
+                        const ManagedTextResult result = resolveManagedText(
+                            *this,
+                            comboBox->itemText(itemIndex),
+                            comboBox->itemData(itemIndex, kRuntimeComboSourceRole),
+                            comboBox->itemData(itemIndex, kRuntimeComboAppliedRole));
+                        if (result.clearMetadata)
+                        {
+                            comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboSourceRole);
+                            comboBox->setItemData(itemIndex, QVariant(), kRuntimeComboAppliedRole);
+                            continue;
+                        }
+                        if (!result.updateMetadata)
+                        {
+                            continue;
+                        }
+                        if (result.setText)
+                        {
+                            comboBox->setItemText(itemIndex, result.appliedText);
+                        }
+                        comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
+                        comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
                     }
-                    if (!result.updateMetadata)
-                    {
-                        continue;
-                    }
-                    if (result.setText)
-                    {
-                        comboBox->setItemText(itemIndex, result.appliedText);
-                    }
-                    comboBox->setItemData(itemIndex, result.sourceText, kRuntimeComboSourceRole);
-                    comboBox->setItemData(itemIndex, result.appliedText, kRuntimeComboAppliedRole);
+                    if (comboState.revision == stamp.second)
+                        generations.insert(comboBox->modelColumn(), stamp);
                 }
             }
         }
@@ -2916,7 +3026,11 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
             const QPersistentModelIndex rootIndex(itemView->rootIndex());
             if (model != nullptr)
             {
-                if (!translatedHeaderRoots[model].contains(rootIndex))
+                observeRuntimeModel(model, itemView);
+                auto& modelState = m_state->runtimeModels[model];
+                const auto headerStamp = qMakePair(languageGeneration, modelState.revision);
+                if (!translatedHeaderRoots[model].contains(rootIndex)
+                    && modelState.headerRoots.value(rootIndex) != headerStamp)
                 {
                     translatedHeaderRoots[model].insert(rootIndex);
                     const int columnCount = model->columnCount(itemView->rootIndex());
@@ -2949,6 +3063,8 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                         model->setHeaderData(section, Qt::Horizontal, result.sourceText, kRuntimeHeaderSourceRole);
                         model->setHeaderData(section, Qt::Horizontal, result.appliedText, kRuntimeHeaderAppliedRole);
                     }
+                    if (modelState.revision == headerStamp.second)
+                        modelState.headerRoots.insert(rootIndex, headerStamp);
                 }
                 bool preserveModelData = preserveModelDataText(itemView, model);
                 if (itemView->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool())
@@ -2962,11 +3078,15 @@ void ks::i18n::LanguageManager::applyRuntimeTranslations(QObject* object)
                             || source->property("ks_i18n_preserve_model_data").toBool();
                     }
                 }
-                if (!preserveModelData && !translatedModelRoots[model].contains(rootIndex))
+                const auto itemStamp = qMakePair(languageGeneration, modelState.revision);
+                if (!preserveModelData && !translatedModelRoots[model].contains(rootIndex)
+                    && modelState.itemRoots.value(rootIndex) != itemStamp)
                 {
                     translatedModelRoots[model].insert(rootIndex);
                     int remainingIndexBudget = 50000;
                     translateModelItems(model, itemView->rootIndex(), remainingIndexBudget);
+                    if (modelState.revision == itemStamp.second)
+                        modelState.itemRoots.insert(rootIndex, itemStamp);
                 }
             }
         }

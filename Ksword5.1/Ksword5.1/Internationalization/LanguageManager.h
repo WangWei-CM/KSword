@@ -9,6 +9,7 @@
 
 #include <memory>
 
+class QAbstractItemModel;
 class QComboBox;
 class QLineEdit;
 class QSpinBox;
@@ -134,7 +135,10 @@ namespace ks::i18n
             bool preserveHistoricalChineseSource) const;
         void ensureApplicationEventFilter();
         void scheduleRuntimeTranslation(QObject* object);
-        void applyRuntimeTranslations(QObject* object);
+        void observeRuntimeModel(QAbstractItemModel* model, QObject* owner);
+        // Ordinary compatibility work is visible-only; true language switches
+        // retain full source capture and complete hidden-page LanguageChange.
+        void applyRuntimeTranslations(QObject* object, bool visibleOnly = false);
         // Binding registration updates only its declared property; language switches traverse the tree.
         void applyTextBinding(QObject* object) const;
         void applyBindings(QObject* object) const;
