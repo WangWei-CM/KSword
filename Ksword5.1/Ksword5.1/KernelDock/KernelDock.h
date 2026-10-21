@@ -703,7 +703,7 @@ private:
     // ensureTabInitialized：
     // - 作用：按需初始化指定 Tab 的 UI 与首次数据加载。
     // - 参数 tabIndex：顶层 Tab 索引。
-    void ensureTabInitialized(int tabIndex);
+    bool ensureTabInitialized(int tabIndex); // true only when this call created lazy UI.
 
     // ensureSelfDriverCurrentTabRefreshed：
     // - 外层自身驱动页可见或内部页切换后延迟一轮复核；
@@ -714,7 +714,7 @@ private:
     // - 输入 innerTabIndex：I/O 管理内部横向子页索引；
     // - 处理：仅为 SSDT/ShadowSSDT 启动原有惰性 UI 与首次刷新；
     // - 返回：无，IDT/GDT 自行在首次显示时加载，IOCTLS 无后台查询。
-    void ensureIoManagementTabInitialized(int innerTabIndex);
+    bool ensureIoManagementTabInitialized(int innerTabIndex);
 
     // ==================== 异步刷新 ====================
     // refreshObjectNamespaceAsync：
@@ -1069,6 +1069,7 @@ private:
 private:
     // ==================== 根级控件 ====================
     quint64 m_displayFallbackRevision = 0;
+    bool m_displayGeometryPrepared = false;
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
     ksword::kernel_navigation::Registry* m_navigationRegistry = nullptr;
     QPointer<QTabWidget> m_selfDriverNavigationTabs;

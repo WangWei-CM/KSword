@@ -502,7 +502,11 @@ void KernelDock::ensureCurrentTabReadyForDisplay()
 
     // ADS restoreState 会恢复外层 Dock 激活状态，但不一定会再次触发内部 QTabWidget
     // currentChanged。这里由 MainWindow/showEvent 主动调用，确保当前页已有真实子控件。
-    ensureTabInitialized(m_tabWidget->currentIndex());
+    const bool created = ensureTabInitialized(m_tabWidget->currentIndex());
+    // Keep first-display sizing and actual lazy construction notifications.
+    // Qt already invalidates geometry for real style/font/size/layout changes.
+    if (!created && m_displayGeometryPrepared) return;
+    m_displayGeometryPrepared = true;
     m_tabWidget->updateGeometry();
     m_tabWidget->update();
     updateGeometry();
@@ -1682,12 +1686,12 @@ void KernelDock::openKnowledgeRoute(const QString& routeId)
     }
 }
 
-void KernelDock::ensureTabInitialized(const int tabIndex)
+bool KernelDock::ensureTabInitialized(const int tabIndex)
 {
     QWidget* const tabPage = m_tabWidget != nullptr ? m_tabWidget->widget(tabIndex) : nullptr;
     if (tabPage == nullptr)
     {
-        return;
+        return false;
     }
     // 已建页只消费真实主题请求，构造守卫由实际初始化分支持有。
     if (tabPage->isVisible())
@@ -1702,7 +1706,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_objectNamespaceTabInitialized = true;
         hideTabInitializingProgress();
         refreshObjectNamespaceAsync();
-        return;
+        return true;
     }
 
     if (tabIndex == m_atomTabIndex && !m_atomTabInitialized)
@@ -1713,7 +1717,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_atomTabInitialized = true;
         hideTabInitializingProgress();
         refreshAtomTableAsync();
-        return;
+        return true;
     }
 
     if (tabIndex == m_miscTabIndex)
@@ -1731,8 +1735,9 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
             m_ntQueryTabInitialized = true;
             hideTabInitializingProgress();
             refreshNtQueryAsync();
+            return true;
         }
-        return;
+        return false;
     }
 
     if (tabIndex == m_ioManagementTabIndex)
@@ -1740,12 +1745,12 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         const int innerTabIndex = m_ioManagementInnerTabWidget != nullptr
             ? m_ioManagementInnerTabWidget->currentIndex()
             : -1;
-        ensureIoManagementTabInitialized(innerTabIndex);
-        return;
+        return ensureIoManagementTabInitialized(innerTabIndex);
     }
 
     if (tabIndex == m_kernelAuditTabIndex)
     {
+        bool created = false;
         const int innerTabIndex = m_kernelAuditInnerTabWidget != nullptr
             ? m_kernelAuditInnerTabWidget->currentIndex()
             : -1;
@@ -1755,6 +1760,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
             showTabInitializingProgress(tabIndex, QStringLiteral("Inline Hook"));
             initializeInlineHookTab();
             m_inlineHookTabInitialized = true;
+            created = true;
             hideTabInitializingProgress();
             refreshInlineHooksAsync();
         }
@@ -1764,6 +1770,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
             showTabInitializingProgress(tabIndex, QStringLiteral("IAT/EAT"));
             initializeIatEatHookTab();
             m_iatEatHookTabInitialized = true;
+            created = true;
             hideTabInitializingProgress();
             refreshIatEatHooksAsync();
         }
@@ -1775,6 +1782,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
                 kernelText("kernel.main.tab.callback_enum.title", QStringLiteral("回调遍历")));
             initializeCallbackEnumTab();
             m_callbackEnumTabInitialized = true;
+            created = true;
             hideTabInitializingProgress();
             refreshCallbackEnumAsync();
         }
@@ -1786,9 +1794,10 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
                 kernelText("kernel.main.tab.callback.title", QStringLiteral("驱动回调")));
             initializeCallbackInterceptTab();
             m_callbackTabInitialized = true;
+            created = true;
             hideTabInitializingProgress();
         }
-        return;
+        return created;
     }
 
     if (tabIndex == m_timerDpcTabIndex && !m_timerDpcTabInitialized)
@@ -1799,7 +1808,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         m_timerDpcTabInitialized = true;
         hideTabInitializingProgress();
         refreshTimerDpcAfterDynDataAsync();
-        return;
+        return true;
     }
 
     if (tabIndex == m_crossViewTabIndex && !m_crossViewTabInitialized)
@@ -1809,7 +1818,7 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         initializeCrossViewTab();
         m_crossViewTabInitialized = true;
         hideTabInitializingProgress();
-        return;
+        return true;
     }
 
     if (tabIndex == m_ipcTabIndex && !m_ipcTabInitialized)
@@ -1819,18 +1828,19 @@ void KernelDock::ensureTabInitialized(const int tabIndex)
         initializeIpcTab();
         m_ipcTabInitialized = true;
         hideTabInitializingProgress();
-        return;
+        return true;
     }
 
+    return false;
 }
 
-void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
+bool KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
 {
     QWidget* const tabPage = m_ioManagementInnerTabWidget != nullptr
         ? m_ioManagementInnerTabWidget->widget(innerTabIndex) : nullptr;
     if (tabPage == nullptr)
     {
-        return;
+        return false;
     }
     if (tabPage->isVisible())
     {
@@ -1844,7 +1854,7 @@ void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
         m_ssdtTabInitialized = true;
         hideTabInitializingProgress();
         refreshSsdtAsync();
-        return;
+        return true;
     }
 
     if (innerTabIndex == m_ioShadowSsdtTabIndex && !m_shadowSsdtTabInitialized)
@@ -1855,7 +1865,7 @@ void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
         m_shadowSsdtTabInitialized = true;
         hideTabInitializingProgress();
         refreshShadowSsdtAsync();
-        return;
+        return true;
     }
 
     if (innerTabIndex == m_ioStartIoTabIndex && m_driverStartIoTab != nullptr)
@@ -1863,6 +1873,7 @@ void KernelDock::ensureIoManagementTabInitialized(const int innerTabIndex)
         // requestInitialRefresh 自身幂等，重复进出该子页不会重复发起 R0 查询。
         m_driverStartIoTab->requestInitialRefresh();
     }
+    return false;
 }
 
 namespace
