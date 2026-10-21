@@ -1610,7 +1610,7 @@ LRESULT KernelPage::HandleMessage(HWND hwnd, const UINT msg, const WPARAM wParam
         queryTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd, kMsgKernelQueryCompleted);
         sortTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelSortSnapshot>>(hwnd, kMsgKernelSortCompleted);
         cachedProjectionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>>(hwnd,kMsgCachedProjectionCompleted);
-        actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgKernelActionCompleted);
+        actionTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd, kMsgKernelActionCompleted);
         callbackAnswerTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>>(hwnd, kMsgCallbackAnswerCompleted);
         callbackFileIoTask_ = std::make_unique<Ksword::Ui::AsyncSnapshotTask<CallbackFileIoResult>>(hwnd, kMsgCallbackFileIoCompleted);
         callbackEventReceiver_ = std::make_unique<CallbackEventReceiver>(hwnd, kMsgCallbackEventReceived);
@@ -4360,12 +4360,7 @@ void KernelPage::RefreshSelectedFeature() {
     activeFeatureId_ = descriptor->id;
     hasActiveFeatureId_ = true;
     KernelRequest request = BuildCurrentRequest(descriptor->id);
-    if (!queryTask_) {
-        const KernelOperationResult result = facade_.QueryFeature(request);
-        RenderResult(result);
-        InvalidateCurrentFeatureViewCache();
-        return;
-    }
+    if(!queryTask_)queryTask_=std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd_,kMsgKernelQueryCompleted);
     const KernelFeatureId featureId = descriptor->id;
     const std::uint64_t requestId = ++queryRequestId_;
     if (statusText_) {
@@ -4412,7 +4407,7 @@ void KernelPage::SaveCurrentFeatureViewCache(const bool transferDataToCache) {
     }
     const KernelFeatureId cacheFeatureId = activeFeatureId_;
     KernelFeatureViewCache& cache = featureViewCache_[cacheFeatureId];
-    cache.projectionSource=currentProjectionSource_;
+    cache.projectionSource=currentProjectionSource_;cache.rawSummary=currentRawSummary_;
     cache.projectionWidths=currentProjectionWidths_;
     if (transferDataToCache) {
         cache.columns = std::move(currentColumns_);
@@ -4467,7 +4462,7 @@ void KernelPage::InvalidateCurrentFeatureViewCache() {
     found->second.rowIndents.clear();
     found->second.rawColumns.clear();
     found->second.rawRows.reset();
-    found->second.projectionSource.reset();
+    found->second.projectionSource.reset();found->second.rawSummary.reset();
     found->second.collapsedObjectPaths.clear();
     found->second.propertyRows.clear();
     found->second.summaryRows.clear();
@@ -4487,7 +4482,7 @@ bool KernelPage::RestoreFeatureViewCache(const KernelFeatureId featureId) {
     }
 
     KernelFeatureViewCache& cache = found->second;
-    currentProjectionSource_=cache.projectionSource;
+    currentProjectionSource_=cache.projectionSource;currentRawSummary_=cache.rawSummary;
     currentProjectionWidths_=cache.projectionWidths;
     currentColumns_ = std::move(cache.columns);
     currentRows_ = std::move(cache.rows);
@@ -4942,12 +4937,7 @@ void KernelPage::RefreshKernelCpuIntegrityFromDriverPage() {
     // processing queries KernelCpuIntegrity through KernelFacade and renders the
     // evidence rows in the same table; there is no direct driver access here.
     KernelRequest request = BuildCurrentRequest(KernelFeatureId::KernelCpuIntegrity);
-    if (!queryTask_) {
-        const KernelOperationResult result = facade_.QueryFeature(request);
-        RenderResult(result);
-        ::SetWindowTextW(statusText_, (L"状态：CPU-only 完整性查询完成 | " + result.message).c_str());
-        return;
-    }
+    if(!queryTask_)queryTask_=std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd_,kMsgKernelQueryCompleted);
     const KernelFeatureId activeFeatureId = activeFeatureId_;
     const std::uint64_t requestId = ++queryRequestId_;
     ::SetWindowTextW(statusText_, L"状态：正在后台查询 CPU-only 完整性快照…");
@@ -5286,12 +5276,7 @@ void KernelPage::ExecuteSelectedAction(const KernelActionId actionId) {
 }
 
 void KernelPage::ExecuteActionInBackground(KernelActionRequest request, const KernelActionId actionId, const bool offerForcedRetry) {
-    if (!actionTask_) {
-        const KernelOperationResult result = facade_.ExecuteAction(request);
-        if (actionId == KernelActionId::CallbackSafeRemove) PresentCallbackRemovalResult(result);
-        else RenderResult(result);
-        return;
-    }
+    if(!actionTask_)actionTask_=std::make_unique<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>>(hwnd_,kMsgKernelActionCompleted);
     const KernelFeatureId featureId = request.featureId;
     const std::uint64_t requestId = ++actionRequestId_;
     const KernelActionRequest retryRequest = request;
@@ -5300,9 +5285,15 @@ void KernelPage::ExecuteActionInBackground(KernelActionRequest request, const Ke
     actionTask_->request(
         [request] {
             KernelFacade facade;
-            return facade.ExecuteAction(request);
+            KernelQuerySnapshot snapshot;
+            snapshot.result=facade.ExecuteAction(request);
+            if(request.actionId!=KernelActionId::CallbackSafeRemove) {
+                snapshot.projection=BuildKernelDynamicProjection(request.featureId,snapshot.result);
+                if(KernelUsesValueProjection(request.featureId))snapshot.projection.rows.clear();
+            }
+            return snapshot;
         },
-        [this, request = retryRequest, actionId, featureId, requestId, offerForcedRetry](std::uint64_t, std::optional<KernelOperationResult>&& result, std::exception_ptr error) mutable {
+        [this, request = retryRequest, actionId, featureId, requestId, offerForcedRetry](std::uint64_t, std::optional<KernelQuerySnapshot>&& result, std::exception_ptr error) mutable {
             ::EnableWindow(refreshButton_, TRUE);
             const KernelFeatureDescriptor* current = CurrentDescriptor();
             if (error || !result.has_value()) {
@@ -5315,8 +5306,8 @@ void KernelPage::ExecuteActionInBackground(KernelActionRequest request, const Ke
                 return;
             }
             bool forceRequired = false;
-            if (offerForcedRetry && actionId == KernelActionId::InlineHookNopPatch && !result->success) {
-                for (const KernelResultRow& row : result->rows) {
+            if (offerForcedRetry && actionId == KernelActionId::InlineHookNopPatch && !result->result.success) {
+                for (const KernelResultRow& row : result->result.rows) {
                     for (const auto& column : row.columns) {
                         if (column.first == L"Status" && column.second == kInlineHookForceRequiredStatusText) {
                             forceRequired = true;
@@ -5340,8 +5331,8 @@ void KernelPage::ExecuteActionInBackground(KernelActionRequest request, const Ke
                     return;
                 }
             }
-            if (actionId == KernelActionId::CallbackSafeRemove) PresentCallbackRemovalResult(*result);
-            else RenderResult(*result);
+            if (actionId == KernelActionId::CallbackSafeRemove) PresentCallbackRemovalResult(result->result);
+            else RenderResult(result->result,&result->projection);
         });
 }
 
@@ -5368,7 +5359,7 @@ void KernelPage::RenderDescriptor(const KernelFeatureDescriptor& descriptor) {
     ::SetWindowTextW(backendText_, L"");
     ::SetWindowTextW(statusText_, L"状态：等待刷新。");
 
-    currentProjectionSource_.reset();
+    currentProjectionSource_.reset();currentRawSummary_.reset();
     currentProjectionWidths_.clear();
     currentColumns_.clear();
     currentRows_.clear();
@@ -5444,12 +5435,6 @@ void KernelPage::RenderResult(const KernelOperationResult& result, KernelDynamic
     Ksword::Ui::ScopedListViewRedrawLock propertyListLock(propertyList_);
     Ksword::Ui::ScopedListViewRedrawLock summaryListLock(summaryList_);
     Ksword::Ui::ScopedWindowRedrawLock objectTreeLock(objectNamespaceTree_);
-    KernelDynamicProjection fallbackProjection;
-    const auto* projectionDescriptor=CurrentDescriptor();
-    if(!prepared && projectionDescriptor && KernelUsesValueProjection(projectionDescriptor->id)) {
-        fallbackProjection=BuildKernelDynamicProjection(projectionDescriptor->id,result);
-        fallbackProjection.rows.clear();prepared=&fallbackProjection;
-    }
     if(prepared) {
         const auto* descriptor=CurrentDescriptor();
         if(descriptor && KernelUsesValueProjection(descriptor->id)) {
@@ -5852,7 +5837,7 @@ void KernelPage::ApplyCachedValueProjection(std::shared_ptr<KernelValueProjectio
     if(top<0 && !projection->rows.empty()) top=(std::min)((std::max)(0,oldTop),static_cast<int>(projection->rows.size())-1);
     const bool schemaChanged=currentColumns_!=projection->columns || currentProjectionWidths_!=projection->widths;
     const bool newSource=currentProjectionSource_!=source;
-    currentProjectionSource_=source;currentRawColumns_=source->columns;currentRawRows_=source->rows;
+    currentProjectionSource_=source;currentRawSummary_=projection->rawSummary;currentRawColumns_=source->columns;currentRawRows_=source->rows;
     currentColumns_=std::move(projection->columns);currentRows_=std::move(projection->rows);
     currentRowIndents_=std::move(projection->indents);currentProjectionWidths_=std::move(projection->widths);
     if(newSource){sortColumn_=-1;sortAscending_=true;pendingSorts_.erase(descriptor->id);}
@@ -6603,6 +6588,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
         return {};
     };
     const auto rawSummary = [&](std::initializer_list<const wchar_t*> names) -> std::wstring {
+        if(currentRawSummary_)return currentRawSummary_->value(names);
         const std::vector<std::wstring>& rawColumns = !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_;
         const std::vector<std::vector<std::wstring>>& rawRows = !currentRawRows_->empty() ? *currentRawRows_ : currentRows_;
         for (const std::vector<std::wstring>& rawRow : rawRows) {
@@ -6924,7 +6910,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
                << L"当前全局能力位: " << globalMaskText << L"\r\n"
                << L"当前未启用能力: " << DisabledDynCapabilitySummary(globalMask) << L"\r\n\r\n"
                << L"R0不可用原因: " << rawSummary({ L"UnavailableReason", L"Reason", L"Detail" }) << L"\r\n\r\n"
-               << L"StatusFlags: " << rawSummary({ L"StatusFlags" }) << L" (" << DynDataStatusFlagsText(static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_->empty() ? *currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"StatusFlags" }))) << L")\r\n"
+               << L"StatusFlags: " << rawSummary({ L"StatusFlags" }) << L" (" << DynDataStatusFlagsText(static_cast<std::uint32_t>((currentRawSummary_?currentRawSummary_->statusFlags:0))) << L")\r\n"
                << L"SystemInformerDataVersion: " << rawSummary({ L"SI Version" }) << L"\r\n"
                << L"SystemInformerDataLength: " << rawSummary({ L"SI Length" }) << L"\r\n"
                << L"MatchedProfileClass: " << rawSummary({ L"MatchedClass", L"ProfileClass" }) << L"\r\n"
@@ -6952,7 +6938,7 @@ std::wstring KernelPage::BuildOriginalStyleSelectedRowDetail(const KernelFeature
         const std::uint32_t featureFlags = static_cast<std::uint32_t>(featureFlags64);
         const std::uint32_t requiredPolicy = static_cast<std::uint32_t>(requiredPolicy64);
         const std::uint32_t deniedPolicy = static_cast<std::uint32_t>(deniedPolicy64);
-        const std::uint32_t dynStatusFlags = static_cast<std::uint32_t>(FirstRowUInt64(!currentRawRows_->empty() ? *currentRawRows_ : currentRows_, !currentRawColumns_.empty() ? currentRawColumns_ : currentColumns_, { L"DynDataStatus" }));
+        const std::uint32_t dynStatusFlags = static_cast<std::uint32_t>((currentRawSummary_?currentRawSummary_->dynStatusFlags:0));
         std::wostringstream detail;
         detail << L"功能: " << cell({ L"功能", L"Feature", L"Name", L"项目" }) << L"\r\n"
                << L"FeatureId: " << cell({ L"Id" }) << L"\r\n"

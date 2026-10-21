@@ -24,6 +24,10 @@ public:
         result_=std::make_shared<KernelValueProjection>();
         result_->input=input_;
         result_->requestId=requestId;
+        auto summary=std::make_shared<KernelRawSummaryIndex>(*currentRawRows_,currentRawColumns_);
+        summary->statusFlags=FirstRowUInt64(*currentRawRows_,currentRawColumns_,{L"StatusFlags"});
+        summary->dynStatusFlags=FirstRowUInt64(*currentRawRows_,currentRawColumns_,{L"DynDataStatus"});
+        result_->rawSummary=std::move(summary);
         const auto feature=input_->source->featureId;
         switch(feature) {
         case KernelFeatureId::ObjectNamespaceOverview:

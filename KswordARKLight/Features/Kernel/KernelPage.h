@@ -100,7 +100,7 @@ private:
     KernelRequest BuildCurrentRequest(KernelFeatureId featureId) const;
     KernelActionRequest BuildCurrentActionRequest(KernelActionId actionId) const;
     void RenderDescriptor(const KernelFeatureDescriptor& descriptor);
-    void RenderResult(const KernelOperationResult& result, KernelDynamicProjection* prepared = nullptr);
+    void RenderResult(const KernelOperationResult& result, KernelDynamicProjection* prepared);
     void RebuildObjectNamespaceListFromCache(KernelFeatureId featureId);
     void ToggleObjectNamespaceListNode(int rowIndex);
     void RebuildObjectNamespaceTreeFromCurrentRows();
@@ -395,6 +395,7 @@ private:
         std::wstring objectNamespaceSelectedPath;
         std::wstring objectNamespaceSelectedDescription;
         std::shared_ptr<const KernelProjectionSource> projectionSource;
+        std::shared_ptr<const KernelRawSummaryIndex> rawSummary;
         std::vector<int> projectionWidths;
         int sortColumn = -1;
         bool sortAscending = true;
@@ -457,6 +458,7 @@ private:
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<std::shared_ptr<KernelValueProjection>>> cachedProjectionTask_;
     std::uint64_t cachedProjectionRequestId_ = 0, projectionSourceSerial_ = 0;
     std::shared_ptr<const KernelProjectionSource> currentProjectionSource_;
+    std::shared_ptr<const KernelRawSummaryIndex> currentRawSummary_;
     std::unordered_map<KernelFeatureId,std::shared_ptr<const KernelProjectionSource>> pendingProjectionSources_;
     std::shared_ptr<KernelValueProjection> deferredProjection_;
     std::vector<int> currentProjectionWidths_;
@@ -468,7 +470,7 @@ private:
     std::uint64_t queryRequestId_ = 0;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> queryTask_;
     std::uint64_t actionRequestId_ = 0;
-    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelOperationResult>> actionTask_;
+    std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<KernelQuerySnapshot>> actionTask_;
     KernelFeatureId pendingR0EvidenceFeatureId_ = KernelFeatureId::CpuHardwareSnapshot;
     bool hasPendingR0EvidenceFilter_ = false;
     std::unordered_set<KernelFeatureId> pendingCachedFilterFeatures_;

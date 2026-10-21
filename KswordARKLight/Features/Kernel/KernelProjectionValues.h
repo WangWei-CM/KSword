@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,8 +44,30 @@ inline std::size_t KernelProjectedRowHash(const std::vector<std::wstring>& row) 
     }
     return hash;
 }
+// First-row lookup preserves row priority, then alias priority, then the
+// original case-insensitive column order. Built once on the value worker.
+struct KernelRawSummaryIndex {
+    struct InsensitiveLess {bool operator()(const std::wstring& left,const std::wstring& right) const {return ::_wcsicmp(left.c_str(),right.c_str())<0;}};
+    struct Entry {std::size_t row=0;std::wstring value;};
+    std::map<std::wstring,Entry,InsensitiveLess> first;
+    std::uint64_t statusFlags=0,dynStatusFlags=0;
+    KernelRawSummaryIndex(const KernelDynamicProjection::Rows& rows,const std::vector<std::wstring>& columns) {
+        for(std::size_t row=0;row<rows.size();++row)
+            for(std::size_t column=0;column<columns.size() && column<rows[row].size();++column)
+                if(!rows[row][column].empty())first.try_emplace(columns[column],Entry{row,rows[row][column]});
+    }
+    std::wstring value(std::initializer_list<const wchar_t*> names) const {
+        const Entry* result=nullptr;
+        for(const auto* name:names) {
+            const auto found=first.find(name);
+            if(found!=first.end() && (!result || found->second.row<result->row))result=&found->second;
+        }
+        return result?result->value:std::wstring{};
+    }
+};
 struct KernelValueProjection {
     std::shared_ptr<const KernelProjectionInput> input;
+    std::shared_ptr<const KernelRawSummaryIndex> rawSummary;
     std::uint64_t requestId = 0;
     std::vector<std::wstring> columns;
     std::vector<int> widths, indents;
