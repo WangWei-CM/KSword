@@ -1066,6 +1066,7 @@ private:
 
 private:
     // ==================== 根级控件 ====================
+    quint64 m_displayFallbackRevision = 0;
     QVBoxLayout* m_rootLayout = nullptr; // m_rootLayout：KernelDock 根布局。
     ksword::kernel_navigation::Registry* m_navigationRegistry = nullptr;
     QPointer<QTabWidget> m_selfDriverNavigationTabs;

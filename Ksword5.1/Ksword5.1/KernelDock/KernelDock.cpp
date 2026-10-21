@@ -482,8 +482,12 @@ void KernelDock::showEvent(QShowEvent* event)
     // ADS 恢复布局后，KernelDock 的内部 QTabWidget 可能已经显示但首页尚未初始化。
     // showEvent 里做幂等兜底，保证当前内部页至少有真实 UI 内容。
     ensureCurrentTabReadyForDisplay();
-    QTimer::singleShot(0, this, [this]() {
-        ensureCurrentTabReadyForDisplay();
+    // Keep the last Show fallback at its original queue position. Older queued
+    // checks are redundant, while ADS may restore the active branch in between.
+    const quint64 fallbackRevision = ++m_displayFallbackRevision;
+    QTimer::singleShot(0, this, [this, fallbackRevision]() {
+        if (fallbackRevision == m_displayFallbackRevision)
+            ensureCurrentTabReadyForDisplay();
     });
 }
 
