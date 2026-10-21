@@ -163,6 +163,22 @@
 
 namespace
 {
+    // Used only for already-authorized clear/owner teardown; never trims retained history.
+    // ProcessActivitySample owns only STL numbers/strings/vectors, with no Qt/OS object affinity.
+    template<class Container>
+    void retireProcessActivityHistory(Container& history)
+    {
+        if (history.empty()) return;
+        auto retired = std::make_shared<Container>();
+        history.swap(*retired);
+        QThreadPool::globalInstance()->start(QRunnable::create([retired]() {
+            {
+                Container obsolete;
+                obsolete.swap(*retired);
+            } // Complete destruction on worker, even if it runs before the GUI drops its shared_ptr.
+        }));
+    }
+
     template<typename Service, typename StartedCallback>
     void requestProcessEtwCapture(
         const std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle>& lifecycle,
@@ -4673,6 +4689,8 @@ ProcessDock::~ProcessDock()
     {
         QApplication::instance()->removeEventFilter(this);
     }
+    // Samples have no readers after the GUI-owned dock shuts down. Child chart caches retire separately.
+    retireProcessActivityHistory(m_activitySamples);
 }
 
 QObject* ProcessDock::mainWindowActionReceiver() const
@@ -6806,7 +6824,7 @@ void ProcessDock::initializeConnections()
 
     // 清空记录缓存：重置序号、时间轴和吸附状态。
     connect(m_activityClearButton, &QPushButton::clicked, this, [this]() {
-        m_activitySamples.clear();
+        retireProcessActivityHistory(m_activitySamples);
         if (m_activityChartWidget != nullptr) m_activityChartWidget->notifyHistoryReset();
         m_activityTableSnapshotActive = false;
         m_activityTableSnapshotIndex = -1;
