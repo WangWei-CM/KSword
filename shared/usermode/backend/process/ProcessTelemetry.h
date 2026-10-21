@@ -13,6 +13,7 @@ public:
         ULONGLONG tickMs = ::GetTickCount64());
     ks::network::ProcessNetworkEtwHealth NetworkHealth() const { return network_.SnapshotHealth(); }
     void Stop() { network_.Stop(); }
+    bool StopChecked() { return network_.StopChecked(); }
 
 private:
     struct Baseline {

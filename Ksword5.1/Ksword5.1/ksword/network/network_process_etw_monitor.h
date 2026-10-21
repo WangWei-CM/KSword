@@ -37,6 +37,9 @@ namespace ks::network
     {
         bool isRunning = false;
         bool dataLossDetected = false;
+        bool cleanupPending = false;
+        bool stopErrorKnown = false;
+        std::uint32_t stopError = 0;
         std::uint64_t eventsLost = 0;
         bool errorCodeKnown = false;
         std::uint32_t errorCode = 0;
@@ -62,6 +65,9 @@ namespace ks::network
 
         // Stop：停止本实例创建的会话并等待 ETW 消费线程退出。
         void Stop();
+        // Returns true only when the owned session, consumer handle and thread
+        // are all released. Failure retains their identity for a later retry.
+        bool StopChecked();
 
         bool IsRunning() const;
         std::string LastErrorText() const;
@@ -77,7 +83,9 @@ namespace ks::network
         static void WINAPI eventRecordCallback(PEVENT_RECORD eventRecord);
         static ULONG WINAPI bufferCallback(PEVENT_TRACE_LOGFILEW logFile);
 
-        void consumeTrace(PROCESSTRACE_HANDLE consumerHandle, std::wstring sessionName);
+        void consumeTrace(PROCESSTRACE_HANDLE consumerHandle, TRACEHANDLE sessionHandle, std::wstring sessionName);
+        bool stopLocked();
+        bool closeOwnedConsumer();
         void recordNetworkEvent(const EVENT_RECORD& eventRecord);
         void setLastErrorText(std::string errorText, ULONG errorCode = ERROR_SUCCESS, bool codeKnown = false);
 
@@ -85,10 +93,14 @@ namespace ks::network
         mutable std::mutex m_lifecycleMutex;
         std::thread m_consumerThread;
         TRACEHANDLE m_sessionHandle = 0;
-        PROCESSTRACE_HANDLE m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
+        std::atomic<PROCESSTRACE_HANDLE> m_consumerHandle{ INVALID_PROCESSTRACE_HANDLE };
         std::wstring m_sessionName;
 
         std::atomic_bool m_running{ false };
+        std::atomic_bool m_sessionReleased{ true };
+        std::atomic_bool m_consumerFinished{ true };
+        std::atomic_bool m_cleanupPending{ false };
+        std::atomic<ULONG> m_stopError{ ERROR_SUCCESS };
         std::atomic_bool m_stopRequested{ false };
         std::atomic<std::uint64_t> m_bufferEventsLost{ 0 };
         std::atomic<std::uint64_t> m_sessionEventsLost{ 0 };

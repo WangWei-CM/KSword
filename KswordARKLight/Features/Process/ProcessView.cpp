@@ -2695,8 +2695,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             const auto telemetry = state->telemetry;
             state->telemetryRetirement = Ksword::Ui::RunBackgroundRetirement([telemetry] {
                 std::lock_guard lock(telemetry->sampleMutex);
-                telemetry->telemetry.Stop();
-                return true;
+                return telemetry->telemetry.StopChecked();
             });
         }
         return 0;
@@ -2888,8 +2887,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 const auto telemetry = state->telemetry;
                 state->telemetryRetirement = Ksword::Ui::RunBackgroundRetirement([telemetry] {
                     std::lock_guard lock(telemetry->sampleMutex);
-                    telemetry->telemetry.Stop();
-                    return true;
+                    return telemetry->telemetry.StopChecked();
                 });
             }
             if (state->refreshTask) {

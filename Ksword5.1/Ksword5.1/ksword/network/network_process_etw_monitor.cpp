@@ -69,16 +69,16 @@ namespace
             std::to_wstring(sequence);
     }
 
-    void stopOwnedTraceSession(const TRACEHANDLE sessionHandle, const std::wstring& sessionName)
+    ULONG stopOwnedTraceSession(const TRACEHANDLE sessionHandle, const std::wstring& sessionName)
     {
         if (sessionHandle == 0 || sessionName.empty())
         {
-            return;
+            return ERROR_SUCCESS;
         }
 
         TracePropertiesBlock traceProperties;
         initializeTraceProperties(&traceProperties, sessionName);
-        (void)::ControlTraceW(
+        return ::ControlTraceW(
             sessionHandle,
             sessionName.c_str(),
             &traceProperties.properties,
@@ -126,6 +126,10 @@ namespace ks::network
     ProcessNetworkEtwMonitor::~ProcessNetworkEtwMonitor()
     {
         Stop();
+        // Legacy callers keep the original destructor guarantee that a live
+        // callback can never outlive this object. Native retirement retains the
+        // object on failed StopChecked, so this fallback is not on its UI path.
+        if (m_consumerThread.joinable()) m_consumerThread.join();
     }
 
     bool ProcessNetworkEtwMonitor::Start()
@@ -136,15 +140,9 @@ namespace ks::network
             return true;
         }
 
-        // 上一轮消费线程若已自然退出，先等待它完成资源释放。
-        if (m_consumerThread.joinable())
-        {
-            m_consumerThread.join();
-        }
-        stopOwnedTraceSession(m_sessionHandle, m_sessionName);
-        m_sessionHandle = 0;
-        m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-        m_sessionName.clear();
+        // Never replace a failed cleanup identity with a new session. All
+        // lifecycle fields are owned here; the consumer receives value handles.
+        if (!stopLocked()) return false;
         setLastErrorText(std::string());
         m_bufferEventsLost.store(0, std::memory_order_relaxed);
         m_sessionEventsLost.store(0, std::memory_order_relaxed);
@@ -165,6 +163,10 @@ namespace ks::network
             return false;
         }
 
+        m_sessionHandle = sessionHandle;
+        m_sessionName = sessionName;
+        m_sessionReleased.store(false, std::memory_order_release);
+        m_cleanupPending.store(true, std::memory_order_release);
         const ULONG enableResult = ::EnableTraceEx2(
             sessionHandle,
             &KernelNetworkProviderGuid,
@@ -176,7 +178,7 @@ namespace ks::network
             nullptr);
         if (enableResult != ERROR_SUCCESS)
         {
-            stopOwnedTraceSession(sessionHandle, sessionName);
+            (void)stopLocked();
             setLastErrorText(makeEtwErrorText("EnableTraceEx2(Microsoft-Windows-Kernel-Network)", enableResult), enableResult, true);
             return false;
         }
@@ -193,27 +195,23 @@ namespace ks::network
         if (consumerHandle == INVALID_PROCESSTRACE_HANDLE)
         {
             const ULONG openTraceError = ::GetLastError();
-            stopOwnedTraceSession(sessionHandle, sessionName);
-            m_sessionName.clear();
+            (void)stopLocked();
             setLastErrorText(makeEtwErrorText("OpenTraceW", openTraceError), openTraceError, true);
             return false;
         }
 
-        m_sessionHandle = sessionHandle;
-        m_consumerHandle = consumerHandle;
+        m_consumerHandle.store(consumerHandle, std::memory_order_release);
+        m_consumerFinished.store(false, std::memory_order_release);
         m_running.store(true, std::memory_order_release);
         try
         {
-            m_consumerThread = std::thread(&ProcessNetworkEtwMonitor::consumeTrace, this, consumerHandle, m_sessionName);
+            m_consumerThread = std::thread(&ProcessNetworkEtwMonitor::consumeTrace, this, consumerHandle, sessionHandle, m_sessionName);
         }
         catch (...)
         {
             m_running.store(false, std::memory_order_release);
-            (void)::CloseTrace(consumerHandle);
-            stopOwnedTraceSession(sessionHandle, sessionName);
-            m_sessionHandle = 0;
-            m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-            m_sessionName.clear();
+            m_consumerFinished.store(true, std::memory_order_release);
+            (void)stopLocked();
             setLastErrorText("failed to create ETW consumer thread");
             return false;
         }
@@ -223,35 +221,64 @@ namespace ks::network
 
     void ProcessNetworkEtwMonitor::Stop()
     {
-        std::lock_guard<std::mutex> lifecycleGuard(m_lifecycleMutex);
-        m_stopRequested.store(true, std::memory_order_release);
+        (void)StopChecked();
+    }
 
-        if (m_sessionHandle != 0 && !m_sessionName.empty())
+    bool ProcessNetworkEtwMonitor::StopChecked()
+    {
+        std::lock_guard<std::mutex> lifecycleGuard(m_lifecycleMutex);
+        return stopLocked();
+    }
+
+    bool ProcessNetworkEtwMonitor::closeOwnedConsumer()
+    {
+        const auto handle = m_consumerHandle.exchange(INVALID_PROCESSTRACE_HANDLE, std::memory_order_acq_rel);
+        if (handle == INVALID_PROCESSTRACE_HANDLE) return true;
+        const ULONG result = ::CloseTrace(handle);
+        if (result == ERROR_SUCCESS || result == ERROR_CTX_CLOSE_PENDING || result == ERROR_INVALID_HANDLE) return true;
+        auto empty = INVALID_PROCESSTRACE_HANDLE;
+        (void)m_consumerHandle.compare_exchange_strong(empty, handle, std::memory_order_acq_rel);
+        setLastErrorText(makeEtwErrorText("CloseTrace", result), result, true);
+        return false;
+    }
+
+    bool ProcessNetworkEtwMonitor::stopLocked()
+    {
+        m_stopRequested.store(true, std::memory_order_release);
+        m_running.store(false, std::memory_order_release);
+        if (m_sessionHandle != 0 && !m_sessionReleased.load(std::memory_order_acquire))
         {
-            TracePropertiesBlock traceProperties;
-            initializeTraceProperties(&traceProperties, m_sessionName);
-            const ULONG stopResult = ::ControlTraceW(
-                m_sessionHandle,
-                m_sessionName.c_str(),
-                &traceProperties.properties,
-                EVENT_TRACE_CONTROL_STOP);
-            if (stopResult == ERROR_SUCCESS)
+            TracePropertiesBlock properties;
+            initializeTraceProperties(&properties, m_sessionName);
+            const ULONG result = ::ControlTraceW(m_sessionHandle, m_sessionName.c_str(),
+                &properties.properties, EVENT_TRACE_CONTROL_STOP);
+            if (result == ERROR_SUCCESS || result == ERROR_WMI_INSTANCE_NOT_FOUND)
             {
-                m_sessionEventsLost.store(
-                    static_cast<std::uint64_t>(traceProperties.properties.EventsLost),
-                    std::memory_order_relaxed);
+                if (result == ERROR_SUCCESS) m_sessionEventsLost.store(properties.properties.EventsLost, std::memory_order_relaxed);
+                m_sessionReleased.store(true, std::memory_order_release);
+                m_stopError.store(ERROR_SUCCESS, std::memory_order_release);
+            }
+            else
+            {
+                m_stopError.store(result, std::memory_order_release);
+                setLastErrorText(makeEtwErrorText("ControlTraceW(STOP)", result), result, true);
             }
         }
-
-        if (m_consumerThread.joinable())
+        const bool consumerClosed = closeOwnedConsumer();
+        // A failed close cannot authorize discarding a live callback owner.
+        // Keep its thread and value handles for Retry instead of blocking this
+        // attempt forever on join when both STOP and CloseTrace failed.
+        if (!consumerClosed && !m_consumerFinished.load(std::memory_order_acquire)) return false;
+        if (m_consumerThread.joinable()) m_consumerThread.join();
+        const bool sessionReleased = m_sessionHandle == 0 || m_sessionReleased.load(std::memory_order_acquire);
+        const bool complete = sessionReleased && m_consumerHandle.load(std::memory_order_acquire) == INVALID_PROCESSTRACE_HANDLE;
+        if (complete)
         {
-            m_consumerThread.join();
+            m_sessionHandle = 0;
+            m_sessionName.clear();
+            m_cleanupPending.store(false, std::memory_order_release);
         }
-
-        m_sessionHandle = 0;
-        m_consumerHandle = INVALID_PROCESSTRACE_HANDLE;
-        m_sessionName.clear();
-        m_running.store(false, std::memory_order_release);
+        return complete;
     }
 
     bool ProcessNetworkEtwMonitor::IsRunning() const
@@ -272,6 +299,9 @@ namespace ks::network
 
         ProcessNetworkEtwHealth health;
         health.isRunning = IsRunning();
+        health.cleanupPending = m_cleanupPending.load(std::memory_order_acquire);
+        health.stopError = m_stopError.load(std::memory_order_acquire);
+        health.stopErrorKnown = health.stopError != ERROR_SUCCESS;
         health.eventsLost = std::max(bufferEventsLost, sessionEventsLost);
         health.dataLossDetected = (health.eventsLost != 0);
         {
@@ -334,6 +364,7 @@ namespace ks::network
 
     void ProcessNetworkEtwMonitor::consumeTrace(
         const PROCESSTRACE_HANDLE consumerHandle,
+        const TRACEHANDLE sessionHandle,
         std::wstring sessionName)
     {
         PROCESSTRACE_HANDLE activeConsumerHandle = consumerHandle;
@@ -342,16 +373,22 @@ namespace ks::network
             1,
             nullptr,
             nullptr);
-        (void)::CloseTrace(consumerHandle);
+        (void)closeOwnedConsumer();
 
         if (!m_stopRequested.load(std::memory_order_acquire) &&
             processResult != ERROR_SUCCESS &&
             processResult != ERROR_CANCELLED)
         {
             setLastErrorText(makeEtwErrorText("ProcessTrace", processResult), processResult, true);
-            stopOwnedTraceSession(m_sessionHandle, sessionName);
+            const ULONG stopped = stopOwnedTraceSession(sessionHandle, sessionName);
+            if (stopped == ERROR_SUCCESS || stopped == ERROR_WMI_INSTANCE_NOT_FOUND) {
+                m_sessionReleased.store(true, std::memory_order_release);
+            } else {
+                m_stopError.store(stopped, std::memory_order_release);
+            }
         }
 
+        m_consumerFinished.store(true, std::memory_order_release);
         m_running.store(false, std::memory_order_release);
     }
 
