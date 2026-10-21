@@ -215,6 +215,7 @@ private:
     struct PageState {
         HWND hwnd = nullptr;
         std::vector<Placement> placements;
+        bool snapshotDirty = true;
     };
 
     struct DetailTableFilterResult {

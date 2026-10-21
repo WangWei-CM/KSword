@@ -490,7 +490,9 @@ void ProcessDetailPage::UpdateVisiblePage() {
 
     const TabIndex selectedTab = static_cast<TabIndex>(selected);
     if (currentTab_ != selectedTab && currentTab_ != TabIndex::Count) {
-        DestroyPageHost(currentTab_);
+        if (HWND previous = pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
+            ::ShowWindow(previous, SW_HIDE);
+        }
     }
     currentTab_ = selectedTab;
 
@@ -502,7 +504,11 @@ void ProcessDetailPage::UpdateVisiblePage() {
         ::ShowWindow(page, SW_SHOW);
     }
     Layout();
-    PopulateTab(selectedTab);
+    PageState& selectedPage = pages_[static_cast<std::size_t>(selectedTab)];
+    if (selectedPage.snapshotDirty) {
+        PopulateTab(selectedTab);
+        selectedPage.snapshotDirty = false;
+    }
     OnTabActivated(selectedTab);
     RedrawTabClient();
 }
@@ -656,22 +662,22 @@ void ProcessDetailPage::RedrawTabClient() {
 void ProcessDetailPage::OnTabActivated(TabIndex tab) {
     switch (tab) {
     case TabIndex::Token:
-        if (!tokenLoaded_) { RefreshTokenReport(); }
+        if (!tokenLoaded_ && (!tokenReportTask_ || !tokenReportTask_->running())) { RefreshTokenReport(); }
         break;
     case TabIndex::TokenSwitch:
-        if (!tokenSwitchLoaded_) { RefreshTokenSwitches(); }
+        if (!tokenSwitchLoaded_ && (!tokenSwitchTask_ || !tokenSwitchTask_->running())) { RefreshTokenSwitches(); }
         break;
     case TabIndex::Evidence:
-        if (!sectionLoaded_) { RefreshSectionReport(); }
+        if (!sectionLoaded_ && (!evidenceTask_ || !evidenceTask_->running())) { RefreshSectionReport(); }
         break;
     case TabIndex::Hotkey:
-        if (!hotkeyLoaded_) { RefreshHotkeys(); }
+        if (!hotkeyLoaded_ && (!hotkeyTask_ || !hotkeyTask_->running())) { RefreshHotkeys(); }
         break;
     case TabIndex::Keyboard:
-        if (!keyboardLoaded_) { RefreshKeyboard(); }
+        if (!keyboardLoaded_ && (!keyboardTask_ || !keyboardTask_->running())) { RefreshKeyboard(); }
         break;
     case TabIndex::Peb:
-        if (!pebLoaded_) { RefreshPebReport(); }
+        if (!pebLoaded_ && (!pebTask_ || !pebTask_->running())) { RefreshPebReport(); }
         break;
     default:
         break;
@@ -717,6 +723,9 @@ void ProcessDetailPage::BeginSnapshotRefresh(const std::wstring& loadingMessage)
 // tabs never cause eager control creation or message storms.
 void ProcessDetailPage::ApplySnapshot(ProcessDetailSnapshot snapshot) {
     snapshot_ = std::move(snapshot);
+    for (PageState& page : pages_) {
+        page.snapshotDirty = true;
+    }
     pendingThreadEntries_ = std::make_shared<const std::vector<ProcessThreadInfo>>(std::move(snapshot_.threads));
     pendingModuleEntries_ = std::make_shared<const std::vector<ProcessModuleInfo>>(std::move(snapshot_.modules));
     ++threadSourceGeneration_;
@@ -725,6 +734,7 @@ void ProcessDetailPage::ApplySnapshot(ProcessDetailSnapshot snapshot) {
     RequestModuleFilter(true);
     if (currentTab_ != TabIndex::Count && pages_[static_cast<std::size_t>(currentTab_)].hwnd) {
         PopulateTab(currentTab_);
+        pages_[static_cast<std::size_t>(currentTab_)].snapshotDirty = false;
     }
 }
 

@@ -781,7 +781,8 @@ std::vector<ProcessR0AuditInfo> CollectR0AuditRows(DWORD processId, bool& succee
 
 ProcessDetailSnapshot ProcessDetailCollector::Collect(
     DWORD processId,
-    ULONGLONG expectedCreationTime100ns) const {
+    ULONGLONG expectedCreationTime100ns,
+    const bool includeThreadsAndModules) const {
     ProcessDetailSnapshot snapshot{};
     snapshot.basic.processId = processId;
     if (processId == 0 || expectedCreationTime100ns == 0U) {
@@ -798,24 +799,26 @@ ProcessDetailSnapshot ProcessDetailCollector::Collect(
 
     snapshot.basic = CollectBasicInfo(processId, snapshot.basicSucceeded);
 
-    std::wstring threadStatus;
-    snapshot.threads = CollectThreads(processId, snapshot.threadsSucceeded, threadStatus);
-    if (snapshot.threadsSucceeded) {
-        const std::size_t boundedThreadCount = (std::min)(
-            snapshot.threads.size(),
-            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)()));
-        snapshot.basic.threadCount = static_cast<DWORD>(boundedThreadCount);
-    }
-    if (!snapshot.threadsSucceeded && !threadStatus.empty()) {
-        snapshot.errorText += L"Threads: " + threadStatus + L"\r\n";
-    }
+    if (includeThreadsAndModules) {
+        std::wstring threadStatus;
+        snapshot.threads = CollectThreads(processId, snapshot.threadsSucceeded, threadStatus);
+        if (snapshot.threadsSucceeded) {
+            const std::size_t boundedThreadCount = (std::min)(
+                snapshot.threads.size(),
+                static_cast<std::size_t>((std::numeric_limits<DWORD>::max)()));
+            snapshot.basic.threadCount = static_cast<DWORD>(boundedThreadCount);
+        }
+        if (!snapshot.threadsSucceeded && !threadStatus.empty()) {
+            snapshot.errorText += L"Threads: " + threadStatus + L"\r\n";
+        }
 
-    std::wstring moduleStatus;
-    snapshot.modules = CollectModules(processId, snapshot.modulesSucceeded, moduleStatus);
-    if (!snapshot.modulesSucceeded && !moduleStatus.empty()) {
-        snapshot.errorText += L"Modules: " + moduleStatus + L"\r\n";
+        std::wstring moduleStatus;
+        snapshot.modules = CollectModules(processId, snapshot.modulesSucceeded, moduleStatus);
+        if (!snapshot.modulesSucceeded && !moduleStatus.empty()) {
+            snapshot.errorText += L"Modules: " + moduleStatus + L"\r\n";
+        }
+        AttachRepresentativeThreads(snapshot.modules, snapshot.threads);
     }
-    AttachRepresentativeThreads(snapshot.modules, snapshot.threads);
 
     std::wstring r0AuditStatus;
     snapshot.r0AuditRows = CollectR0AuditRows(processId, snapshot.r0AuditSucceeded, r0AuditStatus);

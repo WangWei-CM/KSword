@@ -434,7 +434,7 @@ void ProcessDetailPage::RefreshSectionReport() {
     evidenceTask_->request(
         [processId, expectedCreationTime100ns] {
             ProcessDetailCollector collector;
-            return collector.Collect(processId, expectedCreationTime100ns);
+            return collector.Collect(processId, expectedCreationTime100ns, false);
         },
         [this](std::uint64_t, std::optional<ProcessDetailSnapshot>&& result, std::exception_ptr error) {
             if (error || !result.has_value()) {
