@@ -17,6 +17,7 @@
 #include <QWidget>
 #include <QString>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <array>
 #include "../UI/PageNavigationCatalog.h"
 
@@ -833,9 +834,10 @@ private:
     void rebuildDriverCapabilityTable(const QString& filterKeyword);
 
     // rebuildCallbackEnumTable：
-    // - 作用：根据筛选关键词重建回调遍历表。
-    // - 参数 filterKeyword：筛选关键词（空表示不过滤）。
-    void rebuildCallbackEnumTable(const QString& filterKeyword);
+    // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
+    // - sourceChanged：成功源回执已替换缓存；关键词取当前输入框。
+    void rebuildCallbackEnumTable(bool sourceChanged = false);
+    void prepareMinifilterCallbackTree();
 
     // rebuildShadowSsdtTable：
     // - 新源快照重建items；普通查询保留items并只更新canonical过滤。
@@ -1251,7 +1253,10 @@ private:
     QLineEdit* m_callbackEnumFilterEdit = nullptr;                  // m_callbackEnumFilterEdit：回调遍历筛选输入框。
     QLabel* m_callbackEnumStatusLabel = nullptr;                    // m_callbackEnumStatusLabel：回调遍历状态文本。
     QTableWidget* m_callbackEnumTable = nullptr;                    // m_callbackEnumTable：回调遍历表。
-    QTreeWidget* m_minifilterCallbackTree = nullptr;                // m_minifilterCallbackTree：Filter -> Pre/Post 回调树。
+    QTreeWidget* m_minifilterCallbackTree = nullptr;
+    bool m_minifilterCallbackSourceDirty = true;
+    bool m_minifilterCallbackFilterDirty = true;
+    QPersistentModelIndex m_callbackEnumSeparatorIndex;                // m_minifilterCallbackTree：Filter -> Pre/Post 回调树。
     ks::ui::StructuredFieldView* m_callbackEnumDetailEditor = nullptr;         // m_callbackEnumDetailEditor：回调遍历详情文本框。
     QWidget* m_callbackRemoveContentWidget = nullptr;               // m_callbackRemoveContentWidget：嵌入在回调遍历页底部的移除面板容器。
     QVBoxLayout* m_callbackRemoveLayout = nullptr;                  // m_callbackRemoveLayout：回调移除面板内部布局。

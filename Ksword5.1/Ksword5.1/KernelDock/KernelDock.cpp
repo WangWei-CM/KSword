@@ -372,6 +372,9 @@ QWidget* KernelDock::kswordSelfDriverPage() const
 
 bool KernelDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_minifilterCallbackTree && event != nullptr
+        && (event->type() == QEvent::Show || event->type() == QEvent::ShowToParent))
+        prepareMinifilterCallbackTree();
     if (watched == m_selfDriverPage &&
         event != nullptr &&
         (event->type() == QEvent::Show ||
@@ -392,7 +395,8 @@ void KernelDock::applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, c
         QStringLiteral("kernel_result_filter"), {table},
         [owner, tableGuard, editGuard, separatorRow]() {
             if (owner && tableGuard && editGuard)
-                owner->applyKernelResultFilter(tableGuard, editGuard, separatorRow);
+                owner->applyKernelResultFilter(tableGuard, editGuard,
+                    tableGuard == owner->m_callbackEnumTable ? owner->m_callbackEnumSeparatorIndex.row() : separatorRow);
         })) return;
 
     const QString keyword = edit->text().trimmed();
