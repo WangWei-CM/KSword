@@ -1,5 +1,6 @@
 #include "WindowGuiHandleTab.h"
 #include "WindowSnapshotSupport.h"
+#include "../UI/TableCompleteExport.h"
 #include "WindowImmutableTableSupport.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/TableContextMenu.h"
@@ -774,12 +775,7 @@ void WindowGuiHandleTab::showCopyMenu(const QPoint& position)
     }
     else if (selected == copyAll)
     {
-        QStringList lines;
-        for (int tableRow = 0; tableRow < m_table->rowCount(); ++tableRow)
-        {
-            lines << rowClipboardText(m_table, tableRow, tableRow == 0);
-        }
-        QApplication::clipboard()->setText(lines.join(QLatin1Char('\n')));
+        ks::ui::CopyCompleteTableRows(m_table, ks::ui::CompleteTableScope::All, ks::ui::CompleteTableColumns::All);
     }
     else if (selected == openProcessAction)
     {
