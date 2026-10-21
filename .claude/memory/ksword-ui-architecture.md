@@ -478,3 +478,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 七表首次筛选也复用结果发布定时器：原最终排序后先让出，再按256行/4ms目标扫描原完整搜索字段；关键词或共享行布局修订变化重启匹配。完整canonical排除集合接纳并清理隐藏选择后才解除preparing/恢复输入/调用原onReady，回调树准备仍在回调表首筛后。空关键词/分隔行沿原同步帮助函数语义；Qt最终排序、共享排除集合规范化及集合/缓存最后引用退役仍同步，不能据遍历分片认定KCB-003全部完成。
 
 - `AsyncOperation`的回投包装拥有本次Result，现有`apply(*result, ticket)`可接收`Result&`；一次性PreparedRows在页面完成代次/可见性/模型修订/完整捕获门禁后直接move给模型，避免GUI再复制整份行向量及差异数组，不需新增共享指针或控制器。门禁延期只重新请求最新值，不保留对回投局部Result的引用；消费后不可重用计划。`setPreparedRows`仍按值拥有参数，保证模型通知中页面/控制器被销毁时计划活到提交退出。普通setRows、最终Qt结构提交/排序及旧值退役仍有原同步成本，不据此宣称整项完成或量测内存改善。
+
+- 诊断开启时，主程序在真实QApplication::notify前后用PerfNotifyScope记录分派墙钟及线程CPU；直接嵌套notify按scope/parent身份分出inclusive/self，不把后续0ms回投或其它事件时间塞进Paint/Layout。线程cycles保留原单位，不能换算毫秒；GetThreadTimes的100ns累计值保留OS计账精度，短事件为0不代表无CPU。probe_setup_ns/probe_until_enqueue_ns分别说明探针准备和截至受锁保护入队的墙钟开销，不包含最后unlock/notify尾部，也不能当CPU开销。receiver标签在派发前复制，之后不解引用；初始化后才采样，退出关闭前停用。默认宏0时仍直接构造QApplication，notify覆盖和CPU采样均编译移除。该边界是Qt分派，不等同物理呈现；输入到呈现及退出持久化仍由MR-003/004单列。

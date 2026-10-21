@@ -1,5 +1,6 @@
 #include "UI/FlatButtonTheme.h"
 #include "UI/StandardWidgetTheme.h"
+#include "UI/PerfTrace.h"
 #include "UI/FloatingScrollbars.h"
 #include "MainWindow.h"
 #include "theme.h"
@@ -51,6 +52,19 @@
 
 namespace
 {
+#if KSWORD_PERF_TRACE_ENABLED
+    class TracedKswordApplication final : public QApplication
+    {
+    public:
+        using QApplication::QApplication;
+        bool notify(QObject* receiver, QEvent* event) override
+        {
+            ks::ui::PerfNotifyScope dispatch(receiver, event ? static_cast<int>(event->type()) : -1);
+            return QApplication::notify(receiver, event);
+        }
+    };
+#endif
+
     constexpr wchar_t kUnlockerKeyName[] = L"Ksword.FileUnlocker";
     constexpr wchar_t kKswordMainWindowPropertyName[] = L"KswordARK.MainWindow.Singleton.Release";
     constexpr wchar_t kPrivilegeRestartArgument[] = L"--ksword-privilege-restart";
@@ -1600,7 +1614,11 @@ int main(int argc, char* argv[])
     }
 
     startupTraceRaw("before QApplication construction");
+#if KSWORD_PERF_TRACE_ENABLED
+    TracedKswordApplication app(argc, argv);
+#else
     QApplication app(argc, argv);
+#endif
     // Match MainWindow::isDarkModeEffective before the first themed palette/QSS.
     bool startupDarkModeEnabled = false;
     if (startupSettings.themeMode == ks::settings::ThemeMode::Dark)
@@ -1628,6 +1646,9 @@ int main(int argc, char* argv[])
     // 这里补上后，上述三条链路才真正可用；键名沿用各调用点已有的分组前缀，不做迁移。
     QCoreApplication::setOrganizationName(QStringLiteral("Ksword"));
     QCoreApplication::setApplicationName(QStringLiteral("Ksword5.1"));
+#if KSWORD_PERF_TRACE_ENABLED
+    ks::ui::InitializePerfTrace(); // Cover cold widgets too, after QApplication is fully constructed.
+#endif
 
     // startupSystemFont 作用：
     // - 在读取并应用任何持久化字体 family 前保存 Qt/系统提供的完整字体基线；

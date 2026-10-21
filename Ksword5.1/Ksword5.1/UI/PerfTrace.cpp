@@ -24,9 +24,38 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <limits>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 namespace
 {
+    std::atomic_bool notifyTraceReady{false};
+    thread_local ks::ui::PerfNotifyScope* currentNotifyScope = nullptr;
+
+    struct NotifyCpuSample
+    {
+        quint64 cycles = 0, time100ns = 0;
+        bool cyclesValid = false, timeValid = false;
+    };
+
+    NotifyCpuSample sampleNotifyCpu()
+    {
+        NotifyCpuSample sample;
+        ULONG64 cycles = 0;
+        sample.cyclesValid = ::QueryThreadCycleTime(::GetCurrentThread(), &cycles) != FALSE;
+        sample.cycles = cycles;
+        FILETIME creation{}, exit{}, kernel{}, user{};
+        sample.timeValid = ::GetThreadTimes(::GetCurrentThread(), &creation, &exit, &kernel, &user) != FALSE;
+        if (sample.timeValid)
+            sample.time100ns = (static_cast<quint64>(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime)
+                + (static_cast<quint64>(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+        return sample;
+    }
+
     const QElapsedTimer& referenceClock()
     {
         static const QElapsedTimer clock = []()
@@ -57,6 +86,11 @@ namespace
         qint64 durationNs = -1;
         qint64 count = -1;
         quint64 scopeId = 0;
+        quint64 parentScopeId = 0;
+        int eventType = -1;
+        qint64 selfWallNs = -1, threadCycles = -1, selfThreadCycles = -1;
+        qint64 threadCpu100ns = -1, selfThreadCpu100ns = -1;
+        qint64 probeSetupNs = -1, probeUntilEnqueueNs = -1;
     };
 
     struct TraceWriterState
@@ -177,6 +211,24 @@ namespace
                     record.insert(QStringLiteral("attribution"), QStringLiteral("unattributed_interval"));
                     record.insert(QStringLiteral("interval_ns"), static_cast<double>(value.endNs - value.beginNs));
                 }
+                if (value.eventType >= 0)
+                {
+                    record.insert(QStringLiteral("measurement"), QStringLiteral("qt_notify_dispatch"));
+                    record.insert(QStringLiteral("event_type"), value.eventType);
+                    record.insert(QStringLiteral("parent_scope_id"), QString::number(value.parentScopeId));
+                    record.insert(QStringLiteral("self_wall_ns"), static_cast<double>(value.selfWallNs));
+                    if (value.threadCycles >= 0)
+                        record.insert(QStringLiteral("thread_cycles"), QString::number(value.threadCycles));
+                    if (value.selfThreadCycles >= 0)
+                        record.insert(QStringLiteral("self_thread_cycles"), QString::number(value.selfThreadCycles));
+                    if (value.threadCpu100ns >= 0)
+                        record.insert(QStringLiteral("thread_cpu_100ns"), QString::number(value.threadCpu100ns));
+                    if (value.selfThreadCpu100ns >= 0)
+                        record.insert(QStringLiteral("self_thread_cpu_100ns"), QString::number(value.selfThreadCpu100ns));
+                    record.insert(QStringLiteral("probe_setup_ns"), static_cast<double>(value.probeSetupNs));
+                    record.insert(QStringLiteral("probe_until_enqueue_ns"), static_cast<double>(value.probeUntilEnqueueNs));
+                    record.insert(QStringLiteral("physical_present_measured"), false);
+                }
                 writeRecord(record);
             }
             if (file.isOpen())
@@ -229,6 +281,19 @@ namespace ks::ui
                 m_cachedContext = target;
             }
             enqueue(makeRecord("mark", operation, target));
+        }
+
+        quint64 nextNotifyId() { return m_nextScopeId.fetch_add(1, std::memory_order_relaxed); }
+
+        void recordNotify(TraceRecord record)
+        {
+            record.event = QStringLiteral("notify_dispatch");
+            record.operation = QStringLiteral("perf_notify_dispatch");
+            {
+                std::lock_guard<std::mutex> lock(m_contextMutex);
+                record.context = m_cachedContext;
+            }
+            enqueue(std::move(record));
         }
 
     protected:
@@ -305,6 +370,7 @@ namespace ks::ui
 
         void closeWriter()
         {
+            notifyTraceReady.store(false, std::memory_order_relaxed);
             {
                 std::lock_guard<std::mutex> lock(m_writer->mutex);
                 m_writer->closed = true;
@@ -349,7 +415,13 @@ namespace ks::ui
                 if (m_writer->records.size() >= kPendingRecordLimit)
                     ++m_writer->dropped;
                 else
+                {
                     m_writer->records.push_back(std::move(record));
+                    auto& queued = m_writer->records.back();
+                    if (queued.eventType >= 0)
+                        queued.probeUntilEnqueueNs = queued.probeSetupNs
+                            + referenceClock().nsecsElapsed() - queued.endNs;
+                }
             }
             m_writer->ready.notify_one();
         }
@@ -407,6 +479,87 @@ namespace ks::ui
     void InitializePerfTrace()
     {
         (void)PerfTrace::instance();
+        notifyTraceReady.store(true, std::memory_order_relaxed);
+    }
+
+    PerfNotifyScope::PerfNotifyScope(QObject* receiver, const int eventType) noexcept
+    {
+        try
+        {
+            auto* app = QCoreApplication::instance();
+            if (!notifyTraceReady.load(std::memory_order_relaxed) || !app || !receiver
+                || eventType < 0 || QThread::currentThread() != app->thread()) return;
+            const auto setupStarted = referenceClock().nsecsElapsed();
+            // Copy identity before dispatch: the event may destroy its receiver.
+            m_target = QString::fromUtf8(receiver->metaObject()->className());
+            if (!receiver->objectName().isEmpty()) m_target += QLatin1Char('/') + receiver->objectName();
+            m_scopeId = PerfTrace::instance().nextNotifyId();
+            m_parent = currentNotifyScope;
+            m_eventType = eventType;
+            const auto cpu = sampleNotifyCpu();
+            m_startedCycles = cpu.cycles;
+            m_startedCpu100ns = cpu.time100ns;
+            m_cyclesValid = cpu.cyclesValid;
+            m_cpuValid = cpu.timeValid;
+            m_startedAtNs = referenceClock().nsecsElapsed();
+            m_setupNs = m_startedAtNs - setupStarted;
+            currentNotifyScope = this;
+            m_active = true;
+        }
+        catch (...) {} // Diagnostics must not change event delivery.
+    }
+
+    PerfNotifyScope::~PerfNotifyScope() noexcept
+    {
+        if (!m_active) return;
+        currentNotifyScope = m_parent;
+        try
+        {
+            const auto endedAt = referenceClock().nsecsElapsed();
+            const auto cpu = sampleNotifyCpu();
+            const auto wall = std::max<qint64>(0, endedAt - m_startedAtNs);
+            const bool cyclesValid = m_cyclesValid && cpu.cyclesValid && cpu.cycles >= m_startedCycles
+                && cpu.cycles - m_startedCycles <= static_cast<quint64>(std::numeric_limits<qint64>::max());
+            const bool timeValid = m_cpuValid && cpu.timeValid && cpu.time100ns >= m_startedCpu100ns
+                && cpu.time100ns - m_startedCpu100ns <= static_cast<quint64>(std::numeric_limits<qint64>::max());
+            const auto cycles = cyclesValid ? cpu.cycles - m_startedCycles : 0;
+            const auto time = timeValid ? cpu.time100ns - m_startedCpu100ns : 0;
+            if (m_parent)
+            {
+                m_parent->m_childWallNs += wall;
+                if (cyclesValid && std::numeric_limits<quint64>::max() - m_parent->m_childCycles >= cycles)
+                    m_parent->m_childCycles += cycles;
+                else m_parent->m_childCyclesValid = false;
+                if (timeValid && std::numeric_limits<quint64>::max() - m_parent->m_childCpu100ns >= time)
+                    m_parent->m_childCpu100ns += time;
+                else m_parent->m_childCpuValid = false;
+            }
+            if (!notifyTraceReady.load(std::memory_order_relaxed)) return;
+            TraceRecord record;
+            record.atNs = record.endNs = endedAt;
+            record.beginNs = m_startedAtNs;
+            record.durationNs = wall;
+            record.scopeId = m_scopeId;
+            record.parentScopeId = m_parent ? m_parent->m_scopeId : 0;
+            record.eventType = m_eventType;
+            record.target = std::move(m_target);
+            record.selfWallNs = std::max<qint64>(0, wall - m_childWallNs);
+            if (cyclesValid)
+            {
+                record.threadCycles = static_cast<qint64>(cycles);
+                if (m_childCyclesValid && m_childCycles <= cycles)
+                    record.selfThreadCycles = static_cast<qint64>(cycles - m_childCycles);
+            }
+            if (timeValid)
+            {
+                record.threadCpu100ns = static_cast<qint64>(time);
+                if (m_childCpuValid && m_childCpu100ns <= time)
+                    record.selfThreadCpu100ns = static_cast<qint64>(time - m_childCpu100ns);
+            }
+            record.probeSetupNs = m_setupNs;
+            PerfTrace::instance().recordNotify(std::move(record));
+        }
+        catch (...) {}
     }
 
     PerfScope::PerfScope(const char* operation, QString target)

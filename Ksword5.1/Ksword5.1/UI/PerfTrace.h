@@ -3,6 +3,8 @@
 #include <QElapsedTimer>
 #include <QString>
 
+class QObject;
+
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
 // 重新构建后在 exe 同目录读取 ksword_perf_trace.jsonl；也可用 KSWORD_PERF_TRACE 指定路径。
@@ -36,6 +38,29 @@ namespace ks::ui
 
     // GUI 宿主初始化诊断；Dock 标记直接维护观察缓存，不注册 UI 查询回调。
     void InitializePerfTrace();
+
+    // Wrap only the real GUI notify call. CPU cycles remain cycles; thread time
+    // is the OS's 100ns counter, not a conversion of wall time or clock cycles.
+    // Self values subtract nested notify bodies; diagnostic overhead is reported
+    // separately and is still present in the observed dispatch.
+    class PerfNotifyScope final
+    {
+    public:
+        PerfNotifyScope(QObject* receiver, int eventType) noexcept;
+        ~PerfNotifyScope() noexcept;
+        PerfNotifyScope(const PerfNotifyScope&) = delete;
+        PerfNotifyScope& operator=(const PerfNotifyScope&) = delete;
+    private:
+        PerfNotifyScope* m_parent = nullptr;
+        QString m_target;
+        quint64 m_scopeId = 0;
+        quint64 m_startedCycles = 0, m_startedCpu100ns = 0;
+        quint64 m_childCycles = 0, m_childCpu100ns = 0;
+        qint64 m_startedAtNs = 0, m_childWallNs = 0, m_setupNs = 0;
+        int m_eventType = -1;
+        bool m_active = false, m_cyclesValid = false, m_cpuValid = false;
+        bool m_childCyclesValid = true, m_childCpuValid = true;
+    };
 
     // 作用域计时器：构造时开始计时，析构时自动记录，允许提前结束或补充计数。
     class PerfScope final
@@ -71,6 +96,12 @@ namespace ks::ui
     inline qint64 PerfTraceNowNs() { return 0; }
     inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}
     inline void InitializePerfTrace() {}
+
+    class PerfNotifyScope final
+    {
+    public:
+        PerfNotifyScope(QObject*, int) noexcept {}
+    };
 
     // 关闭时的作用域计时器空实现：签名与开启时一致，调用点不需要条件编译。
     class PerfScope final
