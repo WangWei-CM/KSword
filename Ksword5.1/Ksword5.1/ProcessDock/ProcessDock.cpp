@@ -13,6 +13,7 @@
 #include "../UI/TablePresentation.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/SecondaryPageLayout.h"
+#include <QEvent>
 #include <QDynamicPropertyChangeEvent>
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
@@ -9339,6 +9340,7 @@ void ProcessDock::rebuildTable()
 
     // 预计算所有资源/工作量列的本轮最大幅值，供单元格强度染色共用。
     // CPU/GPU 是 0~100 的绝对百分比；其它指标按当前可见进程中的同列最大幅值归一化。
+    const auto previousHighlightMaximums = m_processUsageHighlightMaximums;
     m_processUsageHighlightMaximums.fill(0.0);
     for (const DisplayRow& displayRow : displayRows)
     {
@@ -9426,6 +9428,10 @@ void ProcessDock::rebuildTable()
         }
         tableRow.depth = displayRow.depth;
         tableRow.hasChildren = displayRow.hasChildren;
+        tableRow.expanded = tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate
+            ? m_friendlyExpandedStateByKey.value(tableRow.expansionKey, false)
+            : tableRow.rowKind == ProcessTableRowKind::GroupHeader
+                ? m_friendlyExpandedStateByKey.value(tableRow.expansionKey, true) : tableRow.hasChildren;
         tableRow.isNew = displayRow.isNew;
         tableRow.isExited = displayRow.isExited;
         tableRow.isKernelOnly = displayRow.isKernelOnly;
@@ -9529,9 +9535,18 @@ void ProcessDock::rebuildTable()
     }
     m_processTable->setUpdatesEnabled(false);
 
+    const std::weak_ptr<const ks::process::CpuCoreUsageSnapshot> currentCpuSnapshot(m_latestCpuCoreUsageSnapshot);
+    const bool cpuSnapshotChanged = currentCpuSnapshot.owner_before(m_presentedCpuCoreUsageSnapshot)
+        || m_presentedCpuCoreUsageSnapshot.owner_before(currentCpuSnapshot);
+    const bool cpuSizeChanged = m_presentedLogicalCpuCount != m_logicalCpuCount;
+    m_processTableModel->setRowChangeResolver([this, previousHighlightMaximums, cpuSnapshotChanged, cpuSizeChanged]
+        (const ProcessTableRow& before, const ProcessTableRow& after)
+        { return processTableChanges(before, after, previousHighlightMaximums, cpuSnapshotChanged, cpuSizeChanged); });
     const auto modelApplyStartTime = std::chrono::steady_clock::now();
     const ProcessTableModel::UpdateStats modelUpdateStats =
         m_processTableModel->setRows(std::move(tableRows));
+    m_presentedCpuCoreUsageSnapshot = currentCpuSnapshot;
+    m_presentedLogicalCpuCount = m_logicalCpuCount;
     const auto modelApplyElapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - modelApplyStartTime).count();
 
@@ -10947,32 +10962,346 @@ bool ProcessDock::processUsageHighlightValue(
     return true;
 }
 
-bool ProcessDock::processUsageHighlightRatio(
-    const ks::process::ProcessRecord& processRecord,
-    const TableColumn column,
-    double* const ratioOut) const
+std::vector<ProcessDock::ProcessTableModel::ColumnChange> ProcessDock::processTableChanges(
+    const ProcessTableRow& before, const ProcessTableRow& after,
+    const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& previousMaximums,
+    bool cpuSnapshotChanged, bool cpuSizeChanged) const
 {
-    if (ratioOut == nullptr)
+    using Change = ProcessTableModel::ColumnChange;
+    std::vector<Change> result;
+    const int last = static_cast<int>(TableColumn::Count) - 1;
+    if (before.rowKind != after.rowKind) return {{0, last, {}}}; // includes flags/font/row semantics
+    const auto& a = before.record;
+    const auto& b = after.record;
+    const auto add = [&](TableColumn column, int role)
+        { result.push_back({static_cast<int>(column), static_cast<int>(column), {role}}); };
+    if (before.identityKey != after.identityKey) result.push_back({0, last, {Qt::UserRole}});
+    const bool group = after.rowKind == ProcessTableRowKind::GroupHeader;
+    if (cpuSizeChanged) add(TableColumn::CpuCore, Qt::SizeHintRole);
+    if (before.depth != after.depth) add(TableColumn::Name, ProcessTreeDepthRole);
+    if (before.hasChildren != after.hasChildren) add(TableColumn::Name, ProcessExpandableRole);
+    if (before.expanded != after.expanded) add(TableColumn::Name, ProcessExpandedRole);
+    if (!group)
     {
-        return false;
+        if (a.processName != b.processName || a.imagePath != b.imagePath)
+            add(TableColumn::Name, Qt::DecorationRole); // cached icon identity; never resolve icons here
+        if (a.efficiencyModeSupported != b.efficiencyModeSupported) add(TableColumn::Name, ProcessEfficiencyModeKnownRole);
+        if (a.efficiencyModeEnabled != b.efficiencyModeEnabled) add(TableColumn::Name, ProcessEfficiencyModeRole);
+        if (before.friendlyGroupType != after.friendlyGroupType)
+        { add(TableColumn::ProcessType, Qt::DisplayRole); add(TableColumn::ProcessType, ProcessNumericSortRole); }
+        if (before.cpuCoreProcessIds != after.cpuCoreProcessIds
+            || before.activitySnapshotActive != after.activitySnapshotActive)
+            add(TableColumn::CpuCore, ks::ui::ProcessCpuProcessIdsRole);
+        const auto hasCpuSample = [](const ProcessTableRow& row)
+            { return !row.activitySnapshotActive && !row.isExited && !row.cpuCoreProcessIds.isEmpty(); };
+        if (hasCpuSample(before) != hasCpuSample(after) || (hasCpuSample(after) && cpuSnapshotChanged))
+            add(TableColumn::CpuCore, ks::ui::ProcessCpuUsageSnapshotRole);
     }
-
-    double value = 0.0;
-    if (!processUsageHighlightValue(processRecord, column, &value))
+    const bool colorStateChanged = before.isNew != after.isNew || before.isExited != after.isExited
+        || before.isKernelOnly != after.isKernelOnly || a.r0Flags != b.r0Flags;
+    for (int index = 0; index <= last; ++index)
     {
-        return false;
+        const auto column = static_cast<TableColumn>(index);
+        bool displayDirty = false, numericDirty = false;
+        switch (column)
+        {
+        case TableColumn::Name:
+            displayDirty = a.processName != b.processName;
+            numericDirty = false;
+            break;
+        case TableColumn::Pid:
+            displayDirty = a.pid != b.pid;
+            numericDirty = a.pid != b.pid;
+            break;
+        case TableColumn::Cpu:
+            displayDirty = a.cpuPercent != b.cpuPercent;
+            numericDirty = a.cpuPercent != b.cpuPercent;
+            break;
+        case TableColumn::Ram:
+            displayDirty = a.ramMB != b.ramMB || a.workingSetMB != b.workingSetMB;
+            numericDirty = a.workingSetMB != b.workingSetMB;
+            break;
+        case TableColumn::Disk:
+            displayDirty = a.diskMBps != b.diskMBps;
+            numericDirty = a.diskMBps != b.diskMBps;
+            break;
+        case TableColumn::Gpu:
+            displayDirty = a.gpuPercent != b.gpuPercent;
+            numericDirty = a.gpuPercent != b.gpuPercent;
+            break;
+        case TableColumn::Net:
+            displayDirty = a.netRxKBps != b.netRxKBps || a.netTxKBps != b.netTxKBps;
+            numericDirty = a.netKBps != b.netKBps;
+            break;
+        case TableColumn::Signature:
+            displayDirty = a.signatureState != b.signatureState;
+            numericDirty = false;
+            break;
+        case TableColumn::Path:
+            displayDirty = a.imagePath != b.imagePath;
+            numericDirty = false;
+            break;
+        case TableColumn::ParentPid:
+            displayDirty = a.parentPid != b.parentPid;
+            numericDirty = a.parentPid != b.parentPid;
+            break;
+        case TableColumn::CommandLine:
+            displayDirty = a.commandLine != b.commandLine;
+            numericDirty = false;
+            break;
+        case TableColumn::User:
+            displayDirty = a.userName != b.userName;
+            numericDirty = false;
+            break;
+        case TableColumn::StartTime:
+            displayDirty = a.startTimeText != b.startTimeText;
+            numericDirty = a.creationTime100ns != b.creationTime100ns;
+            break;
+        case TableColumn::IsAdmin:
+            displayDirty = a.isAdmin != b.isAdmin;
+            numericDirty = a.isAdmin != b.isAdmin;
+            break;
+        case TableColumn::PplLevel:
+            displayDirty = a.protectionLevelKnown != b.protectionLevelKnown || a.protectionLevelText != b.protectionLevelText;
+            numericDirty = a.protectionLevel != b.protectionLevel || a.protectionLevelKnown != b.protectionLevelKnown;
+            break;
+        case TableColumn::Protection:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0Protection != b.r0Protection;
+            numericDirty = a.r0Protection != b.r0Protection;
+            break;
+        case TableColumn::Ppl:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0Protection != b.r0Protection;
+            numericDirty = a.r0Protection != b.r0Protection;
+            break;
+        case TableColumn::HandleCount:
+            displayDirty = a.handleCount != b.handleCount;
+            numericDirty = a.handleCount != b.handleCount;
+            break;
+        case TableColumn::HandleTable:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0ObjectTableAddress != b.r0ObjectTableAddress;
+            numericDirty = a.r0FieldFlags != b.r0FieldFlags;
+            break;
+        case TableColumn::SectionObject:
+            displayDirty = a.r0FieldFlags != b.r0FieldFlags || a.r0SectionObjectAddress != b.r0SectionObjectAddress;
+            numericDirty = a.r0FieldFlags != b.r0FieldFlags;
+            break;
+        case TableColumn::R0Status:
+            displayDirty = a.r0Status != b.r0Status;
+            numericDirty = a.r0Status != b.r0Status;
+            break;
+        case TableColumn::PackageName:
+            displayDirty = a.packageFullName != b.packageFullName || a.packageNameKnown != b.packageNameKnown;
+            numericDirty = false;
+            break;
+        case TableColumn::Status:
+            displayDirty = a.processStateKnown != b.processStateKnown || a.processSuspended != b.processSuspended;
+            numericDirty = a.processStateKnown != b.processStateKnown || a.processSuspended != b.processSuspended;
+            break;
+        case TableColumn::SessionId:
+            displayDirty = a.sessionId != b.sessionId;
+            numericDirty = a.sessionId != b.sessionId;
+            break;
+        case TableColumn::JobObject:
+            displayDirty = a.inJobObject != b.inJobObject || a.jobObjectKnown != b.jobObjectKnown;
+            numericDirty = a.inJobObject != b.inJobObject || a.jobObjectKnown != b.jobObjectKnown;
+            break;
+        case TableColumn::CpuTime:
+            displayDirty = a.rawCpuTime100ns != b.rawCpuTime100ns;
+            numericDirty = a.rawCpuTime100ns != b.rawCpuTime100ns;
+            break;
+        case TableColumn::CycleTime:
+            displayDirty = a.cycleTime != b.cycleTime || a.cycleTimeKnown != b.cycleTimeKnown;
+            numericDirty = a.cycleTime != b.cycleTime || a.cycleTimeKnown != b.cycleTimeKnown;
+            break;
+        case TableColumn::WorkingSet:
+            displayDirty = a.rawWorkingSetBytes != b.rawWorkingSetBytes;
+            numericDirty = a.rawWorkingSetBytes != b.rawWorkingSetBytes;
+            break;
+        case TableColumn::PeakWorkingSet:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.peakWorkingSetBytes != b.peakWorkingSetBytes;
+            numericDirty = a.peakWorkingSetBytes != b.peakWorkingSetBytes;
+            break;
+        case TableColumn::WorkingSetDelta:
+            displayDirty = a.workingSetDeltaBytes != b.workingSetDeltaBytes;
+            numericDirty = a.workingSetDeltaBytes != b.workingSetDeltaBytes;
+            break;
+        case TableColumn::ActivePrivateWorkingSet:
+            displayDirty = a.activePrivateWorkingSetBytes != b.activePrivateWorkingSetBytes || a.privateWorkingSetKnown != b.privateWorkingSetKnown;
+            numericDirty = a.activePrivateWorkingSetBytes != b.activePrivateWorkingSetBytes;
+            break;
+        case TableColumn::PrivateWorkingSet:
+            displayDirty = a.privateWorkingSetBytes != b.privateWorkingSetBytes || a.privateWorkingSetKnown != b.privateWorkingSetKnown;
+            numericDirty = a.privateWorkingSetBytes != b.privateWorkingSetBytes;
+            break;
+        case TableColumn::SharedWorkingSet:
+            displayDirty = a.privateWorkingSetKnown != b.privateWorkingSetKnown || a.sharedWorkingSetBytes != b.sharedWorkingSetBytes;
+            numericDirty = a.sharedWorkingSetBytes != b.sharedWorkingSetBytes;
+            break;
+        case TableColumn::CommitSize:
+            displayDirty = a.commitSizeBytes != b.commitSizeBytes || a.memoryDetailKnown != b.memoryDetailKnown;
+            numericDirty = a.commitSizeBytes != b.commitSizeBytes;
+            break;
+        case TableColumn::PagedPool:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pagedPoolBytes != b.pagedPoolBytes;
+            numericDirty = a.pagedPoolBytes != b.pagedPoolBytes;
+            break;
+        case TableColumn::NonPagedPool:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.nonPagedPoolBytes != b.nonPagedPoolBytes;
+            numericDirty = a.nonPagedPoolBytes != b.nonPagedPoolBytes;
+            break;
+        case TableColumn::PageFaults:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pageFaultCount != b.pageFaultCount;
+            numericDirty = a.pageFaultCount != b.pageFaultCount;
+            break;
+        case TableColumn::PageFaultDelta:
+            displayDirty = a.memoryDetailKnown != b.memoryDetailKnown || a.pageFaultDeltaCount != b.pageFaultDeltaCount;
+            numericDirty = a.pageFaultDeltaCount != b.pageFaultDeltaCount;
+            break;
+        case TableColumn::BasePriority:
+            displayDirty = a.basePriority != b.basePriority;
+            numericDirty = a.basePriority != b.basePriority;
+            break;
+        case TableColumn::ThreadCount:
+            displayDirty = a.threadCount != b.threadCount;
+            numericDirty = a.threadCount != b.threadCount;
+            break;
+        case TableColumn::UserObjects:
+            displayDirty = a.guiResourceKnown != b.guiResourceKnown || a.userObjectCount != b.userObjectCount;
+            numericDirty = a.guiResourceKnown != b.guiResourceKnown || a.userObjectCount != b.userObjectCount;
+            break;
+        case TableColumn::GdiObjects:
+            displayDirty = a.gdiObjectCount != b.gdiObjectCount || a.guiResourceKnown != b.guiResourceKnown;
+            numericDirty = a.gdiObjectCount != b.gdiObjectCount || a.guiResourceKnown != b.guiResourceKnown;
+            break;
+        case TableColumn::IoReads:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioReadOperationCount != b.ioReadOperationCount;
+            numericDirty = a.ioReadOperationCount != b.ioReadOperationCount;
+            break;
+        case TableColumn::IoWrites:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioWriteOperationCount != b.ioWriteOperationCount;
+            numericDirty = a.ioWriteOperationCount != b.ioWriteOperationCount;
+            break;
+        case TableColumn::IoOther:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioOtherOperationCount != b.ioOtherOperationCount;
+            numericDirty = a.ioOtherOperationCount != b.ioOtherOperationCount;
+            break;
+        case TableColumn::IoReadBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioReadTransferBytes != b.ioReadTransferBytes;
+            numericDirty = a.ioReadTransferBytes != b.ioReadTransferBytes;
+            break;
+        case TableColumn::IoWriteBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioWriteTransferBytes != b.ioWriteTransferBytes;
+            numericDirty = a.ioWriteTransferBytes != b.ioWriteTransferBytes;
+            break;
+        case TableColumn::IoOtherBytes:
+            displayDirty = a.ioDetailKnown != b.ioDetailKnown || a.ioOtherTransferBytes != b.ioOtherTransferBytes;
+            numericDirty = a.ioOtherTransferBytes != b.ioOtherTransferBytes;
+            break;
+        case TableColumn::OsContext:
+            displayDirty = a.osContextText != b.osContextText;
+            numericDirty = false;
+            break;
+        case TableColumn::Platform:
+            displayDirty = a.architectureText != b.architectureText;
+            numericDirty = false;
+            break;
+        case TableColumn::UacVirtualization:
+            displayDirty = a.uacVirtualizationState != b.uacVirtualizationState;
+            numericDirty = a.uacVirtualizationState != b.uacVirtualizationState;
+            break;
+        case TableColumn::Description:
+            displayDirty = a.fileDescription != b.fileDescription;
+            numericDirty = false;
+            break;
+        case TableColumn::DataExecutionPrevention:
+            displayDirty = a.dataExecutionPreventionState != b.dataExecutionPreventionState;
+            numericDirty = a.dataExecutionPreventionState != b.dataExecutionPreventionState;
+            break;
+        case TableColumn::ControlFlowGuard:
+            displayDirty = a.controlFlowGuardState != b.controlFlowGuardState;
+            numericDirty = a.controlFlowGuardState != b.controlFlowGuardState;
+            break;
+        case TableColumn::HardwareStackProtection:
+            displayDirty = a.hardwareStackProtectionState != b.hardwareStackProtectionState;
+            numericDirty = a.hardwareStackProtectionState != b.hardwareStackProtectionState;
+            break;
+        case TableColumn::DpiAwareness:
+            displayDirty = a.dpiAwarenessLevel != b.dpiAwarenessLevel;
+            numericDirty = a.dpiAwarenessLevel != b.dpiAwarenessLevel;
+            break;
+        case TableColumn::EnterpriseContext:
+            displayDirty = a.enterpriseContextText != b.enterpriseContextText;
+            numericDirty = false;
+            break;
+        case TableColumn::PowerThrottling:
+            displayDirty = a.efficiencyModeEnabled != b.efficiencyModeEnabled || a.efficiencyModeSupported != b.efficiencyModeSupported;
+            numericDirty = a.efficiencyModeEnabled != b.efficiencyModeEnabled || a.efficiencyModeSupported != b.efficiencyModeSupported;
+            break;
+        case TableColumn::GpuEngine:
+            displayDirty = a.gpuEngineText != b.gpuEngineText;
+            numericDirty = false;
+            break;
+        case TableColumn::GpuDedicatedMemory:
+            displayDirty = a.gpuDedicatedMemoryBytes != b.gpuDedicatedMemoryBytes || a.gpuMemoryKnown != b.gpuMemoryKnown;
+            numericDirty = a.gpuDedicatedMemoryBytes != b.gpuDedicatedMemoryBytes || a.gpuMemoryKnown != b.gpuMemoryKnown;
+            break;
+        case TableColumn::GpuSharedMemory:
+            displayDirty = a.gpuMemoryKnown != b.gpuMemoryKnown || a.gpuSharedMemoryBytes != b.gpuSharedMemoryBytes;
+            numericDirty = a.gpuMemoryKnown != b.gpuMemoryKnown || a.gpuSharedMemoryBytes != b.gpuSharedMemoryBytes;
+            break;
+        case TableColumn::ProcessType:
+            displayDirty = false;
+            numericDirty = false;
+            break;
+        case TableColumn::CpuCore:
+            displayDirty = false;
+            numericDirty = a.cpuCorePercent != b.cpuCorePercent;
+            break;
+        case TableColumn::InjectionSurface:
+            displayDirty = a.injectionDynamicRegions != b.injectionDynamicRegions || a.injectionSurfaceState != b.injectionSurfaceState || a.injectionWritableExecRegions != b.injectionWritableExecRegions;
+            numericDirty = a.injectionDynamicRegions != b.injectionDynamicRegions || a.injectionSurfaceState != b.injectionSurfaceState;
+            break;
+        default: break;
+        }
+        if (column == TableColumn::Name && (group || after.rowKind == ProcessTableRowKind::ApplicationAggregate))
+        {
+            if (before.syntheticTitle != after.syntheticTitle) add(column, Qt::DisplayRole);
+        }
+        else if (!group && displayDirty
+            && formatColumnText(a, column, before.depth) != formatColumnText(b, column, after.depth))
+            add(column, Qt::DisplayRole);
+        if (!group && numericDirty
+            && processNumericSortValue(a, column) != processNumericSortValue(b, column))
+            add(column, ProcessNumericSortRole);
+        // Color dependencies include the per-snapshot normalization maximum,
+        // not just the row's raw value. The same brush function serves painting.
+        if (!group && (displayDirty || numericDirty || colorStateChanged
+            || previousMaximums[static_cast<std::size_t>(index)] != m_processUsageHighlightMaximums[static_cast<std::size_t>(index)]
+            || (column == TableColumn::Signature && (a.signatureTrusted != b.signatureTrusted || a.signatureState != b.signatureState))))
+            for (int role : {Qt::BackgroundRole, Qt::ForegroundRole})
+                if (processTableBrush(before, column, role, previousMaximums)
+                    != processTableBrush(after, column, role, m_processUsageHighlightMaximums)) add(column, role);
     }
-
-    const std::size_t columnIndex = static_cast<std::size_t>(column);
-    if (columnIndex >= m_processUsageHighlightMaximums.size())
+    // Only these table tooltips depend on row values; the others are constant.
+    if (!group)
     {
-        return false;
+        const auto tooltip = [&](TableColumn column, bool dirty)
+        {
+            if (dirty && const_cast<ProcessDock*>(this)->processTableData(before, static_cast<int>(column), Qt::ToolTipRole)
+                != const_cast<ProcessDock*>(this)->processTableData(after, static_cast<int>(column), Qt::ToolTipRole))
+                add(column, Qt::ToolTipRole);
+        };
+        tooltip(TableColumn::Name, a.processName != b.processName || a.r0Flags != b.r0Flags
+            || a.efficiencyModeEnabled != b.efficiencyModeEnabled || before.isKernelOnly != after.isKernelOnly
+            || before.activitySnapshotActive != after.activitySnapshotActive);
+        tooltip(TableColumn::CpuCore, a.cpuPercent != b.cpuPercent || a.cpuCorePercent != b.cpuCorePercent
+            || before.activitySnapshotActive != after.activitySnapshotActive);
+        tooltip(TableColumn::Protection, a.r0ProtectionSource != b.r0ProtectionSource);
+        tooltip(TableColumn::Ppl, a.r0ProtectionSource != b.r0ProtectionSource);
+        tooltip(TableColumn::HandleTable, a.r0ObjectTableSource != b.r0ObjectTableSource);
+        tooltip(TableColumn::SectionObject, a.r0SectionObjectSource != b.r0SectionObjectSource);
     }
-    const double maximumValue = m_processUsageHighlightMaximums[columnIndex];
-    *ratioOut = maximumValue > 0.0
-        ? std::clamp(value / maximumValue, 0.0, 1.0)
-        : 0.0;
-    return true;
+    return result;
 }
 
 QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const int column, const int role)
@@ -11011,15 +11340,7 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         }
         if (role == ProcessExpandedRole)
         {
-            if (tableRow.rowKind == ProcessTableRowKind::ApplicationAggregate)
-            {
-                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, false);
-            }
-            if (tableRow.rowKind == ProcessTableRowKind::GroupHeader)
-            {
-                return m_friendlyExpandedStateByKey.value(tableRow.expansionKey, true);
-            }
-            return tableRow.hasChildren;
+            return tableRow.expanded;
         }
     }
     if (tableColumn == TableColumn::CpuCore && role == Qt::SizeHintRole)
@@ -11235,6 +11556,13 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
         return {};
     }
 
+    return processTableBrush(tableRow, tableColumn, role, m_processUsageHighlightMaximums);
+}
+
+QVariant ProcessDock::processTableBrush(const ProcessTableRow& tableRow, TableColumn tableColumn, int role,
+    const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& maximums) const
+{
+    const auto& processRecord = tableRow.record;
     const QColor adminYesColor = KswordTheme::SuccessColor();
     const QColor adminNoColor = KswordTheme::ErrorColor();
 
@@ -11270,10 +11598,10 @@ QVariant ProcessDock::processTableData(const ProcessTableRow& tableRow, const in
     }
 
     double usageHighlightRatio = 0.0;
-    const bool hasUsageHighlight = processUsageHighlightRatio(
-        processRecord,
-        tableColumn,
-        &usageHighlightRatio);
+    double highlightValue = 0.0;
+    const bool hasUsageHighlight = processUsageHighlightValue(processRecord, tableColumn, &highlightValue);
+    const double maximum = maximums[static_cast<std::size_t>(tableColumn)];
+    usageHighlightRatio = maximum > 0.0 ? std::clamp(highlightValue / maximum, 0.0, 1.0) : 0.0;
 
     if (role == Qt::ForegroundRole)
     {
@@ -18814,4 +19142,26 @@ namespace
 {
     [[maybe_unused]] const bool kProcessNavigationRegistered =
         ks::ui::RegisterTypedPageNavigationCatalog<ProcessDock>(QStringLiteral("process"));
+}
+
+void ProcessDock::changeEvent(QEvent* event)
+{
+    const QPointer<ProcessDock> alive(this);
+    QWidget::changeEvent(event);
+    if (!alive || !event || !m_processTableModel) return;
+    const bool language = event->type() == QEvent::LanguageChange;
+    const bool color = event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange;
+    const bool font = event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange;
+    if (!language && !color && !font) return;
+    const QPointer<QAbstractItemModel> model(m_processTableModel);
+    const int columns = model->columnCount();
+    if (language && columns > 0) emit model->headerDataChanged(Qt::Horizontal, 0, columns - 1);
+    if (!alive || !model || m_processTableModel != model.data()) return;
+    QList<int> roles;
+    if (language) roles << Qt::DisplayRole << Qt::ToolTipRole;
+    if (color) roles << Qt::BackgroundRole << Qt::ForegroundRole << Qt::DecorationRole;
+    if (font) roles << Qt::FontRole << Qt::SizeHintRole;
+    const int rows = model->rowCount();
+    if (rows > 0 && columns > 0)
+        emit model->dataChanged(model->index(0, 0), model->index(rows - 1, columns - 1), roles);
 }

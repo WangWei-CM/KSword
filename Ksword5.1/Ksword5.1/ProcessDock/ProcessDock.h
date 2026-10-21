@@ -150,6 +150,7 @@ signals:
     void requestFocusProcessProtectByCallback();
 
 protected:
+    void changeEvent(QEvent* event) override;
     // eventFilter 作用：
     // - 捕获进程页内的鼠标点击；
     // - 点击进程表外部或表格空白区时清空当前进程选择，让活动图回到整体视图。
@@ -396,7 +397,8 @@ private:
         std::vector<std::string> actionIdentityKeys;   // actionIdentityKeys：应用聚合行批量动作的成员标识。
         QList<std::uint32_t> cpuCoreProcessIds;         // cpuCoreProcessIds：逐核心绘制参与汇总的真实 PID 集合。
         int depth = 0;                                // depth：树状显示时的缩进层级。
-        bool hasChildren = false;                     // hasChildren：供表示层绘制树状展开提示。
+        bool hasChildren = false;
+        bool expanded = false; // committed row expansion, independent of the next UI map update.                     // hasChildren：供表示层绘制树状展开提示。
         bool isNew = false;                           // isNew：新增行高亮标记。
         bool isExited = false;                        // isExited：退出保留行高亮标记。
         bool isKernelOnly = false;                    // isKernelOnly：仅内核可见进程高亮标记。
@@ -1038,11 +1040,12 @@ private:
         TableColumn column,
         double* valueOut);
     // processUsageHighlightRatio 作用：把单元格幅值按当前表格同列最大值归一化到 0~1。
-    bool processUsageHighlightRatio(
-        const ks::process::ProcessRecord& processRecord,
-        TableColumn column,
-        double* ratioOut) const;
+
     QVariant processTableData(const ProcessTableRow& tableRow, int column, int role);
+    std::vector<ProcessTableModel::ColumnChange> processTableChanges(const ProcessTableRow& before, const ProcessTableRow& after,
+        const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& previousMaximums, bool cpuSnapshotChanged, bool cpuSizeChanged) const;
+    QVariant processTableBrush(const ProcessTableRow& tableRow, TableColumn column, int role,
+        const std::array<double, static_cast<std::size_t>(TableColumn::Count)>& maximums) const;
     const ProcessTableRow* processTableRowForViewIndex(const QModelIndex& viewIndex) const;
     QModelIndex processTableViewIndexForIdentityKey(const std::string& identityKey, int column) const;
     std::vector<QModelIndex> selectedProcessTableRowIndexes(bool includeCurrentFallback) const;
@@ -1402,6 +1405,8 @@ private:
         std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
     std::shared_ptr<ks::process::ProcessEtwCaptureLifecycle> m_cpuCoreCaptureLifecycle =
         std::make_shared<ks::process::ProcessEtwCaptureLifecycle>();
+    int m_presentedLogicalCpuCount = 0; // CpuCore SizeHintRole source for the committed rows.
+    std::weak_ptr<const ks::process::CpuCoreUsageSnapshot> m_presentedCpuCoreUsageSnapshot; // owner identity only; does not retain the old sample.
     std::shared_ptr<const ks::process::CpuCoreUsageSnapshot> m_latestCpuCoreUsageSnapshot; // 最近区间快照；UI 只交换共享指针，避免复制全量矩阵。
     QHash<QString, QIcon> m_iconCacheByPath;  // 进程图标缓存，避免重复提取。
     QHash<QString, QIcon> m_activityIconCacheByProcessKey; // 历史活动图标缓存：进程名+路径 -> 图标。
