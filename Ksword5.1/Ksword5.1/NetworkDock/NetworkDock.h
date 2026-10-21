@@ -89,6 +89,7 @@ class NetworkDock final : public QWidget
     Q_OBJECT
 
 public:
+    struct RouteRecord;
     // 构造函数：
     // - 作用：初始化 UI、绑定后台服务回调、连接交互信号。
     // - 参数 parent：Qt 父控件，可为空。
