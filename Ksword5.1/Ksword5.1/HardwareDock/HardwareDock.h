@@ -10,6 +10,7 @@
 
 #include "../Framework.h"
 #include "../UI/ThemeColorRemap.h"
+#include "../UI/PageNavigationTabCatalog.h"
 #include "../UI/StructuredFieldView.h"
 
 #include <QStringList>
@@ -89,6 +90,9 @@ public:
 
     // 同一个采样器只升级范围；欢迎页重新绑定不会撤销已打开的硬件详情采样。
     void startPerformanceSampling(SamplingScope scope = SamplingScope::HardwareDetails);
+
+    static ks::ui::PageNavigationCatalog navigationCatalog(const HardwareDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
 
 signals:
     // performanceSnapshotChanged 作用：发布与性能监控页相同的聚合采样结果。
@@ -468,6 +472,19 @@ private:
     void createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer);
     void createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer);
 
+    struct HardwarePageDefinition
+    {
+        ks::ui::PageNavigationTabDefinition navigation;
+        const char* tooltipKey;
+        const char* tooltip;
+        void (HardwareDock::*initialize)();
+    };
+    static const std::vector<HardwarePageDefinition>& hardwarePageDefinitions();
+    QString utilizationNavigationId(const UtilizationNavEntry& entry) const;
+    static QString diskUtilizationDisplayName(const DiskRateSample& sample, int ordinal);
+    static QString networkUtilizationDisplayName(const NetworkRateSample& sample, int ordinal);
+    static QString gpuUtilizationDisplayName(int ordinal);
+    ks::ui::PageNavigationTabCatalog m_hardwareNavigationTabs;
     struct LazyHardwarePage
     {
         QWidget* host = nullptr;
@@ -478,8 +495,7 @@ private:
         QString tip;
         QString tipKey;
     };
-    void registerLazyHardwarePage(void (HardwareDock::*initialize)(), const QString& title,
-        const QString& titleKey, const QString& tip, const QString& tipKey);
+    void registerLazyHardwarePage(const HardwarePageDefinition& definition);
     int addHardwarePageTab(QWidget* content, const QString& title);
     QWidget* currentHardwarePage() const;
     void ensureCurrentHardwarePageInitialized();

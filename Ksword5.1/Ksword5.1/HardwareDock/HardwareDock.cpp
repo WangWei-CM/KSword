@@ -5123,9 +5123,242 @@ void HardwareDock::startInitialSamplingAfterFirstPaint()
     });
 }
 
-void HardwareDock::registerLazyHardwarePage(void (HardwareDock::*initialize)(),
-    const QString& title, const QString& titleKey, const QString& tip, const QString& tipKey)
+const std::vector<HardwareDock::HardwarePageDefinition>& HardwareDock::hardwarePageDefinitions()
 {
+    static const std::vector<HardwarePageDefinition> definitions = {
+        {{"hardware.tab.utilization", "", "hardware.tab.utilization", "性能监控", true}, "hardware.tooltip.utilization", "实时查看处理器、内存、磁盘、网络和显卡使用情况", &HardwareDock::initializeUtilizationTab},
+        {{"hardware.tab.overview", "", "hardware.tab.overview", "硬件概览", false}, "hardware.tooltip.overview", "查看处理器、内存、显卡和系统硬件摘要", &HardwareDock::initializeOverviewTab},
+        {{"hardware.tab.cpu", "", "hardware.tab.cpu", "处理器", false}, "hardware.tooltip.cpu", "查看处理器型号、核心利用率、频率、温度和电压", &HardwareDock::initializeCpuTab},
+        {{"hardware.tab.power", "", "hardware.tab.power", "电源", false}, "hardware.tooltip.power", "管理 Windows 电源方案与受控 CPU 功耗、Turbo 和 HWP 设置", &HardwareDock::initializePowerTab},
+        {{"hardware.tab.gpu", "", "hardware.tab.gpu", "显卡", false}, "hardware.tooltip.gpu", "查看显卡型号、显存与驱动信息", &HardwareDock::initializeGpuTab},
+        {{"hardware.tab.memory", "", "hardware.tab.memory", "内存", false}, "hardware.tooltip.memory", "查看内存容量、模组与使用情况", &HardwareDock::initializeMemoryTab},
+        {{"hardware.tab.disk_activity", "", "hardware.tab.disk_activity", "磁盘活动", false}, "hardware.tooltip.disk_activity", "查看文件访问与进程磁盘读写活动", &HardwareDock::initializeDiskMonitorTab},
+        {{"hardware.tab.device_manager", "", "hardware.tab.device_manager", "设备管理", false}, "hardware.tooltip.device_manager", "搜索、查看和管理 Windows 设备", &HardwareDock::initializeDeviceManagerTab},
+        {{"hardware.tab.other_devices", "", "hardware.tab.other_devices", "其他设备", false}, "hardware.tooltip.other_devices", "查看处理器、内存和显卡之外的硬件清单", &HardwareDock::initializeOtherDevicesTab},
+        {{"hardware.tab.hwid", "", "hardware.tab.hwid", "硬件标识设置", false}, "hardware.tooltip.hwid", "查看和调整支持的磁盘与网络硬件标识", &HardwareDock::initializeHwidDispatchTab},
+        {{"hardware.tab.device_stack", "", "hardware.tab.device_stack", "设备驱动链", false}, "hardware.tooltip.device_stack", "检查设备节点、驱动对象与附加驱动关系", &HardwareDock::initializeDeviceStackTab},
+        {{"hardware.tab.keyboard_mouse", "", "hardware.tab.keyboard_mouse", "键盘与鼠标", false}, "hardware.tooltip.keyboard_mouse", "检查键盘、鼠标与其他输入设备状态", &HardwareDock::initializeKeyboardMouseHidTab},
+        {{"hardware.tab.i8042_audit", "", "hardware.tab.i8042_audit", "i8042prt 审计", false}, "hardware.tooltip.i8042_audit", "精确验证 i8042prt 映像描述符、键鼠端点归属与设备栈关系", &HardwareDock::initializeI8042AuditTab},
+        {{"hardware.tab.usb", "", "hardware.tab.usb", "USB 设备", false}, "hardware.tooltip.usb", "检查 USB 控制器、集线器、端口与设备关系", &HardwareDock::initializeUsbTopologyTab},
+        {{"hardware.tab.system_bus", "", "hardware.tab.system_bus", "系统总线", false}, "hardware.tooltip.system_bus", "查看即插即用、电源管理与 PCI 总线设备状态", &HardwareDock::initializePnpAcpiPciTab},
+        {{"hardware.tab.r0_evidence", "", "hardware.tab.r0_evidence", "底层硬件检查", false}, "hardware.tooltip.r0_evidence", "查看处理器寄存器与系统表的底层只读检查结果", &HardwareDock::initializeR0EvidenceTab},
+    };
+    return definitions;
+}
+
+namespace
+{
+    const bool hardwareNavigationCatalogRegistered =
+        ks::ui::RegisterTypedPageNavigationCatalog<HardwareDock>(QStringLiteral("hardware"));
+    const ks::ui::PageNavigationTabDefinition cpuUtilizationNavigation = {
+        "hardware.utilization.cpu", "hardware.tab.utilization", "hardware.utilization.card.cpu", "CPU", true};
+    const ks::ui::PageNavigationTabDefinition memoryUtilizationNavigation = {
+        "hardware.utilization.memory", "hardware.tab.utilization", "hardware.utilization.card.memory", "内存", false};
+    QString diskNavigationId(const QString& instance)
+    {
+        return QStringLiteral("hardware.utilization.disk:") + QString::fromLatin1(instance.toCaseFolded().toUtf8().toHex());
+    }
+    QString networkNavigationId(const std::uint64_t luid)
+    {
+        return QStringLiteral("hardware.utilization.network:") + QString::number(static_cast<qulonglong>(luid), 16);
+    }
+    QString gpuNavigationId(const std::uint64_t luid)
+    {
+        return QStringLiteral("hardware.utilization.gpu:") + QString::number(static_cast<qulonglong>(luid), 16);
+    }
+}
+
+QString HardwareDock::utilizationNavigationId(const UtilizationNavEntry& entry) const
+{
+    const auto index = static_cast<std::size_t>(std::max(0, entry.deviceIndex));
+    switch (entry.kind)
+    {
+    case UtilizationDeviceKind::Cpu: return QString::fromLatin1(cpuUtilizationNavigation.id);
+    case UtilizationDeviceKind::Memory: return QString::fromLatin1(memoryUtilizationNavigation.id);
+    case UtilizationDeviceKind::Disk:
+        return entry.deviceIndex >= 0 && index < m_diskUtilDevices.size() ? diskNavigationId(m_diskUtilDevices[index].instanceNameText) : QString();
+    case UtilizationDeviceKind::Network:
+        return entry.deviceIndex >= 0 && index < m_networkUtilDevices.size() ? networkNavigationId(m_networkUtilDevices[index].interfaceKey) : QString();
+    case UtilizationDeviceKind::VirtualNetwork: return QStringLiteral("hardware.utilization.virtual_network");
+    case UtilizationDeviceKind::Gpu:
+        return entry.deviceIndex >= 0 && index < m_gpuUtilDevices.size() ? gpuNavigationId(m_gpuUtilDevices[index].adapterKey) : QString();
+    }
+    return {};
+}
+
+QString HardwareDock::diskUtilizationDisplayName(const DiskRateSample& sample, const int ordinal)
+{
+    return sample.displayNameText.isEmpty() ? ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.card.disk.prefix"), QStringLiteral("磁盘"))
+        + QStringLiteral(" %1").arg(ordinal) : sample.displayNameText;
+}
+
+QString HardwareDock::networkUtilizationDisplayName(const NetworkRateSample& sample, const int ordinal)
+{
+    return sample.displayNameText.isEmpty() ? ks::i18n::contextText(
+        QStringLiteral("hardware.utilization.card.network.prefix"), QStringLiteral("以太网"))
+        + QStringLiteral(" %1").arg(ordinal) : sample.displayNameText;
+}
+
+QString HardwareDock::gpuUtilizationDisplayName(const int ordinal)
+{
+    return ks::i18n::contextText(QStringLiteral("hardware.utilization.card.gpu.prefix"), QStringLiteral("GPU"))
+        + QStringLiteral(" %1").arg(ordinal);
+}
+
+ks::ui::PageNavigationCatalog HardwareDock::navigationCatalog(const HardwareDock* existing)
+{
+    ks::ui::PageNavigationCatalog result;
+    for (const auto& definition : hardwarePageDefinitions())
+        result.push_back(ks::ui::PageNavigationTabDescriptor(definition.navigation));
+    if (existing != nullptr) result = existing->m_hardwareNavigationTabs.describe(std::move(result));
+    result.push_back(ks::ui::PageNavigationTabDescriptor(cpuUtilizationNavigation));
+    result.push_back(ks::ui::PageNavigationTabDescriptor(memoryUtilizationNavigation));
+    if (existing == nullptr) return result;
+    QSet<QString> emitted;
+    for (const auto& descriptor : result) emitted.insert(descriptor.id);
+    const auto appendDevice = [&](const QString& id, const QString& title, const QStringList& searchTexts)
+    {
+        if (id.isEmpty() || title.isEmpty()) return;
+        if (emitted.contains(id))
+        {
+            for (auto& descriptor : result)
+                if (descriptor.id == id)
+                    for (const auto& text : searchTexts)
+                        if (!descriptor.searchTexts.contains(text)) descriptor.searchTexts.push_back(text);
+            return;
+        }
+        emitted.insert(id);
+        result.push_back({id, QStringLiteral("hardware.tab.utilization"), title, searchTexts, true, true, false});
+    };
+    // Read only cached provider values/registered identities. Catalog collection never enumerates hardware.
+    for (const auto& device : existing->m_diskUtilDevices)
+        appendDevice(diskNavigationId(device.instanceNameText), device.displayNameText, {device.instanceNameText});
+    for (std::size_t index = 0; index < existing->m_lastPerformanceSample.diskSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastPerformanceSample.diskSamples[index];
+        appendDevice(diskNavigationId(sample.instanceNameText), diskUtilizationDisplayName(sample, static_cast<int>(index)), {sample.instanceNameText});
+    }
+    bool virtualNetwork = existing->m_virtualNetworkPage != nullptr;
+    for (const auto& device : existing->m_networkUtilDevices)
+    {
+        if (device.physical) appendDevice(networkNavigationId(device.interfaceKey), device.displayNameText, {});
+        else virtualNetwork = true;
+    }
+    for (std::size_t index = 0; index < existing->m_lastPerformanceSample.networkSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastPerformanceSample.networkSamples[index];
+        if (sample.physical) appendDevice(networkNavigationId(sample.interfaceKey), networkUtilizationDisplayName(sample, static_cast<int>(index)), {});
+        else virtualNetwork = true;
+    }
+    if (virtualNetwork) appendDevice(QStringLiteral("hardware.utilization.virtual_network"),
+        ks::i18n::contextText(QStringLiteral("hardware.utilization.card.virtual_network"), QStringLiteral("虚拟网络")), {});
+    for (const auto& device : existing->m_gpuUtilDevices)
+        appendDevice(gpuNavigationId(device.adapterKey), device.displayNameText, {});
+    for (std::size_t index = 0; index < existing->m_lastGpuSamples.size(); ++index)
+    {
+        const auto& sample = existing->m_lastGpuSamples[index];
+        appendDevice(gpuNavigationId(sample.adapterKey), gpuUtilizationDisplayName(static_cast<int>(index)), {sample.displayNameText});
+    }
+    const int selectedRow = existing->m_utilizationSidebarList != nullptr ? existing->m_utilizationSidebarList->currentRow() : -1;
+    for (auto& descriptor : result)
+    {
+        if (descriptor.parentId != QStringLiteral("hardware.tab.utilization")) continue;
+        descriptor.current = false;
+        for (int row = 0; row < static_cast<int>(existing->m_utilizationNavEntries.size()); ++row)
+        {
+            if (descriptor.id != existing->utilizationNavigationId(existing->m_utilizationNavEntries[static_cast<std::size_t>(row)])) continue;
+            if (auto* item = existing->m_utilizationSidebarList->item(row))
+            {
+                descriptor.visible = !item->isHidden();
+                descriptor.enabled = item->flags().testFlag(Qt::ItemIsEnabled);
+                descriptor.current = selectedRow == row;
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+QWidget* HardwareDock::activateNavigationDescriptor(const QString& id)
+{
+    const auto catalog = navigationCatalog(this);
+    const auto resolved = ks::ui::ResolvePageNavigationCatalog(catalog, QString());
+    if (!resolved) return nullptr;
+    const auto requested = std::find_if(resolved->cbegin(), resolved->cend(), [&id](const auto& entry) { return entry.page.id == id; });
+    if (requested == resolved->cend() || !requested->page.visible || !requested->page.enabled) return nullptr;
+    const QPointer<HardwareDock> self(this);
+    const QString topId = requested->page.parentId.isEmpty() ? id : QStringLiteral("hardware.tab.utilization");
+    if (m_hardwareNavigationTabs.activate(topId, catalog) == nullptr || !self) return nullptr;
+    ensureCurrentHardwarePageInitialized();
+    if (!self) return nullptr;
+    const auto stillNavigable = [this, &id]()
+    {
+        const auto current = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QString());
+        if (!current) return false;
+        const auto found = std::find_if(current->cbegin(), current->cend(), [&id](const auto& entry) { return entry.page.id == id; });
+        return found != current->cend() && found->page.visible && found->page.enabled && found->page.current;
+    };
+    if (requested->page.parentId.isEmpty()) return stillNavigable() ? m_sideTabWidget->currentWidget() : nullptr;
+    // A cached descriptor can precede its nav view. Resolve only the accepted identity;
+    // no provider query, default-row substitution or unrelated device construction.
+    for (std::size_t index = 0; index < m_lastPerformanceSample.diskSamples.size(); ++index)
+    {
+        const auto& sample = m_lastPerformanceSample.diskSamples[index];
+        if (diskNavigationId(sample.instanceNameText) == id && findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText) < 0)
+        {
+            const int device = ensureDiskUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateDiskUtilizationDevice(m_diskUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (std::size_t index = 0; index < m_lastPerformanceSample.networkSamples.size(); ++index)
+    {
+        const auto& sample = m_lastPerformanceSample.networkSamples[index];
+        if (id == QStringLiteral("hardware.utilization.virtual_network") && !sample.physical) ensureVirtualNetworkPage();
+        if (networkNavigationId(sample.interfaceKey) == id && sample.physical && findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey) < 0)
+        {
+            const int device = ensureNetworkUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateNetworkUtilizationDevice(m_networkUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (std::size_t index = 0; index < m_lastGpuSamples.size(); ++index)
+    {
+        const auto& sample = m_lastGpuSamples[index];
+        if (gpuNavigationId(sample.adapterKey) == id && findGpuUtilizationDeviceIndexByKey(sample.adapterKey) < 0)
+        {
+            const int device = ensureGpuUtilizationDevice(sample, static_cast<int>(index));
+            if (device >= 0) updateGpuUtilizationDevice(m_gpuUtilDevices[static_cast<std::size_t>(device)], sample);
+            break;
+        }
+    }
+    for (int row = 0; row < static_cast<int>(m_utilizationNavEntries.size()); ++row)
+    {
+        if (utilizationNavigationId(m_utilizationNavEntries[static_cast<std::size_t>(row)]) != id) continue;
+        m_utilizationSidebarList->setCurrentRow(row);
+        if (!self) return nullptr;
+        if (currentHardwarePage() != m_utilizationPage || m_utilizationSidebarList->currentRow() != row
+            || row >= static_cast<int>(m_utilizationNavEntries.size())
+            || utilizationNavigationId(m_utilizationNavEntries[static_cast<std::size_t>(row)]) != id) return nullptr;
+        const QPointer<QWidget> page = m_utilizationNavEntries[static_cast<std::size_t>(row)].detailPage;
+        if (!page || m_utilizationDetailStack == nullptr || m_utilizationDetailStack->currentWidget() != page) return nullptr;
+        ks::ui::PrepareWidgetThemeBindingsForShow(page);
+        if (!self || !page || currentHardwarePage() != m_utilizationPage
+            || m_utilizationSidebarList->currentRow() != row || m_utilizationDetailStack->currentWidget() != page
+            || !stillNavigable()) return nullptr;
+        return page.data();
+    }
+    return nullptr; // Device disappeared after the cached descriptor; never choose a different identity.
+}
+
+void HardwareDock::registerLazyHardwarePage(const HardwarePageDefinition& definition)
+{
+    const auto descriptor = ks::ui::PageNavigationTabDescriptor(definition.navigation);
+    const QString title = QString::fromUtf8(definition.navigation.sourceTitle);
+    const QString titleKey = QString::fromLatin1(definition.navigation.languageKey);
+    const QString tipKey = QString::fromLatin1(definition.tooltipKey);
+    const QString tip = QString::fromUtf8(definition.tooltip);
     // Stable page identities keep Taskbar/global-search routes valid across first creation.
     auto* host = new QWidget(m_sideTabWidget);
     host->setProperty("ksword_page_frame_host", true);
@@ -5134,16 +5367,25 @@ void HardwareDock::registerLazyHardwarePage(void (HardwareDock::*initialize)(),
     auto* layout = new QVBoxLayout(host);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    const int index = m_sideTabWidget->addTab(host, title);
+    m_hardwareNavigationTabs.add(definition.navigation, m_sideTabWidget, host);
+    const int index = m_sideTabWidget->indexOf(host);
     ks::i18n::LanguageManager::instance().bindTab(m_sideTabWidget, host, titleKey, title);
     m_sideTabWidget->setTabToolTip(index, tip);
     ks::i18n::LanguageManager::instance().bindTabToolTip(m_sideTabWidget, host, tipKey, tip);
-    m_lazyHardwarePages.push_back({host, nullptr, initialize, title, titleKey, tip, tipKey});
+    m_lazyHardwarePages.push_back({host, nullptr, definition.initialize, QString::fromUtf8(definition.navigation.sourceTitle), titleKey, tip, tipKey});
 }
 
 int HardwareDock::addHardwarePageTab(QWidget* content, const QString& title)
 {
-    if (m_buildingHardwareHost == nullptr) return m_sideTabWidget->addTab(content, title);
+    if (m_buildingHardwareHost == nullptr)
+    {
+        if (content == m_utilizationPage)
+        {
+            m_hardwareNavigationTabs.add(hardwarePageDefinitions().front().navigation, m_sideTabWidget, content);
+            return m_sideTabWidget->indexOf(content);
+        }
+        return m_sideTabWidget->addTab(content, title);
+    }
     for (auto& page : m_lazyHardwarePages)
     {
         if (page.host == m_buildingHardwareHost)
@@ -5258,36 +5500,9 @@ void HardwareDock::initializeUi()
     // 页签顺序：性能与硬件信息 -> 设备管理 -> 底层诊断。
     // 先注册“性能监控”，让硬件 Dock 初次打开时直接显示实时数据。
     initializeUtilizationTab();
-    registerLazyHardwarePage(&HardwareDock::initializeOverviewTab, QStringLiteral("硬件概览"),
-        QStringLiteral("hardware.tab.overview"), QStringLiteral("查看处理器、内存、显卡和系统硬件摘要"), QStringLiteral("hardware.tooltip.overview"));
-    registerLazyHardwarePage(&HardwareDock::initializeCpuTab, QStringLiteral("处理器"),
-        QStringLiteral("hardware.tab.cpu"), QStringLiteral("查看处理器型号、核心利用率、频率、温度和电压"), QStringLiteral("hardware.tooltip.cpu"));
-    registerLazyHardwarePage(&HardwareDock::initializePowerTab, QStringLiteral("电源"),
-        QStringLiteral("hardware.tab.power"), QStringLiteral("管理 Windows 电源方案与受控 CPU 功耗、Turbo 和 HWP 设置"), QStringLiteral("hardware.tooltip.power"));
-    registerLazyHardwarePage(&HardwareDock::initializeGpuTab, QStringLiteral("显卡"),
-        QStringLiteral("hardware.tab.gpu"), QStringLiteral("查看显卡型号、显存与驱动信息"), QStringLiteral("hardware.tooltip.gpu"));
-    registerLazyHardwarePage(&HardwareDock::initializeMemoryTab, QStringLiteral("内存"),
-        QStringLiteral("hardware.tab.memory"), QStringLiteral("查看内存容量、模组与使用情况"), QStringLiteral("hardware.tooltip.memory"));
-    registerLazyHardwarePage(&HardwareDock::initializeDiskMonitorTab, QStringLiteral("磁盘活动"),
-        QStringLiteral("hardware.tab.disk_activity"), QStringLiteral("查看文件访问与进程磁盘读写活动"), QStringLiteral("hardware.tooltip.disk_activity"));
-    registerLazyHardwarePage(&HardwareDock::initializeDeviceManagerTab, QStringLiteral("设备管理"),
-        QStringLiteral("hardware.tab.device_manager"), QStringLiteral("搜索、查看和管理 Windows 设备"), QStringLiteral("hardware.tooltip.device_manager"));
-    registerLazyHardwarePage(&HardwareDock::initializeOtherDevicesTab, QStringLiteral("其他设备"),
-        QStringLiteral("hardware.tab.other_devices"), QStringLiteral("查看处理器、内存和显卡之外的硬件清单"), QStringLiteral("hardware.tooltip.other_devices"));
-    registerLazyHardwarePage(&HardwareDock::initializeHwidDispatchTab, QStringLiteral("硬件标识设置"),
-        QStringLiteral("hardware.tab.hwid"), QStringLiteral("查看和调整支持的磁盘与网络硬件标识"), QStringLiteral("hardware.tooltip.hwid"));
-    registerLazyHardwarePage(&HardwareDock::initializeDeviceStackTab, QStringLiteral("设备驱动链"),
-        QStringLiteral("hardware.tab.device_stack"), QStringLiteral("检查设备节点、驱动对象与附加驱动关系"), QStringLiteral("hardware.tooltip.device_stack"));
-    registerLazyHardwarePage(&HardwareDock::initializeKeyboardMouseHidTab, QStringLiteral("键盘与鼠标"),
-        QStringLiteral("hardware.tab.keyboard_mouse"), QStringLiteral("检查键盘、鼠标与其他输入设备状态"), QStringLiteral("hardware.tooltip.keyboard_mouse"));
-    registerLazyHardwarePage(&HardwareDock::initializeI8042AuditTab, QStringLiteral("i8042prt 审计"),
-        QStringLiteral("hardware.tab.i8042_audit"), QStringLiteral("精确验证 i8042prt 映像描述符、键鼠端点归属与设备栈关系"), QStringLiteral("hardware.tooltip.i8042_audit"));
-    registerLazyHardwarePage(&HardwareDock::initializeUsbTopologyTab, QStringLiteral("USB 设备"),
-        QStringLiteral("hardware.tab.usb"), QStringLiteral("检查 USB 控制器、集线器、端口与设备关系"), QStringLiteral("hardware.tooltip.usb"));
-    registerLazyHardwarePage(&HardwareDock::initializePnpAcpiPciTab, QStringLiteral("系统总线"),
-        QStringLiteral("hardware.tab.system_bus"), QStringLiteral("查看即插即用、电源管理与 PCI 总线设备状态"), QStringLiteral("hardware.tooltip.system_bus"));
-    registerLazyHardwarePage(&HardwareDock::initializeR0EvidenceTab, QStringLiteral("底层硬件检查"),
-        QStringLiteral("hardware.tab.r0_evidence"), QStringLiteral("查看处理器寄存器与系统表的底层只读检查结果"), QStringLiteral("hardware.tooltip.r0_evidence"));
+    const auto& definitions = hardwarePageDefinitions();
+    for (std::size_t index = 1; index < definitions.size(); ++index)
+        registerLazyHardwarePage(definitions[index]);
 
     if (m_sideTabWidget != nullptr)
     {
@@ -8364,16 +8579,7 @@ int HardwareDock::ensureDiskUtilizationDevice(
     // device 用途：为新发现的物理磁盘实例保留 UI 控件和历史采样。
     DiskUtilizationDevice device;
     device.instanceNameText = sample.instanceNameText;
-    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
-    device.displayNameText = useDefaultDisplayName
-        ? QStringLiteral("磁盘 %1").arg(ordinalIndex)
-        : sample.displayNameText;
-    if (useDefaultDisplayName)
-    {
-        device.displayNameText = ks::i18n::contextText(
-            QStringLiteral("hardware.utilization.card.disk.prefix"),
-            QStringLiteral("磁盘")) + device.displayNameText.mid(QStringLiteral("磁盘").size());
-    }
+    device.displayNameText = diskUtilizationDisplayName(sample, ordinalIndex);
     createDiskUtilizationDevicePage(&device);
     m_diskUtilDevices.push_back(device);
 
@@ -8420,16 +8626,7 @@ int HardwareDock::ensureNetworkUtilizationDevice(
     // device 用途：为新发现的网卡接口保留 UI 控件和增量采样基线。
     NetworkUtilizationDevice device;
     device.interfaceKey = sample.interfaceKey;
-    const bool useDefaultDisplayName = sample.displayNameText.isEmpty();
-    device.displayNameText = useDefaultDisplayName
-        ? QStringLiteral("以太网 %1").arg(ordinalIndex)
-        : sample.displayNameText;
-    if (useDefaultDisplayName)
-    {
-        device.displayNameText = ks::i18n::contextText(
-            QStringLiteral("hardware.utilization.card.network.prefix"),
-            QStringLiteral("以太网")) + device.displayNameText.mid(QStringLiteral("以太网").size());
-    }
+    device.displayNameText = networkUtilizationDisplayName(sample, ordinalIndex);
     device.linkBitsPerSecond = sample.linkBitsPerSecond;
     device.physical = sample.physical;
     device.lastOperational = sample.operational;
@@ -8595,10 +8792,7 @@ int HardwareDock::ensureGpuUtilizationDevice(
     device.adapterKey = sample.adapterKey;
     device.adapterKeyAssigned = true;
     device.adapterIndex = sample.adapterIndex;
-    device.displayNameText = ks::i18n::contextText(
-        QStringLiteral("hardware.utilization.card.gpu.prefix"),
-        QStringLiteral("GPU"))
-        + QStringLiteral(" %1").arg(ordinalIndex);
+    device.displayNameText = gpuUtilizationDisplayName(ordinalIndex);
     createGpuUtilizationDevicePage(&device);
     m_gpuUtilDevices.push_back(device);
 
