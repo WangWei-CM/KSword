@@ -170,6 +170,13 @@ private:
         bool hideEmptyPaths = false;
     };
 
+    struct RegistryProjectionGroup
+    {
+        QTreeWidgetItem* item = nullptr;
+        std::size_t total = 0;
+        std::size_t visible = 0;
+    };
+
     struct RefreshStageResult
     {
         std::size_t stageIndex = 0;
@@ -312,6 +319,11 @@ private:
     std::array<quint64, 9> m_renderedProjectionRevision{};
     std::array<std::size_t, 9> m_renderedCanonicalCounts{};
     std::array<int, 9> m_renderedRowCounts{};
+    QHash<QString, RegistryProjectionGroup> m_registryProjectionGroups;
+    QHash<QString, qsizetype> m_registryProjectionGroupOrder;
+    qsizetype m_registryProjectionNextOrder = 0;
+    int m_renderedRegistryGroupCount = 0;
+    bool m_appendRegistryProjection = false;
     StartupCategory m_projectionBuildCategory = StartupCategory::All;
     quint64 m_projectionBuildRevision = 0;
     bool m_projectionBuildActive = false;

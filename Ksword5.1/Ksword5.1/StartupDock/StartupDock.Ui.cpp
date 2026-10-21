@@ -366,6 +366,13 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
         && m_renderedProjectionRevision[categoryIndex] == m_projectionRevision
         && m_renderedCanonicalCounts[categoryIndex] == static_cast<std::size_t>(appendFrom)
         && visibleTable->rowCount() == m_renderedRowCounts[categoryIndex];
+    const bool appendRegistry = processesRefreshStage && appendFrom >= 0
+        && !m_projectionInvalidationPending && !m_filterRefreshPending && !m_tableRebuildInProgress
+        && currentCategory() == StartupCategory::Registry && m_registryTree
+        && m_renderedProjectionRevision[categoryIndex] == m_projectionRevision
+        && m_renderedCanonicalCounts[categoryIndex] == static_cast<std::size_t>(appendFrom)
+        && m_registryTree->topLevelItemCount() == m_renderedRegistryGroupCount
+        && m_registryProjectionGroups.size() == m_renderedRegistryGroupCount;
     m_projectionInvalidationPending = m_projectionInvalidationPending || invalidateProjection;
     m_tableRebuildProcessesRefreshStage = m_tableRebuildProcessesRefreshStage || processesRefreshStage;
     const QList<QAbstractItemView*> startupViews = {
@@ -404,6 +411,14 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
     m_tableRebuildTotalUnits = 0;
     m_lastTableRebuildProgressPercent = -1;
     m_rebuildRegistryFirst = currentCategory() == StartupCategory::Registry;
+    m_appendRegistryProjection = appendRegistry;
+    if (m_rebuildRegistryFirst && !appendRegistry)
+    {
+        auto oldGroups = std::move(m_registryProjectionGroups);
+        auto oldOrder = std::move(m_registryProjectionGroupOrder);
+        m_registryProjectionNextOrder = 0;
+        QThreadPool::globalInstance()->start([groups = std::move(oldGroups), order = std::move(oldOrder)]() {});
+    }
 
     if (m_exportButton != nullptr)
     {
@@ -446,7 +461,7 @@ void StartupDock::rebuildAllTables(const bool processesRefreshStage, const bool 
     }
     m_projectionPreparation = std::make_shared<ProjectionPreparation>();
     m_projectionPreparation->hideEmptyPaths = m_hideEmptyPathCheck && m_hideEmptyPathCheck->isChecked();
-    if (appendCurrentTable)
+    if (appendCurrentTable || appendRegistry)
     {
         // Previous rows/identities stay in place; scan/format only this stage's tail.
         m_projectionPreparation->phase = ProjectionPreparation::Phase::Scan;
@@ -539,6 +554,7 @@ bool StartupDock::continueProjectionPreparation()
                 {
                     preparation.knownLocations.insert(location);
                     preparation.locations.push_back(location);
+                    m_registryProjectionGroupOrder.insert(location, m_registryProjectionNextOrder++);
                 }
                 return true;
             }
@@ -556,6 +572,8 @@ bool StartupDock::continueProjectionPreparation()
                         const QString location = entry.locationGroupText.trimmed().isEmpty()
                             ? entry.locationText : entry.locationGroupText;
                         preparation.total[location].push_back(entryIndex);
+                        if (!m_registryProjectionGroupOrder.contains(location))
+                            m_registryProjectionGroupOrder.insert(location, m_registryProjectionNextOrder++);
                         if (!preparation.knownLocations.contains(location))
                         {
                             preparation.knownLocations.insert(location);
@@ -789,7 +807,9 @@ void StartupDock::finishIncrementalTableRebuild()
         const auto index = static_cast<std::size_t>(m_projectionBuildCategory);
         m_renderedProjectionRevision[index] = m_projectionRevision;
         m_renderedCanonicalCounts[index] = m_entryList.size();
-        if (m_projectionBuildCategory != StartupCategory::Registry)
+        if (m_projectionBuildCategory == StartupCategory::Registry)
+            m_renderedRegistryGroupCount = m_registryTree ? m_registryTree->topLevelItemCount() : 0;
+        else
         {
             for (const auto& target : m_tableRebuildTargets)
                 if (target.category == m_projectionBuildCategory && target.tableWidget)
@@ -977,7 +997,28 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
     }
     target->initialized = true;
 
-    QTreeWidgetItem* groupItem = new QTreeWidgetItem(m_registryTree);
+    const auto previous = m_registryProjectionGroups.value(target->locationText);
+    const bool reused = m_appendRegistryProjection && previous.item;
+    QTreeWidgetItem* groupItem = reused ? previous.item : new QTreeWidgetItem();
+    if (!reused)
+    {
+        // Preserve fixed catalog/first-discovered order, including a newly nonempty known path.
+        const qsizetype order = m_registryProjectionGroupOrder.value(target->locationText);
+        int first = 0, last = m_registryTree->topLevelItemCount();
+        while (first < last)
+        {
+            const int middle = first + (last - first) / 2;
+            const QString existing = m_registryTree->topLevelItem(middle)->data(0, kStartupTreeLocationRole).toString();
+            if (m_registryProjectionGroupOrder.value(existing) < order) first = middle + 1;
+            else last = middle;
+        }
+        m_registryTree->insertTopLevelItem(first, groupItem);
+    }
+    else if (previous.visible == 0)
+        qDeleteAll(groupItem->takeChildren()); // At most the existing single no-match placeholder.
+    const std::size_t totalCount = (reused ? previous.total : 0U) + target->totalEntryIndexList.size();
+    const std::size_t visibleCount = (reused ? previous.visible : 0U) + target->visibleEntryIndexList.size();
+    m_registryProjectionGroups.insert(target->locationText, {groupItem, totalCount, visibleCount});
     target->groupItem = groupItem;
     groupItem->setData(0, kStartupEntryIndexRole, -1);
     groupItem->setData(0, kStartupTreeNodeKindRole, static_cast<int>(StartupTreeNodeKind::Group));
@@ -985,27 +1026,27 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
     groupItem->setFirstColumnSpanned(true);
     groupItem->setIcon(toStartupColumn(StartupColumn::Name), createBlueIcon(":/Icon/file_find.svg"));
 
-    if (!target->visibleEntryIndexList.empty())
+    if (visibleCount != 0U)
     {
         groupItem->setText(
             toStartupColumn(StartupColumn::Name),
             startupText("startup.registry.group.match_summary", QStringLiteral("%1    匹配 %2 项 / 总计 %3 项"))
                 .arg(target->locationText)
-                .arg(target->visibleEntryIndexList.size())
-                .arg(target->totalEntryIndexList.size()));
+                .arg(visibleCount)
+                .arg(totalCount));
     }
     else
     {
         groupItem->setText(
             toStartupColumn(StartupColumn::Name),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText("startup.registry.group.no_entries", QStringLiteral("%1    无条目"))
                     .arg(target->locationText)
                 : startupText(
                     "startup.registry.group.no_filter_matches",
                     QStringLiteral("%1    当前过滤下无匹配项（总计 %2 项）"))
                     .arg(target->locationText)
-                    .arg(target->totalEntryIndexList.size()));
+                    .arg(totalCount));
 
         QTreeWidgetItem* placeholderItem = new QTreeWidgetItem(groupItem);
         placeholderItem->setData(0, kStartupEntryIndexRole, -1);
@@ -1013,12 +1054,12 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
         placeholderItem->setData(0, kStartupTreeLocationRole, target->locationText);
         placeholderItem->setText(
             toStartupColumn(StartupColumn::Name),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText("startup.registry.placeholder.no_entries", QStringLiteral("(无条目)"))
                 : startupText("startup.registry.placeholder.no_matches", QStringLiteral("(无匹配项)")));
         placeholderItem->setText(
             toStartupColumn(StartupColumn::Detail),
-            target->totalEntryIndexList.empty()
+            totalCount == 0U
                 ? startupText(
                     "startup.registry.placeholder.not_found",
                     QStringLiteral("该位置当前未发现启动项"))
@@ -1027,7 +1068,7 @@ void StartupDock::initializeRegistryTreeGroup(RegistryGroupRebuildTarget* const 
                     QStringLiteral("存在条目，但被当前过滤条件隐藏")));
     }
 
-    groupItem->setExpanded(true);
+    if (!reused) groupItem->setExpanded(true);
 }
 
 ks::ui::PageNavigationCatalog StartupDock::navigationCatalog(const StartupDock* existing)
