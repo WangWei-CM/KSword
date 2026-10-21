@@ -8553,122 +8553,212 @@ void HardwareDock::scheduleUtilizationLayoutRefresh()
     });
 }
 
-int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
+void HardwareDock::appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
+    const double value, const bool valid, const int sampleId, const qint64 sampleTimeMs, const int capacity)
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_diskUtilDevices.size()); ++indexValue)
-    {
-        const DiskUtilizationDevice& device = m_diskUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (QString::compare(device.instanceNameText, instanceNameText, Qt::CaseInsensitive) == 0)
-        {
-            return indexValue;
-        }
-    }
-    return -1;
+    auto& history = archive.histories[role];
+    if (!history) history = std::make_shared<ks::ui::MetricHistory>(static_cast<std::size_t>(std::max(1, capacity)));
+    history->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, value, valid});
+    auto& baseline = archive.histories[role + QStringLiteral(".baseline")];
+    if (!baseline) baseline = std::make_shared<ks::ui::MetricHistory>(static_cast<std::size_t>(std::max(1, capacity)));
+    baseline->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, 0.0, valid});
 }
 
-int HardwareDock::ensureDiskUtilizationDevice(
-    const DiskRateSample& sample,
-    const int ordinalIndex)
+void HardwareDock::appendDeviceGap(DeviceSeriesArchive& archive, const int sampleId, const qint64 sampleTimeMs)
 {
-    const int existingIndex = findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText);
-    if (existingIndex >= 0)
+    archive.available = false;
+    for (auto& history : archive.histories)
+        history->append({static_cast<std::uint64_t>(sampleId), sampleTimeMs, 0.0, false});
+}
+
+void HardwareDock::attachDeviceHistory(DeviceSeriesArchive& archive, const QString& role,
+    QLineSeries* line, QLineSeries* baseline)
+{
+    const auto history = archive.histories.value(role);
+    const auto zero = archive.histories.value(role + QStringLiteral(".baseline"));
+    if (line != nullptr && history) ks::ui::MetricChartBinding::ForSeries(line, m_historyLength)->setHistory(history);
+    if (baseline != nullptr && zero) ks::ui::MetricChartBinding::ForSeries(baseline, m_historyLength)->setHistory(zero);
+}
+
+void HardwareDock::recordDeviceSamples(const std::vector<DiskRateSample>& disks,
+    const std::vector<NetworkRateSample>& networks, const std::vector<GpuUsageSample>& gpus)
+{
+    m_recordingDeviceHistory = true;
+    if (m_metricDiskValid)
     {
-        return existingIndex;
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < disks.size(); ++ordinal)
+        {
+            const auto& sample = disks[ordinal];
+            const int index = ensureDiskUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_diskUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("read"), sample.readBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("write"), sample.writeBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeDiskDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_diskUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeDiskDevices = std::move(observed);
     }
-
-    // device 用途：为新发现的物理磁盘实例保留 UI 控件和历史采样。
-    DiskUtilizationDevice device;
-    device.instanceNameText = sample.instanceNameText;
-    device.displayNameText = diskUtilizationDisplayName(sample, ordinalIndex);
-    createDiskUtilizationDevicePage(&device);
-    m_diskUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_diskUtilDevices.size()) - 1;
-    m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
-        UtilizationDeviceKind::Disk,
-        deviceIndex);
-    if (m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard != nullptr)
+    else
     {
-        m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard->setSeriesColors(
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeDiskDevices)
+            appendDeviceGap(m_diskUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    if (m_metricNetworkValid)
+    {
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < networks.size(); ++ordinal)
+        {
+            const auto& sample = networks[ordinal];
+            const int index = ensureNetworkUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_networkUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("rx"), sample.rxBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("tx"), sample.txBytesPerSec, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeNetworkDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_networkUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeNetworkDevices = std::move(observed);
+    }
+    else
+    {
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeNetworkDevices)
+            appendDeviceGap(m_networkUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    if (m_metricGpuValid)
+    {
+        QSet<int> observed;
+        for (std::size_t ordinal = 0; ordinal < gpus.size(); ++ordinal)
+        {
+            const auto& sample = gpus[ordinal];
+            const int index = ensureGpuUtilizationDevice(sample, static_cast<int>(ordinal));
+            observed.insert(index);
+            auto& device = m_gpuUtilDevices[static_cast<std::size_t>(index)];
+            device.archive.active = true;
+            device.archive.available = true;
+            device.archive.lastSampleId = m_sampleCounter;
+            device.archive.lastSampleTimeMs = m_metricSampleTimeMs;
+            device.lastSample = sample;
+            appendDeviceMetric(device.archive, QStringLiteral("3d"), sample.usage3DPercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("copy"), sample.usageCopyPercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("video_encode"), sample.usageVideoEncodePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("video_decode"), sample.usageVideoDecodePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("dedicated"), sample.dedicatedUsedGiB, sample.dedicatedUsageAvailable, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("shared"), sample.sharedUsedGiB, sample.sharedUsageAvailable, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+            appendDeviceMetric(device.archive, QStringLiteral("overall"), sample.overallUsagePercent, true, m_sampleCounter, m_metricSampleTimeMs, m_historyLength);
+        }
+        for (const int index : m_activeGpuDevices)
+        {
+            if (observed.contains(index)) continue;
+            auto& archive = m_gpuUtilDevices[static_cast<std::size_t>(index)].archive;
+            archive.active = false;
+            appendDeviceGap(archive, m_sampleCounter, m_metricSampleTimeMs);
+        }
+        m_activeGpuDevices = std::move(observed);
+    }
+    else
+    {
+        // Provider failure is a missing sample, not proof that all devices disappeared.
+        for (const int index : m_activeGpuDevices)
+            appendDeviceGap(m_gpuUtilDevices[static_cast<std::size_t>(index)].archive, m_sampleCounter, m_metricSampleTimeMs);
+    }
+    m_recordingDeviceHistory = false;
+}
+
+int HardwareDock::findDiskUtilizationDeviceIndexByInstance(const QString& instanceNameText) const
+{
+    return m_diskDeviceIndex.value(instanceNameText.toCaseFolded(), -1);
+}
+
+int HardwareDock::ensureDiskUtilizationDevice(const DiskRateSample& sample, const int ordinalIndex)
+{
+    int deviceIndex = findDiskUtilizationDeviceIndexByInstance(sample.instanceNameText);
+    if (deviceIndex < 0)
+    {
+        DiskUtilizationDevice device;
+        device.instanceNameText = sample.instanceNameText;
+        device.displayNameText = diskUtilizationDisplayName(sample, ordinalIndex);
+        m_diskUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_diskUtilDevices.size()) - 1;
+        m_diskDeviceIndex.insert(sample.instanceNameText.toCaseFolded(), deviceIndex);
+    }
+    auto& device = m_diskUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
+    {
+        createDiskUtilizationDevicePage(&device);
+        device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Disk),
+            UtilizationDeviceKind::Disk, deviceIndex);
+        if (device.navCard != nullptr) device.navCard->setSeriesColors(
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
             KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
+        scheduleUtilizationLayoutRefresh();
     }
-    scheduleUtilizationLayoutRefresh();
     return deviceIndex;
 }
 
 int HardwareDock::findNetworkUtilizationDeviceIndexByKey(const std::uint64_t interfaceKey) const
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_networkUtilDevices.size()); ++indexValue)
-    {
-        const NetworkUtilizationDevice& device = m_networkUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (device.interfaceKey == interfaceKey)
-        {
-            return indexValue;
-        }
-    }
-    return -1;
+    return m_networkDeviceIndex.value(static_cast<quint64>(interfaceKey), -1);
 }
 
-int HardwareDock::ensureNetworkUtilizationDevice(
-    const NetworkRateSample& sample,
-    const int ordinalIndex)
+int HardwareDock::ensureNetworkUtilizationDevice(const NetworkRateSample& sample, const int ordinalIndex)
 {
-    const int existingIndex = findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey);
-    if (existingIndex >= 0)
+    int deviceIndex = findNetworkUtilizationDeviceIndexByKey(sample.interfaceKey);
+    if (deviceIndex < 0)
     {
-        return existingIndex;
+        NetworkUtilizationDevice device;
+        device.interfaceKey = sample.interfaceKey;
+        device.displayNameText = networkUtilizationDisplayName(sample, ordinalIndex);
+        device.physical = sample.physical;
+        device.linkBitsPerSecond = sample.linkBitsPerSecond;
+        m_networkUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_networkUtilDevices.size()) - 1;
+        m_networkDeviceIndex.insert(static_cast<quint64>(sample.interfaceKey), deviceIndex);
     }
-
-    // device 用途：为新发现的网卡接口保留 UI 控件和增量采样基线。
-    NetworkUtilizationDevice device;
-    device.interfaceKey = sample.interfaceKey;
-    device.displayNameText = networkUtilizationDisplayName(sample, ordinalIndex);
-    device.linkBitsPerSecond = sample.linkBitsPerSecond;
-    device.physical = sample.physical;
-    device.lastOperational = sample.operational;
-    device.lastRxBytes = sample.totalRxBytes;
-    device.lastTxBytes = sample.totalTxBytes;
-    device.lastSampleMs = QDateTime::currentMSecsSinceEpoch();
-    device.hasPreviousSample = true;
-    if (!sample.physical)
+    auto& device = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
     {
-        ensureVirtualNetworkPage();
-    }
-    createNetworkUtilizationDevicePage(&device);
-    m_networkUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_networkUtilDevices.size()) - 1;
-    NetworkUtilizationDevice& createdDevice = m_networkUtilDevices[static_cast<std::size_t>(deviceIndex)];
-    if (sample.physical)
-    {
-        createdDevice.navCard = addUtilizationSidebarCard(
-            createdDevice.pageWidget,
-            createdDevice.displayNameText,
-            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
-            UtilizationDeviceKind::Network,
-            deviceIndex);
-        if (createdDevice.navCard != nullptr)
+        if (!device.physical) ensureVirtualNetworkPage();
+        createNetworkUtilizationDevicePage(&device);
+        if (device.physical)
         {
-            createdDevice.navCard->setSeriesColors(
+            device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+            device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+                KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Network),
+                UtilizationDeviceKind::Network, deviceIndex);
+            if (device.navCard != nullptr) device.navCard->setSeriesColors(
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Read),
                 KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Write));
         }
-    }
-    else
-    {
-        if (m_virtualNetworkGrid != nullptr && createdDevice.pageWidget != nullptr)
-        {
-            relayoutVirtualNetworkTiles();
-        }
-    }
-    scheduleUtilizationLayoutRefresh();
-    if (!sample.physical && m_utilizationFloatingPage == m_virtualNetworkPage)
-    {
-        QTimer::singleShot(0, this, [this]() { applyUtilizationFloatingContentScale(); });
+        else relayoutVirtualNetworkTiles();
+        scheduleUtilizationLayoutRefresh();
     }
     return deviceIndex;
 }
@@ -8766,44 +8856,34 @@ void HardwareDock::relayoutVirtualNetworkTiles()
 
 int HardwareDock::findGpuUtilizationDeviceIndexByKey(const std::uint64_t adapterKey) const
 {
-    for (int indexValue = 0; indexValue < static_cast<int>(m_gpuUtilDevices.size()); ++indexValue)
-    {
-        const GpuUtilizationDevice& device = m_gpuUtilDevices[static_cast<std::size_t>(indexValue)];
-        if (device.adapterKeyAssigned && device.adapterKey == adapterKey)
-        {
-            return indexValue;
-        }
-    }
-    return -1;
+    return m_gpuDeviceIndex.value(static_cast<quint64>(adapterKey), -1);
 }
 
-int HardwareDock::ensureGpuUtilizationDevice(
-    const GpuUsageSample& sample,
-    const int ordinalIndex)
+int HardwareDock::ensureGpuUtilizationDevice(const GpuUsageSample& sample, const int ordinalIndex)
 {
-    const int existingIndex = findGpuUtilizationDeviceIndexByKey(sample.adapterKey);
-    if (existingIndex >= 0)
+    int deviceIndex = findGpuUtilizationDeviceIndexByKey(sample.adapterKey);
+    if (deviceIndex < 0)
     {
-        return existingIndex;
+        GpuUtilizationDevice device;
+        device.adapterKey = sample.adapterKey;
+        device.adapterKeyAssigned = true;
+        device.adapterIndex = sample.adapterIndex;
+        device.displayNameText = gpuUtilizationDisplayName(ordinalIndex);
+        m_gpuUtilDevices.push_back(std::move(device));
+        deviceIndex = static_cast<int>(m_gpuUtilDevices.size()) - 1;
+        m_gpuDeviceIndex.insert(static_cast<quint64>(sample.adapterKey), deviceIndex);
     }
-
-    // device 用途：为新发现的 DXGI 适配器保留任务管理器风格 GPU 详情页。
-    GpuUtilizationDevice device;
-    device.adapterKey = sample.adapterKey;
-    device.adapterKeyAssigned = true;
-    device.adapterIndex = sample.adapterIndex;
-    device.displayNameText = gpuUtilizationDisplayName(ordinalIndex);
-    createGpuUtilizationDevicePage(&device);
-    m_gpuUtilDevices.push_back(device);
-
-    const int deviceIndex = static_cast<int>(m_gpuUtilDevices.size()) - 1;
-    m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].navCard = addUtilizationSidebarCard(
-        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].pageWidget,
-        m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)].displayNameText,
-        KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
-        UtilizationDeviceKind::Gpu,
-        deviceIndex);
-    scheduleUtilizationLayoutRefresh();
+    auto& device = m_gpuUtilDevices[static_cast<std::size_t>(deviceIndex)];
+    // Record creation is independent of widgets. Accepted samples survive Welcome-only churn.
+    if (!m_recordingDeviceHistory && m_utilizationDetailsInitialized && device.pageWidget == nullptr)
+    {
+        createGpuUtilizationDevicePage(&device);
+        device.archive.navRow = static_cast<int>(m_utilizationNavEntries.size());
+        device.navCard = addUtilizationSidebarCard(device.pageWidget, device.displayNameText,
+            KswordTheme::PerformanceColor(KswordTheme::PerformanceRole::Gpu),
+            UtilizationDeviceKind::Gpu, deviceIndex);
+        scheduleUtilizationLayoutRefresh();
+    }
     return deviceIndex;
 }
 
@@ -8908,6 +8988,8 @@ void HardwareDock::createDiskUtilizationDevicePage(DiskUtilizationDevice* device
     pageLayout->addWidget(devicePointer->detailLabel, 0);
 
     m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("read"), devicePointer->readLineSeries, devicePointer->readBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("write"), devicePointer->writeLineSeries, devicePointer->writeBaselineSeries);
 }
 
 void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* devicePointer)
@@ -9033,6 +9115,8 @@ void HardwareDock::createNetworkUtilizationDevicePage(NetworkUtilizationDevice* 
     {
         m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
     }
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("rx"), devicePointer->rxLineSeries, devicePointer->rxBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("tx"), devicePointer->txLineSeries, devicePointer->txBaselineSeries);
 }
 
 void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePointer)
@@ -9231,6 +9315,10 @@ void HardwareDock::createGpuUtilizationDevicePage(GpuUtilizationDevice* devicePo
     pageLayout->addWidget(devicePointer->detailLabel, 0);
 
     m_utilizationDetailStack->addWidget(devicePointer->pageWidget);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("dedicated"), devicePointer->dedicatedMemoryLineSeries, devicePointer->dedicatedMemoryBaselineSeries);
+    attachDeviceHistory(devicePointer->archive, QStringLiteral("shared"), devicePointer->sharedMemoryLineSeries, devicePointer->sharedMemoryBaselineSeries);
+    for (auto& engine : devicePointer->engineCharts)
+        attachDeviceHistory(devicePointer->archive, engine.engineKeyText, engine.lineSeries, engine.baselineSeries);
 }
 
 void HardwareDock::refreshCpuTopologyStaticInfo()
@@ -9566,6 +9654,7 @@ void HardwareDock::applyPerformanceSample(const PerformanceSample& sample)
             m_coreHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, value, valid});
             m_coreBaselineHistory[index]->append({static_cast<std::uint64_t>(m_sampleCounter), m_metricSampleTimeMs, 0.0, valid});
         }
+        recordDeviceSamples(diskSampleList, networkSampleList, gpuSampleList);
         m_presentationHistory.push_back({sample, gpuSampleList, m_metricGpuValid, m_sampleCounter});
         while (m_presentationHistory.size() > static_cast<std::size_t>(m_historyLength))
             m_presentationHistory.pop_front();

@@ -14,6 +14,8 @@
 #include "../UI/StructuredFieldView.h"
 
 #include <QStringList>
+#include <QHash>
+#include <QSet>
 #include <QPointer>
 #include <QPoint>
 #include <QPalette>
@@ -292,8 +294,20 @@ private:
     // - 作用：保存一个磁盘卡片、详情页和历史缩略图状态；
     // - 调用方式：ensureDiskUtilizationDevice 在发现新 PDH 实例时创建；
     // - 返回行为：结构体由 HardwareDock 持有，Qt 对象仍走父子树释放。
+    struct DeviceSeriesArchive
+    {
+        bool active = true;
+        bool available = false;
+        int navRow = -1;
+        int lastSampleId = 0;
+        qint64 lastSampleTimeMs = 0;
+        QHash<QString, std::shared_ptr<ks::ui::MetricHistory>> histories;
+    };
+
     struct DiskUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        DiskRateSample lastSample;
         QString instanceNameText;                 // instanceNameText：PDH PhysicalDisk 实例名。
         QString displayNameText;                  // displayNameText：左侧卡片标题。
         QWidget* pageWidget = nullptr;            // pageWidget：右侧详情页。
@@ -320,6 +334,8 @@ private:
     // - 返回行为：结构体不返回数据，刷新函数读取字段更新 UI。
     struct NetworkUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        NetworkRateSample lastSample;
         std::uint64_t interfaceKey = 0;           // interfaceKey：网络接口 LUID 打包键。
         QString displayNameText;                 // displayNameText：网卡展示名。
         std::uint64_t linkBitsPerSecond = 0;      // linkBitsPerSecond：链路速率 bit/s。
@@ -353,6 +369,8 @@ private:
     // - 返回行为：字段由 updateGpuUtilizationDevice 读取并刷新。
     struct GpuUtilizationDevice
     {
+        DeviceSeriesArchive archive;
+        GpuUsageSample lastSample;
         std::uint64_t adapterKey = 0;             // adapterKey：DXGI LUID 打包键。
         bool adapterKeyAssigned = false;          // adapterKeyAssigned：adapterKey 是否已经绑定真实设备。
         int adapterIndex = 0;                     // adapterIndex：DXGI 枚举序号。
@@ -507,6 +525,20 @@ private:
     bool m_restoringUtilizationHistory = false;
     std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreHistory;
     std::vector<std::shared_ptr<ks::ui::MetricHistory>> m_coreBaselineHistory;
+    static void appendDeviceMetric(DeviceSeriesArchive& archive, const QString& role,
+        double value, bool valid, int sampleId, qint64 sampleTimeMs, int capacity);
+    static void appendDeviceGap(DeviceSeriesArchive& archive, int sampleId, qint64 sampleTimeMs);
+    void attachDeviceHistory(DeviceSeriesArchive& archive, const QString& role,
+        QLineSeries* line, QLineSeries* baseline);
+    void recordDeviceSamples(const std::vector<DiskRateSample>& disks,
+        const std::vector<NetworkRateSample>& networks, const std::vector<GpuUsageSample>& gpus);
+    bool m_recordingDeviceHistory = false;
+    QHash<QString, int> m_diskDeviceIndex;
+    QHash<quint64, int> m_networkDeviceIndex;
+    QHash<quint64, int> m_gpuDeviceIndex;
+    QSet<int> m_activeDiskDevices;
+    QSet<int> m_activeNetworkDevices;
+    QSet<int> m_activeGpuDevices;
     // ===================== 采样与刷新 =====================
     void initializePerformanceCounters();
     void refreshAllViews();
