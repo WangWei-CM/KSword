@@ -2942,6 +2942,11 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
         [owner, publish](const Matches& matches, const std::uint64_t ticket)
         {
             return !owner || !owner->m_crossFilterOperation->isCurrent(ticket) || publish(matches);
+        },
+        [owner](std::exception_ptr)
+        {
+            // Keep the accepted filter; the next user search/refresh can retry.
+            if (owner) owner->m_crossFilterDirty = true;
         });
 }
 
