@@ -1588,7 +1588,7 @@ private:
 };
 void NetworkDock::initializeMultiThreadDownloadTab()
 {
-    m_multiThreadDownloadPage = new QWidget(this);
+    if (m_multiThreadDownloadPage == nullptr) m_multiThreadDownloadPage = new QWidget(this);
     m_multiThreadDownloadLayout = new QVBoxLayout(m_multiThreadDownloadPage);
     m_multiThreadDownloadLayout->setContentsMargins(0, 0, 0, 0);
     auto* workspace = new ks::ui::ParameterWorkspace(m_multiThreadDownloadPage, 420); // 下载输入与任务进度分栏。
@@ -1791,10 +1791,8 @@ void NetworkDock::initializeMultiThreadDownloadTab()
 
     network_navigation_detail::AddTab(m_sideTabWidget, m_multiThreadDownloadPage, QStringLiteral("download"), QIcon(":/Icon/process_start.svg"));
 
-    // 设置加载时机：
-    // - 必须在控件构建完成后调用，才能把 JSON 值正确回填到 UI；
-    // - 若设置文件不存在，会自动回退默认值并写入内存状态。
-    loadMultiThreadDownloadCaptureSettings();
+    // 设置值已在宿主启动时加载；首次建UI只回填，不重读文件或重置剪贴板去重值。
+    updateMultiThreadDownloadCaptureSettingsUi();
 
     kLogEvent initEvent;
     info << initEvent << "[NetworkDock] 多线程下载页初始化完成。" << eol;
@@ -2096,6 +2094,8 @@ bool NetworkDock::startMultiThreadDownloadTaskFromInput(
     const QString& urlText,
     const QString& saveDirectoryText)
 {
+    const QPointer<NetworkDock> owner(this);
+    if (!ensureNetworkToolPage(m_multiThreadDownloadPage) || !owner) return false;
     if (m_multiDownloadUrlEdit == nullptr || m_multiDownloadSaveDirEdit == nullptr)
     {
         return false;

@@ -40,6 +40,7 @@ NetworkDock::NetworkDock(QWidget* parent, const ConstructScope scope)
 
     // 初始化界面和连接逻辑。
     initializeUi();
+    loadMultiThreadDownloadCaptureSettings();
     initializeConnections();
     loadMonitorFilterConfigFromDefaultPath();
 

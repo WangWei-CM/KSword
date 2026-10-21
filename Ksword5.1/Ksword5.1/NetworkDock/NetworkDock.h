@@ -446,6 +446,7 @@ private:
     void ensureVisibleNetworkToolPage();
     void initializeNidsConnections();
     void initializeHttpsAnalyzeConnections();
+    void initializeMultiThreadDownloadConnections();
     void initializeManualRequestConnections();
     void initializeArpCacheConnections();
     void initializeDnsCacheConnections();
@@ -983,10 +984,11 @@ private:
     void browseMultiThreadDownloadDirectory();
 
     // loadMultiThreadDownloadCaptureSettings：
-    // - 作用：读取“剪贴板自动捕获下载链接”设置并同步到多线程下载页控件；
-    // - 调用方式：多线程下载页 UI 构建完成后调用。
+    // - 作用：启动时读取“剪贴板自动捕获下载链接”值，未访问下载页也持续捕获；
+    // - 调用方式：完整网络宿主启动时读取，惰性UI随后回填已有值。
     // - 返回：无。
     void loadMultiThreadDownloadCaptureSettings();
+    void updateMultiThreadDownloadCaptureSettingsUi();
 
     // saveMultiThreadDownloadCaptureSettings：
     // - 作用：把“剪贴板自动捕获下载链接”设置写入 JSON 文件；

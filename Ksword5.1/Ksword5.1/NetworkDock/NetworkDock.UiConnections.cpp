@@ -244,6 +244,46 @@ void NetworkDock::initializeHttpsAnalyzeConnections()
         });
 }
 
+void NetworkDock::initializeMultiThreadDownloadConnections()
+{
+    // 多线程下载页连接：开始下载、选择目录、URL回车触发。
+    connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+    connect(m_multiDownloadBrowseDirButton, &QPushButton::clicked, this, [this]()
+        {
+            browseMultiThreadDownloadDirectory();
+        });
+    connect(m_multiDownloadUrlEdit, &QLineEdit::returnPressed, this, [this]()
+        {
+            startMultiThreadDownloadTask();
+        });
+
+    // 下载捕获设置连接：开关/后缀变化后写入 JSON。
+    connect(m_multiDownloadAutoCaptureClipboardCheck, &QCheckBox::toggled, this, [this](const bool checked)
+        {
+            m_multiDownloadAutoCaptureClipboardEnabled = checked;
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadCaptureSuffixEdit, &QLineEdit::editingFinished, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+    connect(m_multiDownloadSaveCaptureSettingsButton, &QPushButton::clicked, this, [this]()
+        {
+            saveMultiThreadDownloadCaptureSettings();
+        });
+
+    // Model/proxy rows may move; the stable task role selects segment identity.
+    connect(m_multiDownloadTaskTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
+        {
+            const auto rows = m_multiDownloadTaskTable->selectionModel()->selectedRows(0);
+            m_multiDownloadSelectedTaskId = rows.isEmpty() ? 0 : rows.front().data(Qt::UserRole + 1).toInt();
+            refreshMultiThreadDownloadUi();
+        });
+}
+
 void NetworkDock::initializeConnections()
 {
     connect(m_sideTabWidget, &QTabWidget::currentChanged, this, [this](const int /*index*/)
@@ -697,35 +737,6 @@ void NetworkDock::initializeConnections()
             });
     }
 
-    // 多线程下载页连接：开始下载、选择目录、URL回车触发。
-    connect(m_multiDownloadStartButton, &QPushButton::clicked, this, [this]()
-        {
-            startMultiThreadDownloadTask();
-        });
-    connect(m_multiDownloadBrowseDirButton, &QPushButton::clicked, this, [this]()
-        {
-            browseMultiThreadDownloadDirectory();
-        });
-    connect(m_multiDownloadUrlEdit, &QLineEdit::returnPressed, this, [this]()
-        {
-            startMultiThreadDownloadTask();
-        });
-
-    // 下载捕获设置连接：开关/后缀变化后写入 JSON。
-    connect(m_multiDownloadAutoCaptureClipboardCheck, &QCheckBox::toggled, this, [this](const bool checked)
-        {
-            m_multiDownloadAutoCaptureClipboardEnabled = checked;
-            saveMultiThreadDownloadCaptureSettings();
-        });
-    connect(m_multiDownloadCaptureSuffixEdit, &QLineEdit::editingFinished, this, [this]()
-        {
-            saveMultiThreadDownloadCaptureSettings();
-        });
-    connect(m_multiDownloadSaveCaptureSettingsButton, &QPushButton::clicked, this, [this]()
-        {
-            saveMultiThreadDownloadCaptureSettings();
-        });
-
     // 剪贴板监听连接：
     // - 仅处理主剪贴板文本变化；
     // - 自动捕获开关关闭时，检测函数会快速返回。
@@ -741,14 +752,6 @@ void NetworkDock::initializeConnections()
                 onMultiThreadDownloadClipboardChanged();
             });
     }
-
-    // Model/proxy rows may move; the stable task role selects segment identity.
-    connect(m_multiDownloadTaskTable->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]()
-        {
-            const auto rows = m_multiDownloadTaskTable->selectionModel()->selectedRows(0);
-            m_multiDownloadSelectedTaskId = rows.isEmpty() ? 0 : rows.front().data(Qt::UserRole + 1).toInt();
-            refreshMultiThreadDownloadUi();
-        });
 
     // 双击报文行：打开独立详情窗口（非阻塞）。
     connect(m_packetTable, &QTableWidget::cellDoubleClicked, this,

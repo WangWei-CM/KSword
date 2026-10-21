@@ -71,7 +71,8 @@ void NetworkDock::initializeUi()
     };
     cold(m_manualRequestPage, QStringLiteral("manual-request"), QIcon(QStringLiteral(":/Icon/process_main.svg")),
         [this]() { initializeManualRequestTab(); initializeManualRequestConnections(); });
-    initializeMultiThreadDownloadTab();
+    cold(m_multiThreadDownloadPage, QStringLiteral("download"), QIcon(QStringLiteral(":/Icon/process_start.svg")),
+        [this]() { initializeMultiThreadDownloadTab(); initializeMultiThreadDownloadConnections(); });
     cold(m_httpsAnalyzePage, QStringLiteral("https"), QIcon(QStringLiteral(":/Icon/process_details.svg")),
         [this]() { initializeHttpsAnalyzeTab(); initializeHttpsAnalyzeConnections(); });
     cold(m_routeTablePage, QStringLiteral("route"), QIcon(QStringLiteral(":/Icon/process_tree.svg")), [this]() { initializeRouteTableTab(); });
