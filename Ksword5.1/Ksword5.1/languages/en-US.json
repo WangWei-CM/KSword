@@ -7051,6 +7051,7 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "正在检查 MCP 脚本路径…": "Checking the MCP script path…",
     "rehearsal view capacity": "rehearsal view capacity",
     "@kernel.knowledge.tab.title": "@kernel.knowledge.tab.title",
     "ALPC PID Handle Query Connection Server Client 端口": "ALPC PID Handle Query Connection Server Client ports",

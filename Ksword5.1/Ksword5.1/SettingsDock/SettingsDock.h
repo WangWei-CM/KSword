@@ -3,6 +3,7 @@
 #include "AppearanceSettings.h"
 
 #include <QWidget>
+#include <memory>
 
 class QButtonGroup;
 class QCheckBox;
@@ -117,6 +118,7 @@ private:
     void applyMcpSettingsToUi(const ks::settings::AppearanceSettings& settings);
     void collectMcpSettingsFromUi(ks::settings::AppearanceSettings& settings) const;
     void refreshMcpServiceState(); // 根据最近的真实状态刷新文案和启停按钮。
+    void requestMcpPathValidation(bool forceRefresh = false);
     void refreshMcpClientConfiguration(); // 仅更新当前 PID 的配置预览，不运行脚本。
     void refreshMcpInstallPrompt(); // 读取随程序嵌入的规范提示词，语言切换时刷新原文。
 
@@ -292,6 +294,8 @@ private:
     QWidget* m_onlineScanTab = nullptr;
 
     // MCP 页保持原控件身份；运行状态与待应用偏好分开保存。
+    struct McpPathValidationState;
+    std::shared_ptr<McpPathValidationState> m_mcpPathValidation;
     QWidget* m_mcpTab = nullptr; // 设置窗口中的 MCP 分类页。
     QCheckBox* m_mcpAutoStartCheckBox = nullptr; // 待保存的自动启动偏好。
     QLineEdit* m_mcpPythonCommandEdit = nullptr; // 客户端 Python 命令或可执行文件路径。
