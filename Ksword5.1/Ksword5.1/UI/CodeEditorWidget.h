@@ -15,6 +15,7 @@
 #include <QStringConverter>
 #include <QPointer>
 #include <QWidget>
+#include <functional>
 #include <memory>
 
 struct CodeEditorReadOnlyViewState;
@@ -28,6 +29,7 @@ class QVBoxLayout;
 class QHBoxLayout;
 class QWidget;
 
+namespace ks::ui { class AsyncOperation; class BudgetedPlainTextTransfer; }
 class CodeTextEdit;
 class QMenu;
 class QAction;
@@ -123,6 +125,9 @@ public:
     // - 不依赖 UI 按钮，适合业务代码直接调用。
     // 返回：true=成功，false=失败。
     bool openLocalFile(const QString& filePath);
+    // First-load variant for an empty editor: value-only file read/decode, then
+    // shared GUI-budgeted complete document transfer. Editing waits for completion.
+    bool openInitialLocalFileAsync(const QString& filePath, std::function<void(bool)> completed);
 
     // openLocalFileWithEncoding：
     // - 通过程序接口按指定编码打开本地文本文件；
@@ -404,5 +409,7 @@ private:
     // m_themeRefreshPending：合并排队的样式更新，避免setStyleSheet引发palette事件递归。
     bool m_themeRefreshPending = false;
     bool m_contentNotificationPending = false;
+    ks::ui::AsyncOperation* m_initialFileRead = nullptr;
+    ks::ui::BudgetedPlainTextTransfer* m_initialFileTransfer = nullptr;
     quint64 m_readOnlyViewRestoreGeneration = 0;
 };

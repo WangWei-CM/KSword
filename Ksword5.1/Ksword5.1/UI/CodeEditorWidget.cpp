@@ -5,6 +5,8 @@
 #include "ThemeAccentIcon.h"
 #include "CodeTextEdit.h"
 #include "CodeEditorFileSession.h"
+#include "AsyncOperation.h"
+#include "BudgetedPlainTextTransfer.h"
 
 // ============================================================
 // CodeEditorWidget.cpp
@@ -515,6 +517,8 @@ CodeEditorWidget::~CodeEditorWidget()
     // - 处理：先标记销毁中，再断开编辑器发往本组件的状态刷新信号；
     // - 返回：无返回值，子控件仍由 Qt 父子机制回收。
     m_destroying = true;
+    if (m_initialFileRead) m_initialFileRead->close();
+    if (m_initialFileTransfer) m_initialFileTransfer->cancel();
     if (m_editor != nullptr)
     {
         QObject::disconnect(m_editor, nullptr, this, nullptr);
@@ -1142,6 +1146,7 @@ void CodeEditorWidget::initializeConnections()
                 m_contentNotificationPending = true;
                 QTimer::singleShot(0, this, [this]() {
                     m_contentNotificationPending = false;
+                    if (m_initialFileTransfer && m_initialFileTransfer->isBusy()) return;
                     // Logs normally have no detail mirror. Keep the queued
                     // lifetime boundary, but only serialize for live consumers.
                     if (!isSignalConnected(QMetaMethod::fromSignal(&CodeEditorWidget::contentChanged))) return;
@@ -1677,6 +1682,86 @@ void CodeEditorWidget::openTextFile()
     }
 
     openLocalFile(filePath);
+}
+
+bool CodeEditorWidget::openInitialLocalFileAsync(const QString& filePath, std::function<void(bool)> completed)
+{
+    if (m_destroying || !m_editor || m_editor->document()->characterCount() != 1
+        || m_editor->document()->isModified() || filePath.trimmed().isEmpty()
+        || (m_initialFileRead && m_initialFileRead->isBusy())
+        || (m_initialFileTransfer && m_initialFileTransfer->isBusy())) return false;
+    if (!m_initialFileRead) m_initialFileRead = new ks::ui::AsyncOperation(this);
+    if (!m_initialFileTransfer) m_initialFileTransfer = new ks::ui::BudgetedPlainTextTransfer(m_editor);
+    const QPointer<CodeEditorWidget> self(this);
+    const auto settled = std::make_shared<bool>(false); // UI-only completion, including dropped read receipt.
+    const auto finish = [self, settled, completed = std::move(completed)](bool success)
+    {
+        if (*settled || !self || self->m_destroying) return;
+        *settled = true;
+        self->m_settingRawText = false;
+        self->setEnabled(true);
+        if (!self) return;
+        if (!success) self->setOperationStatus(QStringLiteral("打开失败：无法读取文件。"));
+        if (self && completed) completed(success);
+    };
+    setEnabled(false); // No save/open/replace can accept a partial initial document.
+    if (!self) return false;
+    m_initialFileRead->setStateChangedCallback([self, finish]()
+    {
+        if (self && !self->m_initialFileRead->isBusy()
+            && !self->m_initialFileTransfer->isBusy()) finish(false);
+    });
+    struct Prepared { bool read = false; FileDecodeResult decoded; };
+    try
+    {
+        m_initialFileRead->submit<QString, Prepared>(filePath.trimmed(),
+            [](const QString& path, const ks::ui::AsyncOperationToken& token)
+            {
+                Prepared result;
+                QFile file(path);
+                if (token.isCanceled() || !file.open(QIODevice::ReadOnly)) return result;
+                const auto bytes = file.readAll();
+                if (file.error() != QFileDevice::NoError || token.isCanceled()) return result;
+                result.read = true;
+                result.decoded = decodeTextFileBytesAuto(bytes); // Existing codec/BOM/newline policy.
+                return result;
+            },
+            [self, path = filePath.trimmed(), finish](const Prepared& result, std::uint64_t)
+            {
+                if (!self) return true;
+                if (!result.read || !result.decoded.success) { finish(false); return true; }
+                const auto decoded = result.decoded;
+                self->m_settingRawText = true;
+                const bool accepted = self->m_initialFileTransfer->load(decoded.text,
+                    [self, path, decoded, finish](bool success, QStringList)
+                    {
+                        if (!self) return;
+                        if (success)
+                        {
+                            self->m_currentFilePath = path;
+                            self->m_fileEncoding = decoded.encoding;
+                            self->m_fileHasBom = decoded.hasBom;
+                            self->m_fileLineEnding = decoded.lineEndingText;
+                            self->m_fileSessionAvailable = true;
+                            self->m_originalRawText = decoded.text;
+                            self->m_originalRawTextActive = true; // Transfer has no block cap/truncation.
+                            self->m_editor->document()->setModified(false);
+                            if (!self) return;
+                            self->updateStatusText();
+                            if (!self) return;
+                            self->setOperationStatus(QStringLiteral("打开成功：%1（%2%3）"),
+                                {path, self->currentEncodingDisplayText(), QString()}, 1U << 1);
+                        }
+                        finish(success);
+                        if (self && success) emit self->contentChanged(self->text());
+                    });
+                if (!accepted) finish(false);
+                return true;
+            },
+            [finish](std::exception_ptr) { finish(false); });
+    }
+    catch (...) { finish(false); }
+    return true;
 }
 
 bool CodeEditorWidget::loadLocalFile(

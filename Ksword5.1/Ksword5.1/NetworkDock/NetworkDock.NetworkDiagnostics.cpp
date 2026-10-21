@@ -1096,7 +1096,11 @@ void NetworkDock::loadHostsFileEditor()
     const QString hostsFilePath = QDir(windowsDirectory)
         .absoluteFilePath(QStringLiteral("System32/drivers/etc/hosts"));
 
-    if (m_hostsFileEditor->openLocalFile(hostsFilePath))
+    const QPointer<NetworkDock> guard(this);
+    m_hostsFileEditor->openInitialLocalFileAsync(hostsFilePath, [guard, hostsFilePath](bool success)
+    {
+        if (!guard || guard->m_hostsFileEditor == nullptr) return;
+    if (success)
     {
         kLogEvent openHostsEvent;
         info << openHostsEvent
@@ -1106,13 +1110,13 @@ void NetworkDock::loadHostsFileEditor()
     }
     else
     {
-        m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
+        guard->m_hostsFileEditor->setCurrentFilePath(hostsFilePath);
         // hosts 正文必须保持原文；这里只翻译本程序生成的读取失败说明。
         const QString hostsReadFailureText =
             ks::i18n::sourceText(QStringLiteral("# hosts 文件读取失败。\n"))
             + ks::i18n::sourceText(QStringLiteral("# 目标路径: %1\n")).arg(hostsFilePath)
             + ks::i18n::sourceText(QStringLiteral("# 如需直接保存系统 hosts，请以管理员权限运行程序。"));
-        m_hostsFileEditor->setRawText(hostsReadFailureText);
+        guard->m_hostsFileEditor->setRawText(hostsReadFailureText);
 
         kLogEvent openHostsFailEvent;
         warn << openHostsFailEvent
@@ -1120,6 +1124,8 @@ void NetworkDock::loadHostsFileEditor()
             << hostsFilePath.toStdString()
             << eol;
     }
+
+    });
 
 }
 
