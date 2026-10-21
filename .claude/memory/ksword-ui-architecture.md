@@ -485,3 +485,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-21 KCB-003后续已由七表/Minifilter完整后台值模型替代此前timer/items及detached树流程。源数组共享不可变根；字段/role/筛选/原Qt比较排序在既有worker准备，旧值在既有CompleteExport退役lane释放。sourceIndex、失败分隔行、persistent映射和捕获门禁继续保留；必要Qt通知/选择/展开仍在GUI。静态及HostX64构建44通过，真实GUI、原生事务与峰值内存没有代用户验收。此前分片段落记录历史阶段，不代表当前仍使用旧流程。
 
 - 速率时间轴的完整采样与绘制投影分开：后台对64点叶块建立小索引，绘制按物理像素列分别保留上下行首末及极值，最后一个原样本独立按原动画插值；最大Y值仍来自目标时间范围内全部原始值，不能改用动画值或降采样值。无序/非有限兼容输入保留原顺序和原扫描语义。投影缓存只按值源、目标/动画范围、物理宽度失效；主题和选区不重建原数据。纯值等价/峰谷守恒不等同GUI逐像素栅格一致或实测FPS证明，实际视觉由用户验收。
+
+- 网络审计/防火墙完整值模型接纳使用worker预备的持久范围树，使原begin/end增删通知内不再erase/shift/copy整个Row数组；最终回到连续根，固定模型/identity proxy保留persistent索引。排序比较在worker按实际显示QString和当前语言进行，切列时同值必须沿原Qt proxy的先前显示顺序稳定排列，不能每次从canonical顺序重排。root的真实QSortFilterProxyModel三次切列对照发现并纠正了此差异。必要Qt通知/真实persistent映射仍随规模增长，不能宣称常量时间。

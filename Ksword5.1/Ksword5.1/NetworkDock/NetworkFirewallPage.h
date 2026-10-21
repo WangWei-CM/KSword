@@ -30,7 +30,8 @@ class QPoint;
 class QPushButton;
 class QTabWidget;
 class QTableView;
-namespace ks::ui { template<class RowT> class FlatTableModel; class AsyncOperation; }
+namespace ks::ui { class AsyncOperation; }
+namespace network_value_detail { template<class Row> class Model; }
 class QTimer;
 class QVBoxLayout;
 class QSplitter;
@@ -188,7 +189,8 @@ private:
     // - 输入：批量事件、是否清空旧内容；
     // - 处理：写入表格；DROP 仅保留筛选标记，文字使用正常主题色；
     // - 无返回值。
-    void appendEventsToTable(const std::vector<FirewallEventEntry>& eventList, bool clearBeforeAppend);
+    void appendEventsToTable(std::shared_ptr<const std::vector<FirewallEventEntry>> eventList, bool clearBeforeAppend);
+    void preparePendingEventSource();
     void presentPendingFirewallValues();
     void applyResolvedHostnames(const QHash<QString, QString>& resolvedHostnameMap);
 
@@ -380,8 +382,8 @@ private:
     QCheckBox* m_ruleEnabledOnlyCheck = nullptr; // m_ruleEnabledOnlyCheck：仅显示启用规则。
     QSplitter* m_ruleSplitter = nullptr;       // m_ruleSplitter：规则表与详情 3:1 垂直分栏。
     QTableView* m_ruleTable = nullptr;       // m_ruleTable：防火墙规则表。
-    ks::ui::FlatTableModel<FirewallEventEntry>* m_eventValueModel = nullptr;
-    ks::ui::FlatTableModel<FirewallRuleEntry>* m_ruleValueModel = nullptr;
+    network_value_detail::Model<FirewallEventEntry>* m_eventValueModel = nullptr;
+    network_value_detail::Model<FirewallRuleEntry>* m_ruleValueModel = nullptr;
     ks::ui::AsyncOperation* m_eventFilterOperation = nullptr;
     ks::ui::AsyncOperation* m_ruleFilterOperation = nullptr;
     ks::ui::AsyncOperation* m_eventDiffOperation = nullptr;
@@ -390,7 +392,19 @@ private:
     std::optional<quint64> m_eventDiffRequestedRevision, m_ruleDiffRequestedRevision;
     std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventFilterSource;
     std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleFilterSource;
-    std::vector<FirewallEventEntry> m_eventEntryList;
+    std::shared_ptr<const std::vector<FirewallEventEntry>> m_eventEntryList = std::make_shared<const std::vector<FirewallEventEntry>>();
+    struct EventMutation
+    {
+        std::shared_ptr<const EventMutation> previous;
+        std::shared_ptr<const std::vector<FirewallEventEntry>> events;
+        QHash<QString, QString> hostnames;
+        quint64 firstIdentity = 0;
+        bool clear = false;
+    };
+    std::shared_ptr<const EventMutation> m_eventMutations;
+    ks::ui::AsyncOperation* m_eventSourceOperation = nullptr;
+    quint64 m_eventSourceReadyRevision = 0;
+    std::size_t m_eventCanonicalCount = 0;
     quint64 m_nextEventIdentity = 0;
     bool m_eventProjectionDirty = false;
     bool m_eventFilterDirty = false;
@@ -402,7 +416,7 @@ private:
     std::thread m_ruleRefreshThread;           // m_ruleRefreshThread：析构前等待的规则枚举线程。
     std::atomic_bool m_initialRefreshRequested{ false }; // m_initialRefreshRequested：首轮刷新门控。
     std::atomic_bool m_shuttingDown{ false };  // m_shuttingDown：阻止后台线程在析构期间继续回投 UI。
-    std::vector<FirewallRuleEntry> m_ruleEntryList; // m_ruleEntryList：规则快照缓存。
+    std::shared_ptr<const std::vector<FirewallRuleEntry>> m_ruleEntryList = std::make_shared<const std::vector<FirewallRuleEntry>>(); // m_ruleEntryList：规则快照缓存。
     void* m_fwpuclntModule = nullptr;          // m_fwpuclntModule：fwpuclnt.dll 模块句柄。
     void* m_liveEngineHandle = nullptr;        // m_liveEngineHandle：实时监控 BFE engine。
     void* m_liveSubscriptionHandle = nullptr;  // m_liveSubscriptionHandle：实时订阅句柄。

@@ -5,6 +5,7 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/FlatTableModel.h"
+#include "NetworkValueTableModel.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/TableRowFilterSupport.h"
 #include <QTableView>
@@ -1328,7 +1329,7 @@ void NetworkAuditPage::initializeConnections()
 void NetworkAuditPage::configureCrossViewValueTable(
     QTableView* table, const QStringList& headers, const bool tcp)
 {
-    using Model = ks::ui::FlatTableModel<CrossViewValue>;
+    using Model = network_value_detail::Model<CrossViewValue>;
     std::vector<Model::ColumnSpec> columns;
     for (const auto& header : headers) columns.push_back({header});
     const auto asyncState = m_asyncState;
@@ -1349,9 +1350,8 @@ void NetworkAuditPage::configureCrossViewValueTable(
         }, table, Model::FlagsResolver{},
         [](const CrossViewValue& row) { return row->identity; },
         crossViewValueChanges<Model>(tcp));
-    auto* proxy = new QSortFilterProxyModel(table);
-    proxy->setDynamicSortFilter(false);
-    proxy->setSortLocaleAware(true);
+    auto* proxy = new network_value_detail::SortProxy(table);
+    proxy->request = [this]() { m_crossDiffRequestedSource.reset(); refreshCrossViewTable(m_preparedCrossView); };
     proxy->setSourceModel(model);
     table->setProperty("ks_i18n_preserve_model_data", true);
     table->setModel(proxy);
@@ -1455,7 +1455,7 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
         QString preparationFailureText;
         if (failureText.isEmpty())
         {
-            try { accepted = std::make_shared<AuditSnapshot>(std::move(snapshot)); }
+            try { accepted = network_value_detail::retainMutable(std::make_shared<AuditSnapshot>(std::move(snapshot))); }
             catch (const std::exception& exception) { failureText = QStringLiteral("刷新失败：%1").arg(QString::fromUtf8(exception.what())); }
             catch (...) { failureText = QStringLiteral("刷新失败"); }
             try
@@ -1572,7 +1572,7 @@ void NetworkAuditPage::refreshCrossViewAsync()
         QString preparationFailureText;
         if (failureText.isEmpty())
         {
-            try { accepted = std::make_shared<AuditSnapshot>(std::move(snapshot)); }
+            try { accepted = network_value_detail::retainMutable(std::make_shared<AuditSnapshot>(std::move(snapshot))); }
             catch (const std::exception& exception) { failureText = QStringLiteral("刷新失败：%1").arg(QString::fromUtf8(exception.what())); }
             catch (...) { failureText = QStringLiteral("刷新失败"); }
             try
@@ -2372,7 +2372,7 @@ void NetworkAuditPage::applySnapshot(std::shared_ptr<AuditSnapshot> snapshot,
     std::shared_ptr<const CrossViewPresentation> prepared)
 {
     // 规范快照始终接收完整采集结果；隐藏与菜单屏障只延后控件投影。
-    m_latestAuditSnapshot = std::move(snapshot);
+    m_latestAuditSnapshot = network_value_detail::retainMutable(std::move(snapshot));
     ++m_crossSourceGeneration;
     if (prepared && prepared->source == m_latestAuditSnapshot
         && prepared->sourceGeneration == m_crossSourceGeneration
@@ -2413,7 +2413,7 @@ void NetworkAuditPage::applyCrossViewSnapshot(std::shared_ptr<AuditSnapshot> sna
 {
     // The existing single-flight worker already merged the request's immutable
     // previous canonical value; GUI acceptance does not copy endpoint/text arrays.
-    m_latestAuditSnapshot = std::move(snapshot);
+    m_latestAuditSnapshot = network_value_detail::retainMutable(std::move(snapshot));
     ++m_crossSourceGeneration;
     if (prepared && prepared->source == m_latestAuditSnapshot
         && prepared->sourceGeneration == m_crossSourceGeneration
@@ -2727,7 +2727,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     prepared->tcpRows = std::move(tcpRows);
     prepared->udpRows = std::move(udpRows);
     prepared->summaryRows = std::move(summaryRows);
-    return prepared;
+    return ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const CrossViewPresentation>(std::move(prepared)));
 }
 
 void NetworkAuditPage::requestCrossViewPreparation()
@@ -2792,24 +2792,25 @@ const std::vector<NetworkAuditPage::TcpEndpointRow>& NetworkAuditPage::tcpEndpoi
 void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPresentation> prepared)
 {
     if (!prepared || m_crossDiffRequestedSource == prepared) return;
-    using Model = ks::ui::FlatTableModel<CrossViewValue>;
-    struct Input { std::vector<CrossViewValue> oldRows, rows; quint64 revision; int columns; };
-    struct Request { std::shared_ptr<const CrossViewPresentation> source; std::array<Input, 3> tables; };
+    using Model = network_value_detail::Model<CrossViewValue>;
+    struct Input { Model::RowsHandle oldRows; const std::vector<CrossViewValue>* rows; quint64 revision, sortRevision; int columns, sortColumn; Qt::SortOrder sortOrder; };
+    struct Request { std::shared_ptr<const CrossViewPresentation> source; std::array<Input, 3> tables; ks::i18n::SourceTextSnapshot language; };
     using Result = std::array<Model::PreparedRows, 3>;
-    Request request{prepared, {}};
+    Request request{prepared, {}, ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
     const std::array<QTableView*, 3> tables{m_tcpTable, m_udpTable, m_crossSummaryTable};
     const std::array<const std::vector<CrossViewValue>*, 3> rows{&prepared->tcpRows, &prepared->udpRows, &prepared->summaryRows};
     std::array<QPointer<Model>, 3> models;
     for (std::size_t i = 0; i < tables.size(); ++i)
     {
-        auto* proxy = tables[i] ? qobject_cast<QSortFilterProxyModel*>(tables[i]->model()) : nullptr;
+        auto* proxy = tables[i] ? dynamic_cast<network_value_detail::SortProxy*>(tables[i]->model()) : nullptr;
         models[i] = proxy ? dynamic_cast<Model*>(proxy->sourceModel()) : nullptr;
         if (!models[i] || !models[i]->canAcceptPreparedRows(models[i]->rowsRevision())) return;
-        request.tables[i] = {models[i]->rows(), *rows[i], models[i]->rowsRevision(), models[i]->columnCount()};
+        request.tables[i] = {models[i]->rowsHandle(), rows[i], models[i]->rowsRevision(), proxy->sortRevision(), models[i]->columnCount(), proxy->sortColumn(), proxy->sortOrder()};
     }
     const QPointer<NetworkAuditPage> owner(this);
     if (!m_crossDiffOperation) m_crossDiffOperation = new ks::ui::AsyncOperation(this);
     m_crossDiffRequestedSource = prepared;
+    const std::array<quint64, 3> sortRevisions{request.tables[0].sortRevision, request.tables[1].sortRevision, request.tables[2].sortRevision};
     m_crossDiffOperation->submit<Request, Result>(std::move(request),
         [](const Request& value, const ks::ui::AsyncOperationToken& token) {
             Result result;
@@ -2817,13 +2818,17 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
             {
                 if (token.isCanceled()) return Result{};
                 const auto& input = value.tables[i];
-                result[i] = Model::prepareRows(input.oldRows, input.rows, input.columns,
+                auto rows = *input.rows;
+                network_value_detail::sortRows(rows, input.sortColumn, input.sortOrder, value.language,
+                    [](const CrossViewValue& row, int column) { return row->fields.value(column); }, input.oldRows.get(),
+                    [](const CrossViewValue& row) { return row->identity; });
+                result[i] = Model::prepareRows(input.oldRows, std::move(rows), input.columns,
                     [](const CrossViewValue& row) { return row->identity; },
                     crossViewValueChanges<Model>(i == 0), input.revision);
             }
             return result;
         },
-        [owner, prepared, models](Result& result, std::uint64_t ticket) {
+        [owner, prepared, models, sortRevisions](Result& result, std::uint64_t ticket) {
             if (!owner || !owner->m_crossDiffOperation->isCurrent(ticket)) return true;
             owner->m_crossDiffRequestedSource.reset();
             const auto retry = [owner]() {
@@ -2844,8 +2849,9 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
             const std::array<QTableView*, 3> currentTables{owner->m_tcpTable, owner->m_udpTable, owner->m_crossSummaryTable};
             for (std::size_t i = 0; i < models.size(); ++i)
             {
-                auto* proxy = currentTables[i] ? qobject_cast<QSortFilterProxyModel*>(currentTables[i]->model()) : nullptr;
+                auto* proxy = currentTables[i] ? dynamic_cast<network_value_detail::SortProxy*>(currentTables[i]->model()) : nullptr;
                 if (!models[i] || !proxy || proxy->sourceModel() != models[i].data()
+                    || proxy->sortRevision() != sortRevisions[i]
                     || !models[i]->canAcceptPreparedRows(result[i].baseRevision)) { retry(); return true; }
             }
             if (ks::ui::DeferTablePresentationIfValueCaptureOpen(owner.data(),
@@ -2950,7 +2956,7 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
         for (std::size_t i = 0; i < currentTables.size(); ++i)
         {
             if (!currentTables[i]) continue;
-            auto* proxy = qobject_cast<QSortFilterProxyModel*>(currentTables[i]->model());
+            auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(currentTables[i]->model());
             if (!proxy || !proxy->sourceModel()
                 || proxy->sourceModel()->rowCount() != static_cast<int>(sourceSizes[i])
                 || (active && !matches[i])) return true;
@@ -2967,8 +2973,8 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
         {
             QTableView* const table = currentTables[i];
             if (!table) continue;
-            auto* proxy = qobject_cast<QSortFilterProxyModel*>(table->model());
-            using Model = ks::ui::FlatTableModel<CrossViewValue>;
+            auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(table->model());
+            using Model = network_value_detail::Model<CrossViewValue>;
             const QPointer<Model> model = dynamic_cast<Model*>(proxy->sourceModel());
             if (!model) return true;
             const auto excluded = active ? matches[i] : std::shared_ptr<const ExcludedKeys>();
@@ -2976,7 +2982,7 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
                 ks::ui::ApplyTableRowFilterPredicateIncrementally(table, {});
             else
                 ks::ui::ApplyTableRowFilterPredicateIncrementally(table,
-                    [proxy = QPointer<QSortFilterProxyModel>(proxy), model, excluded](const QModelIndex& index) {
+                    [proxy = QPointer<network_value_detail::SortProxy>(proxy), model, excluded](const QModelIndex& index) {
                         if (!proxy || !model) return false;
                         const auto* row = model->rowAt(proxy->mapToSource(index).row());
                         if (!row) return false;
@@ -2990,10 +2996,11 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
             if (auto* selection = table->selectionModel())
             {
                 QItemSelection removed;
-                for (const auto& index : selection->selectedRows())
-                    if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
-                        removed.select(table->model()->index(index.row(), 0),
-                            table->model()->index(index.row(), table->model()->columnCount() - 1));
+                for (const auto& range : network_value_detail::selectedRanges(selection))
+                    for (int row = range.first; row <= range.second; ++row)
+                        if (ks::ui::IsTableRowExcludedByFilter(table, row))
+                            removed.select(table->model()->index(row, 0),
+                                table->model()->index(row, table->model()->columnCount() - 1));
                 if (!removed.isEmpty()) selection->select(removed, QItemSelectionModel::Deselect);
                 if (!current()) return true;
                 if (ks::ui::IsTableRowExcludedByFilter(table, table->currentIndex().row()))
@@ -3047,7 +3054,7 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
                             excluded->duplicateRows.insert(row.get());
                     }
                 }
-                result[i] = std::move(excluded);
+                result[i] = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const ExcludedKeys>(std::move(excluded)));
             }
             return result;
         },

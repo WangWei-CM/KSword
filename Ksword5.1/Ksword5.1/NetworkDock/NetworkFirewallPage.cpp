@@ -7,6 +7,7 @@
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/FlatTableModel.h"
+#include "NetworkValueTableModel.h"
 #include "../UI/TableRowFilterSupport.h"
 #include "../UI/AsyncOperation.h"
 #include "../UI/ToolbarMetrics.h"
@@ -430,7 +431,7 @@ namespace
         if (!table || !table->selectionModel()) return;
         auto* selection = table->selectionModel();
         QItemSelection excludedSelection;
-        for (const auto& row : selection->selectedRows())
+        for (const auto& row : network_value_detail::selectedRows(selection))
             if (ks::ui::IsTableRowExcludedByFilter(table, row.row()))
                 excludedSelection.select(table->model()->index(row.row(), 0),
                     table->model()->index(row.row(), table->model()->columnCount() - 1));
@@ -439,8 +440,8 @@ namespace
             selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
     }
 
-    using FirewallEventModel = ks::ui::FlatTableModel<NetworkFirewallPage::FirewallEventEntry>;
-    using FirewallRuleModel = ks::ui::FlatTableModel<NetworkFirewallPage::FirewallRuleEntry>;
+    using FirewallEventModel = network_value_detail::Model<NetworkFirewallPage::FirewallEventEntry>;
+    using FirewallRuleModel = network_value_detail::Model<NetworkFirewallPage::FirewallRuleEntry>;
     using HostnameCommit = std::function<void(const QHash<QString, QString>&)>;
 
     QString eventColumnText(const NetworkFirewallPage::FirewallEventEntry& entry, const int column)
@@ -2628,6 +2629,7 @@ NetworkFirewallPage::~NetworkFirewallPage()
     m_shuttingDown.store(true);
     if (m_eventFilterOperation) m_eventFilterOperation->close();
     if (m_ruleFilterOperation) m_ruleFilterOperation->close();
+    if (m_eventSourceOperation) m_eventSourceOperation->close();
     if (m_eventDiffOperation) m_eventDiffOperation->close();
     if (m_ruleDiffOperation) m_ruleDiffOperation->close();
     if (m_eventTable) m_eventTable->removeEventFilter(this);
@@ -2794,10 +2796,9 @@ void NetworkFirewallPage::initializeEventMonitorUi()
             return sameFirewallEvent(a, b) ? std::vector<FirewallEventModel::ColumnChange>{}
                 : std::vector<FirewallEventModel::ColumnChange>{{0, ColumnCount - 1, {}}};
         });
-    auto* eventSort = new QSortFilterProxyModel(m_eventTable);
+    auto* eventSort = new network_value_detail::SortProxy(m_eventTable);
     eventSort->setSourceModel(m_eventValueModel);
-    eventSort->setDynamicSortFilter(false);
-    eventSort->setSortLocaleAware(true);
+    eventSort->request = [this]() { m_eventDiffRequestedRevision.reset(); m_eventProjectionDirty = true; presentPendingFirewallValues(); };
     m_eventTable->setProperty("ks_i18n_preserve_model_data", true);
     m_eventTable->setModel(eventSort);
     ks::ui::SetTableRowFilterBusinessOwnership(m_eventTable,
@@ -2972,10 +2973,9 @@ void NetworkFirewallPage::initializeRuleManagerUi()
             return sameFirewallRule(a, b) ? std::vector<FirewallRuleModel::ColumnChange>{}
                 : std::vector<FirewallRuleModel::ColumnChange>{{0, RuleColumnCount - 1, {}}};
         });
-    auto* ruleSort = new QSortFilterProxyModel(m_ruleTable);
+    auto* ruleSort = new network_value_detail::SortProxy(m_ruleTable);
     ruleSort->setSourceModel(m_ruleValueModel);
-    ruleSort->setDynamicSortFilter(false);
-    ruleSort->setSortLocaleAware(true);
+    ruleSort->request = [this]() { m_ruleDiffRequestedRevision.reset(); m_ruleProjectionDirty = true; presentPendingFirewallValues(); };
     m_ruleTable->setProperty("ks_i18n_preserve_model_data", true);
     m_ruleTable->setModel(ruleSort);
     ks::ui::SetTableRowFilterBusinessOwnership(m_ruleTable,
@@ -3166,6 +3166,7 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
                 entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
             // 反向 DNS 已从枚举主链路里拆出来：先把 IP 摆上表，主机名交给独立任务回填。
             const QStringList pendingAddressList = collectUnresolvedAddressList(eventList);
+            const auto eventValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(eventList)));
 
             std::lock_guard<std::mutex> dispatchGuard(taskState->dispatchMutex);
             NetworkFirewallPage* const receiver = taskState->owner;
@@ -3176,7 +3177,7 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
 
             const bool invokeOk = QMetaObject::invokeMethod(
                 receiver,
-                [taskState, hostnameCommit, eventList = std::move(eventList), errorText, pendingAddressList]() mutable
+                [taskState, hostnameCommit, eventList = eventValues, errorText, pendingAddressList]() mutable
                 {
                     NetworkFirewallPage* pagePointer = nullptr;
                     {
@@ -3192,7 +3193,7 @@ void NetworkFirewallPage::refreshHistoryAsync(const bool forceRefresh)
                         pagePointer->appendEventsToTable(eventList, true);
                         pagePointer->setStatusText(
                             QStringLiteral("历史事件：%1 条，刷新：%2")
-                            .arg(static_cast<int>(eventList.size()))
+                            .arg(static_cast<int>(eventList->size()))
                             .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
                         enqueueHostnameResolution(hostnameCommit, taskState, pendingAddressList);
                     }
@@ -3462,35 +3463,94 @@ void NetworkFirewallPage::stopLiveMonitor()
 }
 
 void NetworkFirewallPage::appendEventsToTable(
-    const std::vector<FirewallEventEntry>& eventList, const bool clearBeforeAppend)
+    std::shared_ptr<const std::vector<FirewallEventEntry>> eventList, const bool clearBeforeAppend)
 {
     if (!m_eventTable || m_shuttingDown.load()) return;
-    if (clearBeforeAppend) m_eventEntryList.clear();
     const std::size_t limit = static_cast<std::size_t>(kMaximumDisplayedFirewallEvents);
-    const auto first = eventList.size() > limit ? eventList.size() - limit : 0U;
-    const auto incoming = eventList.size() - first;
-    const auto keep = limit - incoming;
-    if (m_eventEntryList.size() > keep)
-        m_eventEntryList.erase(m_eventEntryList.begin(), m_eventEntryList.end() - keep);
-    m_eventEntryList.reserve(m_eventEntryList.size() + incoming);
-    for (std::size_t index = first; index < eventList.size(); ++index)
-    {
-        auto entry = eventList[index];
-        entry.displayIdentity = ++m_nextEventIdentity;
-        if (entry.searchDocumentText.isEmpty())
-            entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
-        m_eventEntryList.push_back(std::move(entry));
-    }
+    const auto incoming = eventList ? std::min(eventList->size(), limit) : 0U;
+    auto mutation = std::make_shared<EventMutation>();
+    mutation->previous = m_eventMutations;
+    mutation->events = std::move(eventList);
+    mutation->clear = clearBeforeAppend;
+    mutation->firstIdentity = m_nextEventIdentity + 1;
+    m_nextEventIdentity += incoming;
+    m_eventCanonicalCount = std::min(limit, (clearBeforeAppend ? 0U : m_eventCanonicalCount) + incoming);
+    m_eventMutations = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const EventMutation>(std::move(mutation)));
     ++m_eventSourceRevision;
     m_eventProjectionDirty = true;
     m_eventFilterDirty = true;
-    presentPendingFirewallValues();
+    preparePendingEventSource();
+}
+
+void NetworkFirewallPage::preparePendingEventSource()
+{
+    if (!m_eventMutations || m_shuttingDown.load()) return;
+    struct Request
+    {
+        std::shared_ptr<const std::vector<FirewallEventEntry>> base;
+        std::shared_ptr<const EventMutation> tail;
+        quint64 revision;
+    };
+    using Result = std::shared_ptr<const std::vector<FirewallEventEntry>>;
+    const Request request{m_eventEntryList, m_eventMutations, m_eventSourceRevision};
+    if (!m_eventSourceOperation) m_eventSourceOperation = new ks::ui::AsyncOperation(this);
+    const QPointer<NetworkFirewallPage> owner(this);
+    m_eventSourceOperation->submit<Request, Result>(request,
+        [](const Request& value, const ks::ui::AsyncOperationToken& token) -> Result {
+            std::vector<const EventMutation*> mutations;
+            for (auto next = value.tail; next; next = next->previous) mutations.push_back(next.get());
+            auto rows = *value.base;
+            const std::size_t limit = static_cast<std::size_t>(kMaximumDisplayedFirewallEvents);
+            for (auto next = mutations.rbegin(); next != mutations.rend(); ++next)
+            {
+                if (token.isCanceled()) return {};
+                const auto& change = **next;
+                if (change.clear) rows.clear();
+                if (change.events)
+                {
+                    const auto first = change.events->size() > limit ? change.events->size() - limit : 0U;
+                    const auto incoming = change.events->size() - first;
+                    const auto keep = limit - incoming;
+                    if (rows.size() > keep) rows.erase(rows.begin(), rows.end() - keep);
+                    rows.reserve(rows.size() + incoming);
+                    for (std::size_t i = first; i < change.events->size(); ++i)
+                    {
+                        auto entry = (*change.events)[i];
+                        entry.displayIdentity = change.firstIdentity + i - first;
+                        if (entry.searchDocumentText.isEmpty()) entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
+                        rows.push_back(std::move(entry));
+                    }
+                }
+                if (!change.hostnames.isEmpty())
+                    for (auto& entry : rows)
+                    {
+                        bool changed = false;
+                        const auto local = change.hostnames.constFind(entry.localAddressText);
+                        if (local != change.hostnames.cend() && !local->isEmpty() && entry.localHostText != *local)
+                        { entry.localHostText = *local; changed = true; }
+                        const auto remote = change.hostnames.constFind(entry.remoteAddressText);
+                        if (remote != change.hostnames.cend() && !remote->isEmpty() && entry.remoteHostText != *remote)
+                        { entry.remoteHostText = *remote; changed = true; }
+                        if (changed) entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
+                    }
+            }
+            return ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(rows)));
+        },
+        [owner, request](const Result& result, std::uint64_t ticket) {
+            if (!owner || !result || !owner->m_eventSourceOperation->isCurrent(ticket)
+                || owner->m_eventMutations != request.tail || owner->m_eventSourceRevision != request.revision) return true;
+            owner->m_eventEntryList = result;
+            owner->m_eventMutations.reset();
+            owner->m_eventSourceReadyRevision = request.revision;
+            owner->presentPendingFirewallValues();
+            return true;
+        }, [](std::exception_ptr) {});
 }
 
 void NetworkFirewallPage::presentPendingFirewallValues()
 {
     if (m_shuttingDown.load()) return;
-    if (m_eventProjectionDirty && m_eventTable && m_eventTable->isVisible())
+    if (m_eventProjectionDirty && m_eventSourceReadyRevision == m_eventSourceRevision && m_eventTable && m_eventTable->isVisible())
     {
         const QPointer<NetworkFirewallPage> owner(this);
         if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
@@ -3499,27 +3559,31 @@ void NetworkFirewallPage::presentPendingFirewallValues()
         if (m_eventDiffRequestedRevision == m_eventSourceRevision
             || !m_eventValueModel->canAcceptPreparedRows(m_eventValueModel->rowsRevision())) return;
         using Model = FirewallEventModel;
-        struct Request { std::vector<FirewallEventEntry> oldRows, rows; quint64 revision, sourceRevision; int columns; };
-        const Request request{m_eventValueModel->rows(), m_eventEntryList,
-            m_eventValueModel->rowsRevision(), m_eventSourceRevision, m_eventValueModel->columnCount()};
+        struct Request { Model::RowsHandle oldRows, rows; quint64 revision, sourceRevision, sortRevision; int columns, sortColumn; Qt::SortOrder sortOrder; ks::i18n::SourceTextSnapshot language; };
+        const auto* sort = dynamic_cast<network_value_detail::SortProxy*>(m_eventTable->model());
+        const Request request{m_eventValueModel->rowsHandle(), m_eventEntryList,
+            m_eventValueModel->rowsRevision(), m_eventSourceRevision, sort->sortRevision(), m_eventValueModel->columnCount(), sort->sortColumn(), sort->sortOrder(), ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
         const QPointer<Model> model(m_eventValueModel);
         if (!m_eventDiffOperation) m_eventDiffOperation = new ks::ui::AsyncOperation(this);
         m_eventDiffRequestedRevision = request.sourceRevision;
         m_eventDiffOperation->submit<Request, Model::PreparedRows>(request,
             [](const Request& value, const ks::ui::AsyncOperationToken&) {
-                return Model::prepareRows(value.oldRows, value.rows, value.columns,
+                auto rows = *value.rows;
+                network_value_detail::sortRows(rows, value.sortColumn, value.sortOrder, value.language, eventColumnText, value.oldRows.get(),
+                    [](const FirewallEventEntry& row) { return std::to_string(row.displayIdentity); });
+                return Model::prepareRows(value.oldRows, std::move(rows), value.columns,
                     [](const FirewallEventEntry& row) { return std::to_string(row.displayIdentity); },
                     [](const FirewallEventEntry& a, const FirewallEventEntry& b) {
                         return sameFirewallEvent(a, b) ? std::vector<Model::ColumnChange>{}
                             : std::vector<Model::ColumnChange>{{0, ColumnCount - 1, {}}};
                     }, value.revision);
             },
-            [owner, model, sourceRevision = request.sourceRevision](Model::PreparedRows& result, std::uint64_t ticket) {
+            [owner, model, sourceRevision = request.sourceRevision, sortRevision = request.sortRevision](Model::PreparedRows& result, std::uint64_t ticket) {
                 if (!owner || !owner->m_eventDiffOperation->isCurrent(ticket)) return true;
                 owner->m_eventDiffRequestedRevision.reset();
-                auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_eventTable->model());
+                auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_eventTable->model());
                 if (!model || owner->m_eventValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
-                    || owner->m_eventSourceRevision != sourceRevision
+                    || owner->m_eventSourceRevision != sourceRevision || proxy->sortRevision() != sortRevision
                     || !model->canAcceptPreparedRows(result.baseRevision))
                 { owner->presentPendingFirewallValues(); return true; }
                 if (!owner->m_eventTable->isVisible()) return true;
@@ -3538,35 +3602,20 @@ void NetworkFirewallPage::presentPendingFirewallValues()
             }, [owner](std::exception_ptr) { if (owner) owner->m_eventDiffRequestedRevision.reset(); });
     }
     if (m_ruleProjectionDirty && m_ruleTable && m_ruleTable->isVisible())
-        appendRulesToTable(m_ruleEntryList, true);
+        appendRulesToTable(*m_ruleEntryList, true);
 }
 
 void NetworkFirewallPage::applyResolvedHostnames(const QHash<QString, QString>& resolvedHostnameMap)
 {
     if (m_shuttingDown.load() || resolvedHostnameMap.isEmpty()) return;
-    bool changed = false;
-    for (auto& entry : m_eventEntryList)
-    {
-        bool rowChanged = false;
-        const auto local = resolvedHostnameMap.constFind(entry.localAddressText);
-        if (local != resolvedHostnameMap.cend() && !local->isEmpty() && entry.localHostText != *local)
-        { entry.localHostText = *local; rowChanged = true; }
-        const auto remote = resolvedHostnameMap.constFind(entry.remoteAddressText);
-        if (remote != resolvedHostnameMap.cend() && !remote->isEmpty() && entry.remoteHostText != *remote)
-        { entry.remoteHostText = *remote; rowChanged = true; }
-        if (rowChanged)
-        {
-            entry.searchDocumentText = firewallSearchDocument(entry, ColumnCount, eventColumnText);
-            changed = true;
-        }
-    }
-    if (changed)
-    {
-        ++m_eventSourceRevision;
-        m_eventProjectionDirty = true;
-        m_eventFilterDirty = true;
-        presentPendingFirewallValues();
-    }
+    auto mutation = std::make_shared<EventMutation>();
+    mutation->previous = m_eventMutations;
+    mutation->hostnames = resolvedHostnameMap;
+    m_eventMutations = ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const EventMutation>(std::move(mutation)));
+    ++m_eventSourceRevision;
+    m_eventProjectionDirty = true;
+    m_eventFilterDirty = true;
+    preparePendingEventSource();
 }
 
 void NetworkFirewallPage::applyFilterToRows()
@@ -3591,7 +3640,7 @@ void NetworkFirewallPage::applyFilterToRows()
     // Copy the immutable value vector once per published source, never walk the
     // proxy/model roles or construct exclusions on the GUI for each search.
     if (!m_eventFilterSource)
-        m_eventFilterSource = std::make_shared<const std::vector<FirewallEventEntry>>(m_eventValueModel->rows());
+        m_eventFilterSource = m_eventValueModel->rowsHandle();
     struct Request { std::shared_ptr<const std::vector<FirewallEventEntry>> source; QString filter; bool dropOnly; };
     using Excluded = std::shared_ptr<const QSet<quint64>>;
     const Request request{m_eventFilterSource, filter, dropOnly};
@@ -3606,7 +3655,7 @@ void NetworkFirewallPage::applyFilterToRows()
                 if ((!value.filter.isEmpty() && !entry.searchDocumentText.contains(value.filter))
                     || (value.dropOnly && !entry.isDrop)) excluded->insert(entry.displayIdentity);
             }
-            return excluded;
+            return ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const QSet<quint64>>(std::move(excluded)));
         },
         [owner, request](const Excluded& excluded, std::uint64_t ticket) {
             if (!owner || !excluded || !owner->m_eventFilterOperation->isCurrent(ticket)
@@ -3619,7 +3668,7 @@ void NetworkFirewallPage::applyFilterToRows()
                 QStringLiteral("firewall_event_filter"), {owner->m_eventTable},
                 [owner]() { if (owner) owner->applyFilterToRows(); })) return true;
             const QPointer<FirewallEventModel> model = owner->m_eventValueModel;
-            const QPointer<QSortFilterProxyModel> proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_eventTable->model());
+            const QPointer<network_value_detail::SortProxy> proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_eventTable->model());
             ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_eventTable,
                 [model, proxy, excluded](const QModelIndex& index) {
                     if (!model || !proxy) return false;
@@ -3668,15 +3717,16 @@ void NetworkFirewallPage::flushLiveEventsToUi()
         eventList.push_back(std::move(queuedEvents.front()));
         queuedEvents.pop_front();
     }
-    appendEventsToTable(eventList, false);
+    const auto eventValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallEventEntry>>(std::move(eventList)));
+    appendEventsToTable(eventValues, false);
     // 实时事件的主机名同样不在 WFP 回调线程里做同步反查，改成事后异步回填。
     enqueueHostnameResolution(
         [safeThis](const QHash<QString, QString>& values) { if (safeThis) safeThis->applyResolvedHostnames(values); },
         acquireFirewallAsyncTaskState(this),
-        collectUnresolvedAddressList(eventList));
+        collectUnresolvedAddressList(*eventValues));
     setStatusText(QStringLiteral("实时事件：追加 %1 条，总计 %2 条")
-        .arg(static_cast<int>(eventList.size()))
-        .arg(m_eventEntryList.size()));
+        .arg(static_cast<int>(eventValues->size()))
+        .arg(m_eventCanonicalCount));
 }
 
 void NetworkFirewallPage::setStatusText(const QString& statusText)
@@ -3756,6 +3806,7 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
                 return;
             }
 
+            const auto ruleValues = ks::ui::RetainCompleteExportSnapshot(std::make_shared<const std::vector<FirewallRuleEntry>>(std::move(ruleList)));
             std::lock_guard<std::mutex> dispatchGuard(taskState->dispatchMutex);
             NetworkFirewallPage* const receiver = taskState->owner;
             if (receiver == nullptr)
@@ -3765,7 +3816,7 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
 
             const bool invokeOk = QMetaObject::invokeMethod(
                 receiver,
-                [taskState, ruleList = std::move(ruleList), errorText]() mutable
+                [taskState, ruleList = ruleValues, errorText]() mutable
                 {
                     NetworkFirewallPage* pagePointer = nullptr;
                     {
@@ -3794,12 +3845,12 @@ void NetworkFirewallPage::refreshRulesAsync(const bool forceRefresh)
 
                         if (errorText.isEmpty())
                         {
-                            deferredPagePointer->m_ruleEntryList = std::move(ruleSnapshot);
+                            deferredPagePointer->m_ruleEntryList = ruleSnapshot;
                             ++deferredPagePointer->m_ruleSourceRevision;
-                            deferredPagePointer->appendRulesToTable(deferredPagePointer->m_ruleEntryList, true);
+                            deferredPagePointer->appendRulesToTable(*deferredPagePointer->m_ruleEntryList, true);
                             deferredPagePointer->setStatusText(
                                 QStringLiteral("防火墙规则：%1 条，刷新：%2")
-                                .arg(static_cast<int>(deferredPagePointer->m_ruleEntryList.size()))
+                                .arg(static_cast<int>(deferredPagePointer->m_ruleEntryList->size()))
                                 .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
                         }
                         else
@@ -3847,6 +3898,7 @@ void NetworkFirewallPage::appendRulesToTable(
     const std::vector<FirewallRuleEntry>& ruleList, const bool clearBeforeAppend)
 {
     if (!m_ruleTable || m_shuttingDown.load()) return;
+    (void)ruleList; // The canonical retained owner is captured below.
     // All existing producers publish complete rule snapshots. Keep the signature
     // for the established call sites; a hidden snapshot remains canonical here.
     Q_ASSERT(clearBeforeAppend);
@@ -3856,14 +3908,15 @@ void NetworkFirewallPage::appendRulesToTable(
     const QPointer<NetworkFirewallPage> owner(this);
     if (ks::ui::DeferTablePresentationIfValueCaptureOpen(this,
         QStringLiteral("firewall-rule-table-append"), {m_ruleTable},
-        [owner]() { if (owner) owner->appendRulesToTable(owner->m_ruleEntryList, true); })) return;
+        [owner]() { if (owner) owner->appendRulesToTable(*owner->m_ruleEntryList, true); })) return;
     if (m_ruleDiffRequestedRevision == m_ruleSourceRevision
         || !m_ruleValueModel->canAcceptPreparedRows(m_ruleValueModel->rowsRevision())) return;
     using Model = FirewallRuleModel;
-    struct Request { std::vector<FirewallRuleEntry> oldRows, rows; quint64 revision, sourceRevision; int columns; };
+    struct Request { Model::RowsHandle oldRows, rows; quint64 revision, sourceRevision, sortRevision; int columns, sortColumn; Qt::SortOrder sortOrder; ks::i18n::SourceTextSnapshot language; };
     struct Result { Model::PreparedRows plan; bool unchanged = false; };
-    const Request request{m_ruleValueModel->rows(), ruleList,
-        m_ruleValueModel->rowsRevision(), m_ruleSourceRevision, m_ruleValueModel->columnCount()};
+    const auto* sort = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+    const Request request{m_ruleValueModel->rowsHandle(), m_ruleEntryList,
+        m_ruleValueModel->rowsRevision(), m_ruleSourceRevision, sort->sortRevision(), m_ruleValueModel->columnCount(), sort->sortColumn(), sort->sortOrder(), ks::i18n::LanguageManager::instance().sourceTextSnapshot()};
     const QPointer<Model> model(m_ruleValueModel);
     if (!m_ruleDiffOperation) m_ruleDiffOperation = new ks::ui::AsyncOperation(this);
     m_ruleDiffRequestedRevision = request.sourceRevision;
@@ -3871,27 +3924,30 @@ void NetworkFirewallPage::appendRulesToTable(
         [](const Request& value, const ks::ui::AsyncOperationToken&) {
             // Preserve the page's original unchanged-snapshot fast path,
             // including duplicate-key snapshots that must not gain a reset.
-            if (value.oldRows.size() == value.rows.size()
-                && std::equal(value.oldRows.cbegin(), value.oldRows.cend(), value.rows.cbegin(), sameFirewallRule))
+            auto rows = *value.rows;
+            network_value_detail::sortRows(rows, value.sortColumn, value.sortOrder, value.language, ruleColumnText, value.oldRows.get(),
+                [](const FirewallRuleEntry& row) { return row.fingerprintText.toUtf8().toStdString(); });
+            if (value.oldRows->size() == rows.size()
+                && std::equal(value.oldRows->cbegin(), value.oldRows->cend(), rows.cbegin(), sameFirewallRule))
             {
                 Result result;
                 result.plan.baseRevision = value.revision;
                 result.unchanged = true;
                 return result;
             }
-            return Result{Model::prepareRows(value.oldRows, value.rows, value.columns,
+            return Result{Model::prepareRows(value.oldRows, std::move(rows), value.columns,
                 [](const FirewallRuleEntry& row) { return row.fingerprintText.toUtf8().toStdString(); },
                 [](const FirewallRuleEntry& a, const FirewallRuleEntry& b) {
                     return sameFirewallRule(a, b) ? std::vector<Model::ColumnChange>{}
                         : std::vector<Model::ColumnChange>{{0, RuleColumnCount - 1, {}}};
                 }, value.revision), false};
         },
-        [owner, model, sourceRevision = request.sourceRevision](Result& result, std::uint64_t ticket) {
+        [owner, model, sourceRevision = request.sourceRevision, sortRevision = request.sortRevision](Result& result, std::uint64_t ticket) {
             if (!owner || !owner->m_ruleDiffOperation->isCurrent(ticket)) return true;
             owner->m_ruleDiffRequestedRevision.reset();
-            auto* proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_ruleTable->model());
+            auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_ruleTable->model());
             if (!model || owner->m_ruleValueModel != model.data() || !proxy || proxy->sourceModel() != model.data()
-                || owner->m_ruleSourceRevision != sourceRevision
+                || owner->m_ruleSourceRevision != sourceRevision || proxy->sortRevision() != sortRevision
                 || !model->canAcceptPreparedRows(result.plan.baseRevision))
             { owner->presentPendingFirewallValues(); return true; }
             if (!owner->m_ruleTable->isVisible()) return true;
@@ -3939,7 +3995,7 @@ void NetworkFirewallPage::applyRuleFilterToRows()
         return;
     }
     if (!m_ruleFilterSource)
-        m_ruleFilterSource = std::make_shared<const std::vector<FirewallRuleEntry>>(m_ruleValueModel->rows());
+        m_ruleFilterSource = m_ruleValueModel->rowsHandle();
     struct Request { std::shared_ptr<const std::vector<FirewallRuleEntry>> source; QString filter; bool enabledOnly; };
     struct ExcludedRows { QSet<QString> keys, duplicateKeys; std::vector<bool> rows; };
     using Excluded = std::shared_ptr<const ExcludedRows>;
@@ -3961,7 +4017,7 @@ void NetworkFirewallPage::applyRuleFilterToRows()
                 excluded->rows.push_back(hidden);
                 if (hidden) excluded->keys.insert(entry.fingerprintText);
             }
-            return excluded;
+            return ks::ui::RetainCompleteExportSnapshot(std::shared_ptr<const ExcludedRows>(std::move(excluded)));
         },
         [owner, request](const Excluded& excluded, std::uint64_t ticket) {
             if (!owner || !excluded || !owner->m_ruleFilterOperation->isCurrent(ticket)
@@ -3974,7 +4030,7 @@ void NetworkFirewallPage::applyRuleFilterToRows()
                 QStringLiteral("firewall_rule_filter"), {owner->m_ruleTable},
                 [owner]() { if (owner) owner->applyRuleFilterToRows(); })) return true;
             const QPointer<FirewallRuleModel> model = owner->m_ruleValueModel;
-            const QPointer<QSortFilterProxyModel> proxy = qobject_cast<QSortFilterProxyModel*>(owner->m_ruleTable->model());
+            const QPointer<network_value_detail::SortProxy> proxy = dynamic_cast<network_value_detail::SortProxy*>(owner->m_ruleTable->model());
             ks::ui::ApplyTableRowFilterPredicateIncrementally(owner->m_ruleTable,
                 [model, proxy, excluded](const QModelIndex& index) {
                     if (!model || !proxy) return false;
@@ -3998,20 +4054,9 @@ void NetworkFirewallPage::applyRuleFilterToRows()
 
 void NetworkFirewallPage::updateRuleActionButtons()
 {
-    int visibleSelectedRowCount = 0;
-    if (m_ruleTable != nullptr)
-    {
-        const QModelIndexList rowIndexList = m_ruleTable->selectionModel() != nullptr
-            ? m_ruleTable->selectionModel()->selectedRows()
-            : QModelIndexList{};
-        for (const QModelIndex& rowIndex : rowIndexList)
-        {
-            if (!ks::ui::IsTableRowExcludedByFilter(m_ruleTable, rowIndex.row()))
-            {
-                ++visibleSelectedRowCount;
-            }
-        }
-    }
+    const int visibleSelectedRowCount = m_ruleTable
+        ? static_cast<int>(network_value_detail::selectedRows(m_ruleTable->selectionModel(), 2,
+            [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); }).size()) : 0;
 
     const bool hasSingleSelection = visibleSelectedRowCount == 1;
     const bool hasSelection = visibleSelectedRowCount > 0;
@@ -4108,7 +4153,8 @@ void NetworkFirewallPage::showRuleContextMenu(const QPoint& localPosition)
     FirewallRuleEntry selectedEntry;
     const bool hasSingleRule = selectedRuleEntry(&selectedEntry);
     const auto selectedRows = m_ruleTable->selectionModel() != nullptr
-        ? m_ruleTable->selectionModel()->selectedRows() : QModelIndexList{};
+        ? network_value_detail::selectedRows(m_ruleTable->selectionModel(), 1,
+            [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); }) : QModelIndexList{};
     const bool hasAnySelection = std::any_of(selectedRows.cbegin(), selectedRows.cend(), [this](const QModelIndex& row) {
         return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row.row());
     });
@@ -4189,38 +4235,21 @@ bool NetworkFirewallPage::selectedRuleEntry(FirewallRuleEntry* ruleEntryOut) con
         return false;
     }
 
-    const QModelIndexList rowIndexList = m_ruleTable->selectionModel()->selectedRows();
-    if (rowIndexList.isEmpty())
-    {
-        return false;
-    }
-
-    const auto selected = std::find_if(rowIndexList.cbegin(), rowIndexList.cend(), [this](const QModelIndex& index) {
-        return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, index.row());
-    });
-    if (selected == rowIndexList.cend()) return false;
-    const QString fingerprintText = m_ruleTable->model()->index(selected->row(), RuleColumnName).data(Qt::UserRole).toString();
-    const auto it = std::find_if(
-        m_ruleValueModel->rows().begin(),
-        m_ruleValueModel->rows().end(),
-        [&fingerprintText](const FirewallRuleEntry& ruleEntry)
-        {
-            return ruleEntry.fingerprintText == fingerprintText;
-        });
-    if (it == m_ruleValueModel->rows().end())
-    {
-        return false;
-    }
-
-    *ruleEntryOut = *it;
+    const auto rows = network_value_detail::selectedRows(m_ruleTable->selectionModel(), 1,
+        [this](int row) { return !ks::ui::IsTableRowExcludedByFilter(m_ruleTable, row); });
+    if (rows.isEmpty()) return false;
+    const auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+    const auto* entry = proxy ? m_ruleValueModel->rowAt(proxy->mapToSource(rows.front()).row()) : nullptr;
+    if (!entry) return false;
+    *ruleEntryOut = *entry;
     return true;
 }
 
 int NetworkFirewallPage::ruleNameDuplicateCount(const QString& ruleNameText) const
 {
     return static_cast<int>(std::count_if(
-        m_ruleEntryList.begin(),
-        m_ruleEntryList.end(),
+        m_ruleEntryList->begin(),
+        m_ruleEntryList->end(),
         [&ruleNameText](const FirewallRuleEntry& ruleEntry)
         {
             return ruleEntry.nameText.compare(ruleNameText, Qt::CaseSensitive) == 0;
@@ -4907,18 +4936,16 @@ void NetworkFirewallPage::deleteSelectedFirewallRules()
     }
 
     QStringList ruleNameList;
-    const QModelIndexList rowIndexList = m_ruleTable->selectionModel()->selectedRows();
+    const QModelIndexList rowIndexList = network_value_detail::selectedRows(m_ruleTable->selectionModel());
     for (const QModelIndex& rowIndex : rowIndexList)
     {
         if (ks::ui::IsTableRowExcludedByFilter(m_ruleTable, rowIndex.row()))
         {
             continue;
         }
-        const QString fingerprint = m_ruleTable->model()->index(rowIndex.row(), RuleColumnName).data(Qt::UserRole).toString();
-        const auto entry = std::find_if(m_ruleValueModel->rows().cbegin(), m_ruleValueModel->rows().cend(), [&fingerprint](const FirewallRuleEntry& value) {
-            return value.fingerprintText == fingerprint;
-        });
-        if (entry != m_ruleValueModel->rows().cend()) ruleNameList.push_back(safeText(entry->nameText));
+        const auto* proxy = dynamic_cast<network_value_detail::SortProxy*>(m_ruleTable->model());
+        const auto* entry = proxy ? m_ruleValueModel->rowAt(proxy->mapToSource(rowIndex).row()) : nullptr;
+        if (entry) ruleNameList.push_back(safeText(entry->nameText));
     }
     ruleNameList.removeDuplicates();
     if (ruleNameList.isEmpty())

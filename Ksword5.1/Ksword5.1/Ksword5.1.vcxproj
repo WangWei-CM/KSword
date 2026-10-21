@@ -1200,6 +1200,7 @@
     <QtMoc Include="NetworkDock\NetworkDock.h" />
     <ClInclude Include="NetworkDock\NetworkDock.NavigationData.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalCommon.h" />
+    <ClInclude Include="NetworkDock\NetworkValueTableModel.h" />
     <ClInclude Include="NetworkDock\NetworkDock.InternalHelpers.h" />
     <QtMoc Include="NetworkDock\NetworkFirewallPage.h" />
     <ClInclude Include="NetworkDock\NetworkAuditPage.h" />
