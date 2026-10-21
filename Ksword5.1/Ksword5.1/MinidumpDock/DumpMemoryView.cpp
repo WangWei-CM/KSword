@@ -365,8 +365,9 @@ DumpMemoryView::DumpMemoryView(QWidget* parent)
     ks::ui::NormalizeToolbarRow(toolbarLayout);
     rootLayout->addLayout(toolbarLayout);
 
-    // 映射说明直接使用原生字段模型；复制与导出由模型按需生成。
+    // 普通映射说明使用共享值模型；隐藏时保留完整文档，复制/导出不依赖已显示行。
     m_messageView = new ks::ui::StructuredFieldView(this);
+    m_messageView->setValueModelProjection();
     m_messageView->setMaximumHeight(145);
     rootLayout->addWidget(m_messageView);
 
