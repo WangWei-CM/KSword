@@ -1083,80 +1083,6 @@ namespace
         return cellTexts.join(QChar('\t'));
     }
 
-    // treeItemContainsFilterText 作用：
-    // - 检查树节点所有列是否包含筛选文本；
-    // - 文件画像页的筛选框同时匹配“字段”和“值”，避免用户只知道 PE 字段值时搜不到。
-    // 入参 item：待检查的树节点。
-    // 入参 filterText：已经 trim 过的筛选文本。
-    // 返回：true=当前节点任一列命中；false=当前节点不命中。
-    bool treeItemContainsFilterText(QTreeWidgetItem* item, const QString& filterText)
-    {
-        if (item == nullptr || filterText.isEmpty())
-        {
-            return filterText.isEmpty();
-        }
-
-        const QTreeWidget* tree = item->treeWidget();
-        const int columnCount = tree != nullptr ? tree->columnCount() : item->columnCount();
-        for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
-        {
-            if (item->text(columnIndex).contains(filterText, Qt::CaseInsensitive))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // applyTreeItemFilter 作用：
-    // - 递归过滤树节点，保留命中节点及其父链；
-    // - 子节点命中时自动展开父节点，保证筛选结果一眼可见。
-    // 入参 item：当前树节点。
-    // 入参 filterText：已经 trim 过的筛选文本；为空时恢复显示。
-    // 返回：true=当前节点或任一子节点可见；false=整棵子树不命中。
-    bool applyTreeItemFilter(QTreeWidgetItem* item, const QString& filterText)
-    {
-        if (item == nullptr)
-        {
-            return false;
-        }
-
-        bool childVisible = false;
-        for (int childIndex = 0; childIndex < item->childCount(); ++childIndex)
-        {
-            childVisible = applyTreeItemFilter(item->child(childIndex), filterText) || childVisible;
-        }
-
-        const bool selfVisible = treeItemContainsFilterText(item, filterText);
-        const bool visible = filterText.isEmpty() || selfVisible || childVisible;
-        item->setHidden(!visible);
-        if (!filterText.isEmpty() && visible && childVisible)
-        {
-            item->setExpanded(true);
-        }
-        return visible;
-    }
-
-    // applyTreeFilter 作用：
-    // - 对 QTreeWidget 顶层节点应用筛选；
-    // - 仅控制节点可见性，不删除原始报告节点，清空筛选后可完整恢复。
-    // 入参 tree：目标报告树。
-    // 入参 filterText：用户输入的筛选文本。
-    // 返回：无。
-    void applyTreeFilter(QTreeWidget* tree, const QString& filterText)
-    {
-        if (tree == nullptr)
-        {
-            return;
-        }
-
-        const QString normalizedFilterText = filterText.trimmed();
-        for (int topIndex = 0; topIndex < tree->topLevelItemCount(); ++topIndex)
-        {
-            applyTreeItemFilter(tree->topLevelItem(topIndex), normalizedFilterText);
-        }
-    }
-
     // copyTextToClipboard 作用：
     // - 将 VT 报告页里用户右键选择的单元格/行复制到系统剪贴板；
     // - 空文本直接忽略，避免误清空已有剪贴板内容。
@@ -1445,6 +1371,7 @@ VirusTotalOnlineScan::VirusTotalOnlineScan(QObject* parent)
 
 VirusTotalOnlineScan::~VirusTotalOnlineScan()
 {
+    if (m_profileFilterOperation) m_profileFilterOperation->close();
     for (auto& operation : m_rawPreparationOperations) if (operation) operation->close();
     m_rawExportOperation->close();
 }
@@ -2901,6 +2828,10 @@ void VirusTotalOnlineScan::resetRuntimeState()
     {
         apiState = VtApiState::NotStarted;
     }
+    ++m_profileFilterRevision;
+    if (m_profileFilterOperation) m_profileFilterOperation->cancel();
+    m_profileFilterProjection.reset();
+    m_profileFilterPending = false;
     ++m_rawProjectionEpoch;
     for (auto& operation : m_rawPreparationOperations) if (operation) operation->cancel();
     m_rawProjectedSections.fill(0);
@@ -3144,8 +3075,8 @@ void VirusTotalOnlineScan::ensureResultDialog()
                 filterTimer->setInterval(120);
                 const QPointer<QLineEdit> filterEdit = pane.fileProfileFilterEdit;
                 QObject::connect(filterEdit, &QLineEdit::textChanged, filterTimer, [filterTimer]() { filterTimer->start(); });
-                QObject::connect(filterTimer, &QTimer::timeout, reportTree, [reportTree, filterEdit]() {
-                    if (filterEdit) applyTreeFilter(reportTree, filterEdit->text());
+                QObject::connect(filterTimer, &QTimer::timeout, this, [this, filterEdit]() {
+                    if (filterEdit) requestProfileFilter(filterEdit->text());
                 });
             }
 
@@ -3305,6 +3236,10 @@ void VirusTotalOnlineScan::ensureResultDialog()
             // 输入：实时结果窗口 destroyed 信号。
             // 处理：清空弱指针，并在 scanFileAndAutoDelete 场景中释放扫描对象。
             // 返回：无；deleteLater 交给 Qt 事件循环执行。
+            ++m_profileFilterRevision;
+            if (m_profileFilterOperation) m_profileFilterOperation->cancel();
+            m_profileFilterProjection.reset();
+            m_profileFilterPending = false;
             ++m_rawProjectionEpoch;
             for (auto& operation : m_rawPreparationOperations) if (operation) operation->cancel();
             m_rawProjectedSections.fill(0);
@@ -4061,6 +3996,10 @@ void VirusTotalOnlineScan::refreshFileProfileResult(const QJsonObject& fileObjec
         return;
     }
 
+    ++m_profileFilterRevision;
+    if (m_profileFilterOperation) m_profileFilterOperation->cancel();
+    m_profileFilterProjection.reset();
+    m_profileFilterPending = false;
     pane.reportTree->clear();
     QTreeWidgetItem* basicItem = new QTreeWidgetItem(pane.reportTree);
     basicItem->setText(0, QStringLiteral("文件画像"));
@@ -4107,11 +4046,106 @@ void VirusTotalOnlineScan::refreshFileProfileResult(const QJsonObject& fileObjec
     namesItem->setExpanded(true);
     peItem->setExpanded(true);
     signatureItem->setExpanded(true);
-    if (!pane.fileProfileFilterEdit.isNull())
-    {
-        applyTreeFilter(pane.reportTree, pane.fileProfileFilterEdit->text());
-    }
+    resetProfileFilterIndex();
+    if (!pane.fileProfileFilterEdit.isNull()) requestProfileFilter(pane.fileProfileFilterEdit->text());
     pane.reportTree->resizeColumnToContents(0);
+}
+
+void VirusTotalOnlineScan::resetProfileFilterIndex()
+{
+    auto& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
+    auto oldFields = std::move(m_profileFilterFields);
+    auto oldVisible = std::move(m_profileFilterVisible);
+    QThreadPool::globalInstance()->start([fields = std::move(oldFields), visible = std::move(oldVisible)]() {});
+    m_profileFilterIndexes.clear();
+    if (!pane.reportTree) return;
+    // This canonical field index is built once with the complete report, never per query.
+    const auto visit = [&](auto&& self, QTreeWidgetItem* item, const int parent) -> void {
+        const int index = static_cast<int>(m_profileFilterFields.size());
+        QString text;
+        for (int column = 0; column < pane.reportTree->columnCount(); ++column) text += item->text(column) + QLatin1Char('\n');
+        m_profileFilterFields.push_back({std::move(text), parent});
+        m_profileFilterIndexes.push_back(pane.reportTree->indexFromItem(item));
+        m_profileFilterVisible.push_back(!item->isHidden());
+        for (int child = 0; child < item->childCount(); ++child) self(self, item->child(child), index);
+    };
+    for (int root = 0; root < pane.reportTree->topLevelItemCount(); ++root) visit(visit, pane.reportTree->topLevelItem(root), -1);
+}
+
+void VirusTotalOnlineScan::requestProfileFilter(const QString& text)
+{
+    auto& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
+    if (!pane.reportTree) return;
+    m_profileFilterPendingText = text.trimmed();
+    if (m_profileFilterProjection) { m_profileFilterPending = true; return; }
+    const quint64 revision = ++m_profileFilterRevision;
+    if (!m_profileFilterOperation) m_profileFilterOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+    struct Request { QVector<ProfileFilterField> fields; QVector<bool> previous; QString query; quint64 revision; };
+    m_profileFilterOperation->submit<Request, ProfileFilterResult>(
+        {m_profileFilterFields, m_profileFilterVisible, m_profileFilterPendingText, revision},
+        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
+            ProfileFilterResult result;
+            result.revision = request.revision;
+            result.visible.resize(request.fields.size());
+            QVector<bool> childVisible(request.fields.size(), false);
+            for (qsizetype index = request.fields.size(); index-- > 0;) {
+                if ((index & 255) == 0 && token.isCanceled()) return result;
+                const auto& field = request.fields.at(index);
+                const bool visible = request.query.isEmpty() || childVisible.at(index) || field.text.contains(request.query, Qt::CaseInsensitive);
+                result.visible[index] = visible;
+                if (visible && field.parent >= 0) childVisible[field.parent] = true;
+                if (!request.query.isEmpty() && childVisible.at(index)) result.expand.push_back(static_cast<int>(index));
+                if (index >= request.previous.size() || request.previous.at(index) != visible) result.changed.push_back(static_cast<int>(index));
+            }
+            return result;
+        }, [this](const ProfileFilterResult& result, std::uint64_t) {
+            if (result.revision != m_profileFilterRevision) return;
+            m_profileFilterProjection = std::make_shared<ProfileFilterResult>(result);
+            m_profileFilterApplyOffset = m_profileFilterExpandOffset = 0;
+            continueProfileFilterProjection(result.revision);
+        }, [this, revision](std::exception_ptr) {
+            if (revision != m_profileFilterRevision) return;
+            const auto& current = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
+            if (current.fileProfileFilterEdit) current.fileProfileFilterEdit->setToolTip(
+                ks::i18n::sourceText(QStringLiteral("文件画像筛选失败；请修改关键词重试。")));
+        });
+}
+
+void VirusTotalOnlineScan::continueProfileFilterProjection(const quint64 revision)
+{
+    if (revision != m_profileFilterRevision || !m_profileFilterProjection) return;
+    auto& pane = m_apiPanes[static_cast<std::size_t>(apiIndex(VtApiKind::FileProfile))];
+    if (!pane.reportTree) return;
+    const QPointer<VirusTotalOnlineScan> guard(this);
+    if (ks::ui::DeferItemViewUiCommitIfContextMenuOpen(this, QStringLiteral("vt-profile-filter-projection"), {pane.reportTree.data()},
+        [guard, revision]() { if (guard) guard->continueProfileFilterProjection(revision); })) return;
+    const auto result = m_profileFilterProjection;
+    for (int unit = 0; unit < 300; ++unit) {
+        const bool hidePhase = m_profileFilterApplyOffset < result->changed.size();
+        if (!hidePhase && m_profileFilterExpandOffset >= result->expand.size()) break;
+        const int index = hidePhase ? result->changed.at(m_profileFilterApplyOffset++) : result->expand.at(m_profileFilterExpandOffset++);
+        if (index < 0 || index >= m_profileFilterIndexes.size()) continue;
+        const auto sourceIndex = m_profileFilterIndexes.at(index);
+        if (!sourceIndex.isValid()) continue;
+        auto* item = pane.reportTree->itemFromIndex(sourceIndex);
+        if (!item) continue;
+        if (hidePhase) {
+            const bool hidden = !result->visible.at(index);
+            if (item->isHidden() != hidden) item->setHidden(hidden);
+        } else if (!item->isExpanded()) item->setExpanded(true);
+        if (!guard || revision != m_profileFilterRevision) return;
+    }
+    if (m_profileFilterApplyOffset < result->changed.size() || m_profileFilterExpandOffset < result->expand.size()) {
+        QTimer::singleShot(0, this, [this, revision]() { continueProfileFilterProjection(revision); });
+        return;
+    }
+    m_profileFilterVisible = result->visible;
+    auto retired = std::move(m_profileFilterProjection);
+    QThreadPool::globalInstance()->start([retired = std::move(retired)]() {});
+    if (m_profileFilterPending) {
+        m_profileFilterPending = false;
+        requestProfileFilter(m_profileFilterPendingText);
+    }
 }
 
 void VirusTotalOnlineScan::refreshIocResult()

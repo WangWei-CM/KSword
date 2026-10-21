@@ -16,6 +16,8 @@
 #include <QList>
 #include <QObject>
 #include <QPointer>
+#include <QVector>
+#include <QPersistentModelIndex>
 #include <QString>
 #include <QStringList>
 #include <QUrl>
@@ -152,6 +154,25 @@ private:
     void prepareVisibleRawData(VtApiKind apiKind);
     void projectVisibleResponses(VtApiKind apiKind);
     void refreshDeferredReport(VtApiKind apiKind);
+    void resetProfileFilterIndex();
+    void requestProfileFilter(const QString& text);
+    void continueProfileFilterProjection(quint64 revision);
+    struct ProfileFilterField { QString text; int parent = -1; };
+    struct ProfileFilterResult {
+        QVector<bool> visible;
+        QVector<int> changed, expand;
+        quint64 revision = 0;
+    };
+    std::unique_ptr<ks::ui::AsyncOperation> m_profileFilterOperation;
+    QVector<ProfileFilterField> m_profileFilterFields;
+    QVector<QPersistentModelIndex> m_profileFilterIndexes;
+    QVector<bool> m_profileFilterVisible;
+    std::shared_ptr<ProfileFilterResult> m_profileFilterProjection;
+    qsizetype m_profileFilterApplyOffset = 0, m_profileFilterExpandOffset = 0;
+    quint64 m_profileFilterRevision = 0;
+    QString m_profileFilterPendingText;
+    bool m_profileFilterPending = false;
+
     // requestLargeUploadUrl 作用：
     // - 当样本超过 32MB 时请求 VirusTotal 一次性大文件上传 URL；
     // - 成功后继续调用 uploadFileToUrl。
