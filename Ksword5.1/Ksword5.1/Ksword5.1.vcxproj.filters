@@ -563,6 +563,9 @@
     <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="KernelDock\KernelResultModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KernelDock\KernelCleanImageBaseline.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2618,6 +2621,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\shared\driver\KswordArkDriverImageEditorIoctl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KernelDock\KernelResultModel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KernelDock\KernelCleanImageBaseline.h">

@@ -1886,7 +1886,7 @@ namespace
         }
     }
 
-    int callbackEnumVisibleColumnCount(QTableWidget* table)
+    int callbackEnumVisibleColumnCount(KernelResultTable* table)
     {
         // 作用：统计可见列，防止表头菜单隐藏最后一列。
         // 返回：当前可见列数。
@@ -1906,7 +1906,7 @@ namespace
         return visibleCount;
     }
 
-    void callbackEnumInstallHeaderColumnMenu(QTableWidget* table)
+    void callbackEnumInstallHeaderColumnMenu(KernelResultTable* table)
     {
         // 作用：安装表头右键列显隐菜单；默认显示全部列，用户可按需隐藏。
         // 返回：无。
@@ -2027,7 +2027,7 @@ namespace
     }
 
     std::vector<int> callbackEnumSelectedVisualRows(
-        const QTableWidget* tableWidget,
+        const KernelResultTable* tableWidget,
         const int fallbackRow)
     {
         // 作用：收集当前可视表格中所有选中行，按可视行号排序去重。
@@ -2038,15 +2038,10 @@ namespace
             return selectedRows;
         }
 
-        const QList<QTableWidgetItem*> selectedItems = tableWidget->selectedItems();
-        selectedRows.reserve(static_cast<std::size_t>(selectedItems.size()));
-        for (QTableWidgetItem* item : selectedItems)
-        {
-            if (item != nullptr && !ks::ui::IsTableRowExcludedByFilter(tableWidget, item->row()))
-            {
-                selectedRows.push_back(item->row());
-            }
-        }
+        const QModelIndexList selectedIndexes = tableWidget->selectionModel()->selectedIndexes();
+        selectedRows.reserve(static_cast<std::size_t>(selectedIndexes.size()));
+        for (const auto& index : selectedIndexes)
+            if (!ks::ui::IsTableRowExcludedByFilter(tableWidget, index.row())) selectedRows.push_back(index.row());
 
         if (selectedRows.empty() && fallbackRow >= 0
             && !ks::ui::IsTableRowExcludedByFilter(tableWidget, fallbackRow))
@@ -2060,7 +2055,7 @@ namespace
     }
 
     std::vector<std::size_t> callbackEnumSelectedSourceIndices(
-        const QTableWidget* tableWidget,
+        const KernelResultTable* tableWidget,
         const std::vector<KernelCallbackEnumEntry>& sourceRows,
         const int fallbackRow)
     {
@@ -2154,7 +2149,13 @@ void KernelDock::initializeCallbackEnumTab()
 
     QTabWidget* callbackViewTabs = new QTabWidget(splitter);
     ks::ui::StyleJoinedResultTabs(callbackViewTabs, queryHeader);
-    m_callbackEnumTable = new ks::ui::VisibleTableWidget(callbackViewTabs);
+    m_callbackEnumTable = new KernelResultTable(callbackViewTabs);
+    m_callbackEnumTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_callbackEnumRefreshRunning.store(false);
+        m_refreshCallbackEnumButton->setEnabled(true);
+        if (owner) m_callbackEnumStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 内核回调新增、消失与归属变化需要完整快照比较。
     ks::ui::SetTableActionBarMode(m_callbackEnumTable, ks::ui::TableActionBarMode::Full);
     m_callbackEnumTable->setColumnCount(static_cast<int>(CallbackEnumColumn::Count));
@@ -2198,12 +2199,13 @@ void KernelDock::initializeCallbackEnumTab()
     m_callbackEnumTable->setColumnHidden(static_cast<int>(CallbackEnumColumn::Class), true);
     m_callbackEnumTable->setColumnHidden(static_cast<int>(CallbackEnumColumn::Trust), true);
     m_callbackEnumTable->setColumnHidden(static_cast<int>(CallbackEnumColumn::Status), true);
+    m_callbackEnumTable->setProperty("ksword_kernel_keep_unsorted", true);
     m_callbackEnumTable->setSortingEnabled(false);
     callbackEnumInstallHeaderColumnMenu(m_callbackEnumTable);
     ksword::kernel_navigation::addTab(callbackViewTabs, m_callbackEnumTable,
         "audit.callbacks.list");
 
-    m_minifilterCallbackTree = new QTreeWidget(callbackViewTabs);
+    m_minifilterCallbackTree = new KernelMinifilterTree(callbackViewTabs);
     m_minifilterCallbackTree->installEventFilter(this);
     m_minifilterCallbackTree->setColumnCount(10);
     m_minifilterCallbackTree->setHeaderLabels(QStringList{
@@ -2277,32 +2279,30 @@ void KernelDock::initializeCallbackEnumTab()
                     ? static_cast<QAbstractItemView*>(m_minifilterCallbackTree)
                     : static_cast<QAbstractItemView*>(m_callbackEnumTable));
         });
-    connect(m_callbackEnumTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_callbackEnumTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showCallbackEnumDetailByCurrentRow();
     });
-    connect(m_callbackEnumTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_callbackEnumTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showCallbackEnumContextMenu(localPosition);
     });
-    connect(m_minifilterCallbackTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* currentItem) {
-        if (currentItem == nullptr || m_minifilterCallbackSourceDirty || currentItem->isHidden()
-            || (currentItem->parent() != nullptr && currentItem->parent()->isHidden()))
+    connect(m_minifilterCallbackTree->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& currentItem) {
+        if (!currentItem.isValid() || m_minifilterCallbackSourceDirty)
         {
             showCallbackEnumDetail(nullptr);
             return;
         }
         const std::size_t sourceIndex = static_cast<std::size_t>(
-            currentItem->data(0, Qt::UserRole).toULongLong());
+            currentItem.siblingAtColumn(0).data(Qt::UserRole).toULongLong());
         showCallbackEnumDetail(
             sourceIndex < m_callbackEnumRows.size() ? &m_callbackEnumRows[sourceIndex] : nullptr);
     });
-    connect(m_minifilterCallbackTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item) {
-        if (item == nullptr || m_minifilterCallbackSourceDirty || item->isHidden()
-            || (item->parent() != nullptr && item->parent()->isHidden()))
+    connect(m_minifilterCallbackTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& item) {
+        if (!item.isValid() || m_minifilterCallbackSourceDirty)
         {
             return;
         }
         const std::size_t sourceIndex = static_cast<std::size_t>(
-            item->data(0, Qt::UserRole).toULongLong());
+            item.siblingAtColumn(0).data(Qt::UserRole).toULongLong());
         if (sourceIndex >= m_callbackEnumRows.size())
         {
             return;
@@ -2526,11 +2526,7 @@ void KernelDock::refreshCallbackEnumAsync()
 
 void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::function<void()> onReady)
 {
-    if (m_callbackEnumTable == nullptr)
-    {
-        return;
-    }
-
+    if (!m_callbackEnumTable) return;
     const auto searchFields = [](const KernelCallbackEnumEntry& entry) {
         return QStringList{entry.classText, entry.registrationTypeText, entry.sourceText, entry.sourceTrustText,
             entry.statusText, entry.removePolicyText, entry.nameText, callbackEnumPrimaryAddressText(entry),
@@ -2538,57 +2534,20 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::functio
             entry.companyText, entry.fileVersionText, entry.fileDescriptionText, entry.altitudeText, entry.detailText};
     };
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-    if (!sourceChanged)
+    if (!sourceChanged && m_callbackEnumTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        if (m_callbackEnumTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
-        if (m_callbackEnumTable->property(KernelSearchLanguageProperty).toString() != language)
-        {
-            publishKernelResultRows(m_callbackEnumTable, static_cast<std::size_t>(m_callbackEnumTable->rowCount()),
-                [this, searchFields](const std::size_t cacheRow) {
-                const int row = static_cast<int>(cacheRow);
-                auto* item = m_callbackEnumTable->item(row, 0);
-                std::size_t sourceIndex = 0U;
-                if (callbackEnumReadSourceIndex(item, m_callbackEnumRows.size(), sourceIndex))
-                {
-                    item->setData(KernelSearchFieldsRole, searchFields(m_callbackEnumRows[sourceIndex]));
-                    rememberKernelResultFilterRow(m_callbackEnumTable, row);
-                }
-                }, [this, language]() {
-                    m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
-                }, [this]() { rebuildCallbackEnumTable(false); }, false);
-            return;
-        }
-        applyKernelResultFilterAsync(m_callbackEnumTable, m_callbackEnumFilterEdit, m_callbackEnumSeparatorIndex.row());
+        applyKernelResultFilterAsync(m_callbackEnumTable, m_callbackEnumFilterEdit);
         m_minifilterCallbackFilterDirty = true;
         prepareMinifilterCallbackTree();
         return;
     }
-
     m_minifilterCallbackSourceDirty = true;
-    m_callbackEnumSeparatorIndex = QPersistentModelIndex();
-
-    std::vector<std::size_t> successfulSourceIndices;
-    std::vector<std::size_t> deferredSourceIndices;
-    successfulSourceIndices.reserve(m_callbackEnumRows.size());
-    deferredSourceIndices.reserve(m_callbackEnumRows.size());
-
-    for (std::size_t sourceIndex = 0; sourceIndex < m_callbackEnumRows.size(); ++sourceIndex)
-    {
-        const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
-        if (callbackEnumIsVisibleSuccess(entry))
-        {
-            successfulSourceIndices.push_back(sourceIndex);
-        }
-        else
-        {
-            deferredSourceIndices.push_back(sourceIndex);
-        }
-    }
-
-    const auto rowCount = successfulSourceIndices.size() + deferredSourceIndices.size()
-        + (deferredSourceIndices.empty() ? 0U : 1U);
-    const auto appendCallbackRow = [this, searchFields](const std::size_t sourceIndex, const int rowIndex) {
-        const KernelCallbackEnumEntry& entry = m_callbackEnumRows[sourceIndex];
+    const auto rows = m_callbackEnumRows;
+    int firstVisibleColumn = -1;
+    for (int column = 0; column < m_callbackEnumTable->columnCount(); ++column)
+        if (!m_callbackEnumTable->isColumnHidden(column)) { firstVisibleColumn = column; break; }
+    const auto appendCallbackRow = [rows, searchFields](KernelResultValues& values, const std::size_t sourceIndex, const int rowIndex) {
+        const KernelCallbackEnumEntry& entry = rows[sourceIndex];
         const QString addressText = callbackEnumPrimaryAddressText(entry);
         const QString moduleText = entry.modulePathText.isEmpty()
             ? kernelText("kernel.callback.enum.placeholder.unresolved", QStringLiteral("<未解析>"))
@@ -2612,235 +2571,137 @@ void KernelDock::rebuildCallbackEnumTable(const bool sourceChanged, std::functio
 
         if (callbackEnumIsTrustedSource(entry))
         {
-            trustItem->setForeground(QBrush(KswordTheme::SuccessColor()));
+            trustItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().SuccessColor()));
         }
         else if (entry.fallbackPatternOnly)
         {
-            trustItem->setForeground(QBrush(KswordTheme::WarningColor()));
+            trustItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningColor()));
         }
         else if (callbackEnumIsUnsupportedSource(entry))
         {
-            trustItem->setForeground(QBrush(KswordTheme::TextSecondaryColor()));
+            trustItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().TextSecondaryColor()));
         }
 
         if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_SUSPICIOUS)
         {
-            statusItem->setForeground(QBrush(KswordTheme::ErrorColor()));
+            statusItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().ErrorColor()));
         }
         else if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_UNKNOWN)
         {
-            statusItem->setForeground(QBrush(KswordTheme::WarningColor()));
+            statusItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningColor()));
         }
         else if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_UNSUPPORTED)
         {
-            statusItem->setForeground(QBrush(KswordTheme::WarningColor()));
+            statusItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningColor()));
         }
         else if (entry.status == KSWORD_ARK_CALLBACK_ENUM_STATUS_QUERY_FAILED)
         {
-            statusItem->setForeground(QBrush(KswordTheme::ErrorColor()));
+            statusItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().ErrorColor()));
         }
 
         callbackEnumApplyRemovePolicyPresentation(removePolicyItem, entry);
 
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Class), classItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::RegistrationType), registrationTypeItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Source), sourceItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Trust), trustItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Status), statusItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::RemovePolicy), removePolicyItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Name), nameItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::CallbackAddress), addressItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Module), moduleItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Company), companyItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileVersion), fileVersionItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileDescription), fileDescriptionItem);
-        m_callbackEnumTable->setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Altitude), altitudeItem);
-        rememberKernelResultFilterRow(m_callbackEnumTable, rowIndex);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Class), classItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::RegistrationType), registrationTypeItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Source), sourceItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Trust), trustItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Status), statusItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::RemovePolicy), removePolicyItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Name), nameItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::CallbackAddress), addressItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Module), moduleItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Company), companyItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileVersion), fileVersionItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::FileDescription), fileDescriptionItem);
+        values.setItem(rowIndex, static_cast<int>(CallbackEnumColumn::Altitude), altitudeItem);
     };
 
-    publishKernelResultRows(m_callbackEnumTable, rowCount,
-        [this, appendCallbackRow, successful = std::move(successfulSourceIndices),
-            deferred = std::move(deferredSourceIndices)](const std::size_t row) {
-            const int rowIndex = static_cast<int>(row);
-            if (row < successful.size())
+    const auto count = static_cast<int>(CallbackEnumColumn::Count);
+    const QPointer<KernelDock> owner(this);
+    m_callbackEnumTable->setFilterEdit(m_callbackEnumFilterEdit);
+    m_callbackEnumTable->prepare(rows.size(), [rows, appendCallbackRow, count, firstVisibleColumn](KernelResultValues& values) {
+        std::vector<std::size_t> successful, deferred;
+        successful.reserve(rows.size()); deferred.reserve(rows.size());
+        for (std::size_t index = 0; index < rows.size(); ++index)
+            (callbackEnumIsVisibleSuccess(rows[index]) ? successful : deferred).push_back(index);
+        values = KernelResultValues(rows.size() + (deferred.empty() ? 0U : 1U), count);
+        int row = 0;
+        for (const auto index : successful) appendCallbackRow(values, index, row++);
+        if (!deferred.empty())
+        {
+            values.separator = row;
+            if (firstVisibleColumn >= 0)
             {
-                appendCallbackRow(successful[row], rowIndex);
+                auto* separatorItem = new QTableWidgetItem(kernelText(
+                    "kernel.callback.enum.separator.failed_or_unsupported",
+                    QStringLiteral("以下项查询失败/当前不支持")));
+                separatorItem->setFlags(Qt::ItemIsEnabled);
+                separatorItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                separatorItem->setBackground(ksword::kernel_dock_internal::ResultColors::current().SurfaceMutedColor());
+                separatorItem->setForeground(ksword::kernel_dock_internal::ResultColors::current().TextPrimaryColor());
+                separatorItem->setToolTip(separatorItem->text());
+                values.setItem(row, firstVisibleColumn, separatorItem);
+                values.setSpan(row, firstVisibleColumn, 1, count - firstVisibleColumn);
             }
-            else if (!deferred.empty() && row == successful.size())
-            {
-                const int separatorRow = rowIndex;
-                m_callbackEnumSeparatorIndex = QPersistentModelIndex(m_callbackEnumTable->model()->index(separatorRow, 0));
-                int firstVisibleColumn = -1;
-                for (int columnIndex = 0; columnIndex < m_callbackEnumTable->columnCount(); ++columnIndex)
-                {
-                    if (!m_callbackEnumTable->isColumnHidden(columnIndex))
-                    {
-                        firstVisibleColumn = columnIndex;
-                        break;
-                    }
-                }
-                if (firstVisibleColumn >= 0)
-                {
-                    auto* separatorItem = new QTableWidgetItem(kernelText(
-                        "kernel.callback.enum.separator.failed_or_unsupported",
-                        QStringLiteral("以下项查询失败/当前不支持")));
-                    separatorItem->setFlags(Qt::ItemIsEnabled);
-                    separatorItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-                    separatorItem->setBackground(KswordTheme::SurfaceMutedColor());
-                    separatorItem->setForeground(KswordTheme::TextPrimaryColor());
-                    separatorItem->setToolTip(separatorItem->text());
-                    m_callbackEnumTable->setItem(separatorRow, firstVisibleColumn, separatorItem);
-                    m_callbackEnumTable->setSpan(
-                        separatorRow,
-                        firstVisibleColumn,
-                        1,
-                        m_callbackEnumTable->columnCount() - firstVisibleColumn);
-                }
-            }
-            else
-            {
-                appendCallbackRow(deferred[row - successful.size() - 1U], rowIndex);
-            }
-        }, [this, language]() {
-            m_callbackEnumTable->setProperty(KernelSearchLanguageProperty, language);
-        }, [this, owner = QPointer<KernelDock>(this), onReady = std::move(onReady)]() mutable {
+            ++row;
+        }
+        for (const auto index : deferred) appendCallbackRow(values, index, row++);
+    }, m_callbackEnumFilterEdit->text().trimmed(), KernelSearchFieldsRole,
+        [this, owner, language, onReady = std::move(onReady)] {
+            m_callbackEnumSeparatorIndex = QPersistentModelIndex(m_callbackEnumTable->model()->index(m_callbackEnumTable->separatorRow(), 0));
             m_minifilterCallbackFilterDirty = true;
             prepareMinifilterCallbackTree();
             if (owner && onReady) onReady();
-        }, true, m_callbackEnumFilterEdit);
+        }, sourceChanged);
 }
 
 void KernelDock::prepareMinifilterCallbackTree()
 {
-    if (m_minifilterCallbackTree == nullptr || !m_minifilterCallbackTree->isVisible()) return;
-    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-    const bool languageChanged = m_minifilterCallbackTree->property(KernelSearchLanguageProperty).toString() != language;
-    if (!m_minifilterCallbackSourceDirty && !m_minifilterCallbackFilterDirty && !languageChanged) return;
-    const QString filterKeyword = m_callbackEnumFilterEdit->text().trimmed();
-    constexpr auto filterPassName = "ksword_minifilter_filter_pass";
-    auto* previousPass = m_minifilterCallbackTree->findChild<QTimer*>(
-        QLatin1String(filterPassName), Qt::FindDirectChildrenOnly);
-    if (previousPass != nullptr)
-    {
-        // Show and currentChanged may both prepare the same visible branch.
-        if (!m_minifilterCallbackSourceDirty
-            && previousPass->property("keyword").toString() == filterKeyword
-            && previousPass->property("language").toString() == language)
-        { previousPass->start(0); return; }
-        previousPass->stop();
-        previousPass->setObjectName(QString());
-        previousPass->deleteLater();
-    }
+    if (!m_minifilterCallbackTree || !m_minifilterCallbackTree->isVisible()) return;
+    const auto texts = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+    const auto language = texts.languageId();
+    if (!m_minifilterCallbackSourceDirty && !m_minifilterCallbackFilterDirty
+        && m_minifilterCallbackTree->property(KernelSearchLanguageProperty).toString() == language) return;
+    const auto rows = m_callbackEnumRows;
+    const auto revision = m_callbackEnumSourceRevision;
+    const auto query = m_callbackEnumFilterEdit->text().trimmed();
     const QPointer<KernelDock> owner(this);
-    if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
-        coordinator && coordinator->deferPresentationIfBlocked(this,
-            QStringLiteral("kernel_minifilter_projection"), {m_callbackEnumTable, m_minifilterCallbackTree},
-            [owner]() { if (owner) owner->prepareMinifilterCallbackTree(); })) return;
-
     const auto searchFields = [](const KernelCallbackEnumEntry& entry) {
         return QStringList{entry.classText, entry.registrationTypeText, entry.sourceText, entry.sourceTrustText,
             entry.statusText, entry.nameText, callbackEnumPrimaryAddressText(entry), entry.modulePathText,
             entry.companyText, entry.fileVersionText, entry.fileDescriptionText, entry.altitudeText, entry.detailText};
     };
-    const auto matches = [filterKeyword](const QTreeWidgetItem* item) {
-        if (filterKeyword.isEmpty()) return true;
-        const QStringList fields = item->data(0, KernelSearchFieldsRole).toStringList();
-        return std::any_of(fields.cbegin(), fields.cend(), [&filterKeyword](const QString& field) {
-            return field.contains(filterKeyword, Qt::CaseInsensitive);
-        });
-    };
-    constexpr auto sourcePassName = "ksword_minifilter_source_pass";
-    constexpr auto sourcePendingProperty = "ksword_minifilter_source_pending";
-    const auto sourceRevision = m_callbackEnumSourceRevision;
-    if (m_minifilterCallbackSourceDirty)
-    {
-        if (auto* previous = m_minifilterCallbackTree->findChild<QTimer*>(
-            QLatin1String(sourcePassName), Qt::FindDirectChildrenOnly))
+    m_minifilterCallbackTree->prepare([rows, texts, query, searchFields] {
+        ksword::kernel_dock_internal::ResultTextScope scope(texts);
+        auto values = std::make_shared<KernelMinifilterValues>();
+        QHash<qulonglong, int> parents;
+        for (std::size_t sourceIndex = 0; sourceIndex < rows.size(); ++sourceIndex)
         {
-            if (previous->property("source_revision").toULongLong() == sourceRevision
-                && previous->property("language").toString() == language)
-            {
-                previous->start(0); // Show resumes the same detached build.
-                return;
-            }
-            previous->stop();
-            previous->setObjectName(QString());
-            previous->deleteLater();
-        }
-        struct SourcePass
-        {
-            std::size_t sourceIndex = 0;
-            int phase = 0; // parents, children, atomic attach, expansion
-            qsizetype expandIndex = 0;
-            QHash<qulonglong, QTreeWidgetItem*> filterParents;
-            std::vector<std::unique_ptr<QTreeWidgetItem>> parentOwners;
-            QList<QTreeWidgetItem*> roots;
-        };
-        const auto pass = std::make_shared<SourcePass>();
-        const QPointer<QTreeWidget> tree(m_minifilterCallbackTree);
-        auto* timer = new QTimer(tree);
-        timer->setObjectName(QLatin1String(sourcePassName));
-        timer->setProperty("source_revision", static_cast<qulonglong>(sourceRevision));
-        timer->setProperty("language", language);
-        timer->setSingleShot(true);
-        const QPointer<QTimer> timerGuard(timer);
-        if (!tree->property(sourcePendingProperty).toBool())
-        {
-            tree->setProperty("source_updates_enabled", tree->updatesEnabled());
-            if (!owner || !tree || !timerGuard) return;
-            tree->setProperty("source_force_disabled", tree->testAttribute(Qt::WA_ForceDisabled));
-            if (!owner || !tree || !timerGuard) return;
-            tree->setProperty(sourcePendingProperty, true);
-            if (!owner || !tree || !timerGuard) return;
-            tree->setProperty(ks::ui::TablePresentationPreparingProperty, true);
-        }
-        if (!owner || !tree || !timerGuard) return;
-        tree->setEnabled(false);
-        if (!owner || !tree || !timerGuard) return;
-        const auto fillParent = [owner, pass, searchFields](const std::size_t sourceIndex) {
-            const KernelCallbackEnumEntry& entry = owner->m_callbackEnumRows[sourceIndex];
-            const bool isFilterParent =
-                entry.callbackClass == KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER
-                && entry.source == KSWORD_ARK_CALLBACK_ENUM_SOURCE_FLTMGR_ENUMERATION
-                && entry.callbackAddress == 0U
-                && entry.registrationAddress != 0U;
-            if (!isFilterParent)
-            {
-                return;
-            }
-
-            // Fill a detached tree so text/role/brush updates do not each
-            // notify the live model, selection, sizing and presentation hooks.
-            auto parentOwner = std::make_unique<QTreeWidgetItem>();
-            auto* parentItem = parentOwner.get();
-            parentItem->setText(0, callbackEnumSafeText(entry.nameText));
-            parentItem->setText(
-                1,
-                kernelText("kernel.callback.enum.minifilter.type.filter", QStringLiteral("Filter")));
-            parentItem->setText(8, callbackEnumSafeText(entry.altitudeText));
-            parentItem->setText(9, entry.sourceText + QStringLiteral(" / ") + entry.sourceTrustText);
-            parentItem->setData(0, Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            parentItem->setData(0, KernelSearchFieldsRole, searchFields(entry));
-            parentItem->setToolTip(0, entry.detailText);
-            pass->filterParents.insert(static_cast<qulonglong>(entry.registrationAddress), parentItem);
-            pass->parentOwners.push_back(std::move(parentOwner));
-
-        };
-        const auto fillChild = [owner, pass, searchFields](const std::size_t sourceIndex) {
-            const KernelCallbackEnumEntry& entry = owner->m_callbackEnumRows[sourceIndex];
+            const auto& entry = rows[sourceIndex];
             if (entry.callbackClass != KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER
-                || entry.contextAddress == 0U)
-            {
-                return;
-            }
-
-            QTreeWidgetItem* parentItem =
-                pass->filterParents.value(static_cast<qulonglong>(entry.contextAddress), nullptr);
-            if (parentItem == nullptr)
-            {
-                return;
-            }
-
+                || entry.source != KSWORD_ARK_CALLBACK_ENUM_SOURCE_FLTMGR_ENUMERATION
+                || entry.callbackAddress != 0U || entry.registrationAddress == 0U) continue;
+            const int id = static_cast<int>(values->nodes.size());
+            values->nodes.push_back({});
+            auto& parent = values->nodes.back();
+            parent.cells.resize(10);
+            parent.cells[0] = callbackEnumSafeText(entry.nameText);
+            parent.cells[1] = kernelText("kernel.callback.enum.minifilter.type.filter", QStringLiteral("Filter"));
+            parent.cells[8] = callbackEnumSafeText(entry.altitudeText);
+            parent.cells[9] = entry.sourceText + QStringLiteral(" / ") + entry.sourceTrustText;
+            parent.roles[0][Qt::UserRole] = static_cast<qulonglong>(sourceIndex);
+            parent.roles[0][KernelSearchFieldsRole] = searchFields(entry);
+            parent.roles[0][Qt::ToolTipRole] = entry.detailText;
+            parents.insert(static_cast<qulonglong>(entry.registrationAddress), id);
+            values->roots.push_back(id);
+        }
+        for (std::size_t sourceIndex = 0; sourceIndex < rows.size(); ++sourceIndex)
+        {
+            const auto& entry = rows[sourceIndex];
+            if (entry.callbackClass != KSWORD_ARK_CALLBACK_ENUM_CLASS_MINIFILTER || entry.contextAddress == 0U) continue;
+            const auto found = parents.constFind(static_cast<qulonglong>(entry.contextAddress));
+            if (found == parents.cend()) continue;
+            const int parentId = *found;
             QString modulePath = callbackEnumNormalizeModulePath(entry.modulePathText);
             if (modulePath.isEmpty())
             {
@@ -2863,249 +2724,81 @@ void KernelDock::prepareMinifilterCallbackTree()
                 stageText = entry.statusText;
             }
 
-            auto* callbackItem = new QTreeWidgetItem(parentItem);
-            callbackItem->setText(0, callbackEnumSafeText(entry.nameText));
-            callbackItem->setText(1, stageText);
-            callbackItem->setText(
-                2,
-                entry.callbackAddress == 0U
+            const int childId = static_cast<int>(values->nodes.size());
+            values->nodes.push_back({});
+            values->nodes.back().cells.resize(10);
+            auto* callbackItem = &values->nodes[childId];
+            callbackItem->parent = parentId;
+            auto* parentItem = &values->nodes[parentId];
+            parentItem->children.push_back(childId);
+            callbackItem->cells[0] = callbackEnumSafeText(entry.nameText);
+            callbackItem->cells[1] = stageText;
+            callbackItem->cells[2] = entry.callbackAddress == 0U
                     ? kernelText("kernel.callback.enum.address.none", QStringLiteral("<无回调地址>"))
-                    : callbackEnumFormatAddress(entry.callbackAddress));
-            callbackItem->setText(3, moduleFileName);
-            callbackItem->setText(4, modulePath);
-            callbackItem->setText(5, entry.companyText);
-            callbackItem->setText(6, entry.fileVersionText);
-            callbackItem->setText(7, entry.fileDescriptionText);
-            callbackItem->setText(8, callbackEnumSafeText(entry.altitudeText));
-            callbackItem->setText(9, entry.sourceText + QStringLiteral(" / ") + entry.sourceTrustText);
-            callbackItem->setData(0, Qt::UserRole, static_cast<qulonglong>(sourceIndex));
-            callbackItem->setData(0, KernelSearchFieldsRole, searchFields(entry));
-            callbackItem->setToolTip(0, entry.detailText);
-            callbackItem->setToolTip(
-                4,
-                kernelText(
+                    : callbackEnumFormatAddress(entry.callbackAddress);
+            callbackItem->cells[3] = moduleFileName;
+            callbackItem->cells[4] = modulePath;
+            callbackItem->cells[5] = entry.companyText;
+            callbackItem->cells[6] = entry.fileVersionText;
+            callbackItem->cells[7] = entry.fileDescriptionText;
+            callbackItem->cells[8] = callbackEnumSafeText(entry.altitudeText);
+            callbackItem->cells[9] = entry.sourceText + QStringLiteral(" / ") + entry.sourceTrustText;
+            callbackItem->roles[0][Qt::UserRole] = static_cast<qulonglong>(sourceIndex);
+            callbackItem->roles[0][KernelSearchFieldsRole] = searchFields(entry);
+            callbackItem->roles[0][Qt::ToolTipRole] = entry.detailText;
+            callbackItem->roles[4][Qt::ToolTipRole] = kernelText(
                     "kernel.callback.enum.minifilter.path.tooltip",
-                    QStringLiteral("双击此回调可查看驱动文件常规信息和 PE 明细")));
+                    QStringLiteral("双击此回调可查看驱动文件常规信息和 PE 明细"));
             if (entry.fallbackPatternOnly)
             {
-                callbackItem->setForeground(9, QBrush(KswordTheme::WarningColor()));
+                callbackItem->roles[9][Qt::ForegroundRole] = QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningColor());
             }
 
-            if (parentItem->text(4).isEmpty() && !modulePath.isEmpty())
+            if (parentItem->cells[4].isEmpty() && !modulePath.isEmpty())
             {
-                parentItem->setText(3, moduleFileName);
-                parentItem->setText(4, modulePath);
-                parentItem->setText(5, entry.companyText);
-                parentItem->setText(6, entry.fileVersionText);
-                parentItem->setText(7, entry.fileDescriptionText);
+                parentItem->cells[3] = moduleFileName;
+                parentItem->cells[4] = modulePath;
+                parentItem->cells[5] = entry.companyText;
+                parentItem->cells[6] = entry.fileVersionText;
+                parentItem->cells[7] = entry.fileDescriptionText;
             }
+        }
+        const auto matches = [&query](const KernelMinifilterValues::Node& node) {
+            if (query.isEmpty()) return true;
+            for (const auto& field : node.roles.value(0).value(KernelSearchFieldsRole).toStringList())
+                if (field.contains(query, Qt::CaseInsensitive)) return true;
+            return false;
         };
-        connect(timer, &QTimer::timeout, timer,
-            [owner, tree, timerGuard, pass, language, sourceRevision, fillParent, fillChild]() {
-            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (!tree->isVisible()) return; // No hidden-page wake loop; Show resumes.
-            if (owner->m_callbackEnumSourceRevision != sourceRevision
-                || ks::i18n::LanguageManager::instance().currentLanguageId() != language)
+        QVector<int> acceptedRoots;
+        for (const int id : values->roots)
+        {
+            auto& parent = values->nodes[id];
+            const bool parentMatch = matches(parent);
+            QVector<int> children;
+            for (const int childId : parent.children)
             {
-                timerGuard->setObjectName(QString());
-                timerGuard->deleteLater();
-                owner->prepareMinifilterCallbackTree();
-                return;
+                auto& node = values->nodes[childId];
+                node.accepted = parentMatch || matches(node);
+                if (node.accepted) { node.position = static_cast<int>(children.size()); children.push_back(childId); }
             }
-            if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
-                coordinator && coordinator->deferPresentationIfBlocked(owner.data(),
-                    QStringLiteral("kernel_minifilter_source_batch"),
-                    {owner->m_callbackEnumTable, tree.data()}, [timerGuard]() {
-                        if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start(0);
-                    })) return;
-            QElapsedTimer budget;
-            budget.start();
-            int processed = 0;
-            while (pass->phase < 2 && processed < 64 && budget.elapsed() < 4)
-            {
-                if (pass->sourceIndex == owner->m_callbackEnumRows.size())
-                {
-                    pass->sourceIndex = 0;
-                    ++pass->phase;
-                    continue;
-                }
-                if (pass->phase == 0) fillParent(pass->sourceIndex++);
-                else fillChild(pass->sourceIndex++);
-                ++processed;
-            }
-            if (pass->phase < 2) { timerGuard->start(0); return; }
-            if (pass->phase == 2)
-            {
-                // Keep the old painted frame until the first complete filter.
-                // Qt's clear/adoption remain indivisible model operations.
-                tree->setUpdatesEnabled(false);
-                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-                tree->clear();
-                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-                if (owner->m_callbackEnumSourceRevision != sourceRevision)
-                { timerGuard->start(0); return; }
-                pass->roots.reserve(static_cast<qsizetype>(pass->parentOwners.size()));
-                for (auto& root : pass->parentOwners) pass->roots.push_back(root.release());
-                pass->parentOwners.clear();
-                tree->addTopLevelItems(pass->roots);
-                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-                pass->filterParents.clear();
-                pass->phase = 3;
-                timerGuard->start(0);
-                return;
-            }
-            while (pass->expandIndex < pass->roots.size() && processed < 64 && budget.elapsed() < 4)
-            {
-                pass->roots.at(pass->expandIndex++)->setExpanded(true);
-                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-                if (owner->m_callbackEnumSourceRevision != sourceRevision)
-                { timerGuard->start(0); return; }
-                ++processed;
-            }
-            if (pass->expandIndex < pass->roots.size()) { timerGuard->start(0); return; }
-            timerGuard->setObjectName(QString());
-            timerGuard->deleteLater();
-            owner->m_minifilterCallbackSourceDirty = false;
-            owner->m_minifilterCallbackFilterDirty = true;
-            owner->prepareMinifilterCallbackTree();
-        });
-        timer->start(0);
-        return;
-    }
-
-    // Keep the original items/source identities. Only this visible tree's
-    // search-cache and visibility work yields between bounded GUI slices.
-    struct FilterPass
-    {
-        int parentIndex = 0;
-        int childIndex = -1;
-        bool parentMatched = false;
-        bool childMatched = false;
-        bool restart = false;
-    };
-    const auto pass = std::make_shared<FilterPass>();
-    auto* timer = new QTimer(m_minifilterCallbackTree);
-    timer->setObjectName(QLatin1String(filterPassName));
-    timer->setProperty("keyword", filterKeyword);
-    timer->setProperty("language", language);
-    timer->setSingleShot(true);
-    const QPointer<QTimer> timerGuard(timer);
-    connect(m_minifilterCallbackTree->model(), &QAbstractItemModel::layoutChanged, timer,
-        [pass]() { pass->restart = true; });
-    const auto continuePass =
-        [owner, timerGuard, pass, language, filterKeyword, searchFields, matches,
-         sourceRevision, sourcePendingProperty, refreshLanguage = languageChanged]() {
-            if (!owner || !timerGuard) return;
-            const auto finish = [timerGuard]() {
-                if (!timerGuard) return;
-                timerGuard->stop();
-                timerGuard->setObjectName(QString());
-                timerGuard->deleteLater();
-            };
-            const QPointer<QTreeWidget> tree(owner->m_minifilterCallbackTree);
-            if (timerGuard->objectName().isEmpty() || tree == nullptr
-                || !tree->isVisible() || owner->m_minifilterCallbackSourceDirty
-                || owner->m_callbackEnumSourceRevision != sourceRevision
-                || owner->m_callbackEnumFilterEdit->text().trimmed() != filterKeyword
-                || ks::i18n::LanguageManager::instance().currentLanguageId() != language)
-            {
-                // Dirty flags remain set; the next visible/latest request retries.
-                finish();
-                return;
-            }
-            if (auto* coordinator = ks::ui::UiCommitCoordinator::forApplication();
-                coordinator && coordinator->deferPresentationIfBlocked(owner.data(),
-                QStringLiteral("kernel_minifilter_filter_batch"),
-                {owner->m_callbackEnumTable, tree.data()}, [timerGuard]() {
-                    if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start();
-                })) return;
-            if (pass->restart)
-            {
-                // Header sorting can move a branch between slices. Restart its
-                // cheap cursor pass rather than treating row numbers as identity.
-                pass->parentIndex = 0;
-                pass->childIndex = -1;
-                pass->restart = false;
-            }
-            const auto refreshLanguageCache = [owner, &searchFields](QTreeWidgetItem* item) {
-                const auto sourceIndex = static_cast<std::size_t>(item->data(0, Qt::UserRole).toULongLong());
-                if (sourceIndex < owner->m_callbackEnumRows.size())
-                    item->setData(0, KernelSearchFieldsRole, searchFields(owner->m_callbackEnumRows[sourceIndex]));
-            };
-            const bool batchUpdatesEnabled = tree->updatesEnabled();
-            tree->setUpdatesEnabled(false);
-            QElapsedTimer budget;
-            budget.start();
-            int processed = 0;
-            while (pass->parentIndex < tree->topLevelItemCount()
-                && processed < 256 && budget.nsecsElapsed() < 4'000'000)
-            {
-                auto* parentItem = tree->topLevelItem(pass->parentIndex);
-                if (pass->childIndex < 0)
-                {
-                    if (refreshLanguage) refreshLanguageCache(parentItem);
-                    pass->parentMatched = matches(parentItem);
-                    pass->childMatched = false;
-                    pass->childIndex = 0;
-                }
-                else if (pass->childIndex < parentItem->childCount())
-                {
-                    auto* childItem = parentItem->child(pass->childIndex++);
-                    if (refreshLanguage) refreshLanguageCache(childItem);
-                    const bool rowMatched = matches(childItem);
-                    pass->childMatched = pass->childMatched || rowMatched;
-                    childItem->setHidden(!pass->parentMatched && !rowMatched);
-                }
-                else
-                {
-                    parentItem->setHidden(!pass->parentMatched && !pass->childMatched);
-                    ++pass->parentIndex;
-                    pass->childIndex = -1;
-                }
-                ++processed;
-            }
-            tree->setUpdatesEnabled(batchUpdatesEnabled);
-            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (pass->parentIndex < tree->topLevelItemCount())
-            {
-                timerGuard->start();
-                return;
-            }
-            tree->setProperty(KernelSearchLanguageProperty, language);
-            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            owner->m_minifilterCallbackFilterDirty = false;
-            for (auto* selectedItem : tree->selectedItems())
-            {
-                if (selectedItem->isHidden() || (selectedItem->parent() != nullptr && selectedItem->parent()->isHidden()))
-                    selectedItem->setSelected(false);
-                if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            }
-            auto* currentItem = tree->currentItem();
-            if (currentItem != nullptr && (currentItem->isHidden()
-                || (currentItem->parent() != nullptr && currentItem->parent()->isHidden())))
-                tree->setCurrentItem(nullptr);
-            if (!owner || !tree || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            finish();
-            if (owner && owner->m_minifilterCallbackTree
-                && owner->m_callbackEnumSourceRevision == sourceRevision
-                && owner->m_minifilterCallbackTree->property(sourcePendingProperty).toBool())
-            {
-                const QPointer<QTreeWidget> readyTree(owner->m_minifilterCallbackTree);
-                const bool updatesEnabled = readyTree->property("source_updates_enabled").toBool();
-                const bool forceDisabled = readyTree->property("source_force_disabled").toBool();
-                readyTree->setProperty(sourcePendingProperty, false);
-                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
-                readyTree->setProperty(ks::ui::TablePresentationPreparingProperty, false);
-                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
-                readyTree->setEnabled(!forceDisabled);
-                if (!owner || !readyTree || owner->m_callbackEnumSourceRevision != sourceRevision) return;
-                readyTree->setUpdatesEnabled(updatesEnabled);
-            }
-        };
-    connect(timer, &QTimer::timeout, timer, continuePass);
-    // Initial and subsequent filters share the same budget. A new source only
-    // becomes paintable/interactive after its complete first filter is ready.
-    timer->start(0);
+            parent.children = std::move(children);
+            parent.accepted = parentMatch || !parent.children.empty();
+            if (parent.accepted) { parent.position = static_cast<int>(acceptedRoots.size()); acceptedRoots.push_back(id); }
+        }
+        values->roots = std::move(acceptedRoots);
+        return values;
+    }, [owner, revision, language, query] {
+        if (!owner || owner->m_callbackEnumSourceRevision != revision
+            || owner->m_callbackEnumFilterEdit->text().trimmed() != query
+            || ks::i18n::LanguageManager::instance().currentLanguageId() != language) return;
+        owner->m_minifilterCallbackSourceDirty = false;
+        owner->m_minifilterCallbackFilterDirty = false;
+        owner->m_minifilterCallbackTree->setProperty(KernelSearchLanguageProperty, language);
+    }, revision, [owner, revision, language, query] {
+        return owner && owner->m_callbackEnumSourceRevision == revision
+            && owner->m_callbackEnumFilterEdit->text().trimmed() == query
+            && ks::i18n::LanguageManager::instance().currentLanguageId() == language;
+    });
 }
 
 bool KernelDock::currentCallbackEnumSourceIndex(std::size_t& sourceIndexOut) const
@@ -3184,14 +2877,14 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
     // - 点在已选中行上时保留 Ctrl 多选集合；
     // - 点在空白处时保留现有选择，复制动作继续对当前选择生效。
     QTableWidgetItem* clickedItem = m_callbackEnumTable->itemAt(localPosition);
-    const int clickedRow = clickedItem != nullptr ? clickedItem->row() : -1;
+    const int clickedRow = clickedItem != nullptr ? m_callbackEnumTable->indexAt(localPosition).row() : -1;
     const int clickedColumn = m_callbackEnumTable->columnAt(localPosition.x());
     if (clickedItem != nullptr)
     {
-        if (!clickedItem->isSelected())
+        if (!m_callbackEnumTable->selectionModel()->isSelected(m_callbackEnumTable->indexAt(localPosition)))
         {
             m_callbackEnumTable->clearSelection();
-            m_callbackEnumTable->setCurrentItem(clickedItem);
+            m_callbackEnumTable->setCurrentCell(clickedRow, 0);
             m_callbackEnumTable->selectRow(clickedRow);
         }
         else
@@ -3200,7 +2893,7 @@ void KernelDock::showCallbackEnumContextMenu(const QPoint& localPosition)
             {
                 // 右键点在已选中行时只移动当前单元格，不清空 Ctrl 多选集合。
                 selectionModel->setCurrentIndex(
-                    m_callbackEnumTable->indexFromItem(clickedItem),
+                    m_callbackEnumTable->indexAt(localPosition),
                     QItemSelectionModel::NoUpdate);
             }
         }

@@ -243,6 +243,7 @@
     <ClCompile Include="KernelDock\KernelDock.DriverStatus.cpp" />
     <ClCompile Include="KernelDock\KernelDock.DynData.cpp" />
     <ClCompile Include="KernelDock\KernelDock.KernelHooks.cpp" />
+    <ClCompile Include="KernelDock\KernelResultModel.cpp" />
     <ClCompile Include="KernelDock\KernelCleanImageBaseline.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Runtime.cpp" />
     <ClCompile Include="KernelDock\KernelDock.Ssdt.cpp" />
@@ -1232,6 +1233,7 @@
     <ClInclude Include="PrivilegeDock\PrivilegeTokenPages.h" />
     <QtMoc Include="PrivilegeDock\PrivilegeDock.h" />
     <QtMoc Include="RegistryDock\RegistryDock.h" />
+    <ClInclude Include="KernelDock\KernelResultModel.h" />
     <ClInclude Include="KernelDock\KernelCleanImageBaseline.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskDeletedEntryForensics.h" />
     <ClInclude Include="MiscDock\DiskEditor\DiskFileSystemForensics.h" />

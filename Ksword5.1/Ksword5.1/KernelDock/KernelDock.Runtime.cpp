@@ -753,356 +753,25 @@ void KernelDock::selectFirstObjectNamespaceEntryItem()
     m_objectNamespaceDetailEditor->setDocument(ks::ui::FieldDocument{}.note(kernelText("kernel.runtime.object_namespace.empty.tree", QStringLiteral("当前对象命名空间树为空。"))));
 }
 
-struct KernelDock::KernelResultFilterProjection
+void KernelDock::applyKernelResultFilterAsync(KernelResultTable* table, QLineEdit* edit, const int)
 {
-    QPointer<QTableWidget> table;
-    QPointer<QLineEdit> edit;
-    QPointer<ks::ui::AsyncOperation> operation;
-    QString keyword;
-    quint64 sourceRevision = 0;
-    std::uint64_t ticket = 0;
-    quint64 layoutRevision = 0;
-    QVector<QPersistentModelIndex> identities;
-    QVector<quint8> matches;
-    QPersistentModelIndex separator;
-    QSet<QPersistentModelIndex> excluded;
-    qsizetype cursor = 0;
-    bool hasDeferredMatch = false;
-};
-
-int KernelDock::kernelResultFilterSlot(const QTableWidget* table) const
-{
-    const std::array<const QTableWidget*, 7> tables{m_atomTable, m_ssdtTable,
-        m_shadowSsdtTable, m_inlineHookTable, m_iatEatHookTable, m_timerDpcTable, m_callbackEnumTable};
-    for (std::size_t index = 0; index < tables.size(); ++index)
-        if (table != nullptr && table == tables[index]) return static_cast<int>(index);
-    return -1;
+    if (table && edit) table->filter(edit->text().trimmed());
 }
 
-void KernelDock::resetKernelResultFilterCache(QTableWidget* table)
-{
-    const int slot = kernelResultFilterSlot(table);
-    if (slot < 0) return;
-    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
-    ++cache.revision;
-    if (cache.operation) cache.operation->cancel();
-    cache.fields = {};
-    cache.identities = {};
-}
-
-void KernelDock::rememberKernelResultFilterRow(QTableWidget* table, const int row)
-{
-    const int slot = kernelResultFilterSlot(table);
-    if (slot < 0 || table->item(row, 0) == nullptr) return;
-    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
-    cache.fields.push_back(table->item(row, 0)->data(KernelSearchFieldsRole).toStringList());
-    cache.identities.push_back(QPersistentModelIndex(table->model()->index(row, 0)));
-}
-
-void KernelDock::applyKernelResultFilterAsync(QTableWidget* table, QLineEdit* edit, const int separatorRow)
-{
-    const int slot = kernelResultFilterSlot(table);
-    if (slot < 0 || edit == nullptr) return;
-    auto& cache = m_kernelResultFilterCaches[static_cast<std::size_t>(slot)];
-    const QString keyword = edit->text().trimmed();
-    if (keyword.isEmpty())
-    {
-        if (cache.operation) cache.operation->cancel();
-        // Keep the existing constant-work clear-filter and separator semantics.
-        applyKernelResultFilter(table, edit, separatorRow);
-        return;
-    }
-    if (!cache.operation) cache.operation = new ks::ui::AsyncOperation(table);
-    struct Request { QString keyword; QVector<QStringList> fields; };
-    using Result = QVector<quint8>;
-    const auto identities = cache.identities; // GUI only; never part of Request/worker.
-    const auto sourceRevision = cache.revision;
-    const QPersistentModelIndex separator = separatorRow >= 0
-        ? QPersistentModelIndex(table->model()->index(separatorRow, 0)) : QPersistentModelIndex();
-    const QPointer<KernelDock> owner(this);
-    const QPointer<QTableWidget> tableGuard(table);
-    const QPointer<QLineEdit> editGuard(edit);
-    cache.operation->submit<Request, Result>(Request{keyword, cache.fields},
-        [](const Request& request, const ks::ui::AsyncOperationToken& token) {
-            Result matches;
-            matches.reserve(request.fields.size());
-            for (qsizetype index = 0; index < request.fields.size(); ++index)
-            {
-                if ((index & 255) == 0 && token.isCanceled()) return Result{};
-                const auto& fields = request.fields[index];
-                matches.push_back(std::any_of(fields.cbegin(), fields.cend(), [&request](const QString& field) {
-                    return field.contains(request.keyword, Qt::CaseInsensitive);
-                }) ? 1 : 0);
-            }
-            return matches;
-        },
-        [this, owner, tableGuard, editGuard, identities, sourceRevision, keyword, separator]
-        (const Result& matches, const std::uint64_t ticket) {
-            if (!owner || !tableGuard || !editGuard || matches.size() != identities.size()) return true;
-            const int currentSlot = kernelResultFilterSlot(tableGuard);
-            if (currentSlot < 0) return true;
-            const auto& current = m_kernelResultFilterCaches[static_cast<std::size_t>(currentSlot)];
-            if (current.revision != sourceRevision || editGuard->text().trimmed() != keyword) return true;
-            auto projection = std::make_shared<KernelResultFilterProjection>();
-            projection->table = tableGuard;
-            projection->edit = editGuard;
-            projection->operation = current.operation;
-            projection->keyword = keyword;
-            projection->sourceRevision = sourceRevision;
-            projection->ticket = ticket;
-            projection->layoutRevision = ks::ui::TableRowFilterIdentityRevision(tableGuard);
-            projection->identities = identities;
-            projection->matches = matches;
-            projection->separator = separator;
-            // Queue even a small result so AsyncOperation has entered awaitingCommit.
-            QTimer::singleShot(0, this, [this, projection]() { continueKernelResultFilter(projection); });
-            return false;
-        },
-        [](std::exception_ptr) {
-            // Keep the last complete accepted filter; never publish a partial/error set.
-            // The next input/source request can retry through the same operation.
-        });
-}
-
-void KernelDock::continueKernelResultFilter(const std::shared_ptr<KernelResultFilterProjection>& projection)
-{
-    if (!projection->operation) return;
-    const auto finish = [&projection]() { if (projection->operation) projection->operation->completeDeferred(projection->ticket); };
-    if (!projection->table || !projection->edit || !projection->operation->isCurrent(projection->ticket))
-    {
-        finish();
-        return;
-    }
-    auto* table = projection->table.data();
-    const int slot = kernelResultFilterSlot(table);
-    if (slot < 0 || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision
-        || projection->edit->text().trimmed() != projection->keyword)
-    {
-        finish();
-        return;
-    }
-    const QPointer<KernelDock> owner(this);
-    if (ks::ui::DeferTablePresentationIfValueCaptureOpen(table,
-        QStringLiteral("kernel_result_filter_async"), {table}, [owner, projection]() {
-            if (owner) owner->continueKernelResultFilter(projection);
-        })) return;
-    if (!owner || !projection->table || !projection->edit || !projection->operation) return;
-    if (!projection->operation->isCurrent(projection->ticket)
-        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision
-        || projection->edit->text().trimmed() != projection->keyword) { finish(); return; }
-
-    const quint64 layoutRevision = ks::ui::TableRowFilterIdentityRevision(table);
-    if (projection->layoutRevision != layoutRevision)
-    {
-        // Sorting preserves the captured identities. Restart only the bounded GUI
-        // identity pass so the separator still follows its original physical-row rule.
-        projection->layoutRevision = layoutRevision;
-        projection->cursor = 0;
-        projection->excluded.clear();
-        projection->hasDeferredMatch = false;
-    }
-    QElapsedTimer budget;
-    budget.start();
-    int accepted = 0;
-    while (projection->cursor < projection->identities.size()
-        && accepted < 256 && budget.nsecsElapsed() < 4'000'000)
-    {
-        const qsizetype index = projection->cursor++;
-        const auto& identity = projection->identities[index];
-        if (!identity.isValid() || identity.model() != table->model())
-        {
-            finish();
-            return;
-        }
-        if (!projection->matches[index]) projection->excluded.insert(identity);
-        else if (projection->separator.isValid() && identity.row() > projection->separator.row())
-            projection->hasDeferredMatch = true;
-        ++accepted;
-    }
-    if (projection->cursor < projection->identities.size())
-    {
-        QTimer::singleShot(0, this, [this, projection]() { continueKernelResultFilter(projection); });
-        return;
-    }
-    if (projection->separator.isValid() && !projection->hasDeferredMatch)
-        projection->excluded.insert(projection->separator);
-    ks::ui::SetTableRowFilterBusinessOwnership(table,
-        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
-    if (!owner || !projection->table || !projection->edit || !projection->operation) { finish(); return; }
-    if (!projection->operation->isCurrent(projection->ticket)
-        || projection->edit->text().trimmed() != projection->keyword
-        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision)
-    { finish(); return; }
-    ks::ui::ApplyTableRowFilterIncrementally(table, projection->excluded);
-    if (!owner || !projection->table || !projection->edit || !projection->operation) { finish(); return; }
-    if (!projection->operation->isCurrent(projection->ticket)
-        || projection->edit->text().trimmed() != projection->keyword
-        || m_kernelResultFilterCaches[static_cast<std::size_t>(slot)].revision != projection->sourceRevision)
-    { finish(); return; }
-    // Same canonical deselection as the original synchronous helper.
-    if (const QPointer<QItemSelectionModel> selection = table->selectionModel())
-    {
-        QItemSelection deselect;
-        for (const QModelIndex& index : selection->selectedRows())
-            if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
-                deselect.select(table->model()->index(index.row(), 0),
-                    table->model()->index(index.row(), table->columnCount() - 1));
-        if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
-        if (!owner || !projection->table || !selection) { finish(); return; }
-        if (ks::ui::IsTableRowExcludedByFilter(table, table->currentRow()))
-            selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
-    }
-    finish();
-}
-
-void KernelDock::publishKernelResultRows(QTableWidget* table, const std::size_t rowCount,
-    std::function<void(std::size_t)> fillRow, std::function<void()> finalize,
+void KernelDock::publishKernelResultRows(KernelResultTable* table, const std::size_t rowCount,
+    std::function<void(KernelResultValues&, std::size_t)> fillRow, std::function<void()> finalize,
     std::function<void()> onReady, const bool rebuildSource, QLineEdit* firstFilter)
 {
-    const QPointer<QTableWidget> tableGuard(table);
-    const QPointer<KernelDock> owner(this);
-    if (!tableGuard) return;
-    constexpr auto projectionName = "ksword_kernel_result_projection";
-    bool wasForceDisabled = table->testAttribute(Qt::WA_ForceDisabled);
-    bool wasSortingEnabled = table->isSortingEnabled();
-    if (auto* previous = table->findChild<QTimer*>(QLatin1String(projectionName), Qt::FindDirectChildrenOnly))
-    {
-        // A source refresh supersedes an in-flight metadata pass. Keep the
-        // original enabled/sorting baselines rather than inheriting its lock.
-        wasForceDisabled = previous->property("was_force_disabled").toBool();
-        wasSortingEnabled = previous->property("was_sorting_enabled").toBool();
-        previous->stop();
-        previous->setObjectName(QString());
-        previous->deleteLater();
-    }
-    auto* timer = new QTimer(table);
-    timer->setObjectName(QLatin1String(projectionName));
-    timer->setProperty("was_force_disabled", wasForceDisabled);
-    timer->setProperty("was_sorting_enabled", wasSortingEnabled);
-    timer->setSingleShot(true);
-    const QPointer<QTimer> timerGuard(timer);
-    const QPointer<QLineEdit> filterGuard(firstFilter);
-    const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-    table->setProperty(ks::ui::TablePresentationPreparingProperty, true);
-    if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-    table->setEnabled(false);
-    if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-    connect(timer, &QTimer::timeout, this,
-        [this, owner, tableGuard, timerGuard, filterGuard, rowCount, wasForceDisabled, wasSortingEnabled,
-            rebuildSource, language,
-            cursor = std::size_t{0}, initialized = false, finalized = false,
-            filterInitialized = false, filterCursor = 0, filterKeyword = QString(),
-            filterRevision = quint64{0}, excluded = QSet<QPersistentModelIndex>(), hasDeferredMatch = false,
-            fillRow = std::move(fillRow),
-            finalize = std::move(finalize), onReady = std::move(onReady)]() mutable {
-        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        const auto resume = [timerGuard]() {
-            if (timerGuard && !timerGuard->objectName().isEmpty()) timerGuard->start(0);
-        };
-        if (ks::ui::DeferTablePresentationIfValueCaptureOpen(tableGuard,
-            QStringLiteral("kernel_result_source_projection"), {tableGuard}, resume)) return;
-        const bool staleLanguage = !rebuildSource
-            && ks::i18n::LanguageManager::instance().currentLanguageId() != language;
-        QElapsedTimer budget;
-        budget.start();
-        if (!initialized && !staleLanguage)
-        {
-            initialized = true;
-            tableGuard->setSortingEnabled(false);
-            resetKernelResultFilterCache(tableGuard);
-            if (rebuildSource)
-            {
-                tableGuard->setRowCount(0);
-                tableGuard->setRowCount(static_cast<int>(rowCount));
-            }
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        }
-        int rows = 0;
-        while (!staleLanguage && cursor < rowCount)
-        {
-            fillRow(cursor++);
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (++rows >= 64 || budget.elapsed() >= 4) break;
-        }
-        if (!staleLanguage && cursor < rowCount) { resume(); return; }
-        if (!staleLanguage && !finalized)
-        {
-            finalized = true;
-            finalize(); // Keep the original final sort, then yield before matching.
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (filterGuard) { resume(); return; }
-        }
-        if (filterGuard && !staleLanguage)
-        {
-            const QString keyword = filterGuard->text().trimmed();
-            const quint64 revision = ks::ui::TableRowFilterIdentityRevision(tableGuard);
-            const int separatorRow = tableGuard == m_callbackEnumTable ? m_callbackEnumSeparatorIndex.row() : -1;
-            if (!filterInitialized || keyword != filterKeyword || revision != filterRevision)
-            {
-                filterInitialized = true;
-                filterCursor = 0;
-                filterKeyword = keyword;
-                filterRevision = revision;
-                excluded.clear();
-                hasDeferredMatch = keyword.isEmpty() && separatorRow >= 0
-                    && separatorRow + 1 < tableGuard->rowCount();
-            }
-            budget.restart();
-            int processed = 0;
-            while (!keyword.isEmpty() && filterCursor < tableGuard->rowCount()
-                && processed < 256 && budget.elapsed() < 4)
-            {
-                const int row = filterCursor++;
-                ++processed;
-                if (row == separatorRow) continue;
-                const auto* item = tableGuard->item(row, 0);
-                bool matched = false;
-                if (item != nullptr)
-                {
-                    const QStringList fields = item->data(KernelSearchFieldsRole).toStringList();
-                    matched = std::any_of(fields.cbegin(), fields.cend(), [&keyword](const QString& field) {
-                        return field.contains(keyword, Qt::CaseInsensitive);
-                    });
-                }
-                if (!matched) excluded.insert(QPersistentModelIndex(tableGuard->model()->index(row, 0)));
-                else if (separatorRow >= 0 && row > separatorRow) hasDeferredMatch = true;
-            }
-            if (!keyword.isEmpty() && filterCursor < tableGuard->rowCount()) { resume(); return; }
-            if (separatorRow >= 0 && !hasDeferredMatch)
-                excluded.insert(QPersistentModelIndex(tableGuard->model()->index(separatorRow, 0)));
-            ks::ui::SetTableRowFilterBusinessOwnership(tableGuard,
-                ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            ks::ui::ApplyTableRowFilterIncrementally(tableGuard, excluded);
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (const QPointer<QItemSelectionModel> selection = tableGuard->selectionModel())
-            {
-                QItemSelection deselect;
-                for (const QModelIndex& index : selection->selectedRows())
-                    if (ks::ui::IsTableRowExcludedByFilter(tableGuard, index.row()))
-                        deselect.select(tableGuard->model()->index(index.row(), 0),
-                            tableGuard->model()->index(index.row(), tableGuard->columnCount() - 1));
-                if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
-                if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty() || !selection) return;
-                if (ks::ui::IsTableRowExcludedByFilter(tableGuard, tableGuard->currentRow()))
-                    selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
-            }
-            if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-            if (filterGuard && filterGuard->text().trimmed() != filterKeyword)
-            { filterInitialized = false; resume(); return; }
-        }
-        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        if (!rebuildSource) tableGuard->setSortingEnabled(wasSortingEnabled);
-        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        tableGuard->setProperty(ks::ui::TablePresentationPreparingProperty, false);
-        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        tableGuard->setEnabled(!wasForceDisabled);
-        if (!owner || !tableGuard || !timerGuard || timerGuard->objectName().isEmpty()) return;
-        timerGuard->setObjectName(QString());
-        timerGuard->deleteLater();
-        if (onReady) onReady();
-    });
-    timer->start(0);
+    if (!table) return;
+    const QPointer<KernelResultTable> guarded(table);
+    table->setFilterEdit(firstFilter);
+    table->prepare(rowCount, [fillRow = std::move(fillRow), rowCount](KernelResultValues& values) {
+        for (std::size_t row = 0; row < rowCount; ++row) fillRow(values, row);
+    }, firstFilter ? firstFilter->text().trimmed() : QString(), KernelSearchFieldsRole,
+        [guarded, finalize = std::move(finalize), onReady = std::move(onReady)] {
+            if (finalize) finalize();
+            if (guarded && onReady) onReady();
+        }, rebuildSource);
 }
 
 void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()> onReady)
@@ -1116,37 +785,16 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()
         return QStringList{QString::number(entry.atomValue), QStringLiteral("0x%1").arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0')).toUpper(), entry.atomNameText, entry.sourceText, entry.statusText};
     };
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-    if (!sourceChanged)
+    if (!sourceChanged && m_atomTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        // The current keyword is read again after every source row is ready.
-        if (m_atomTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
-        if (m_atomTable->property(KernelSearchLanguageProperty).toString() != language)
-        {
-            publishKernelResultRows(m_atomTable, static_cast<std::size_t>(m_atomTable->rowCount()),
-                [this, searchFields](const std::size_t cacheRow) {
-                const int row = static_cast<int>(cacheRow);
-                auto* item = m_atomTable->item(row, 0);
-                if (item == nullptr) return;
-                const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
-                if (sourceIndex < m_atomRows.size())
-                {
-                    item->setData(KernelSearchFieldsRole, searchFields(m_atomRows[sourceIndex]));
-                    rememberKernelResultFilterRow(m_atomTable, row);
-                }
-                }, [this, language]() {
-                    m_atomTable->setProperty(KernelSearchLanguageProperty, language);
-                }, [this]() { rebuildAtomTable(false); }, false);
-            return;
-        }
         applyKernelResultFilterAsync(m_atomTable, m_atomFilterEdit);
         return;
     }
 
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_atomDetailEditor);
-    const QPointer<KernelDock> owner(this);
     publishKernelResultRows(m_atomTable, m_atomRows.size(),
-        [this, searchFields](const std::size_t sourceIndex) {
-        const KernelAtomEntry& entry = m_atomRows[sourceIndex];
+        [rows = m_atomRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+        const KernelAtomEntry& entry = rows[sourceIndex];
         const QString valueText = QString::number(entry.atomValue);
         const QString hexText = QStringLiteral("0x%1")
             .arg(static_cast<unsigned int>(entry.atomValue), 4, 16, QChar('0'))
@@ -1170,21 +818,15 @@ void KernelDock::rebuildAtomTable(const bool sourceChanged, std::function<void()
 
         if (!entry.querySucceeded)
         {
-            statusItem->setForeground(QBrush(KswordTheme::WarningAccentColor()));
+            statusItem->setForeground(QBrush(ksword::kernel_dock_internal::ResultColors::current().WarningAccentColor()));
         }
 
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
-        m_atomTable->setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
-        rememberKernelResultFilterRow(m_atomTable, rowIndex);
-        }, [this, owner]() {
-            m_atomTable->setSortingEnabled(true);
-            if (!owner) return;
-            m_atomTable->setProperty(KernelSearchLanguageProperty,
-                ks::i18n::LanguageManager::instance().currentLanguageId());
-        }, std::move(onReady), true, m_atomFilterEdit);
+        values.setItem(rowIndex, static_cast<int>(AtomColumn::Value), valueItem);
+        values.setItem(rowIndex, static_cast<int>(AtomColumn::Hex), hexItem);
+        values.setItem(rowIndex, static_cast<int>(AtomColumn::Name), nameItem);
+        values.setItem(rowIndex, static_cast<int>(AtomColumn::Source), sourceItem);
+        values.setItem(rowIndex, static_cast<int>(AtomColumn::Status), statusItem);
+        }, []() {}, std::move(onReady), sourceChanged, m_atomFilterEdit);
 }
 
 void KernelDock::rebuildNtQueryTable()

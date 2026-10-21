@@ -23,6 +23,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -117,7 +118,7 @@ namespace
     // - 输入：SSDT 表指针与可视行号；
     // - 处理：按当前表格列顺序读取可见文本，空单元格使用占位符，字段间使用 Tab；
     // - 返回：适合复制到剪贴板/表格软件的 TSV 文本；输入无效时返回空字符串。
-    QString tableRowAsTsv(const QTableWidget* tableWidget, const int rowIndex)
+    QString tableRowAsTsv(const KernelResultTable* tableWidget, const int rowIndex)
     {
         if (tableWidget == nullptr || rowIndex < 0 || rowIndex >= tableWidget->rowCount())
         {
@@ -198,7 +199,13 @@ void KernelDock::initializeSsdtTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_ssdtPage);
     m_ssdtLayout->addWidget(splitter, 1);
 
-    m_ssdtTable = new ks::ui::VisibleTableWidget(splitter);
+    m_ssdtTable = new KernelResultTable(splitter);
+    m_ssdtTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_ssdtRefreshRunning.store(false);
+        m_refreshSsdtButton->setEnabled(true);
+        if (owner) m_ssdtStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 服务槽值及模块归属需要保留完整性现场比较。
     ks::ui::SetTableActionBarMode(m_ssdtTable, ks::ui::TableActionBarMode::Full);
     m_ssdtTable->setColumnCount(static_cast<int>(SsdtColumn::Count));
@@ -250,7 +257,7 @@ void KernelDock::initializeSsdtTab()
     connect(m_ssdtFilterEdit, &QLineEdit::textChanged, ssdtFilterTimer,
         [ssdtFilterTimer]() { ssdtFilterTimer->start(); });
     connect(ssdtFilterTimer, &QTimer::timeout, this, [this]() { rebuildSsdtTable(); });
-    connect(m_ssdtTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_ssdtTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showSsdtDetailByCurrentRow();
         const KernelSsdtEntry* entry = currentSsdtEntry();
         m_restoreSsdtButton->setEnabled(
@@ -261,7 +268,7 @@ void KernelDock::initializeSsdtTab()
             && !m_ssdtRefreshRunning.load()
             && (!m_kernelActionOperations[2] || !m_kernelActionOperations[2]->isBusy()));
     });
-    connect(m_ssdtTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_ssdtTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         if (m_ssdtTable == nullptr)
         {
             return;
@@ -469,35 +476,16 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()
         return QStringList{entry.indexResolved ? QString::number(entry.serviceIndex) : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>")), entry.serviceNameText, formatAddressHex(entry.zwRoutineAddress), formatAddressHex(entry.serviceRoutineAddress), formatAddressHex(entry.tableEntryAddress), entry.moduleNameText};
     };
     const QString language = ks::i18n::LanguageManager::instance().currentLanguageId();
-    if (!sourceChanged)
+    if (!sourceChanged && m_ssdtTable->property(KernelSearchLanguageProperty).toString() == language)
     {
-        if (m_ssdtTable->property(ks::ui::TablePresentationPreparingProperty).toBool()) return;
-        if (m_ssdtTable->property(KernelSearchLanguageProperty).toString() != language)
-        {
-            publishKernelResultRows(m_ssdtTable, static_cast<std::size_t>(m_ssdtTable->rowCount()),
-                [this, searchFields](const std::size_t cacheRow) {
-                const int row = static_cast<int>(cacheRow);
-                auto* item = m_ssdtTable->item(row, 0);
-                if (item == nullptr) return;
-                const auto sourceIndex = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong());
-                if (sourceIndex < m_ssdtRows.size())
-                {
-                    item->setData(KernelSearchFieldsRole, searchFields(m_ssdtRows[sourceIndex]));
-                    rememberKernelResultFilterRow(m_ssdtTable, row);
-                }
-                }, [this, language]() {
-                    m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
-                }, [this]() { rebuildSsdtTable(false); }, false);
-            return;
-        }
         applyKernelResultFilterAsync(m_ssdtTable, m_ssdtFilterEdit);
         return;
     }
 
     ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_ssdtDetailEditor);
     publishKernelResultRows(m_ssdtTable, m_ssdtRows.size(),
-        [this, searchFields](const std::size_t sourceIndex) {
-            const KernelSsdtEntry& entry = m_ssdtRows[sourceIndex];
+        [rows = m_ssdtRows, searchFields](KernelResultValues& values, const std::size_t sourceIndex) {
+            const KernelSsdtEntry& entry = rows[sourceIndex];
             const QString indexText = entry.indexResolved
                 ? QString::number(entry.serviceIndex)
                 : kernelText("kernel.ssdt.placeholder.unknown", QStringLiteral("<未知>"));
@@ -524,17 +512,13 @@ void KernelDock::rebuildSsdtTable(const bool sourceChanged, std::function<void()
             slotAddressItem->setFlags(slotAddressItem->flags() & ~Qt::ItemIsEditable);
             moduleItem->setFlags(moduleItem->flags() & ~Qt::ItemIsEditable);
 
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
-            m_ssdtTable->setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
-            rememberKernelResultFilterRow(m_ssdtTable, rowIndex);
-        }, [this, language]() {
-            m_ssdtTable->setSortingEnabled(true);
-            m_ssdtTable->setProperty(KernelSearchLanguageProperty, language);
-        }, std::move(onReady), true, m_ssdtFilterEdit);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::Index), indexItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceName), serviceNameItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ZwAddress), zwAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::ServiceAddress), serviceAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::SlotAddress), slotAddressItem);
+            values.setItem(rowIndex, static_cast<int>(SsdtColumn::Module), moduleItem);
+        }, []() {}, std::move(onReady), sourceChanged, m_ssdtFilterEdit);
 }
 
 void KernelDock::restoreSelectedSsdtBaseline()

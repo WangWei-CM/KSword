@@ -273,8 +273,6 @@ KernelDock::~KernelDock()
     // Close GUI delivery before member caches and source identities are destroyed.
     for (auto& operation : m_kernelActionOperations)
         if (operation) operation->close();
-    for (auto& cache : m_kernelResultFilterCaches)
-        if (cache.operation) cache.operation->close();
 }
 
 
@@ -396,64 +394,12 @@ bool KernelDock::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
-void KernelDock::applyKernelResultFilter(QTableWidget* table, QLineEdit* edit, const int separatorRow)
+void KernelDock::applyKernelResultFilter(KernelResultTable* table, QLineEdit* edit, const int separatorRow)
 {
-    if (table == nullptr || edit == nullptr) return;
-    const QPointer<KernelDock> owner(this);
-    const QPointer<QTableWidget> tableGuard(table);
-    const QPointer<QLineEdit> editGuard(edit);
-    if (ks::ui::DeferTableUiCommitIfContextMenuOpen(table,
-        QStringLiteral("kernel_result_filter"), {table},
-        [owner, tableGuard, editGuard, separatorRow]() {
-            if (owner && tableGuard && editGuard)
-                owner->applyKernelResultFilter(tableGuard, editGuard,
-                    tableGuard == owner->m_callbackEnumTable ? owner->m_callbackEnumSeparatorIndex.row() : separatorRow);
-        })) return;
-
-    const QString keyword = edit->text().trimmed();
-    QSet<QPersistentModelIndex> excluded;
-    bool hasDeferredMatch = keyword.isEmpty() && separatorRow >= 0
-        && separatorRow + 1 < table->rowCount();
-    if (!keyword.isEmpty()) excluded.reserve(table->rowCount());
-    for (int row = 0; !keyword.isEmpty() && row < table->rowCount(); ++row)
-    {
-        if (row == separatorRow) continue;
-        const auto* item = table->item(row, 0);
-        bool matched = keyword.isEmpty();
-        if (!matched && item != nullptr)
-        {
-            const QStringList fields = item->data(KernelSearchFieldsRole).toStringList();
-            matched = std::any_of(fields.cbegin(), fields.cend(), [&keyword](const QString& field) {
-                return field.contains(keyword, Qt::CaseInsensitive);
-            });
-        }
-        if (!matched) excluded.insert(QPersistentModelIndex(table->model()->index(row, 0)));
-        else if (separatorRow >= 0 && row > separatorRow) hasDeferredMatch = true;
-    }
-    if (separatorRow >= 0 && !hasDeferredMatch)
-        excluded.insert(QPersistentModelIndex(table->model()->index(separatorRow, 0)));
-    ks::ui::SetTableRowFilterBusinessOwnership(table,
-        ks::ui::TableRowFilterBusinessOwnership::ExclusiveSharedIdentity);
-    ks::ui::ApplyTableRowFilterIncrementally(table, excluded);
-
-    // Canonical filtering is immediate even while its visual projection yields.
-    // Do not let a now-filtered selection retain a copy/mutation target.
-    if (auto* selection = table->selectionModel())
-    {
-        QItemSelection deselect;
-        for (const QModelIndex& index : selection->selectedRows())
-        {
-            if (ks::ui::IsTableRowExcludedByFilter(table, index.row()))
-                deselect.select(table->model()->index(index.row(), 0),
-                    table->model()->index(index.row(), table->columnCount() - 1));
-        }
-        if (!deselect.isEmpty()) selection->select(deselect, QItemSelectionModel::Deselect);
-        if (ks::ui::IsTableRowExcludedByFilter(table, table->currentRow()))
-            selection->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
-    }
+    applyKernelResultFilterAsync(table, edit, separatorRow);
 }
 
-int KernelDock::firstKernelResultRow(const QTableWidget* table) const
+int KernelDock::firstKernelResultRow(const KernelResultTable* table) const
 {
     if (table != nullptr)
         for (int row = 0; row < table->rowCount(); ++row)
@@ -1344,7 +1290,13 @@ void KernelDock::initializeAtomTableTab()
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_atomPage);
     m_atomLayout->addWidget(splitter, 1);
 
-    m_atomTable = new ks::ui::VisibleTableWidget(splitter);
+    m_atomTable = new KernelResultTable(splitter);
+    m_atomTable->preparationFailed = [this] {
+        const QPointer<KernelDock> owner(this);
+        m_atomRefreshRunning.store(false);
+        m_refreshAtomButton->setEnabled(true);
+        if (owner) m_atomStatusLabel->setText(ks::i18n::sourceText(QStringLiteral("后台任务发生异常。")));
+    };
     // 原子名索引只需快速复制导出，收拢不常用的快照对比。
     ks::ui::SetTableActionBarMode(m_atomTable, ks::ui::TableActionBarMode::Compact);
     m_atomTable->setColumnCount(static_cast<int>(AtomColumn::Count));
@@ -1391,10 +1343,10 @@ void KernelDock::initializeAtomTableTab()
     connect(m_atomFilterEdit, &QLineEdit::textChanged, atomFilterTimer,
         [atomFilterTimer]() { atomFilterTimer->start(); });
     connect(atomFilterTimer, &QTimer::timeout, this, [this]() { rebuildAtomTable(); });
-    connect(m_atomTable, &QTableWidget::currentCellChanged, this, [this](int, int, int, int) {
+    connect(m_atomTable->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
         showAtomDetailByCurrentRow();
     });
-    connect(m_atomTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+    connect(m_atomTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
         showAtomContextMenu(localPosition);
     });
 }
