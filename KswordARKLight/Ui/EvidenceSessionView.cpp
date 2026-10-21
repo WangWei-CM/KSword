@@ -35,6 +35,7 @@ struct EvidenceComparison final {
     std::uint64_t beforeSequence = 0;
     std::uint64_t afterSequence = 0;
     EvidenceDiff diff;
+    std::wstring preview;
 };
 
 struct EvidenceSessionViewState final {
@@ -46,7 +47,7 @@ struct EvidenceSessionViewState final {
     HWND list = nullptr;
     HWND previewEdit = nullptr;
     HWND statusText = nullptr;
-    std::vector<EvidenceItem> items;
+    EvidenceSession::SharedSnapshot items;
     std::unique_ptr<AsyncSnapshotTask<EvidenceComparison>> comparisonTask;
 };
 
@@ -112,11 +113,12 @@ void SetPreview(EvidenceSessionViewState& state, const std::wstring& text) {
     }
 }
 
-std::wstring LimitPreviewText(std::wstring text, const wchar_t* label) {
-    if (text.size() <= kPreviewTextLimit) {
+std::wstring LimitPreviewText(std::wstring text, const wchar_t* label, std::size_t completeSize = 0) {
+    completeSize = (std::max)(completeSize, text.size());
+    if (completeSize <= kPreviewTextLimit) {
         return text;
     }
-    const std::size_t omitted = text.size() - kPreviewTextLimit;
+    const std::size_t omitted = completeSize - kPreviewTextLimit;
     text.resize(kPreviewTextLimit);
     text += L"\r\n\r\n[";
     text += label;
@@ -133,8 +135,10 @@ std::wstring RenderItemPreview(const EvidenceItem& item) {
     preview += L"来源: " + item.source + L"\r\n";
     preview += L"格式: " + item.format + L"\r\n";
     preview += L"字符数: " + std::to_wstring(item.text.size()) + L"\r\n\r\n";
-    preview += item.text;
-    return LimitPreviewText(std::move(preview), L"证据");
+    const std::size_t completeSize = preview.size() + item.text.size();
+    const std::size_t available = preview.size() < kPreviewTextLimit ? kPreviewTextLimit - preview.size() : 0;
+    preview.append(item.text.data(), (std::min)(available, item.text.size()));
+    return LimitPreviewText(std::move(preview), L"证据", completeSize);
 }
 
 void UpdatePreviewForSelection(EvidenceSessionViewState& state) {
@@ -145,7 +149,7 @@ void UpdatePreviewForSelection(EvidenceSessionViewState& state) {
         return;
     }
     if (selected.size() == 1U) {
-        SetPreview(state, RenderItemPreview(state.items[selected.front()]));
+        SetPreview(state, RenderItemPreview(*state.items[selected.front()]));
         return;
     }
     SetPreview(state, L"已选择 " + std::to_wstring(selected.size()) +
@@ -154,12 +158,12 @@ void UpdatePreviewForSelection(EvidenceSessionViewState& state) {
 }
 
 void RefreshSessionSnapshot(EvidenceSessionViewState& state) {
-    state.items = GlobalEvidenceSession().snapshot();
+    state.items = GlobalEvidenceSession().sharedSnapshot();
     if (state.list) {
         ScopedListViewRedrawLock redrawLock(state.list);
         ListView_DeleteAllItems(state.list);
         for (std::size_t index = 0; index < state.items.size(); ++index) {
-            const EvidenceItem& item = state.items[index];
+            const EvidenceItem& item = *state.items[index];
             InsertListViewTextRow(state.list, {
                 std::to_wstring(item.sequence),
                 TimestampText(item.timestamp100ns),
@@ -185,17 +189,20 @@ void CompareSelectedItems(EvidenceSessionViewState& state) {
         SetStatus(state, L"比较任务不可用。");
         return;
     }
-    const EvidenceItem& before = state.items[selected[0]];
-    const EvidenceItem& after = state.items[selected[1]];
-    const std::uint64_t beforeSequence = before.sequence;
-    const std::uint64_t afterSequence = after.sequence;
+    const auto before = state.items[selected[0]];
+    const auto after = state.items[selected[1]];
+    const std::uint64_t beforeSequence = before->sequence;
+    const std::uint64_t afterSequence = after->sequence;
     const HWND hwnd = state.hwnd;
     state.comparisonTask->request(
-        [beforeSequence, afterSequence, beforeText = before.text, afterText = after.text]() mutable {
+        [beforeSequence, afterSequence, before, after]() {
             EvidenceComparison result;
             result.beforeSequence = beforeSequence;
             result.afterSequence = afterSequence;
-            result.diff = BuildEvidenceDiff(beforeText, afterText);
+            result.diff = BuildEvidenceDiff(before->text, after->text);
+            std::wstring preview = L"比较: #" + std::to_wstring(beforeSequence) + L" -> #" +
+                std::to_wstring(afterSequence) + L"\r\n\r\n" + RenderEvidenceDiff(result.diff);
+            result.preview = LimitPreviewText(std::move(preview), L"差异");
             return result;
         },
         [hwnd](std::uint64_t, std::optional<EvidenceComparison>&& result, std::exception_ptr error) {
@@ -210,14 +217,12 @@ void CompareSelectedItems(EvidenceSessionViewState& state) {
             const EvidenceComparison& comparison = *result;
             const std::vector<std::size_t> selected = SelectedItemIndexes(*liveState);
             if (selected.size() != 2U ||
-                liveState->items[selected[0]].sequence != comparison.beforeSequence ||
-                liveState->items[selected[1]].sequence != comparison.afterSequence) {
+                liveState->items[selected[0]]->sequence != comparison.beforeSequence ||
+                liveState->items[selected[1]]->sequence != comparison.afterSequence) {
                 SetStatus(*liveState, L"证据比较已完成，但当前选择已变化；结果未覆盖当前预览。");
                 return;
             }
-            std::wstring preview = L"比较: #" + std::to_wstring(comparison.beforeSequence) + L" -> #" +
-                std::to_wstring(comparison.afterSequence) + L"\r\n\r\n" + RenderEvidenceDiff(comparison.diff);
-            SetPreview(*liveState, LimitPreviewText(std::move(preview), L"差异"));
+            SetPreview(*liveState, comparison.preview);
             SetStatus(*liveState, L"已比较证据 #" + std::to_wstring(comparison.beforeSequence) + L" 与 #" +
                 std::to_wstring(comparison.afterSequence) + L"：+" + std::to_wstring(comparison.diff.added.size()) +
                 L" -" + std::to_wstring(comparison.diff.removed.size()) + L" =" +
@@ -234,7 +239,7 @@ void DeleteSelectedItem(EvidenceSessionViewState& state) {
         SetStatus(state, L"删除需要单选一项证据。");
         return;
     }
-    const std::uint64_t sequence = state.items[selected.front()].sequence;
+    const std::uint64_t sequence = state.items[selected.front()]->sequence;
     const HWND hwnd = state.hwnd;
     const std::wstring prompt = L"删除证据 #" + std::to_wstring(sequence) +
         L"？该操作只影响当前 Lite 进程内存中的证据会话。";

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,10 @@ class EvidenceSession final {
 public:
     std::uint64_t record(std::wstring source, std::wstring format, std::wstring text);
     std::vector<EvidenceItem> snapshot() const;
+    using SharedSnapshot = std::vector<std::shared_ptr<const EvidenceItem>>;
+    SharedSnapshot sharedSnapshot() const;
+    static std::wstring exportJsonSnapshot(const SharedSnapshot& items, EvidenceRedaction redaction);
+    static std::wstring exportTsvSnapshot(const SharedSnapshot& items, EvidenceRedaction redaction);
     bool erase(std::uint64_t sequence);
     void clear();
     std::size_t size() const;
@@ -47,7 +52,7 @@ public:
 
 private:
     mutable std::mutex mutex_;
-    std::vector<EvidenceItem> items_;
+    SharedSnapshot items_;
     std::uint64_t nextSequence_ = 1;
 };
 
