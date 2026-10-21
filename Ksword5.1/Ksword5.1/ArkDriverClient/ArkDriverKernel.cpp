@@ -828,19 +828,51 @@ namespace ksword::ark
             KSWORD_ARK_DRIVER_OBJECT_NAME_CHARS,
             driverName);
 
-        // With no device rows requested the existing protocol returns only its fixed header.
-        // Keep the full original device capacity for all callers requesting device traversal.
+        // maxDevices limits root devices, not the appended attached-device rows.
+        // Start small and retry actual capacity truncation up to the original ceiling.
         constexpr std::size_t fixedResponseSize = sizeof(KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE)
             - sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY);
-        const std::size_t responseCapacity = (flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL
-            ? 2U * 1024U * 1024U : fixedResponseSize;
-        std::vector<std::uint8_t> responseBuffer(responseCapacity, 0U);
-        queryResult.io = deviceIoControl(
-            IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT,
-            &request,
-            static_cast<unsigned long>(sizeof(request)),
-            responseBuffer.data(),
-            static_cast<unsigned long>(responseBuffer.size()));
+        constexpr std::size_t maximumResponseCapacity = 2U * 1024U * 1024U;
+        const bool includeDevices = (flags & KSWORD_ARK_DRIVER_OBJECT_QUERY_FLAG_INCLUDE_DEVICES) != 0UL;
+        std::size_t responseCapacity = includeDevices
+            ? std::max<std::size_t>(256U * 1024U, fixedResponseSize + sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY))
+            : fixedResponseSize;
+        std::vector<std::uint8_t> responseBuffer;
+        for (;;)
+        {
+            responseBuffer.assign(responseCapacity, 0U);
+            queryResult.io = deviceIoControl(
+                IOCTL_KSWORD_ARK_QUERY_DRIVER_OBJECT,
+                &request,
+                static_cast<unsigned long>(sizeof(request)),
+                responseBuffer.data(),
+                static_cast<unsigned long>(responseBuffer.size()));
+            if (!includeDevices || responseCapacity >= maximumResponseCapacity) break;
+            bool grow = !queryResult.io.ok && (queryResult.io.win32Error == ERROR_INSUFFICIENT_BUFFER
+                || queryResult.io.win32Error == ERROR_MORE_DATA);
+            if (queryResult.io.ok && queryResult.io.bytesReturned >= KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_V2_HEADER_SIZE)
+            {
+                const auto* header = reinterpret_cast<const KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE*>(responseBuffer.data());
+                const std::size_t headerBytes = header->version >= KSWORD_ARK_DRIVER_OBJECT_PROTOCOL_VERSION_V3
+                    ? fixedResponseSize : KSWORD_ARK_QUERY_DRIVER_OBJECT_RESPONSE_V2_HEADER_SIZE;
+                if ((header->version != KSWORD_ARK_DRIVER_OBJECT_PROTOCOL_VERSION_V2
+                    && header->version != KSWORD_ARK_DRIVER_OBJECT_PROTOCOL_VERSION_V3)
+                    || header->deviceEntrySize > sizeof(KSWORD_ARK_DRIVER_DEVICE_ENTRY))
+                {
+                    responseCapacity = maximumResponseCapacity; // Unknown legacy/future shape keeps the old capacity.
+                    continue;
+                }
+                if (queryResult.io.bytesReturned >= headerBytes
+                    && header->deviceEntrySize >= KSWORD_ARK_DRIVER_DEVICE_ENTRY_V1_SIZE)
+                {
+                    const std::size_t capacity = (responseCapacity - headerBytes) / header->deviceEntrySize;
+                    grow = capacity != 0U && header->returnedDeviceCount >= capacity
+                        && (header->fieldFlags & KSWORD_ARK_DRIVER_OBJECT_FIELD_DEVICE_TRUNCATED) != 0UL;
+                }
+            }
+            if (!grow) break;
+            responseCapacity = std::min(maximumResponseCapacity, responseCapacity * 2U);
+        }
         if (!queryResult.io.ok)
         {
             queryResult.io.message =
