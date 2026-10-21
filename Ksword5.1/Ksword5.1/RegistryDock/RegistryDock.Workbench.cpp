@@ -4,6 +4,7 @@
 #include <QResizeEvent>
 #include <QStyle>
 #include "RegistryDock.h"
+#include "RegistryNavigationSchema.h"
 #include "../UI/AsyncOperation.h"
 #include "RegistryValueEditorWidget.h"
 #include "RegistryWorkbenchAccess.h"
@@ -345,7 +346,7 @@ void RegistryDock::initializeWorkbenchControls()
     m_changesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_changesTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     changesLayout->addWidget(m_changesTable, 1);
-    m_rightTabWidget->addTab(changes, ks::i18n::sourceText(QStringLiteral("待应用")));
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Pending], m_rightTabWidget, changes);
     for (auto* table : {m_valueTable, m_searchResultTable, m_changesTable})
     {
         table->setProperty("ks_i18n_preserve_model_data", true);

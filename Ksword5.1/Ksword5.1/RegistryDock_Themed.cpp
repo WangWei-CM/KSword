@@ -1,4 +1,5 @@
 ﻿#include "RegistryDock/RegistryDock.h"
+#include "RegistryDock/RegistryNavigationSchema.h"
 #include "UI/TableContextMenu.h"
 #include "UI/AsyncOperation.h"
 #include "RegistryDock/RegistryValueEditorWidget.h"
@@ -619,12 +620,8 @@ void RegistryDock::initializeUi()
     m_searchResultTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     m_searchResultTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
 
-    m_rightTabWidget->addTab(m_valueTable, QStringLiteral("值列表"));
-    m_rightTabWidget->addTab(m_searchResultTable, QStringLiteral("搜索结果"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rightTabWidget, m_valueTable, QStringLiteral("registry.tab.values"), QStringLiteral("值列表"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_rightTabWidget, m_searchResultTable, QStringLiteral("registry.tab.search_results"), QStringLiteral("搜索结果"));
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Values], m_rightTabWidget, m_valueTable);
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Search], m_rightTabWidget, m_searchResultTable);
 
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 2);
@@ -644,12 +641,8 @@ void RegistryDock::initializeUi()
     refreshRegistryDriverModeIndicator();
 
     m_optimizationPage = new RegistryOptimizationPage(m_registryTabWidget);
-    m_registryTabWidget->addTab(m_registryEditorPage, QStringLiteral("注册表编辑"));
-    m_registryTabWidget->addTab(m_optimizationPage, QStringLiteral("系统优化"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_registryTabWidget, m_registryEditorPage, QStringLiteral("registry.tab.editor"), QStringLiteral("注册表编辑"));
-    ks::i18n::LanguageManager::instance().bindTab(
-        m_registryTabWidget, m_optimizationPage, QStringLiteral("registry.tab.optimization"), QStringLiteral("系统优化"));
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Editor], m_registryTabWidget, m_registryEditorPage);
+    m_navigationTabs.add(ks::registry_navigation::Definitions[ks::registry_navigation::Optimization], m_registryTabWidget, m_optimizationPage);
 }
 
 void RegistryDock::initializeConnections()
@@ -1851,3 +1844,53 @@ void RegistryDock::flushPendingSearchRows()
         updateStatusBar(QStringLiteral("搜索中：扫描 %1 键，命中 %2 项。").arg(m_searchScannedKeys).arg(m_searchHitCount));
 
 }
+
+ks::ui::PageNavigationCatalog RegistryDock::navigationCatalog(const RegistryDock* existing)
+{
+    ks::ui::PageNavigationCatalog main;
+    for (const auto& definition : ks::registry_navigation::Definitions)
+        main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (existing) main = existing->m_navigationTabs.describe(std::move(main));
+    // 值编辑器是专业并列内容，只有原详情分支实际显示时才暴露；不为目录读取一个值。
+    const auto* editor = existing ? existing->m_valueEditor : nullptr;
+    const bool editorVisible = editor && existing->m_registryEditorPage
+        && editor->isVisibleTo(existing->m_registryEditorPage);
+    auto leaf = RegistryValueEditorWidget::navigationCatalog(editor);
+    const QString prefix = QStringLiteral("registry.value:");
+    for (auto& page : leaf)
+    {
+        page.id.prepend(prefix);
+        page.parentId = page.parentId.isEmpty() ? QStringLiteral("registry.editor") : prefix + page.parentId;
+        page.visible = page.visible && editorVisible;
+    }
+    // 保持真实父子显示顺序：editor的并列内容在optimization主入口之前。
+    const auto optimization = main.takeLast();
+    main += leaf;
+    main.append(optimization);
+    return main;
+}
+QWidget* RegistryDock::activateNavigationDescriptor(const QString& id)
+{
+    const QPointer<RegistryDock> self(this);
+    const auto permitted = [self, &id](bool requireCurrent) {
+        if (!self) return false;
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        if (!resolved) return false;
+        for (const auto& page : *resolved)
+            if (page.page.id == id) return page.page.visible && page.page.enabled && (!requireCurrent || page.page.current);
+        return false;
+    };
+    if (!permitted(false)) return nullptr;
+    const QString prefix = QStringLiteral("registry.value:");
+    if (!id.startsWith(prefix)) return m_navigationTabs.activate(id, navigationCatalog(this));
+    QPointer<RegistryValueEditorWidget> editor = m_valueEditor;
+    QPointer<QWidget> root = m_registryEditorPage;
+    if (!m_navigationTabs.activate(QStringLiteral("registry.editor"), navigationCatalog(this)) || !self || !editor || !root) return nullptr;
+    if (self->m_valueEditor != editor || self->m_registryEditorPage != root || !permitted(false)) return nullptr;
+    QPointer<QWidget> target = editor->activateNavigationDescriptor(id.mid(prefix.size()));
+    if (!self || !editor || !root || !target || self->m_valueEditor != editor || self->m_registryEditorPage != root
+        || !self->m_registryTabWidget || self->m_registryTabWidget->currentWidget() != root || !permitted(true)) return nullptr;
+    return target.data();
+}
+namespace { const bool kRegistryNavigationRegistered =
+    ks::ui::RegisterTypedPageNavigationCatalog<RegistryDock>(QStringLiteral("registry")); }

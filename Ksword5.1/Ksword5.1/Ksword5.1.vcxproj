@@ -1214,6 +1214,7 @@
     <ClInclude Include="..\..\shared\window\DwmProcessIdentity.h" />
     <ClInclude Include="OtherDock\DwmZOrderControl.h" />
     <ClInclude Include="OtherDock\WindowInputClient.h" />
+    <ClInclude Include="RegistryDock\RegistryNavigationSchema.h" />
     <ClInclude Include="OtherDock\WindowInputControl.h" />
     <ClInclude Include="OtherDock\WindowControlInspectionInput.h" />
     <ClInclude Include="OtherDock\WindowControlInspectionOverlay.h" />

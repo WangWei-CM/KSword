@@ -3666,6 +3666,9 @@
     <ClInclude Include="OnlineScan\SandboxUploadActions.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="RegistryDock\RegistryNavigationSchema.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="OnlineScan\OnlineScanSupport.h">
       <Filter>Header Files</Filter>
     </ClInclude>

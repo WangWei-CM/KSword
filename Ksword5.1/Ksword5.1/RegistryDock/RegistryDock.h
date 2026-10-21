@@ -10,6 +10,7 @@
 
 #include "../Framework.h"
 #include "../UI/AsyncUiDispatcher.h"
+#include "../UI/PageNavigationTabCatalog.h"
 
 #include <QWidget>
 #include <QVector>
@@ -62,6 +63,9 @@ class RegistryDock final : public QWidget
     Q_OBJECT
 
 public:
+    static ks::ui::PageNavigationCatalog navigationCatalog(const RegistryDock* existing = nullptr);
+    QWidget* activateNavigationDescriptor(const QString& id);
+
     // 构造函数：
     // - 作用：初始化 UI、根键节点与信号槽；
     // - 参数 parent：Qt 父控件。
@@ -77,6 +81,8 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    ks::ui::PageNavigationTabCatalog m_navigationTabs;
+
     // SearchOptions：
     // - 作用：封装搜索时的匹配范围选项。
     struct SearchOptions
