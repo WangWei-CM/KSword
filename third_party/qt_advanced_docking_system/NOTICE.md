@@ -15,7 +15,11 @@ DLL to the executable's output directory after a build.
 
 `build/CMakeLists.txt` preserves the existing `qtadvanceddocking.dll` and
 `qtadvanceddockingd.dll` filenames using CMake `OUTPUT_NAME`, so the import
-libraries and deployed DLL names agree. Upstream source is otherwise unmodified.
+libraries and deployed DLL names agree. The tracked local patch
+`patches/0001-keep-inactive-dock-parent.patch` changes only same-area tab switching:
+inactive docks are hidden without detaching their parent; actual removal still
+detaches, and only the active dock participates in layout. All other upstream
+source and the public ABI remain unchanged.
 Do not simply rename an upstream DLL: its import library would still reference
 the upstream filename.
 
@@ -29,11 +33,16 @@ $sourceRoot = Join-Path (Get-Location) '.deps/QtADS-5.1.1-source'
 $buildRoot = Join-Path (Get-Location) '.deps/QtADS-5.1.1-build'
 git clone https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git $sourceRoot
 git -C $sourceRoot checkout --detach 023ce95934fecfd4cf5c672c9c404fabe0f54923
+git -C $sourceRoot apply --unidiff-zero (Join-Path (Get-Location) 'third_party/qt_advanced_docking_system/patches/0001-keep-inactive-dock-parent.patch')
 cmake -S third_party/qt_advanced_docking_system/build -B $buildRoot `
-  -G 'Visual Studio 17 2022' -A x64 `
+  -G 'Visual Studio 17 2022' -A x64 -T host=x64 `
   "-DCMAKE_PREFIX_PATH=$env:KSWORD_QT_DIR" "-DKSWORD_ADS_SOURCE_DIR=$sourceRoot"
-cmake --build $buildRoot --config Release --target qtadvanceddocking-qt6
-cmake --build $buildRoot --config Debug --target qtadvanceddocking-qt6
+$msbuild = 'D:/Software/VS/MSBuild/Current/Bin/amd64/MSBuild.exe'
+if (!(Test-Path $msbuild)) { throw 'Set msbuild to an installed 64-bit MSBuild.' }
+$adsProject = Join-Path $buildRoot 'upstream/src/qtadvanceddocking-qt6.vcxproj'
+$hostArgs = @('/p:Platform=x64', '/p:PreferredToolArchitecture=x64', '/p:PROCESSOR_ARCHITECTURE=AMD64', '/p:PROCESSOR_ARCHITEW6432=AMD64')
+& $msbuild $adsProject /t:Build /p:Configuration=Release @hostArgs /m:1 /v:minimal
+& $msbuild $adsProject /t:Build /p:Configuration=Debug @hostArgs /m:1 /v:minimal
 ```
 
 Copy `src/*.h` from the pinned source and `upstream/src/ads_version.h` from

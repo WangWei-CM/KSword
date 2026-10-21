@@ -1,0 +1,12 @@
+--- a/src/DockAreaWidget.cpp
++++ b/src/DockAreaWidget.cpp
+@@ -75,3 +75,3 @@
+- * \warning Only the current widget has a parent. All other widgets
+- * do not have a parent. That means, a widget that is in this layout may
+- * return nullptr for its parent() function if it is not the current widget.
++ * Inactive widgets keep their dock-area parent while hidden. Only the
++ * current widget participates in the parent layout and its size hints.
++ * Actual dock insertion and removal still update the widget parent.
+@@ -187 +187 @@
+-				LayoutItem->widget()->setParent(nullptr);
++				LayoutItem->widget()->hide(); // Keep the same-area parent and render context.
