@@ -2,6 +2,7 @@
 
 #include "../../Core/Win32Lean.h"
 #include "../../Ui/AsyncTask.h"
+#include "../../Ui/AsyncShellIconLoader.h"
 #include "EtwFilterModel.h"
 #include "EtwSessionController.h"
 
@@ -88,7 +89,6 @@ private:
     void updateStatusText(const std::wstring& text);
     void updateButtonState();
     int iconIndexForProcessId(std::uint32_t processId);
-    std::wstring processImagePath(std::uint32_t processId) const;
     void openSelectedEventDetail();
     void openSelectedEventProcess();
     void showEventDetail(const EtwEvent& eventRow);
@@ -131,7 +131,7 @@ private:
     EtwSessionController controller_;
     std::mutex pendingEventMutex_;
     std::deque<EtwEvent> pendingEvents_;
-    std::unordered_map<std::uint32_t, int> processIconCache_;
+    std::unique_ptr<Ksword::Ui::AsyncShellIconLoader> iconLoader_;
     std::unique_ptr<Ksword::Ui::AsyncSnapshotTask<EtwEventFilterResult>> localFilterTask_;
     bool deleteOnDestroy_ = false;
 };

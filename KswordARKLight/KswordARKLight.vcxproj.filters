@@ -1184,6 +1184,9 @@
     <ClInclude Include="Ui\ImmutableTextRows.h">
       <Filter>Ui</Filter>
     </ClInclude>
+    <ClInclude Include="Ui\AsyncShellIconLoader.h">
+      <Filter>Ui</Filter>
+    </ClInclude>
     <ClInclude Include="Ui\AsyncTask.h">
       <Filter>Ui</Filter>
     </ClInclude>

@@ -17,6 +17,7 @@
 #include "../../Ui/EntityNavigation.h"
 #include "../../Ui/ExportUtil.h"
 #include "../../Ui/FilterBar.h"
+#include "../../Ui/AsyncShellIconLoader.h"
 #include "../../Ui/ListViewUtil.h"
 #include "../../Ui/Theme.h"
 #include "../../Ui/VirtualListView.h"
@@ -62,6 +63,7 @@ constexpr UINT kMsgInitialRefresh = WM_APP + 520;
 constexpr UINT kMsgRequestRefresh = WM_APP + 521;
 constexpr UINT kMsgRefreshCompleted = WM_APP + 522;
 constexpr UINT kMsgFilterCompleted = WM_APP + 523;
+constexpr UINT kMsgIconsReady = WM_APP + 526;
 constexpr UINT kMsgActionCompleted = WM_APP + 524;
 constexpr UINT kMsgOpenDetails = WM_APP + 525;
 constexpr int kTreeIndentPixels = 18;
@@ -313,7 +315,7 @@ struct ProcessViewState {
     UINT refreshIntervalSeconds = 2;
     ULONGLONG previousSampleTickMs = 0;
     std::vector<ProcessActionMenuItem> activeMenuItems;
-    std::unordered_map<std::wstring, int> iconCache;
+    std::unique_ptr<Ksword::Ui::AsyncShellIconLoader> iconLoader;
     std::unordered_map<std::wstring, ULONGLONG> previousCpuTime100ns;
     std::unordered_map<std::wstring, ProcessSnapshotRow> lastActiveRowsByIdentity;
     std::unordered_map<std::wstring, ProcessRowVisualState> visualStateByIdentity;
@@ -487,53 +489,14 @@ HIMAGELIST CreateIconList() {
         64);
 }
 
-// AddIconFromShell extracts a small icon for a path or returns a generic icon.
-// Inputs are the image list, an executable path and whether fallback is allowed.
-// Processing uses SHGetFileInfoW and copies the icon into the image list. Return
-// value is the image index or -1 when no icon could be obtained.
-int AddIconFromShell(HIMAGELIST imageList, const std::wstring& path, bool fallback) {
-    if (!imageList) {
-        return -1;
-    }
-
-    SHFILEINFOW info{};
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    const wchar_t* queryPath = path.empty() ? L".exe" : path.c_str();
-    if (path.empty() && fallback) {
-        flags |= SHGFI_USEFILEATTRIBUTES;
-    }
-
-    if (!::SHGetFileInfoW(queryPath,
-            fallback ? FILE_ATTRIBUTE_NORMAL : 0,
-            &info,
-            sizeof(info),
-            flags) || !info.hIcon) {
-        return -1;
-    }
-
-    const int index = ImageList_AddIcon(imageList, info.hIcon);
-    ::DestroyIcon(info.hIcon);
-    return index;
-}
-
-// IconIndexForPath resolves and caches a process icon. Inputs are page state and
-// an executable path. Processing extracts an icon with Shell APIs and caches by
-// path; output is a ListView image index, falling back to a generic executable.
-int IconIndexForPath(ProcessViewState& state, const std::wstring& path) {
-    const std::wstring key = path.empty() ? L"<generic-exe>" : path;
-    const auto found = state.iconCache.find(key);
-    if (found != state.iconCache.end()) {
-        return found->second;
-    }
-
-    int index = AddIconFromShell(state.imageList, path, path.empty());
-    if (index < 0 && !path.empty()) {
-        index = IconIndexForPath(state, std::wstring());
-    }
-    if (index >= 0) {
-        state.iconCache.emplace(key, index);
-    }
-    return index;
+// This is called from custom draw. It performs cache lookup/queueing only;
+// Shell extraction and executable metadata resolution never run in paint.
+int IconIndexForPath(ProcessViewState& state, const std::wstring& path, const std::wstring& identity) {
+    if (!state.iconLoader) return -1;
+    const std::wstring key = identity + L"|" + path;
+    return state.iconLoader->indexFor(key, [path, identity] {
+        return Ksword::Ui::AsyncShellIconLoader::Source{ path, identity };
+    });
 }
 
 // LayoutChildren positions the toolbar and ListView. Inputs are the
@@ -965,7 +928,7 @@ LRESULT DrawProcessSubItem(ProcessViewState& state, NMLVCUSTOMDRAW* draw) {
         const int iconLeft = cell.left + displayRow->display.depth * kTreeIndentPixels;
         const int rowHeight = static_cast<int>(cell.bottom - cell.top);
         const int iconTop = static_cast<int>(cell.top) + std::max(0, (rowHeight - iconSize) / 2);
-        const int iconIndex = IconIndexForPath(state, displayRow->iconPath);
+        const int iconIndex = IconIndexForPath(state, displayRow->iconPath, displayRow->stableKey);
         if (state.imageList && iconIndex >= 0) {
             ImageList_Draw(state.imageList, iconIndex, dc, iconLeft, iconTop, ILD_TRANSPARENT);
         }
@@ -2590,6 +2553,7 @@ void CreateChildControls(ProcessViewState& state) {
     state.filterBar = Ksword::Ui::CreateFilterBar(state.hwnd, kFilterBarId, L"筛选进程、PID、路径和 R0 证据", 0, 0, 0, 0);
     state.listView = CreateProcessListView(state.hwnd, kProcessListId);
     state.imageList = CreateIconList();
+    state.iconLoader = std::make_unique<Ksword::Ui::AsyncShellIconLoader>(state.imageList, state.hwnd, kMsgIconsReady);
     if (state.listView && state.imageList) {
         ListView_SetImageList(state.listView, state.imageList, LVSIL_SMALL);
     }
@@ -2708,6 +2672,21 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+    case kMsgIconsReady:
+        if (state && state->iconLoader) {
+            const auto changed = state->iconLoader->consume(wParam);
+            const std::unordered_set<std::wstring> keys(changed.begin(), changed.end());
+            const int top = (std::max)(0, ListView_GetTopIndex(state->listView));
+            const int end = (std::min)(static_cast<int>(state->visibleRowIndexes.size()),
+                top + ListView_GetCountPerPage(state->listView) + 1);
+            for (int item = top; item < end; ++item) {
+                const auto index = state->visibleRowIndexes[static_cast<std::size_t>(item)];
+                if (index >= state->presentationRows.size()) continue;
+                const auto& row = state->presentationRows[index];
+                if (keys.contains(row.stableKey + L"|" + row.iconPath)) ListView_RedrawItems(state->listView, item, item);
+            }
+        }
+        return 0;
     case kMsgFilterCompleted:
         if (state && state->filterTask && state->filterTask->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -2860,6 +2839,7 @@ LRESULT CALLBACK ProcessViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (state->actionTask) {
                 state->actionTask->cancel();
             }
+            state->iconLoader.reset();
             if (state->imageList) {
                 ImageList_Destroy(state->imageList);
                 state->imageList = nullptr;

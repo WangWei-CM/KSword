@@ -38,6 +38,7 @@ constexpr int kLocalFilterBarId = 52006;
 constexpr UINT kStatusMessage = WM_APP + 62;
 constexpr UINT kLocalFilterMessage = WM_APP + 63;
 constexpr UINT kExternalProcessFilterMessage = WM_APP + 64;
+constexpr UINT kIconsReadyMessage = WM_APP + 66;
 constexpr UINT_PTR kEventFlushTimerId = 52061;
 constexpr UINT kEventFlushIntervalMs = 150;
 constexpr std::size_t kMaxEventRows = 5000;
@@ -195,6 +196,7 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
 EtwMonitorView::EtwMonitorView() = default;
 
 EtwMonitorView::~EtwMonitorView() {
+    iconLoader_.reset();
     controller_.stop();
     if (eventImageList_ != nullptr) {
         ImageList_Destroy(eventImageList_);
@@ -331,6 +333,21 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         return 0;
     }
+    case kIconsReadyMessage:
+        if (iconLoader_) {
+            const auto changed = iconLoader_->consume(wParam);
+            const std::unordered_set<std::wstring> keys(changed.begin(), changed.end());
+            const int top = (std::max)(0, ListView_GetTopIndex(eventList_));
+            const int end = (std::min)(static_cast<int>(visibleEventIndexes_.size()),
+                top + ListView_GetCountPerPage(eventList_) + 1);
+            for (int item = top; item < end; ++item) {
+                const auto index = visibleEventIndexes_[static_cast<std::size_t>(item)];
+                if (index < eventRows_.size() && keys.contains(std::to_wstring(eventRows_[index]->processId))) {
+                    ListView_RedrawItems(eventList_, item, item);
+                }
+            }
+        }
+        return 0;
     case kLocalFilterMessage:
         if (localFilterTask_ && localFilterTask_->consume(hwnd, wParam, lParam)) {
             return 0;
@@ -352,6 +369,7 @@ LRESULT EtwMonitorView::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return reinterpret_cast<LRESULT>(Ksword::Ui::AppTheme().windowBrush());
     }
     case WM_DESTROY:
+        iconLoader_.reset();
         ::KillTimer(hwnd_, kEventFlushTimerId);
         if (localFilterTask_) {
             localFilterTask_->cancel();
@@ -400,6 +418,7 @@ void EtwMonitorView::createControls() {
         64,
         64);
     if (eventImageList_ != nullptr) {
+        iconLoader_ = std::make_unique<Ksword::Ui::AsyncShellIconLoader>(eventImageList_, hwnd_, kIconsReadyMessage);
         ListView_SetImageList(eventList_, eventImageList_, LVSIL_SMALL);
     }
     InsertColumn(eventList_, 0, L"PID", 96);
@@ -739,40 +758,17 @@ void EtwMonitorView::updateButtonState() {
     ::EnableWindow(stopButton_, running ? TRUE : FALSE);
 }
 
-int EtwMonitorView::iconIndexForProcessId(std::uint32_t processId) {
-    if (eventImageList_ == nullptr) {
-        return -1;
-    }
-
-    const auto cached = processIconCache_.find(processId);
-    if (cached != processIconCache_.end()) {
-        return cached->second;
-    }
-
-    const std::wstring imagePath = processImagePath(processId);
-    SHFILEINFOW shellInfo{};
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    const wchar_t* queryPath = imagePath.empty() ? L".exe" : imagePath.c_str();
-    if (imagePath.empty()) {
-        flags |= SHGFI_USEFILEATTRIBUTES;
-    }
-
-    int imageIndex = -1;
-    if (::SHGetFileInfoW(queryPath,
-            imagePath.empty() ? FILE_ATTRIBUTE_NORMAL : 0,
-            &shellInfo,
-            sizeof(shellInfo),
-            flags) && shellInfo.hIcon != nullptr) {
-        imageIndex = ImageList_AddIcon(eventImageList_, shellInfo.hIcon);
-        ::DestroyIcon(shellInfo.hIcon);
-    }
-
-    processIconCache_[processId] = imageIndex;
-    return imageIndex;
-}
-
-std::wstring EtwMonitorView::processImagePath(std::uint32_t processId) const {
-    return ks::r3::process::QueryEventProcessImagePath(processId);
+int EtwMonitorView::iconIndexForProcessId(const std::uint32_t processId) {
+    if (!iconLoader_) return -1;
+    // ETW carries a historical PID, not creation time. Resolve the current
+    // process image and its creation identity only on the read-only worker;
+    // periodically revalidate PID reuse rather than treating this icon as proof.
+    return iconLoader_->indexFor(std::to_wstring(processId), [processId] {
+        ks::r3::process::ProcessImageEvidence evidence;
+        auto path = ks::r3::process::QueryEventProcessImagePath(processId, &evidence);
+        return Ksword::Ui::AsyncShellIconLoader::Source{ std::move(path),
+            evidence.timeKnown ? std::to_wstring(evidence.creationTime) : std::wstring{} };
+    }, 2000);
 }
 
 void EtwMonitorView::openSelectedEventDetail() {
