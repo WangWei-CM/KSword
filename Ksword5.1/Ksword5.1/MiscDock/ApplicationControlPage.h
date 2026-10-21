@@ -14,6 +14,8 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <array>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -24,6 +26,11 @@ class CodeEditorWidget;
 class QPushButton;
 class QTabWidget;
 class QTableWidget;
+class QTableView;
+class QAbstractTableModel;
+class QSortFilterProxyModel;
+class QShowEvent;
+class QEvent;
 class QVBoxLayout;
 class QPoint;
 
@@ -45,6 +52,10 @@ namespace ks::misc
         // - 页面采用 Qt 对象树管理控件；
         // - 后台任务使用 QPointer 回投，无需显式收尾。
         ~ApplicationControlPage() override = default;
+
+    protected:
+        void showEvent(QShowEvent* event) override;
+        void changeEvent(QEvent* event) override;
 
     private:
         ks::ui::FieldDocument m_eventSummaryDocument;
@@ -168,7 +179,7 @@ namespace ks::misc
         // - table 为目标表格，传 nullptr 时直接返回；
         // - stretchLastColumn 决定最后一列是否吸收剩余宽度；
         // - 无返回值。
-        void initializeTable(QTableWidget* table, bool stretchLastColumn = true);
+        void initializeTable(QTableView* table, bool stretchLastColumn = true);
 
         // refreshAsync：
         // - 后台采集 AppLocker / WDAC / Defender / Event Log 诊断数据；
@@ -212,14 +223,14 @@ namespace ks::misc
         // currentExportTable：
         // - 获取当前激活页对应的导出表格；
         // - 返回 nullptr 表示当前页无可导出表格。
-        QTableWidget* currentExportTable() const;
+        QTableView* currentExportTable() const;
 
 
         // tableToTsv：
         // - 把表格全部内容导出为 TSV 文本；
         // - selectedOnly=true 时仅导出当前选中行；
         // - 返回 TSV 字符串。
-        QString tableToTsv(QTableWidget* table, bool selectedOnly) const;
+        QString tableToTsv(QTableView* table, bool selectedOnly) const;
 
         // runPowerShellCaptureText：
         // - 异步线程内通过 powershell.exe 执行脚本并抓取标准输出；
@@ -293,17 +304,17 @@ namespace ks::misc
         QWidget* m_fileDiagnosisPage = nullptr;      // m_fileDiagnosisPage：文件诊断页面。
 
         ks::ui::StructuredFieldView* m_appLockerSummary = nullptr;   // m_appLockerSummary：AppLocker 说明文本。
-        QTableWidget* m_appLockerTable = nullptr;       // m_appLockerTable：AppLocker 规则表。
+        QTableView* m_appLockerTable = nullptr;       // m_appLockerTable：AppLocker 规则表。
         ks::ui::StructuredFieldView* m_wdacSummary = nullptr;        // m_wdacSummary：WDAC 说明文本。
-        QTableWidget* m_policyFileTable = nullptr;      // m_policyFileTable：WDAC 策略文件表。
-        QTableWidget* m_codeIntegrityEventTable = nullptr; // m_codeIntegrityEventTable：Code Integrity 事件表。
+        QTableView* m_policyFileTable = nullptr;      // m_policyFileTable：WDAC 策略文件表。
+        QTableView* m_codeIntegrityEventTable = nullptr; // m_codeIntegrityEventTable：Code Integrity 事件表。
         ks::ui::StructuredFieldView* m_defenderSummary = nullptr;    // m_defenderSummary：Defender 状态文本。
-        QTableWidget* m_defenderTable = nullptr;        // m_defenderTable：Defender 键值表。
+        QTableView* m_defenderTable = nullptr;        // m_defenderTable：Defender 键值表。
         QWidget* m_platformPage = nullptr;              // m_platformPage：平台安全页面。
         ks::ui::StructuredFieldView* m_platformSummary = nullptr;    // m_platformSummary：平台安全状态文本。
-        QTableWidget* m_platformTable = nullptr;        // m_platformTable：平台安全键值表。
+        QTableView* m_platformTable = nullptr;        // m_platformTable：平台安全键值表。
         ks::ui::StructuredFieldView* m_eventSummary = nullptr;       // m_eventSummary：事件日志文本。
-        QTableWidget* m_eventTable = nullptr;           // m_eventTable：事件表。
+        QTableView* m_eventTable = nullptr;           // m_eventTable：事件表。
         QComboBox* m_eventVerdictFilterCombo = nullptr; // m_eventVerdictFilterCombo：事件分类筛选器。
         QComboBox* m_eventLimitCombo = nullptr;         // m_eventLimitCombo：事件读取数量选择。
         QLineEdit* m_filePathEdit = nullptr;            // m_filePathEdit：文件诊断输入框。
@@ -312,9 +323,29 @@ namespace ks::misc
         ks::ui::StructuredFieldView* m_fileDiagnosisSummary = nullptr; // m_fileDiagnosisSummary：文件诊断说明文本。
         QTableWidget* m_fileDiagnosisTable = nullptr;   // m_fileDiagnosisTable：文件诊断结果表。
 
+        struct RefreshSnapshot
+        {
+            ks::ui::FieldDocument appLockerSummary, wdacSummary, defenderSummary, platformSummary, eventSummary;
+            QVector<AppLockerRuleRecord> appLockerRules;
+            QVector<PolicyFileRecord> policyFiles;
+            QVector<EventRecord> events;
+            QVector<KeyValueRecord> defenderRows, platformRows;
+        };
+        // Complete accepted data is independent of the branch currently projected by Qt.
+        std::shared_ptr<const RefreshSnapshot> m_snapshot;
+        std::array<bool, 5> m_projectionDirty{};
+        std::weak_ptr<const RefreshSnapshot> m_eventModelSnapshot;
+        bool m_projectionBusy = false;
+        bool m_projectionRequested = false;
+        QAbstractTableModel* m_appLockerModel = nullptr;
+        QAbstractTableModel* m_policyFileModel = nullptr;
+        QAbstractTableModel* m_eventModel = nullptr; // Shared CI/EventLog canonical row store.
+        QAbstractTableModel* m_defenderModel = nullptr;
+        QAbstractTableModel* m_platformModel = nullptr;
+        QSortFilterProxyModel* m_eventProxy = nullptr;
+        void presentVisibleSnapshot();
+
         QVector<AppLockerRuleRecord> m_appLockerRules;  // m_appLockerRules：最近一次 AppLocker 规则快照。
-        QVector<EventRecord> m_eventRows;               // m_eventRows：最近一次完整事件日志缓存。
-        QVector<KeyValueRecord> m_platformRows;         // m_platformRows：最近一次平台安全诊断缓存。
         bool m_refreshInFlight = false;               // One complete read-only collection at a time.
         bool m_refreshPending = false;                // Coalesced latest event-limit/refresh request.
         std::uint64_t m_refreshGeneration = 0;           // m_refreshGeneration：UI 线程维护的刷新代次，阻止旧结果回写。

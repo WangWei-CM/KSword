@@ -7,6 +7,7 @@
 #include "../UI/ToolbarMetrics.h"
 #include "ApplicationControlPage.h"
 #include "../UI/TableInteractionSupport.h"
+#include "../UI/TableRowFilterSupport.h"
 #include "../UI/VisibleTableWidget.h"
 
 #include "../UI/CodeEditorWidget.h"
@@ -17,6 +18,12 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
+#include <QShowEvent>
+#include <QEvent>
+#include <QTimer>
+#include "../Internationalization/LanguageManager.h"
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -57,11 +64,95 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <functional>
+#include <memory>
 #include <thread>
 #include <utility>
 
 namespace
 {
+    // The model retains an immutable typed snapshot, never one item per cell.
+    // EditRole and UserRole remain canonical so translated text cannot become a mutation key.
+    class ControlValueTableModel final : public QAbstractTableModel
+    {
+    public:
+        ControlValueTableModel(QStringList headers, ks::i18n::SourceTextSnapshot translator, QObject* parent)
+            : QAbstractTableModel(parent), m_headers(std::move(headers)), m_translator(std::move(translator))
+        {
+            setProperty("ks_i18n_preserve_model_data", true);
+        }
+        int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : m_count; }
+        int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : static_cast<int>(m_headers.size()); }
+        QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+        {
+            if (orientation == Qt::Horizontal && section >= 0 && section < m_headers.size() && role == Qt::DisplayRole)
+                return m_translator.sourceText(m_headers.at(section));
+            return QAbstractTableModel::headerData(section, orientation, role);
+        }
+        QVariant data(const QModelIndex& index, int role) const override
+        {
+            if (!index.isValid() || index.row() >= m_count || index.column() >= m_headers.size() || !m_cell)
+                return {};
+            if (role == Qt::UserRole && index.column() == 0 && m_identity) return m_identity(index.row());
+            if (role == Qt::EditRole) return m_cell(index.row(), index.column());
+            if (role == Qt::DisplayRole) return m_translator.sourceText(m_cell(index.row(), index.column()));
+            return {};
+        }
+        void replaceSnapshot(int count, std::function<QString(int,int)> cell,
+            std::function<QVariant(int)> identity = {})
+        {
+            beginResetModel();
+            m_count = count;
+            m_cell = std::move(cell);
+            m_identity = std::move(identity);
+            endResetModel();
+        }
+        void retranslate(ks::i18n::SourceTextSnapshot translator)
+        {
+            m_translator = std::move(translator);
+            if (!m_headers.isEmpty()) emit headerDataChanged(Qt::Horizontal, 0, static_cast<int>(m_headers.size()) - 1);
+            if (m_count > 0) emit dataChanged(index(0,0), index(m_count - 1, columnCount() - 1), {Qt::DisplayRole});
+        }
+    private:
+        QStringList m_headers;
+        ks::i18n::SourceTextSnapshot m_translator;
+        int m_count = 0;
+        std::function<QString(int,int)> m_cell;
+        std::function<QVariant(int)> m_identity;
+    };
+
+    class ControlEventProxy final : public QSortFilterProxyModel
+    {
+    public:
+        using QSortFilterProxyModel::QSortFilterProxyModel;
+        void setVerdict(QString verdict)
+        {
+            if (m_verdict == verdict) return;
+            m_verdict = std::move(verdict);
+            invalidateFilter();
+        }
+    protected:
+        bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+        {
+            return m_verdict.isEmpty() || sourceModel()->index(row, 3, parent).data(Qt::EditRole).toString()
+                .compare(m_verdict, Qt::CaseInsensitive) == 0;
+        }
+    private:
+        QString m_verdict;
+    };
+
+    QSortFilterProxyModel* attachControlModel(QTableView* table, QAbstractItemModel* source, bool eventFilter = false)
+    {
+        QSortFilterProxyModel* proxy = eventFilter
+            ? static_cast<QSortFilterProxyModel*>(new ControlEventProxy(table))
+            : new QSortFilterProxyModel(table);
+        proxy->setDynamicSortFilter(false);
+        proxy->setSourceModel(source);
+        table->setProperty("ks_i18n_preserve_model_data", true);
+        table->setModel(proxy);
+        return proxy;
+    }
+
     // makeReadOnlyItem：
     // - 创建只读表格项；
     // - text 为单元格文本；
@@ -463,7 +554,7 @@ namespace
     }
 
     // selectTableContextRow：同步右键命中的行，空白区域返回 -1。
-    int selectTableContextRow(QTableWidget* table, const QPoint& localPosition)
+    int selectTableContextRow(QTableView* table, const QPoint& localPosition)
     {
         if (table == nullptr)
         {
@@ -485,14 +576,16 @@ namespace
     }
 
     // tableCellText：安全读取表格单元格的显示文本。
-    QString tableCellText(const QTableWidget* table, const int row, const int column)
+    QString tableCellText(const QTableView* table, const int row, const int column)
     {
         if (table == nullptr || row < 0 || column < 0)
         {
             return QString();
         }
-        const QTableWidgetItem* item = table->item(row, column);
-        return item != nullptr ? item->text().trimmed() : QString();
+        if (table->model() == nullptr) return {};
+        const QModelIndex index = table->model()->index(row, column);
+        const QVariant raw = index.data(Qt::EditRole);
+        return (raw.isValid() ? raw : index.data(Qt::DisplayRole)).toString().trimmed();
     }
 }
 
@@ -538,6 +631,17 @@ namespace ks::misc
         ks::ui::StyleJoinedResultTabs(m_tabWidget, m_toolbarWidget);
         m_rootLayout->addWidget(m_tabWidget, 1);
 
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        m_appLockerModel = new ControlValueTableModel({QStringLiteral("规则集合"), QStringLiteral("Action"),
+            QStringLiteral("User"), QStringLiteral("SID"), QStringLiteral("条件类型"),
+            QStringLiteral("路径 / 发布者 / Hash"), QStringLiteral("描述"), QStringLiteral("风险")}, translator, this);
+        m_policyFileModel = new ControlValueTableModel({QStringLiteral("文件路径"), QStringLiteral("存在"),
+            QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("策略数量"), QStringLiteral("说明")}, translator, this);
+        m_eventModel = new ControlValueTableModel({QStringLiteral("时间"), QStringLiteral("事件 ID"),
+            QStringLiteral("级别"), QStringLiteral("判定"), QStringLiteral("消息")}, translator, this);
+        m_defenderModel = new ControlValueTableModel({QStringLiteral("字段"), QStringLiteral("值"), QStringLiteral("说明")}, translator, this);
+        m_platformModel = new ControlValueTableModel({QStringLiteral("字段"), QStringLiteral("值"), QStringLiteral("说明")}, translator, this);
+
         m_appLockerPage = buildAppLockerPage();
         m_wdacPage = buildWdacPage();
         m_defenderPage = buildDefenderPage();
@@ -560,6 +664,7 @@ namespace ks::misc
                 ks::ui::FlatButtonAppearance::Solid);
         }
 
+        connect(m_tabWidget, &QTabWidget::currentChanged, this, [this]() { presentVisibleSnapshot(); });
         connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refreshAsync(); });
         connect(m_exportButton, &QPushButton::clicked, this, [this]() { exportCurrentTableTsv(); });
     }
@@ -588,7 +693,8 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_appLockerTable = new ks::ui::VisibleTableWidget(page);
+        m_appLockerTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_appLockerTable, m_appLockerModel);
         // 执行规则增删值得保存前后策略，保留快照对比。
         ks::ui::SetTableActionBarMode(m_appLockerTable, ks::ui::TableActionBarMode::Full);
         initializeTable(m_appLockerTable, true);
@@ -598,7 +704,7 @@ namespace ks::misc
         layout->addWidget(actionRow, 0);
         layout->addWidget(m_appLockerTable, 1);
         connect(m_appLockerEditButton, &QPushButton::clicked, this, [this]() { editAppLockerPolicy(); });
-        connect(m_appLockerTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_appLockerTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showAppLockerContextMenu(localPosition);
         });
         return page;
@@ -626,13 +732,15 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_policyFileTable = new ks::ui::VisibleTableWidget(page);
+        m_policyFileTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_policyFileTable, m_policyFileModel);
         // 活动 WDAC 策略列表需要对比部署前后状态。
         ks::ui::SetTableActionBarMode(m_policyFileTable, ks::ui::TableActionBarMode::Full);
         initializeTable(m_policyFileTable, true);
         m_policyFileTable->setContextMenuPolicy(Qt::CustomContextMenu);
 
-        m_codeIntegrityEventTable = new ks::ui::VisibleTableWidget(page);
+        m_codeIntegrityEventTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_codeIntegrityEventTable, m_eventModel);
         // WDAC 页的附属事件流水保留复制导出，避免两条完整操作栏。
         ks::ui::SetTableActionBarMode(m_codeIntegrityEventTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_codeIntegrityEventTable, true);
@@ -642,7 +750,7 @@ namespace ks::misc
         layout->addWidget(m_policyFileTable, 1);
         layout->addWidget(m_codeIntegrityEventTable, 1);
         connect(m_wdacEditButton, &QPushButton::clicked, this, [this]() { editWdacPolicy(); });
-        connect(m_policyFileTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_policyFileTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showWdacContextMenu(localPosition);
         });
         return page;
@@ -670,7 +778,8 @@ namespace ks::misc
         actionLayout->addStretch(1);
         ks::ui::NormalizeToolbarRow(actionLayout);
 
-        m_defenderTable = new ks::ui::VisibleTableWidget(page);
+        m_defenderTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_defenderTable, m_defenderModel);
         // Defender 配置摘要已有编辑入口，收拢快照动作。
         ks::ui::SetTableActionBarMode(m_defenderTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_defenderTable, true);
@@ -680,7 +789,7 @@ namespace ks::misc
         layout->addWidget(actionRow, 0);
         layout->addWidget(m_defenderTable, 1);
         connect(m_defenderEditButton, &QPushButton::clicked, this, [this]() { editDefenderSetting(); });
-        connect(m_defenderTable, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& localPosition) {
+        connect(m_defenderTable, &QTableView::customContextMenuRequested, this, [this](const QPoint& localPosition) {
             showDefenderContextMenu(localPosition);
         });
         return page;
@@ -699,7 +808,8 @@ namespace ks::misc
         m_platformSummary->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("CI / VBS / Hyper-V / Driver Trust / BAM 摘要会在后台刷新后显示。")));
         m_platformSummary->setMaximumHeight(160);
 
-        m_platformTable = new ks::ui::VisibleTableWidget(page);
+        m_platformTable = new ks::ui::TableActionTableView(page);
+        attachControlModel(m_platformTable, m_platformModel);
         // 平台安全键值摘要已有统一导出，不需要独立快照栏。
         ks::ui::SetTableActionBarMode(m_platformTable, ks::ui::TableActionBarMode::None);
         initializeTable(m_platformTable, true);
@@ -733,6 +843,8 @@ namespace ks::misc
             QStringLiteral("事件"),
             QStringLiteral("读取失败")
             });
+        for (int item = 0; item < m_eventVerdictFilterCombo->count(); ++item)
+            m_eventVerdictFilterCombo->setItemData(item, item == 0 ? QString() : m_eventVerdictFilterCombo->itemText(item));
         m_eventVerdictFilterCombo->setToolTip(QStringLiteral("按 Code Integrity 判定分类筛选事件。"));
 
         m_eventLimitCombo = new QComboBox(filterRow);
@@ -758,7 +870,8 @@ namespace ks::misc
         m_eventSummary->setDocument(m_eventSummaryDocument);
         m_eventSummary->setMaximumHeight(150);
 
-        m_eventTable = new ks::ui::VisibleTableWidget(page);
+        m_eventTable = new ks::ui::TableActionTableView(page);
+        m_eventProxy = attachControlModel(m_eventTable, m_eventModel, true);
         // 事件本身是时间序列，保留复制导出并收拢重复快照。
         ks::ui::SetTableActionBarMode(m_eventTable, ks::ui::TableActionBarMode::Compact);
         initializeTable(m_eventTable, true);
@@ -769,7 +882,7 @@ namespace ks::misc
         layout->addWidget(m_eventSummary, 0);
         layout->addWidget(m_eventTable, 1);
 
-        connect(m_eventVerdictFilterCombo, &QComboBox::currentTextChanged, this, [this]() {
+        connect(m_eventVerdictFilterCombo, &QComboBox::currentIndexChanged, this, [this]() {
             rebuildEventTable();
         });
         connect(m_eventLimitCombo, &QComboBox::currentTextChanged, this, [this]() {
@@ -834,7 +947,7 @@ namespace ks::misc
         return page;
     }
 
-    void ApplicationControlPage::initializeTable(QTableWidget* table, const bool stretchLastColumn)
+    void ApplicationControlPage::initializeTable(QTableView* table, const bool stretchLastColumn)
     {
         if (table == nullptr)
         {
@@ -854,7 +967,7 @@ namespace ks::misc
 
     }
 
-    QTableWidget* ApplicationControlPage::currentExportTable() const
+    QTableView* ApplicationControlPage::currentExportTable() const
     {
         if (m_tabWidget == nullptr)
         {
@@ -1185,12 +1298,11 @@ namespace ks::misc
         QString initialPathText;
         if (!isNewRule)
         {
-            if (row >= m_appLockerTable->rowCount())
+            if (row >= m_appLockerTable->model()->rowCount())
             {
                 return;
             }
-            const QTableWidgetItem* idItem = m_appLockerTable->item(row, 0);
-            ruleId = idItem != nullptr ? idItem->data(Qt::UserRole).toString().trimmed() : QString();
+            ruleId = m_appLockerTable->model()->index(row, 0).data(Qt::UserRole).toString().trimmed();
             if (ruleId.isEmpty())
             {
                 QMessageBox::information(this, QStringLiteral("编辑 AppLocker 规则"), QStringLiteral("当前规则没有可写入的本地规则 ID，可能由组策略下发。"));
@@ -1354,13 +1466,12 @@ namespace ks::misc
 
     void ApplicationControlPage::deleteAppLockerRule()
     {
-        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerTable == nullptr || m_appLockerTable->currentRow() < 0)
+        if (!m_appLockerModuleAvailable || m_pendingMutationCount > 0 || m_appLockerTable == nullptr || m_appLockerTable->currentIndex().row() < 0)
         {
             return;
         }
-        const int row = m_appLockerTable->currentRow();
-        const QTableWidgetItem* idItem = m_appLockerTable->item(row, 0);
-        const QString ruleId = idItem != nullptr ? idItem->data(Qt::UserRole).toString().trimmed() : QString();
+        const int row = m_appLockerTable->currentIndex().row();
+        const QString ruleId = m_appLockerTable->model()->index(row, 0).data(Qt::UserRole).toString().trimmed();
         if (ruleId.isEmpty())
         {
             QMessageBox::information(this, QStringLiteral("删除 AppLocker 规则"), QStringLiteral("当前规则没有可写入的本地规则 ID，可能由组策略下发。"));
@@ -1603,17 +1714,15 @@ namespace ks::misc
 
     void ApplicationControlPage::editDefenderSetting()
     {
-        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentRow() < 0)
+        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentIndex().row() < 0)
         {
             QMessageBox::information(this, QStringLiteral("编辑 Defender 配置"), QStringLiteral("请先在表格中选中要编辑的配置项。"));
             return;
         }
 
-        const int selectedRow = m_defenderTable->currentRow();
-        const QTableWidgetItem* nameItem = m_defenderTable->item(selectedRow, 0);
-        const QTableWidgetItem* valueItem = m_defenderTable->item(selectedRow, 1);
-        const QString settingName = nameItem != nullptr ? nameItem->text().trimmed() : QString();
-        const QString currentValue = valueItem != nullptr ? valueItem->text().trimmed() : QString();
+        const int selectedRow = m_defenderTable->currentIndex().row();
+        const QString settingName = tableCellText(m_defenderTable, selectedRow, 0);
+        const QString currentValue = tableCellText(m_defenderTable, selectedRow, 1);
 
         enum class DefenderSettingKind { ControlledFolderAccess, PuaProtection, NetworkProtection, AsrRule, RealTimeProtection };
         DefenderSettingKind settingKind{};
@@ -1845,12 +1954,12 @@ namespace ks::misc
 
     void ApplicationControlPage::deleteDefenderSetting()
     {
-        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentRow() < 0)
+        if (m_pendingMutationCount > 0 || m_defenderTable == nullptr || m_defenderTable->currentIndex().row() < 0)
         {
             return;
         }
 
-        const int row = m_defenderTable->currentRow();
+        const int row = m_defenderTable->currentIndex().row();
         const QString settingName = tableCellText(m_defenderTable, row, 0);
         QString mutationScript;
         QString operationName;
@@ -1914,59 +2023,41 @@ namespace ks::misc
         runPowerShellMutationAsync(operationName, mutationScript);
     }
 
-    QString ApplicationControlPage::tableToTsv(QTableWidget* table, const bool selectedOnly) const
+    QString ApplicationControlPage::tableToTsv(QTableView* table, const bool selectedOnly) const
     {
-        if (table == nullptr)
-        {
-            return QString();
-        }
-
-        QStringList lines;
-        QStringList headerValues;
-        for (int column = 0; column < table->columnCount(); ++column)
-        {
-            QTableWidgetItem* headerItem = table->horizontalHeaderItem(column);
-            headerValues.push_back(headerItem != nullptr ? headerItem->text() : QStringLiteral("Column %1").arg(column + 1));
-        }
-        lines.push_back(headerValues.join(QStringLiteral("\t")));
-
+        if (table == nullptr || table->model() == nullptr) return {};
+        const QAbstractItemModel* model = table->model();
+        QStringList lines, headers;
+        for (int column = 0; column < model->columnCount(); ++column)
+            headers.push_back(model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
+        lines.push_back(headers.join(QStringLiteral("\t")));
         QVector<int> rowIndexes;
         if (selectedOnly && table->selectionModel() != nullptr)
         {
-            const QModelIndexList selectedRows = table->selectionModel()->selectedRows();
-            rowIndexes.reserve(selectedRows.size());
-            for (const QModelIndex& index : selectedRows)
-            {
-                rowIndexes.push_back(index.row());
-            }
+            const QModelIndexList rows = table->selectionModel()->selectedRows();
+            rowIndexes.reserve(rows.size());
+            for (const QModelIndex& index : rows) rowIndexes.push_back(index.row());
         }
         else
         {
-            rowIndexes.reserve(table->rowCount());
-            for (int row = 0; row < table->rowCount(); ++row)
-            {
-                rowIndexes.push_back(row);
-            }
+            rowIndexes.reserve(model->rowCount());
+            for (int row = 0; row < model->rowCount(); ++row) rowIndexes.push_back(row);
         }
-
-        for (const int row : rowIndexes)
+        for (int row : rowIndexes)
         {
+            if (ks::ui::IsTableRowExcludedByFilter(table, row)) continue;
             QStringList values;
-            values.reserve(table->columnCount());
-            for (int column = 0; column < table->columnCount(); ++column)
-            {
-                QTableWidgetItem* item = table->item(row, column);
-                values.push_back(item != nullptr ? item->text() : QString());
-            }
+            values.reserve(model->columnCount());
+            for (int column = 0; column < model->columnCount(); ++column)
+                values.push_back(model->index(row, column).data(Qt::DisplayRole).toString());
             lines.push_back(values.join(QStringLiteral("\t")));
         }
-
         return lines.join(QStringLiteral("\n"));
     }
 
     void ApplicationControlPage::exportCurrentTableTsv()
     {
-        QTableWidget* const table = currentExportTable();
+        QTableView* const table = currentExportTable();
         if (table == nullptr)
         {
             QMessageBox::information(this, QStringLiteral("导出 TSV"), QStringLiteral("当前页没有可导出的表格。"));
@@ -3025,221 +3116,147 @@ namespace ks::misc
             return;
         }
 
-        const QList<QTableView*> applicationControlTables = {
-            m_appLockerTable,
-            m_policyFileTable,
-            m_codeIntegrityEventTable,
-            m_defenderTable,
-            m_platformTable,
-            m_eventTable
-        };
-        if (ks::ui::IsTableUiCommitBlockedByContextMenu(applicationControlTables))
-        {
-            const QPointer<ApplicationControlPage> safeThis(this);
-            ks::ui::DeferTableUiCommitIfContextMenuOpen(
-                this,
-                QStringLiteral("application-control-refresh-apply"),
-                applicationControlTables,
-                [safeThis,
-                    refreshGeneration,
-                    statusText = std::move(statusText),
-                    appLockerSummary = std::move(appLockerSummary),
-                    wdacSummary = std::move(wdacSummary),
-                    defenderSummary = std::move(defenderSummary),
-                    platformSummary = std::move(platformSummary),
-                    eventSummary = std::move(eventSummary),
-                    appLockerModuleAvailable,
-                    appLockerRules = std::move(appLockerRules),
-                    policyFiles = std::move(policyFiles),
-                    events = std::move(events),
-                    defenderRows = std::move(defenderRows),
-                    platformRows = std::move(platformRows)]() mutable
-                {
-                    if (!safeThis.isNull())
-                    {
-                        safeThis->applyRefreshResult(
-                            refreshGeneration,
-                            std::move(statusText),
-                            std::move(appLockerSummary),
-                            std::move(wdacSummary),
-                            std::move(defenderSummary),
-                            std::move(platformSummary),
-                            std::move(eventSummary),
-                            appLockerModuleAvailable,
-                            std::move(appLockerRules),
-                            std::move(policyFiles),
-                            std::move(events),
-                            std::move(defenderRows),
-                            std::move(platformRows));
-                    }
-                });
-            return;
-        }
-
-        m_appLockerRules = std::move(appLockerRules);
+        auto snapshot = std::make_shared<RefreshSnapshot>();
+        snapshot->appLockerSummary = std::move(appLockerSummary);
+        snapshot->wdacSummary = std::move(wdacSummary);
+        snapshot->defenderSummary = std::move(defenderSummary);
+        snapshot->platformSummary = std::move(platformSummary);
+        snapshot->eventSummary = std::move(eventSummary);
+        snapshot->appLockerRules = std::move(appLockerRules);
+        snapshot->policyFiles = std::move(policyFiles);
+        snapshot->events = std::move(events);
+        snapshot->defenderRows = std::move(defenderRows);
+        snapshot->platformRows = std::move(platformRows);
+        m_appLockerRules = snapshot->appLockerRules; // Implicit shared value for file diagnosis.
+        m_snapshot = std::move(snapshot);
+        m_projectionDirty.fill(true);
         m_appLockerModuleAvailable = appLockerModuleAvailable;
+        const QPointer<ApplicationControlPage> guard(this);
+        if (m_statusLabel) m_statusLabel->setText(QStringLiteral("状态: %1").arg(statusText));
+        if (!guard) return;
+        if (m_appLockerEditButton) m_appLockerEditButton->setEnabled(m_appLockerModuleAvailable && m_pendingMutationCount == 0);
+        if (!guard) return;
+        if (m_refreshButton) m_refreshButton->setEnabled(true);
+        if (!guard) return;
+        if (m_exportButton) m_exportButton->setEnabled(true);
+        if (!guard) return;
+        presentVisibleSnapshot();
+    }
 
-        if (m_statusLabel != nullptr)
-        {
-            m_statusLabel->setText(QStringLiteral("状态: %1").arg(statusText));
-        }
+    void ApplicationControlPage::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        presentVisibleSnapshot();
+    }
 
-        if (m_appLockerSummary != nullptr)
+    void ApplicationControlPage::changeEvent(QEvent* event)
+    {
+        QWidget::changeEvent(event);
+        if (event->type() != QEvent::LanguageChange) return;
+        const QPointer<ApplicationControlPage> guard(this);
+        const auto translator = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
+        for (QAbstractTableModel* model : {m_appLockerModel, m_policyFileModel, m_eventModel, m_defenderModel, m_platformModel})
         {
-            m_appLockerSummary->setDocument(appLockerSummary);
+            static_cast<ControlValueTableModel*>(model)->retranslate(translator);
+            if (!guard) return;
         }
-        if (m_appLockerEditButton != nullptr)
-        {
-            m_appLockerEditButton->setEnabled(m_appLockerModuleAvailable && m_pendingMutationCount == 0);
-        }
-        if (m_wdacSummary != nullptr)
-        {
-            m_wdacSummary->setDocument(wdacSummary);
-        }
-        if (m_defenderSummary != nullptr)
-        {
-            m_defenderSummary->setDocument(defenderSummary);
-        }
-        if (m_platformSummary != nullptr)
-        {
-            m_platformSummary->setDocument(platformSummary);
-        }
-        if (m_eventSummary != nullptr)
-        {
-            m_eventSummaryDocument = eventSummary;
-            m_eventSummary->setDocument(eventSummary);
-        }
+        m_projectionDirty[4] = true;
+        presentVisibleSnapshot();
+    }
 
-        QVector<QStringList> appLockerRows;
-        QVector<QVariant> appLockerRuleIds;
-        appLockerRows.reserve(m_appLockerRules.size());
-        appLockerRuleIds.reserve(m_appLockerRules.size());
-        for (const AppLockerRuleRecord& record : m_appLockerRules)
-        {
-            appLockerRows.push_back(QStringList{
-                record.collectionText,
-                record.actionText,
-                record.userText,
-                record.sidText,
-                record.conditionTypeText,
-                record.conditionText,
-                record.descriptionText,
-                record.riskText
-            });
-            appLockerRuleIds.push_back(record.idText);
-        }
-        fillTable(
-            m_appLockerTable,
-            QStringList{
-                QStringLiteral("规则集合"),
-                QStringLiteral("Action"),
-                QStringLiteral("User"),
-                QStringLiteral("SID"),
-                QStringLiteral("条件类型"),
-                QStringLiteral("路径 / 发布者 / Hash"),
-                QStringLiteral("描述"),
-                QStringLiteral("风险")
-            },
-            appLockerRows,
-            appLockerRuleIds);
+    void ApplicationControlPage::presentVisibleSnapshot()
+    {
+        if (!isVisible() || !m_snapshot || !m_tabWidget) return;
+        const int branch = m_tabWidget->currentIndex();
+        if (branch < 0 || branch >= 5 || !m_projectionDirty[branch]) return;
+        if (m_projectionBusy) { m_projectionRequested = true; return; }
+        const QPointer<ApplicationControlPage> guard(this);
+        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
+            QStringLiteral("application-control-visible-snapshot"),
+            {m_appLockerTable, m_policyFileTable, m_codeIntegrityEventTable, m_defenderTable, m_platformTable, m_eventTable},
+            [guard]() { if (guard) guard->presentVisibleSnapshot(); })) return;
 
-        QVector<QStringList> policyRows;
-        policyRows.reserve(policyFiles.size());
-        for (const PolicyFileRecord& record : policyFiles)
+        m_projectionBusy = true;
+        m_projectionRequested = false;
+        m_projectionDirty[branch] = false; // A nested acceptance marks it dirty again.
+        const auto snapshot = m_snapshot; // Pin the exact accepted values through synchronous model/view callbacks.
+        const auto current = [guard, snapshot, branch]() {
+            return guard && guard->m_snapshot == snapshot && guard->m_tabWidget->currentIndex() == branch;
+        };
+        const auto finish = [guard, snapshot, branch]() {
+            if (!guard) return;
+            if (guard->m_snapshot != snapshot || guard->m_tabWidget->currentIndex() != branch)
+                guard->m_projectionDirty[branch] = true;
+            guard->m_projectionBusy = false;
+            if (guard->m_projectionRequested)
+                QTimer::singleShot(0, guard, [guard]() { if (guard) guard->presentVisibleSnapshot(); });
+        };
+        const auto events = [this, snapshot]() {
+            if (m_eventModelSnapshot.lock() == snapshot) return;
+            m_eventModelSnapshot = snapshot;
+            const auto rows = snapshot->events;
+            static_cast<ControlValueTableModel*>(m_eventModel)->replaceSnapshot(static_cast<int>(snapshot->events.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.timeText; case 1: return item.idText;
+                    case 2: return item.levelText; case 3: return item.verdictText; default: return item.messageText; }
+                });
+        };
+        if (branch == 0)
         {
-            policyRows.push_back(QStringList{
-                record.pathText,
-                record.existsText,
-                record.sizeText,
-                record.modifiedText,
-                record.countText,
-                record.detailText
-            });
+            const auto rows = snapshot->appLockerRules;
+            static_cast<ControlValueTableModel*>(m_appLockerModel)->replaceSnapshot(static_cast<int>(snapshot->appLockerRules.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.collectionText; case 1: return item.actionText;
+                    case 2: return item.userText; case 3: return item.sidText; case 4: return item.conditionTypeText;
+                    case 5: return item.conditionText; case 6: return item.descriptionText; default: return item.riskText; }
+                }, [rows](int row) { return QVariant(rows.at(row).idText); });
+            if (!current()) { finish(); return; }
+            m_appLockerSummary->setDocument(snapshot->appLockerSummary);
         }
-        fillTable(
-            m_policyFileTable,
-            QStringList{
-                QStringLiteral("文件路径"),
-                QStringLiteral("存在"),
-                QStringLiteral("大小"),
-                QStringLiteral("修改时间"),
-                QStringLiteral("策略数量"),
-                QStringLiteral("说明")
-            },
-            policyRows);
-
-        m_eventRows = std::move(events);
-
-        QVector<QStringList> eventRows;
-        eventRows.reserve(m_eventRows.size());
-        for (const EventRecord& record : m_eventRows)
+        else if (branch == 1)
         {
-            eventRows.push_back(QStringList{
-                record.timeText,
-                record.idText,
-                record.levelText,
-                record.verdictText,
-                record.messageText
-            });
+            const auto rows = snapshot->policyFiles;
+            static_cast<ControlValueTableModel*>(m_policyFileModel)->replaceSnapshot(static_cast<int>(snapshot->policyFiles.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    switch (column) { case 0: return item.pathText; case 1: return item.existsText;
+                    case 2: return item.sizeText; case 3: return item.modifiedText; case 4: return item.countText; default: return item.detailText; }
+                });
+            if (!current()) { finish(); return; }
+            events();
+            if (!current()) { finish(); return; }
+            m_wdacSummary->setDocument(snapshot->wdacSummary);
         }
-        fillTable(
-            m_codeIntegrityEventTable,
-            QStringList{
-                QStringLiteral("时间"),
-                QStringLiteral("事件 ID"),
-                QStringLiteral("级别"),
-                QStringLiteral("判定"),
-                QStringLiteral("消息")
-            },
-            eventRows);
-        rebuildEventTable();
-
-        QVector<QStringList> defenderRowsTable;
-        defenderRowsTable.reserve(defenderRows.size());
-        for (const KeyValueRecord& record : defenderRows)
+        else if (branch == 2 || branch == 3)
         {
-            defenderRowsTable.push_back(QStringList{
-                record.nameText,
-                record.valueText,
-                record.detailText
-            });
+            const bool defender = branch == 2;
+            const auto rows = defender ? snapshot->defenderRows : snapshot->platformRows;
+            static_cast<ControlValueTableModel*>(defender ? m_defenderModel : m_platformModel)->replaceSnapshot(static_cast<int>(rows.size()),
+                [rows](int row, int column) {
+                    const auto& item = rows.at(row);
+                    return column == 0 ? item.nameText : column == 1 ? item.valueText : item.detailText;
+                });
+            if (!current()) { finish(); return; }
+            (defender ? m_defenderSummary : m_platformSummary)->setDocument(defender ? snapshot->defenderSummary : snapshot->platformSummary);
         }
-        fillTable(
-            m_defenderTable,
-            QStringList{
-                QStringLiteral("字段"),
-                QStringLiteral("值"),
-                QStringLiteral("说明")
-            },
-            defenderRowsTable);
-
-        QVector<QStringList> platformRowsTable;
-        platformRowsTable.reserve(platformRows.size());
-        for (const KeyValueRecord& record : platformRows)
+        else
         {
-            platformRowsTable.push_back(QStringList{
-                record.nameText,
-                record.valueText,
-                record.detailText
-            });
+            events();
+            if (!current()) { finish(); return; }
+            const QString verdict = m_eventVerdictFilterCombo->currentData().toString();
+            static_cast<ControlEventProxy*>(m_eventProxy)->setVerdict(verdict);
+            if (!current()) { finish(); return; }
+            auto summary = snapshot->eventSummary;
+            if (!verdict.isEmpty())
+            {
+                summary.field(QStringLiteral("筛选"), m_eventVerdictFilterCombo->currentText());
+                summary.field(QStringLiteral("显示 / 总数"), QStringLiteral("%1 / %2").arg(m_eventProxy->rowCount()).arg(snapshot->events.size()));
+            }
+            m_eventSummary->setDocument(summary);
         }
-        fillTable(
-            m_platformTable,
-            QStringList{
-                QStringLiteral("字段"),
-                QStringLiteral("值"),
-                QStringLiteral("说明")
-            },
-            platformRowsTable);
-
-        if (m_refreshButton != nullptr)
-        {
-            m_refreshButton->setEnabled(true);
-        }
-        if (m_exportButton != nullptr)
-        {
-            m_exportButton->setEnabled(true);
-        }
+        finish();
     }
 
     int ApplicationControlPage::selectedEventLimit() const
@@ -3258,72 +3275,8 @@ namespace ks::misc
 
     void ApplicationControlPage::rebuildEventTable()
     {
-        const QPointer<ApplicationControlPage> safeThis(this);
-        if (ks::ui::DeferTableUiCommitIfContextMenuOpen(
-            this,
-            QStringLiteral("application-control-event-filter-rebuild"),
-            {m_eventTable},
-            [safeThis]()
-            {
-                if (!safeThis.isNull())
-                {
-                    safeThis->rebuildEventTable();
-                }
-            }))
-        {
-            return;
-        }
-
-        const QString selectedVerdictText = m_eventVerdictFilterCombo != nullptr
-            ? m_eventVerdictFilterCombo->currentText()
-            : QStringLiteral("全部分类");
-
-        QVector<QStringList> visibleRows;
-        visibleRows.reserve(m_eventRows.size());
-        for (const EventRecord& record : m_eventRows)
-        {
-            const bool matched =
-                selectedVerdictText == QStringLiteral("全部分类") ||
-                record.verdictText.compare(selectedVerdictText, Qt::CaseInsensitive) == 0;
-            if (!matched)
-            {
-                continue;
-            }
-
-            visibleRows.push_back(QStringList{
-                record.timeText,
-                record.idText,
-                record.levelText,
-                record.verdictText,
-                record.messageText
-            });
-        }
-
-        fillTable(
-            m_eventTable,
-            QStringList{
-                QStringLiteral("时间"),
-                QStringLiteral("事件 ID"),
-                QStringLiteral("级别"),
-                QStringLiteral("判定"),
-                QStringLiteral("消息")
-            },
-            visibleRows);
-
-        if (m_eventSummary != nullptr)
-        {
-            auto baseSummary = m_eventSummaryDocument;
-            if (selectedVerdictText == QStringLiteral("全部分类"))
-            {
-                m_eventSummary->setDocument(baseSummary);
-            }
-            else
-            {
-                baseSummary.field(QStringLiteral("筛选"), selectedVerdictText);
-                baseSummary.field(QStringLiteral("显示 / 总数"), QStringLiteral("%1 / %2").arg(visibleRows.size()).arg(m_eventRows.size()));
-                m_eventSummary->setDocument(baseSummary);
-            }
-        }
+        m_projectionDirty[4] = true;
+        presentVisibleSnapshot();
     }
 
     QString ApplicationControlPage::buildPathMatchHint(
