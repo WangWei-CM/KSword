@@ -52,6 +52,7 @@
 #endif
 #include <Windows.h>
 #include <Pdh.h>
+#include <pdhmsg.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
 
