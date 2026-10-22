@@ -384,50 +384,6 @@ namespace
 
             m_freezePaneMenu = new QMenu(m_freezePaneButton);
             m_freezePaneMenu->setStyleSheet(KswordTheme::ContextMenuStyle());
-            auto* freezeCountsWidget = new QWidget(m_freezePaneMenu);
-            auto* freezeCountsLayout = new QGridLayout(freezeCountsWidget);
-            freezeCountsLayout->setContentsMargins(10, 8, 10, 8);
-            freezeCountsLayout->setHorizontalSpacing(10);
-            freezeCountsLayout->setVerticalSpacing(6);
-            m_freezeRowsLabel = new QLabel(localizedSourceText("前面的行"), freezeCountsWidget);
-            m_freezeColumnsLabel = new QLabel(localizedSourceText("前面的列"), freezeCountsWidget);
-            m_freezeRowsSpin = new QSpinBox(freezeCountsWidget);
-            m_freezeColumnsSpin = new QSpinBox(freezeCountsWidget);
-            m_freezeRowsSpin->setObjectName(QStringLiteral("ksword_table_freeze_row_count"));
-            m_freezeColumnsSpin->setObjectName(QStringLiteral("ksword_table_freeze_column_count"));
-            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
-            {
-                spin->setRange(0, 0);
-                spin->setMinimumSize(72, 28);
-                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
-            }
-            m_freezeRowsLabel->setBuddy(m_freezeRowsSpin);
-            m_freezeColumnsLabel->setBuddy(m_freezeColumnsSpin);
-            m_applyFreezeCountsButton = new QPushButton(localizedSourceText("应用冻结"), freezeCountsWidget);
-            m_applyFreezeCountsButton->setObjectName(QStringLiteral("ksword_table_apply_freeze_counts"));
-            m_applyFreezeCountsButton->setMinimumHeight(28);
-            freezeCountsLayout->addWidget(m_freezeRowsLabel, 0, 0);
-            freezeCountsLayout->addWidget(m_freezeRowsSpin, 0, 1);
-            freezeCountsLayout->addWidget(m_freezeColumnsLabel, 1, 0);
-            freezeCountsLayout->addWidget(m_freezeColumnsSpin, 1, 1);
-            freezeCountsLayout->addWidget(m_applyFreezeCountsButton, 2, 0, 1, 2);
-            auto* freezeCountsAction = new QWidgetAction(m_freezePaneMenu);
-            freezeCountsAction->setDefaultWidget(freezeCountsWidget);
-            m_freezePaneMenu->addAction(freezeCountsAction);
-            m_freezePaneMenu->addSeparator();
-            m_freezeCurrentRowAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中行"));
-            m_freezeCurrentColumnAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中列"));
-            m_freezeCurrentCellAction = m_freezePaneMenu->addAction(
-                localizedSourceText("冻结选中行列"));
-            m_freezePaneMenu->addSeparator();
-            m_unfreezeRowsAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消冻结行"));
-            m_unfreezeColumnsAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消冻结列"));
-            m_unfreezeAllAction = m_freezePaneMenu->addAction(
-                localizedSourceText("取消全部冻结"));
             m_freezePaneButton->setMenu(m_freezePaneMenu);
             m_freezePaneButton->setPopupMode(QToolButton::InstantPopup);
 
@@ -501,56 +457,26 @@ namespace
                 });
             connect(m_freezePaneMenu, &QMenu::aboutToShow, this, [this]()
                 {
+                    const QPointer<TableActionBar> alive(this);
+                    ensureFreezeMenuContents();
+                    if (!alive) return;
                     // ContextMenuStyle includes sampled theme colors. Refresh before
                     // native Show begins, never from a Show/Resize event filter.
                     const QString menuStyle = KswordTheme::ContextMenuStyle();
                     if (m_freezePaneMenu->styleSheet() != menuStyle) m_freezePaneMenu->setStyleSheet(menuStyle);
+                    if (!alive) return;
                     if (!m_freezeMenuBarrierActive)
                     {
                         m_freezeMenuBarrierActive = true;
                         m_freezeMenuSource = m_table;
                         beginItemViewContextMenu(m_freezeMenuSource.data());
+                        if (!alive) return;
                     }
                     updateFreezePaneMenu();
                 });
             connect(m_freezePaneMenu, &QMenu::aboutToHide, this, [this]()
                 {
                     closeFreezeMenuBarrier();
-                });
-            connect(m_applyFreezeCountsButton, &QPushButton::clicked, this, [this]()
-                {
-                    applyFreezeCounts();
-                    m_freezePaneMenu->hide();
-                });
-            connect(m_freezeCurrentRowAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(true, false);
-                });
-            connect(m_freezeCurrentColumnAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(false, true);
-                });
-            connect(m_freezeCurrentCellAction, &QAction::triggered, this, [this]()
-                {
-                    freezeToCurrentIndex(true, true);
-                });
-            connect(m_unfreezeRowsAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenRows();
-                    updatePosition();
-                    updateControls();
-                });
-            connect(m_unfreezeColumnsAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenColumns();
-                    updatePosition();
-                    updateControls();
-                });
-            connect(m_unfreezeAllAction, &QAction::triggered, this, [this]()
-                {
-                    m_frozenPaneController->clearFrozenPanes();
-                    updatePosition();
-                    updateControls();
                 });
             connect(m_pauseRefreshButton, &QToolButton::toggled, this, [this](const bool checked)
                 {
@@ -650,19 +576,25 @@ namespace
 
             m_copyAllButton->setText(localizedSourceText(kCopyAllSource));
             m_exportButton->setText(localizedSourceText(kExportSource));
-            m_freezeRowsLabel->setText(localizedSourceText("前面的行"));
-            m_freezeColumnsLabel->setText(localizedSourceText("前面的列"));
-            m_applyFreezeCountsButton->setText(localizedSourceText("应用冻结"));
-            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
-                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            if (m_freezeRowsSpin != nullptr)
+            {
+                m_freezeRowsLabel->setText(localizedSourceText("前面的行"));
+                m_freezeColumnsLabel->setText(localizedSourceText("前面的列"));
+                m_applyFreezeCountsButton->setText(localizedSourceText("应用冻结"));
+                for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
+                    spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            }
             m_freezePaneButton->setToolTip(localizedSourceText(
                 "冻结选中的行或列：行会钉在列标题正下方，列会固定在行表头右侧；支持一次冻结多选行"));
-            m_freezeCurrentRowAction->setText(localizedSourceText("冻结选中行"));
-            m_freezeCurrentColumnAction->setText(localizedSourceText("冻结选中列"));
-            m_freezeCurrentCellAction->setText(localizedSourceText("冻结选中行列"));
-            m_unfreezeRowsAction->setText(localizedSourceText("取消冻结行"));
-            m_unfreezeColumnsAction->setText(localizedSourceText("取消冻结列"));
-            m_unfreezeAllAction->setText(localizedSourceText("取消全部冻结"));
+            if (m_unfreezeAllAction != nullptr)
+            {
+                m_freezeCurrentRowAction->setText(localizedSourceText("冻结选中行"));
+                m_freezeCurrentColumnAction->setText(localizedSourceText("冻结选中列"));
+                m_freezeCurrentCellAction->setText(localizedSourceText("冻结选中行列"));
+                m_unfreezeRowsAction->setText(localizedSourceText("取消冻结行"));
+                m_unfreezeColumnsAction->setText(localizedSourceText("取消冻结列"));
+                m_unfreezeAllAction->setText(localizedSourceText("取消全部冻结"));
+            }
             m_cleanupButton->setText(localizedSourceText("清理"));
             m_doneCleanupButton->setText(localizedSourceText("完成"));
             m_deleteSelectedButton->setText(localizedSourceText("清理选中"));
@@ -791,8 +723,97 @@ namespace
             return m_pauseOverlay.isNull() ? m_table.data() : m_pauseOverlay.data();
         }
 
+        void ensureFreezeMenuContents()
+        {
+            if (m_unfreezeAllAction != nullptr) return;
+            auto* freezeCountsWidget = new QWidget(m_freezePaneMenu);
+            auto* freezeCountsLayout = new QGridLayout(freezeCountsWidget);
+            freezeCountsLayout->setContentsMargins(10, 8, 10, 8);
+            freezeCountsLayout->setHorizontalSpacing(10);
+            freezeCountsLayout->setVerticalSpacing(6);
+            m_freezeRowsLabel = new QLabel(localizedSourceText("前面的行"), freezeCountsWidget);
+            m_freezeColumnsLabel = new QLabel(localizedSourceText("前面的列"), freezeCountsWidget);
+            m_freezeRowsSpin = new QSpinBox(freezeCountsWidget);
+            m_freezeColumnsSpin = new QSpinBox(freezeCountsWidget);
+            m_freezeRowsSpin->setObjectName(QStringLiteral("ksword_table_freeze_row_count"));
+            m_freezeColumnsSpin->setObjectName(QStringLiteral("ksword_table_freeze_column_count"));
+            for (QSpinBox* spin : {m_freezeRowsSpin, m_freezeColumnsSpin})
+            {
+                spin->setRange(0, 0);
+                spin->setMinimumSize(72, 28);
+                spin->setToolTip(localizedSourceText("数量按照当前可见顺序；冻结区域最多占用视口的一半。"));
+            }
+            m_freezeRowsLabel->setBuddy(m_freezeRowsSpin);
+            m_freezeColumnsLabel->setBuddy(m_freezeColumnsSpin);
+            m_applyFreezeCountsButton = new QPushButton(localizedSourceText("应用冻结"), freezeCountsWidget);
+            m_applyFreezeCountsButton->setObjectName(QStringLiteral("ksword_table_apply_freeze_counts"));
+            m_applyFreezeCountsButton->setMinimumHeight(28);
+            freezeCountsLayout->addWidget(m_freezeRowsLabel, 0, 0);
+            freezeCountsLayout->addWidget(m_freezeRowsSpin, 0, 1);
+            freezeCountsLayout->addWidget(m_freezeColumnsLabel, 1, 0);
+            freezeCountsLayout->addWidget(m_freezeColumnsSpin, 1, 1);
+            freezeCountsLayout->addWidget(m_applyFreezeCountsButton, 2, 0, 1, 2);
+            auto* freezeCountsAction = new QWidgetAction(m_freezePaneMenu);
+            freezeCountsAction->setDefaultWidget(freezeCountsWidget);
+            m_freezePaneMenu->addAction(freezeCountsAction);
+            m_freezePaneMenu->addSeparator();
+            m_freezeCurrentRowAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中行"));
+            m_freezeCurrentColumnAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中列"));
+            m_freezeCurrentCellAction = m_freezePaneMenu->addAction(
+                localizedSourceText("冻结选中行列"));
+            m_freezePaneMenu->addSeparator();
+            m_unfreezeRowsAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消冻结行"));
+            m_unfreezeColumnsAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消冻结列"));
+            m_unfreezeAllAction = m_freezePaneMenu->addAction(
+                localizedSourceText("取消全部冻结"));
+            connect(m_applyFreezeCountsButton, &QPushButton::clicked, this, [this]()
+                {
+                    applyFreezeCounts();
+                    m_freezePaneMenu->hide();
+                });
+            connect(m_freezeCurrentRowAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(true, false);
+                });
+            connect(m_freezeCurrentColumnAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(false, true);
+                });
+            connect(m_freezeCurrentCellAction, &QAction::triggered, this, [this]()
+                {
+                    freezeToCurrentIndex(true, true);
+                });
+            connect(m_unfreezeRowsAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenRows();
+                    updatePosition();
+                    updateControls();
+                });
+            connect(m_unfreezeColumnsAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenColumns();
+                    updatePosition();
+                    updateControls();
+                });
+            connect(m_unfreezeAllAction, &QAction::triggered, this, [this]()
+                {
+                    m_frozenPaneController->clearFrozenPanes();
+                    updatePosition();
+                    updateControls();
+                });
+        }
+
         void updateFreezePaneMenu()
         {
+            if (m_unfreezeAllAction == nullptr)
+            {
+                updateFreezeButton();
+                return;
+            }
             QTableView* tableView = activeTableView();
             const QModelIndex currentIndex =
                 tableView != nullptr ? tableView->currentIndex() : QModelIndex();
