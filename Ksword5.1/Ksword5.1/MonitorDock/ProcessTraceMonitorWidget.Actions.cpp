@@ -1558,7 +1558,8 @@ void ProcessTraceMonitorWidget::applyTimelineSelection(
     // 这里存储绝对时间戳，确保图形选区与表格行通过数据关联，而不是通过屏幕坐标关联。
     m_timelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_timelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_timelineUserSelectionActive = true;
+    m_timelineUserSelectionActive = m_eventTimelineWidget != nullptr
+        && m_eventTimelineWidget->hasUserAdjustedSelection();
     applyEventFilter();
 }
 

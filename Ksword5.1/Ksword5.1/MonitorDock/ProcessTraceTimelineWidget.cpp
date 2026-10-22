@@ -630,9 +630,10 @@ void ProcessTraceTimelineWidget::mouseMoveEvent(QMouseEvent* eventPointer)
         m_selectionEnd100ns = currentTime100ns;
     }
 
-    // 任何拖动都会把时间轴切换到用户选区模式，并立即通知事件表筛选。
-    m_userAdjustedSelection = true;
+    // 拉回完整范围后恢复实时跟随；局部选区继续保持绝对时间。
     clampSelectionToRange();
+    m_userAdjustedSelection = m_selectionStart100ns != m_rangeStart100ns
+        || m_selectionEnd100ns != m_rangeEnd100ns;
     update();
     eventPointer->accept();
     notifySelectionChanged(); // 回调可销毁本控件，之后不再访问this或事件对象。
@@ -706,9 +707,17 @@ void ProcessTraceTimelineWidget::wheelEvent(QWheelEvent* eventPointer)
         : m_rangeStart100ns;
     m_selectionEnd100ns = saturatingAdd(m_selectionStart100ns, newWidth100ns);
 
+    // 全宽时锚点不能把左端推离范围起点，否则右端夹紧后仍会留下局部选区。
+    if (newWidth100ns == rangeWidth100ns)
+    {
+        m_selectionStart100ns = m_rangeStart100ns;
+        m_selectionEnd100ns = m_rangeEnd100ns;
+    }
+
     // 滚轮缩放同样是用户主动选择时间窗口，需要立即叠加到事件表。
-    m_userAdjustedSelection = true;
     clampSelectionToRange();
+    m_userAdjustedSelection = m_selectionStart100ns != m_rangeStart100ns
+        || m_selectionEnd100ns != m_rangeEnd100ns;
     update();
     eventPointer->accept();
     notifySelectionChanged(); // 接管事件后才回调，允许宿主同步关闭时间轴窗口。

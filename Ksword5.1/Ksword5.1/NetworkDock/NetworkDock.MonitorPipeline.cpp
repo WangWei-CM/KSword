@@ -1046,7 +1046,8 @@ void NetworkDock::applyPacketTimelineSelection(
     // 时间轴控件负责把鼠标框选转换成时间戳；NetworkDock 只保存范围并重建表格。
     m_packetTimelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_packetTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_packetTimelineUserSelectionActive = true;
+    m_packetTimelineUserSelectionActive = m_packetTimelineWidget != nullptr
+        && m_packetTimelineWidget->hasUserAdjustedSelection();
 
     updateMonitorFilterStateLabel();
     rebuildMonitorTableByFilter();

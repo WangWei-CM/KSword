@@ -13470,7 +13470,8 @@ void MonitorDock::applyEtwTimelineSelection(
     // 这里保存的是“扣除暂停段后的有效时间戳”，表格筛选时会把事件原始时间映射后比较。
     m_etwTimelineSelectionStart100ns = std::min(start100ns, end100ns);
     m_etwTimelineSelectionEnd100ns = std::max(start100ns, end100ns);
-    m_etwTimelineUserSelectionActive = true;
+    m_etwTimelineUserSelectionActive = m_etwTimelineWidget != nullptr
+        && m_etwTimelineWidget->hasUserAdjustedSelection();
     scheduleEtwArchiveFilterRebuild();
 }
 

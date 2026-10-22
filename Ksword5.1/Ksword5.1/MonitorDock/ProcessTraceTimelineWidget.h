@@ -143,6 +143,9 @@ public:
     // - 捕获范围尚未初始化时返回 0。
     std::uint64_t selectionEnd100ns() const;
 
+    // 全范围选区不冻结时间右端；宿主据此停用历史时间过滤。
+    bool hasUserAdjustedSelection() const { return m_userAdjustedSelection; }
+
 protected:
     bool event(QEvent* eventPointer) override; // 轨道密度悬停提示与热主题/语言重绘。
     void resizeEvent(QResizeEvent* eventPointer) override; // 大小变化必须重新按像素预算聚合。
