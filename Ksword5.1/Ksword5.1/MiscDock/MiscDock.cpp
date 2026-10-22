@@ -528,7 +528,8 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)
                 || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
                 || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
-                || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)))
+                || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)
+                || (m_navigationPrepareCursor == m_clipboardGuardTabIndex && !m_clipboardGuardPage)))
                 m_navigationSkippedColdBodies = true;
             else ensureTabInitialized(m_navigationPrepareCursor, false);
         }
@@ -718,8 +719,10 @@ void MiscDock::initializeClipboardGuardPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_clipboardGuardHostWidget);
+    const QPointer<QWidget> host(m_clipboardGuardHostWidget);
     m_clipboardGuardPage = new ks::misc::ClipboardGuardPage(m_clipboardGuardHostWidget);
     hostLayout->addWidget(m_clipboardGuardPage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeRenderBenchmarkPage()
@@ -827,7 +830,7 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
-    if (index == 1 || index == 2 || index == 3 || index == 17 || index == 19)
+    if (index == 1 || index == 2 || index == 3 || index == 10 || index == 17 || index == 19)
         host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
@@ -903,6 +906,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
     {
         main[3].coldBodyTexts = ks::misc::VirtualLocationPage::coldSearchBody();
         main[3].coldBodyComplete = true;
+    }
+    if (!existing || !existing->m_clipboardGuardPage)
+    {
+        main[10].coldBodyTexts = ks::misc::ClipboardGuardPage::coldSearchBody();
+        main[10].coldBodyComplete = true;
     }
     if (!existing || !existing->m_minidumpPage)
     {

@@ -15,6 +15,7 @@
 #include "../../Framework.h"
 #include "../../MonitorDock/WinApiMonitorProtocol.h"
 #include "../../ArkDriverClient/ArkDriverClient.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QString>
 #include <QElapsedTimer>
@@ -184,6 +185,9 @@ namespace ks::misc
         Q_OBJECT
 
     public:
+        // Searchable body of the unactivated initial page, without creating UI.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
         explicit ClipboardGuardPage(QWidget* parent = nullptr);
         ~ClipboardGuardPage() override;
 
