@@ -288,7 +288,9 @@ void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
             {
                 auto* layout = buildHostLayout(m_themeCheckHostWidget);
                 m_themeCheckPage = new ks::misc::ThemeCheckPage(m_themeCheckHostWidget);
+                const QPointer<QWidget> host(m_themeCheckHostWidget);
                 layout->addWidget(m_themeCheckPage);
+                if (host) host->setProperty("ksword_search_body_page_id", QVariant());
             }
         });
         return;
@@ -475,7 +477,8 @@ bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool sin
         m_navigationPagePreparing = true;
         try
         {
-            if (useColdBodies && m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
+            if (useColdBodies && ((m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
+                || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)))
                 m_navigationSkippedColdBodies = true;
             else ensureTabInitialized(m_navigationPrepareCursor, false);
         }
@@ -733,8 +736,9 @@ void MiscDock::initializeMinidumpPage()
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_minidumpHostWidget);
     m_minidumpPage = new MinidumpDock(m_minidumpHostWidget);
+    const QPointer<QWidget> host(m_minidumpHostWidget);
     hostLayout->addWidget(m_minidumpPage, 1);
-    m_minidumpHostWidget->setProperty("ksword_search_body_page_id", QVariant());
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializePluginPage()
@@ -760,7 +764,7 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
-    if (index == 17)
+    if (index == 17 || index == 19)
         host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
@@ -827,7 +831,12 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
         main[17].coldBodyTexts = MinidumpDock::coldSearchBody();
         main[17].coldBodyComplete = true;
     }
-    main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
+    if (!existing || !existing->m_themeCheckPage)
+    {
+        main[19].coldBodyTexts = ks::misc::ThemeCheckPage::coldSearchBody();
+        main[19].coldBodyComplete = true;
+    }
+    else main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
     if (existing) main = existing->m_navigationTabs.describe(std::move(main));
     else main[4].visible = false; // MainWindow以相同配置/会话状态修正尚未构造的入口。
     ks::ui::PageNavigationCatalog schema;

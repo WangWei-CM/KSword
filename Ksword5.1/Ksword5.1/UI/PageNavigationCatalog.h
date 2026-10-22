@@ -15,6 +15,28 @@ namespace ads { class CDockWidget; }
 
 namespace ks::ui
 {
+    // Identical normalization for real controls and their cold search values.
+    inline QString StripUiSearchMnemonicMarkers(const QString& sourceText)
+    {
+        QString strippedText;
+        strippedText.reserve(sourceText.size());
+        for (int charIndex = 0; charIndex < sourceText.size(); ++charIndex)
+        {
+            const QChar currentChar = sourceText.at(charIndex);
+            if (currentChar == QLatin1Char('&'))
+            {
+                if (charIndex + 1 < sourceText.size() && sourceText.at(charIndex + 1) == QLatin1Char('&'))
+                {
+                    strippedText.append(QLatin1Char('&'));
+                    ++charIndex;
+                }
+                continue;
+            }
+            strippedText.append(currentChar);
+        }
+        return strippedText;
+    }
+
     // A cold factory's actual searchable text, with the real target's stable
     // object name. These are body records, never extra navigation pages.
     struct PageSearchBodyText

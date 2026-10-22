@@ -51,6 +51,8 @@
 
 namespace
 {
+    using ks::ui::StripUiSearchMnemonicMarkers;
+
     // g_activeSearchController：主窗口当前活动的标题栏搜索控制器。
     QPointer<ks::ui::GlobalUiSearchController> g_activeSearchController;
 
@@ -100,31 +102,6 @@ namespace
         rawText.replace(QLatin1Char('\r'), QLatin1Char(' '));
         rawText.replace(QLatin1Char('\t'), QLatin1Char(' '));
         return rawText.simplified();
-    }
-
-    // stripMnemonicMarkers：
-    // - 作用：去掉按钮/页签文本中的 '&' 助记符标记（'&&' 保留为单个 '&'）；
-    // - 传入 sourceText：可能带助记符的文本；
-    // - 传出：展示用文本。
-    QString stripMnemonicMarkers(const QString& sourceText)
-    {
-        QString strippedText;
-        strippedText.reserve(sourceText.size());
-        for (int charIndex = 0; charIndex < sourceText.size(); ++charIndex)
-        {
-            const QChar currentChar = sourceText.at(charIndex);
-            if (currentChar == QLatin1Char('&'))
-            {
-                if (charIndex + 1 < sourceText.size() && sourceText.at(charIndex + 1) == QLatin1Char('&'))
-                {
-                    strippedText.append(QLatin1Char('&'));
-                    ++charIndex;
-                }
-                continue;
-            }
-            strippedText.append(currentChar);
-        }
-        return strippedText;
     }
 
     // isWidgetChainRevealable：
@@ -225,7 +202,7 @@ namespace
                     if (tabIndex >= 0)
                     {
                         const QString tabText =
-                            normalizeUiText(stripMnemonicMarkers(tabWidget->tabText(tabIndex)));
+                            normalizeUiText(StripUiSearchMnemonicMarkers(tabWidget->tabText(tabIndex)));
                         if (!tabText.isEmpty())
                         {
                             innerPathParts.prepend(tabText);
@@ -269,7 +246,7 @@ namespace
             int bestRank = 3;
             for (const QString& text : candidates)
             {
-                const QString normalized = normalizeUiText(stripMnemonicMarkers(text));
+                const QString normalized = normalizeUiText(StripUiSearchMnemonicMarkers(text));
                 const int position = normalized.indexOf(query, 0, Qt::CaseInsensitive);
                 if (position < 0) continue;
                 const int rank = resolveMatchRank(normalized, query, position);
@@ -293,7 +270,7 @@ namespace
         QVector<ks::ui::UiSearchHit>& hits)
     {
         if (dock == nullptr) return;
-        const QString title = normalizeUiText(stripMnemonicMarkers(dock->windowTitle()));
+        const QString title = normalizeUiText(StripUiSearchMnemonicMarkers(dock->windowTitle()));
         const int position = title.indexOf(query, 0, Qt::CaseInsensitive);
         if (position < 0) return;
         ks::ui::UiSearchHit hit;
@@ -756,14 +733,14 @@ namespace ks::ui
 
                 if (auto* label = qobject_cast<QLabel*>(candidate)) appendHit(label, label->text());
                 else if (auto* button = qobject_cast<QAbstractButton*>(candidate))
-                    appendHit(button, stripMnemonicMarkers(button->text()));
+                    appendHit(button, StripUiSearchMnemonicMarkers(button->text()));
                 else if (auto* group = qobject_cast<QGroupBox*>(candidate)) appendHit(group, group->title());
                 else if (auto* tabs = qobject_cast<QTabWidget*>(candidate))
                 {
                     const int first = m_visibleOnly ? tabs->currentIndex() : 0;
                     const int end = m_visibleOnly ? std::min(tabs->count(), first + 1) : tabs->count();
                     for (int index = std::max(0, first); index < end; ++index)
-                        appendHit(tabs->widget(index), stripMnemonicMarkers(tabs->tabText(index)));
+                        appendHit(tabs->widget(index), StripUiSearchMnemonicMarkers(tabs->tabText(index)));
                 }
                 else if (auto* combo = qobject_cast<QComboBox*>(candidate))
                 {
@@ -811,7 +788,7 @@ namespace ks::ui
             {
                 if (m_hits.size() >= kMaxHitsPerDock) return;
                 if (entry.targetObjectName.isEmpty()) continue;
-                const QString text = normalizeUiText(entry.mnemonic ? stripMnemonicMarkers(entry.text) : entry.text);
+                const QString text = normalizeUiText(entry.mnemonic ? StripUiSearchMnemonicMarkers(entry.text) : entry.text);
                 const int matchIndex = text.indexOf(m_query, 0, Qt::CaseInsensitive);
                 if (text.isEmpty() || matchIndex < 0) continue;
                 const QString key = page.page.id + QLatin1Char('\x1f')
@@ -824,7 +801,13 @@ namespace ks::ui
                 hit.navigationBodyTargetName = entry.targetObjectName;
                 hit.navigationEnabled = page.page.enabled;
                 hit.matchedText = text;
-                QStringList path = page.path;
+                QStringList path;
+                for (qsizetype index = 0; index < page.path.size(); ++index)
+                {
+                    const QString title = normalizeUiText(index == 0 ? page.path[index]
+                        : StripUiSearchMnemonicMarkers(page.path[index]));
+                    if (!title.isEmpty()) path.append(title);
+                }
                 for (const auto& group : entry.groupTitles)
                     if (const QString title = normalizeUiText(group); !title.isEmpty()) path.append(title);
                 hit.pagePathText = path.join(QStringLiteral(" › "));
@@ -1757,11 +1740,13 @@ namespace ks::ui
                     };
                     QSet<QString> liveKeys;
                     for (const auto& hit : m_currentHitList)
-                        if (hit.navigationDescriptorId.isEmpty() && !hit.navigationRoot) liveKeys.insert(hitKey(hit));
+                        if ((hit.navigationDescriptorId.isEmpty() && !hit.navigationRoot)
+                            || !hit.navigationBodyTargetName.isEmpty()) liveKeys.insert(hitKey(hit));
                     for (qsizetype index = 0; index < m_currentHitList.size();)
                     {
                         const auto& hit = m_currentHitList[index];
-                        if ((!hit.navigationDescriptorId.isEmpty() || hit.navigationRoot) && liveKeys.contains(hitKey(hit)))
+                        if (hit.navigationBodyTargetName.isEmpty()
+                            && (!hit.navigationDescriptorId.isEmpty() || hit.navigationRoot) && liveKeys.contains(hitKey(hit)))
                             m_currentHitList.removeAt(index);
                         else ++index;
                     }

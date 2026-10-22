@@ -16,6 +16,7 @@ namespace ks::misc
     {
     public:
         static QStringList navigationRootSearchTexts();
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
         static ks::ui::PageNavigationCatalog navigationCatalog(const ThemeCheckPage* existing = nullptr);
         QWidget* activateNavigationDescriptor(const QString& id);
 
