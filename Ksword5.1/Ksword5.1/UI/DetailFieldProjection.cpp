@@ -393,8 +393,11 @@ namespace
             if (m_refreshing) { m_dirty = true; return; }
             m_refreshing = true;
             m_loading->setText(ks::i18n::text(QStringLiteral("shared.fields.loading"), QStringLiteral("正在准备字段...")));
-            m_loading->show();
-            positionLoading();
+            if (!m_snapshotReady)
+            {
+                m_loading->show();
+                positionLoading();
+            }
             const auto document = m_source->document();
             const QFont renderFont = font();
             const quint64 translationRevision = m_translationRevision;
@@ -728,8 +731,6 @@ namespace
             m_materializing = false;
             if (unfinished)
             {
-                m_loading->show();
-                positionLoading();
                 scheduleViewport();
             }
             else m_loading->hide();
