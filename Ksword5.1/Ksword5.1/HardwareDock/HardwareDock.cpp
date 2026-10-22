@@ -1305,8 +1305,20 @@ namespace
         table->clearSelection();
         table->selectionModel()->clearCurrentIndex();
         const QSet<QString> wanted(desiredKeys.cbegin(), desiredKeys.cend());
-        for (int row = table->rowCount() - 1; row >= 0; --row)
-            if (!wanted.contains(existingKeys.at(row))) table->removeRow(row);
+        for (int last = table->rowCount() - 1; last >= 0;)
+        {
+            if (wanted.contains(existingKeys.at(last)))
+            {
+                --last;
+                continue;
+            }
+            int first = last;
+            while (first > 0 && !wanted.contains(existingKeys.at(first - 1))) --first;
+            // One Qt removal for each contiguous obsolete range preserves surviving
+            // persistent identities without notifying every observer once per row.
+            table->model()->removeRows(first, last - first + 1);
+            last = first - 1;
+        }
         QHash<QString, int> rowByKey;
         for (int row = 0; row < table->rowCount(); ++row)
         {
@@ -1314,16 +1326,18 @@ namespace
             // Install the migration identity before matching; first population has no old rows.
             if (first != nullptr) rowByKey.insert(first->data(identityRole).toString(), row);
         }
+        int requiredRowCount = table->rowCount();
+        for (const QString& key : desiredKeys)
+        {
+            if (!rowByKey.contains(key)) rowByKey.insert(key, requiredRowCount++);
+        }
+        // QTableWidget appends this tail through one insertRows notification. USB
+        // snapshots can otherwise synchronously notify layout/filter observers 1024 times.
+        if (requiredRowCount != table->rowCount()) table->setRowCount(requiredRowCount);
         for (int rank = 0; rank < rows.size(); ++rank)
         {
             const QString& key = desiredKeys.at(rank);
-            int rowIndex = rowByKey.value(key, -1);
-            if (rowIndex < 0)
-            {
-                rowIndex = table->rowCount();
-                table->insertRow(rowIndex);
-                rowByKey.insert(key, rowIndex);
-            }
+            const int rowIndex = rowByKey.value(key);
             const QStringList& row = rows.at(rank);
             for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
             {
