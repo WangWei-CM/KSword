@@ -40,6 +40,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QAbstractButton;
 class QSplitter;
 class QTableWidget;
 class QTableWidgetItem;
@@ -321,7 +322,7 @@ private:
     static QString blueInputStyle();
     static QString blueHeaderStyle();
     static QString collapsePanelStyle(const QWidget* panel);
-    static QString collapseHeaderButtonStyle();
+    static QString collapseHeaderButtonStyle(const QAbstractButton* button);
     static QString providerTypeFromName(const QString& providerNameText);
     static QString now100nsText();
     static std::uint64_t currentSystemTime100ns();

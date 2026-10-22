@@ -123,7 +123,7 @@ QWidget* ProcessTraceMonitorWidget::createConfigurationCollapseSection(
     // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
     ks::ui::BindWidgetTheme(headerButton, [headerButton]()
     {
-        const QString style = collapseHeaderButtonStyle();
+        const QString style = collapseHeaderButtonStyle(headerButton);
         if (headerButton->styleSheet() != style)
         {
             headerButton->setStyleSheet(style);

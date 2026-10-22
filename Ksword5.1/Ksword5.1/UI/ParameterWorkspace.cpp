@@ -262,11 +262,13 @@ namespace
         ks::ui::BindWidgetTheme(widget, [target, footer, canvas]()
         {
             if (!target) return;
-            const QColor surface = ks::ui::MainWindowSurfaceColors().content;
+            const bool transparent = ks::ui::UsesTransparentMainSurface(target);
+            const QColor surface = transparent && canvas ? QColor(Qt::transparent)
+                : ks::ui::MainControlSurfaceColor(ks::ui::MainWindowSurfaceColors().content, target);
             const QColor divider = KswordTheme::BlendColors(surface, KswordTheme::BorderColor(), 70);
             const QString style = QStringLiteral(
                 "QWidget[ksword_parameter_surface=\"true\"]{background:%1;border:0;border-radius:%2px;%3}")
-                .arg(surface.name()).arg(canvas ? 0 : 8).arg(footer
+                .arg(surface.name(QColor::HexArgb)).arg(canvas ? 0 : 8).arg(footer
                     ? QStringLiteral("border-top:1px solid %1;border-top-left-radius:0;border-top-right-radius:0;").arg(divider.name())
                     : QString());
             target->setProperty("ksword_parameter_surface_style_block", style); // 完整中性容器块供按钮所有权识别。
@@ -319,7 +321,7 @@ namespace
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(fill);
+            painter.setBrush(ks::ui::MainControlSurfaceColor(fill, this));
             painter.drawRoundedRect(rect(), 5, 5);
 
             // 折角约 4×7 逻辑像素，低于正文的视觉权重，并跟随展开方向旋转。

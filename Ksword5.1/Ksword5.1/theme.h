@@ -1744,9 +1744,13 @@ namespace KswordTheme
 
     // 此块最后追加，覆盖背景图透明兜底；只影响ADS导航，不覆盖业务页面的QTabBar。
     // 父子控件与自绘hover必须共用上面的颜色，避免标签文字层露出背景色。
-    inline QString DockNavigationStyleSheet()
+    inline QString DockNavigationStyleSheet(int backgroundAlpha = 255)
     {
-        return QStringLiteral(R"(
+        const auto backgroundName = [backgroundAlpha](QColor color) {
+            color.setAlpha(qBound(0, backgroundAlpha, 255));
+            return color.name(QColor::HexArgb);
+        };
+        QString style = QStringLiteral(R"(
 ads--CDockAreaTitleBar,ads--CDockAreaTabBar{ background:%1 !important;background-color:%1 !important;color:%2 !important;}
 ads--CDockAreaTitleBar QToolButton,ads--CDockAreaTitleBar QPushButton{ background:%1 !important;background-color:%1 !important;color:%2 !important;border:none !important;}
 ads--CDockAreaTitleBar QToolButton:hover,ads--CDockAreaTitleBar QPushButton:hover{ background:%3 !important;background-color:%3 !important;color:%4 !important;}
@@ -1761,13 +1765,16 @@ ads--CDockWidgetTab[activeTab="true"],ads--CAutoHideTab[activeTab="true"],ads--C
 ads--CDockWidgetTab[activeTab="true"],ads--CAutoHideTab[activeTab="true"],ads--CDockWidgetTab[activeTab="true"]:hover,ads--CAutoHideTab[activeTab="true"]:hover,ads--CDockWidgetTab[kswordDockTab="true"][activeTab="true"]:hover,ads--CAutoHideTab[kswordAutoHideTab="true"][activeTab="true"]:hover,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab[activeTab="true"]:hover,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab[activeTab="true"]:hover{border-bottom:2px solid %7 !important;padding-bottom:1px;}
 ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true"] QWidget,ads--CAutoHideTab[activeTab="true"] QLabel,ads--CAutoHideTab[activeTab="true"] QWidget,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab[activeTab="true"]:hover QLabel,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CDockWidgetTab[activeTab="true"]:hover QWidget,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab[activeTab="true"]:hover QLabel,ads--CDockAreaWidget ads--CDockAreaTitleBar ads--CAutoHideTab[activeTab="true"]:hover QWidget{ background:transparent !important;background-color:transparent !important; color:%6 !important;}
 )")
-            .arg(ThemeColorName(DockTabBackgroundColor(DockTabState::Inactive)))
+            .arg(backgroundName(DockTabBackgroundColor(DockTabState::Inactive)))
             .arg(ThemeColorName(DockTabTextColor(DockTabState::Inactive)))
-            .arg(ThemeColorName(DockTabBackgroundColor(DockTabState::Hover)))
+            .arg(backgroundName(DockTabBackgroundColor(DockTabState::Hover)))
             .arg(ThemeColorName(DockTabTextColor(DockTabState::Hover)))
-            .arg(ThemeColorName(DockTabBackgroundColor(DockTabState::Active)))
+            .arg(backgroundName(DockTabBackgroundColor(DockTabState::Active)))
             .arg(ThemeColorName(DockTabTextColor(DockTabState::Active)))
             .arg(ThemeColorName(DockTabHighlightColor()));
+        if (backgroundAlpha < 255)
+            style += QStringLiteral("ads--CDockAreaTitleBar,ads--CDockAreaTabBar{background:transparent !important;background-color:transparent !important;}");
+        return style;
     }
 
     // ControlGlyphColor 作用：让箭头/勾号等控件图形从主题色派生，并对实际底色保持 3:1。
@@ -1884,8 +1891,12 @@ ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true
             .arg(ControlCornerRadius);
     }
 
-    inline QString ThemedComboBoxStyle(const QColor& surfaceColor = ControlInputSurfaceColor())
+    inline QString ThemedComboBoxStyle(const QColor& surfaceColor = ControlInputSurfaceColor(), int backgroundAlpha = 255)
     {
+        const auto backgroundName = [backgroundAlpha](QColor color) {
+            color.setAlpha(qBound(0, backgroundAlpha, 255));
+            return color.name(QColor::HexArgb);
+        };
         // 页面可传真实输入层；默认调用仍沿用独立窗口的输入角色。
         const QColor hoverColor = ControlInputHoverColor(surfaceColor);
         const QColor focusColor = ControlInputFocusColor(surfaceColor);
@@ -1926,18 +1937,18 @@ ads--CDockWidgetTab[activeTab="true"] QLabel,ads--CDockWidgetTab[activeTab="true
             "}"
             "QComboBox QLineEdit:disabled{background:transparent !important;color:%6 !important;border:none !important;}"
             "QComboBox QAbstractItemView{"
-            "  background:%1 !important;background-color:%1 !important;alternate-background-color:%1 !important;"
+            "  background:%13 !important;background-color:%13 !important;alternate-background-color:%13 !important;"
             "  color:%4 !important;border:1px solid %11 !important;border-radius:%12px;"
             "  selection-background-color:%7 !important;selection-color:%8 !important;outline:0;"
             "}"
-            "QComboBox QAbstractItemView::viewport{background:%1 !important;background-color:%1 !important;}"
-            "QComboBox QAbstractItemView::item{background:%1 !important;background-color:%1 !important;color:%4 !important;min-height:22px;padding:2px 6px;}"
-            "QComboBox QAbstractItemView::item:hover{background:%2 !important;background-color:%2 !important;color:%4 !important;}"
+            "QComboBox QAbstractItemView::viewport{background:%13 !important;background-color:%13 !important;}"
+            "QComboBox QAbstractItemView::item{background:%13 !important;background-color:%13 !important;color:%4 !important;min-height:22px;padding:2px 6px;}"
+            "QComboBox QAbstractItemView::item:hover{background:%14 !important;background-color:%14 !important;color:%4 !important;}"
             "QComboBox QAbstractItemView::item:selected{background:%7 !important;background-color:%7 !important;color:%8 !important;}")
-            .arg(surfaceColor.name(), hoverColor.name(), focusColor.name(), textColor.name(), mutedColor.name(),
+            .arg(backgroundName(surfaceColor), backgroundName(hoverColor), backgroundName(focusColor), textColor.name(), backgroundName(mutedColor),
                 disabledTextColor.name(), accentColor.name(), OnAccentColor(accentColor).name(), arrowPath)
             .arg(disabledArrowPath, BorderColorHex())
-            .arg(ControlCornerRadius);
+            .arg(ControlCornerRadius).arg(surfaceColor.name(), hoverColor.name());
     }
 
     inline QString ContextMenuStyle()

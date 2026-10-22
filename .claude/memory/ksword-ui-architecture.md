@@ -556,3 +556,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - USB等设备审计表的行增删通知保留，单元格批量填充阶段仅屏蔽model数据通知，结束后一次dataChanged，再恢复排序/选择/业务过滤。不得连结构信号一起屏蔽，否则持久行身份与冻结/搜索观察器失效。真实USB切页停顿仍须用户复测，不能由通知次数推算帧率。
 - 网络监控已有投影可继续交互，不能每批数据禁用整表导致按钮/图标变成Disabled再恢复。趋势捕获允许尾部追加，完整旧快照可在同代/同epoch及交互参数有效时先展示，再合并dirty追上，避免高负载下连续拒绝所有完成值；速率复用原接收/淘汰维护的秒桶。R0进入原预算消费通道前按队列余量限制查询，满则不前移cursor，不新增用户态丢包；R3原策略保留。设备打开失败且ENABLE未发出时才免除R0停用义务，真正IOCTL失败仍保留失败回执。
 - 透明主宿主的数据衬底统一由MainSurfaceStyle的TransparentMainDataSurfaceAlpha控制（192/255），表头节与工具带同入口；表头画布不再额外叠同色alpha层，前景按同一alpha的黑/白极端背板校准。独立窗和无背景模式保留原不透明配方，不用setWindowOpacity淡化文字。亮暗/主题色/背景模式热切换和GPU/普通表格实际合成仍由用户验收。
+
+- 同日用户要求可调控件背景：原固定192由AppearanceSettings::controlBackgroundOpacityPercent（默认75，0..100，control_background_opacity_percent）替代。设置→外观→背景的共享滑块只改待应用值；应用/取消/重载沿原流程。MainSurfaceStyle维护GUI线程运行值，变化时只失效原颜色/QSS代次、主/浮动宿主样式和已登记ThemeBinding，单改alpha不走业务枚举、背景文件重读或全局旧色扫描。表格/表头/工具带/标准按钮与输入/页签/ADS/监控时间轴复用现有绘制；Collapse与页根外壳透明，参数滚动三层由现有外板负责底面，避免重复同色铺底。参数正文只有实际alpha255才保留opaque快路径。下拉popup/独立窗和原生插件边界保持原实底，控件文字图标与语义颜色不整体淡化。82项实际alpha/cache/Combo弹层/ADS QSS纯值检查通过，无QApplication/QWidget；实际GUI与性能仍由用户测。

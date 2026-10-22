@@ -1,4 +1,5 @@
 #include "ProcessTraceTimelineWidget.h"
+#include "../UI/MainSurfaceStyle.h"
 #include "../theme.h"
 #include "../Internationalization/LanguageManager.h"
 
@@ -73,7 +74,7 @@ void ProcessTraceTimelineWidget::paintEvent(QPaintEvent* eventPointer)
     // - 这个矩形本身代表完整时间范围；
     // - 即使没有事件，也要保留清晰边界。
     painter.setPen(QPen(borderColor, 1.0));
-    painter.setBrush(surfaceColor);
+    painter.setBrush(ks::ui::MainControlSurfaceColor(surfaceColor, this));
     painter.drawRect(axisRect);
 
     // 行分隔线只做弱提示，主要类别信息由事件点颜色表达。

@@ -875,7 +875,8 @@ namespace
             "  color:%2;"
             "  border:none;"
             "}")
-            .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+            .arg(ks::ui::UsesTransparentMainSurface(panel) ? QStringLiteral("transparent")
+                : ks::ui::UsesMainSurfaceHierarchy(panel)
                 ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
             .arg(KswordTheme::TextPrimaryHex());
     }
@@ -883,10 +884,10 @@ namespace
     // collapseHeaderButtonStyle 作用：
     // - 重写折叠头按钮主题，避免继承旧 Collapse/QToolBox 的固定配色；
     // - 返回：可直接应用到 QToolButton 的样式表。
-    QString collapseHeaderButtonStyle()
+    QString collapseHeaderButtonStyle(const QAbstractButton* button)
     {
         // 纯色主题只接管颜色；保留本页按钮尺寸和业务选中状态。
-        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+        return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Auto, button)
             + QStringLiteral("QToolButton{border-radius:5px;padding:5px 8px;font-weight:600;text-align:left;}");
 
     }
@@ -927,7 +928,7 @@ namespace
         // 仅此明确折叠控件持有主题绑定，样式未变化时不重复 polish 子树。
         ks::ui::BindWidgetTheme(headerButton, [headerButton]()
         {
-            const QString style = collapseHeaderButtonStyle();
+            const QString style = collapseHeaderButtonStyle(headerButton);
             if (headerButton->styleSheet() != style)
             {
                 headerButton->setStyleSheet(style);

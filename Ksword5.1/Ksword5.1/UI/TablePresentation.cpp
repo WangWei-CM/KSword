@@ -274,7 +274,7 @@ namespace ks::ui
         const QColor headerColor = mainSurface ? surfaces.header : KswordTheme::SurfaceMutedColor();
         const QString headerSurface = MainDataSurfaceStyleColor(headerColor, transparentSurface);
         const QString headerCanvas = transparentSurface ? QStringLiteral("transparent") : headerSurface;
-        const int backdropWeight = transparentSurface ? 255 - TransparentMainDataSurfaceAlpha : 0;
+        const int backdropWeight = transparentSurface ? 255 - MainDataSurfaceAlpha() : 0;
         const QColor headerBackgrounds[] = {
             KswordTheme::BlendColors(headerColor, QColor(Qt::black), backdropWeight),
             KswordTheme::BlendColors(headerColor, QColor(Qt::white), backdropWeight)};

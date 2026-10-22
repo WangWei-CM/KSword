@@ -30,7 +30,7 @@ namespace
     };
 
     // 主窗口使用工作区层级，独立窗口使用现有表面角色；子栏与父栏用不同强度。
-    PageTabColors tabColors(bool mainSurface, bool child, bool joined = false)
+    PageTabColors tabColors(bool mainSurface, bool child, bool joined = false, bool transparent = false)
     {
         const ks::ui::MainSurfaceColors mainColors = ks::ui::MainWindowSurfaceColors();
         PageTabColors colors;
@@ -52,6 +52,13 @@ namespace
             colors.selected = mainSurface ? mainColors.header : KswordTheme::SurfaceAltColor();
         }
         colors.hovered = KswordTheme::BlendColors(colors.rail, colors.selected, 128);
+        if (transparent)
+        {
+            colors.page = Qt::transparent;
+            colors.rail.setAlpha(ks::ui::MainDataSurfaceAlpha());
+            colors.selected.setAlpha(ks::ui::MainDataSurfaceAlpha());
+            colors.hovered.setAlpha(ks::ui::MainDataSurfaceAlpha());
+        }
         return colors;
     }
 
@@ -86,9 +93,9 @@ namespace
             "%1::tab:left:selected,%1::tab:right:selected{border-left-color:%7;}"
             "%1 QToolButton{background:%9;color:%2;border:0;border-radius:5px;}"
             "%1 QToolButton:hover{background:%3;color:%4;}")
-            .arg(selector, text.name(), colors.hovered.name(), hoverText.name(),
-                colors.selected.name(), selectedText.name(), marker.name(),
-                disabledText.name(), colors.rail.name());
+            .arg(selector, text.name(), colors.hovered.name(QColor::HexArgb), hoverText.name(),
+                colors.selected.name(QColor::HexArgb), selectedText.name(), marker.name(),
+                disabledText.name(), colors.rail.name(QColor::HexArgb));
         if (child && colors.childNavigation)
         {
             // 子导航保留自然文字宽度；状态共享同一内缩与圆角，不复制父级贴边页签造型。
@@ -218,7 +225,7 @@ namespace
         }
         const bool child = tabs->tabBar()->property("ksword_page_tabs_child").toBool();
         const bool joined = tabs->property("ksword_joined_result_tabs").toBool(); // 连体结果区不重复内缩。
-        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined);
+        const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(tabs), child, joined, ks::ui::UsesTransparentMainSurface(tabs));
         const int inset = pageFrameInset(tabs); // 只计最内层明确登记的留白。
         const QVariant mainSurface = tabs->window()->property("ksword_main_surface_hierarchy");
         bool parameterCanvas = false; // 参数卡片内的Tab不再新增更暗的页根底板。
@@ -311,7 +318,7 @@ namespace
                 return;
             }
             // 外框层级与父子栏强调程度分开，子栏也保留清楚的同心外弧。
-            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), false);
+            const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), false, false, ks::ui::UsesTransparentMainSurface(m_tabs));
             QPainterPath square; // 只填外框圆弧之外的角落，保留内部原有圆角和留白。
             square.addRect(QRectF(rect()));
             QPainterPath content;
@@ -466,7 +473,7 @@ namespace
             }
             const bool child = m_tabs->tabBar()->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(ks::ui::UsesMainSurfaceHierarchy(m_tabs), child,
-                m_tabs->property("ksword_joined_result_tabs").toBool());
+                m_tabs->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(m_tabs));
             QPainter painter(this); // 水平/竖向导航均使用控制器给出的真实栏范围。
             painter.fillRect(rect(), colors.rail);
         }
@@ -979,7 +986,7 @@ namespace ks::ui
     {
         const bool child = bar && bar->property("ksword_page_tabs_child").toBool();
         return tabColors(UsesMainSurfaceHierarchy(bar), child,
-            bar && bar->property("ksword_joined_result_tabs").toBool()).rail;
+            bar && bar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(bar)).rail;
     }
 
     QColor PageTabIconContrastColor(const QColor& preferred)
@@ -1020,7 +1027,7 @@ namespace ks::ui
             }
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const PageTabColors colors = tabColors(UsesMainSurfaceHierarchy(safeBar), child,
-                safeBar->property("ksword_joined_result_tabs").toBool());
+                safeBar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(safeBar));
             return PageTabMotionColors{colors.selected, KswordTheme::EnsureTextContrast(
                 KswordTheme::ControlAccentColor(), colors.selected, 3.0)};
         });
@@ -1029,7 +1036,7 @@ namespace ks::ui
             const bool child = bar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
                 tabColors(UsesMainSurfaceHierarchy(bar), child,
-                    bar->property("ksword_joined_result_tabs").toBool()), child, true);
+                    bar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(bar)), child, true);
             if (bar->styleSheet() != rules)
             {
                 bar->setStyleSheet(rules); // 重复明确接入不再触发整栏polish和外壳StyleChange。
@@ -1048,7 +1055,7 @@ namespace ks::ui
             const bool child = safeBar->property("ksword_page_tabs_child").toBool();
             const QString rules = tabBarRules(QStringLiteral("QTabBar[ksword_page_tabs_style=\"true\"]"),
                 tabColors(UsesMainSurfaceHierarchy(safeBar), child,
-                    safeBar->property("ksword_joined_result_tabs").toBool()), child, true);
+                    safeBar->property("ksword_joined_result_tabs").toBool(), ks::ui::UsesTransparentMainSurface(safeBar)), child, true);
             if (safeBar->styleSheet() != rules)
             {
                 safeBar->setStyleSheet(rules);

@@ -198,10 +198,10 @@ namespace
         QPalette colors = button != nullptr && button->parentWidget() != nullptr
             ? button->parentWidget()->palette() : QApplication::palette();
         // 主窗口操作底色读取固定内容/表头层，避免嵌套卡片继承后再次加亮。
-        if (ks::ui::UsesMainSurfaceHierarchy(button))
+        if (ks::ui::UsesMainSurfaceHierarchy(button) || ks::ui::UsesTransparentMainSurface(button))
         {
             const ks::ui::MainSurfaceColors surfaces = ks::ui::MainWindowSurfaceColors();
-            colors.setColor(QPalette::Base, surfaces.content);
+            colors.setColor(QPalette::Base, ks::ui::MainControlSurfaceColor(surfaces.content, button));
             colors.setColor(QPalette::AlternateBase, surfaces.header);
             return colors;
         }
@@ -235,6 +235,10 @@ namespace
         const QPalette& palette, const QAbstractButton* button = nullptr)
     {
         using namespace ks::ui;
+        const bool transparentSurface = UsesTransparentMainSurface(button);
+        const auto backgroundName = [transparentSurface](const QColor& color) {
+            return MainDataSurfaceStyleColor(color, transparentSurface);
+        };
         QString style = QStringLiteral("/*KSWORD_FLAT_BUTTON_TONE_%1*/"
             "/*KSWORD_FLAT_BUTTON_APPEARANCE_%2*/").arg(static_cast<int>(tone)).arg(static_cast<int>(appearance));
         std::array<FlatButtonStateColors, 5> recipe;
@@ -268,11 +272,11 @@ namespace
                 "%1:pressed{background-color:%6;color:%7;border:none;}"
                 "%1:checked,%1:checked:hover{background-color:%8;color:%9;border:none;}"
                 "%1:disabled,%1:checked:disabled{background-color:%10;color:%11;border:none;}")
-                .arg(selector).arg(normal.transparent ? QStringLiteral("transparent") : normal.background.name())
-                .arg(normal.foreground.name()).arg(hover.background.name()).arg(hover.foreground.name())
-                .arg(pressed.background.name()).arg(pressed.foreground.name())
-                .arg(checked.background.name()).arg(checked.foreground.name())
-                .arg(disabled.transparent ? QStringLiteral("transparent") : disabled.background.name())
+                .arg(selector).arg(normal.transparent ? QStringLiteral("transparent") : backgroundName(normal.background))
+                .arg(normal.foreground.name()).arg(backgroundName(hover.background)).arg(hover.foreground.name())
+                .arg(backgroundName(pressed.background)).arg(pressed.foreground.name())
+                .arg(backgroundName(checked.background)).arg(checked.foreground.name())
+                .arg(disabled.transparent ? QStringLiteral("transparent") : backgroundName(disabled.background))
                 .arg(disabled.foreground.name());
         }
         return style + QStringLiteral("QToolButton::menu-button{background:transparent;border:none;}");
@@ -584,9 +588,9 @@ ks::ui::FlatButtonStateColors ks::ui::FlatButtonColorsForState(const QPalette& p
     return result;
 }
 
-QString ks::ui::BuildFlatButtonStyle(FlatButtonTone tone, FlatButtonAppearance appearance)
+QString ks::ui::BuildFlatButtonStyle(FlatButtonTone tone, FlatButtonAppearance appearance, const QAbstractButton* button)
 {
-    return ownedStyle(tone, appearance, QApplication::palette());
+    return ownedStyle(tone, appearance, button ? buttonPalette(button) : QApplication::palette(), button);
 }
 
 QString ks::ui::BuildSharedMainSurfaceButtonStyle()
@@ -685,7 +689,7 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
                     FlatButtonState::Pressed, FlatButtonState::Checked, FlatButtonState::Disabled})
                 {
                     appliedBackgrounds.append(QVariant::fromValue(
-                        FlatButtonColorsForState(colors, tone, actualAppearance, state).background));
+                        MainControlSurfaceColor(FlatButtonColorsForState(colors, tone, actualAppearance, state).background, guardedButton)));
                 }
             // 记录最后实际下发的完整样式及配方，逐帧图标无需再扫描同一祖先 QSS 链。
             // 页面后来追加/替换任意规则时精确字符串不相等，查询立即回到所有权检查。
@@ -811,7 +815,7 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     const FlatButtonStateColors colors = FlatButtonColorsForState(shared
             ? sharedRoot->property("ksword_shared_button_palette").value<QPalette>() : buttonPalette(button),
         static_cast<FlatButtonTone>(tone), appearance, actualState);
-    *background = colors.background;
+    *background = MainControlSurfaceColor(colors.background, button);
     return true;
 }
 

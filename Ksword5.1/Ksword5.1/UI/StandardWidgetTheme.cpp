@@ -270,7 +270,8 @@ namespace
                 ? ks::ui::MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
             // QSS的min-height指内容高度；保留2px上下padding后，实际单行高度必须仍一致。
             const int height = std::max(28, QFontMetrics(target->font()).height() + 12);
-            QString style = KswordTheme::ThemedComboBoxStyle(surface);
+            QString style = KswordTheme::ThemedComboBoxStyle(surface,
+                ks::ui::UsesTransparentMainSurface(target) ? ks::ui::MainDataSurfaceAlpha() : 255);
             if (target->maximumHeight() >= height
                 && target->minimumHeight() != target->maximumHeight())
             {

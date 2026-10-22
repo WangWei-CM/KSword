@@ -580,8 +580,10 @@ bool ks::ui::BindSpinBoxTheme(QAbstractSpinBox* spinBox)
             "QAbstractSpinBox:hover{background-color:%3;border:none;}"
             "QAbstractSpinBox:focus{background-color:%4;border:none;}"
             "QAbstractSpinBox:disabled{background-color:%5;color:%6;border:none;}")
-            .arg(background.name(), foreground.name(), hoverBackground.name(), focusBackground.name(),
-                disabledBackground.name(), disabledForeground.name())
+            .arg(MainDataSurfaceStyleColor(background, UsesTransparentMainSurface(guardedSpin)), foreground.name(),
+                MainDataSurfaceStyleColor(hoverBackground, UsesTransparentMainSurface(guardedSpin)),
+                MainDataSurfaceStyleColor(focusBackground, UsesTransparentMainSurface(guardedSpin)),
+                MainDataSurfaceStyleColor(disabledBackground, UsesTransparentMainSurface(guardedSpin)), disabledForeground.name())
             + QString::fromLatin1(kSpinStyleEnd);
         QString currentStyle = InitialStandaloneInputThemeStyle(guardedSpin);
         const QString style = replaceFieldStyle(std::move(currentStyle), block,
@@ -662,7 +664,7 @@ bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
             background = KswordTheme::SurfaceAltColor();
         }
         // 主页面固定采用编辑层，不从已变亮的父容器继续计算更亮的底面。
-        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField);
+        const bool mainSurface = UsesMainSurfaceHierarchy(guardedField) || UsesTransparentMainSurface(guardedField);
         background = mainSurface ? MainWindowSurfaceColors().input
             : KswordTheme::ControlInputSurfaceColor(pageSurface, background);
         const QColor hoverBackground = KswordTheme::ControlInputHoverColor(background);
@@ -698,8 +700,9 @@ bool ks::ui::BindLineEditTheme(QLineEdit* searchField)
             "QLineEdit:hover{background-color:%4;border:none;}"
             "QLineEdit:focus{background-color:%5;border:none;}"
             "QLineEdit:disabled{background-color:%1;color:%3;placeholder-text-color:%7;border:none;}")
-            .arg(background.name(), foreground.name(), disabledForeground.name(),
-                hoverBackground.name(), focusBackground.name(), placeholder.name(), disabledPlaceholder.name())
+            .arg(MainDataSurfaceStyleColor(background, UsesTransparentMainSurface(guardedField)), foreground.name(), disabledForeground.name(),
+                MainDataSurfaceStyleColor(hoverBackground, UsesTransparentMainSurface(guardedField)),
+                MainDataSurfaceStyleColor(focusBackground, UsesTransparentMainSurface(guardedField)), placeholder.name(), disabledPlaceholder.name())
             + QString::fromLatin1(kSearchStyleEnd);
         QString currentStyle = InitialStandaloneInputThemeStyle(guardedField);
         const QString style = replaceFieldStyle(std::move(currentStyle), block,

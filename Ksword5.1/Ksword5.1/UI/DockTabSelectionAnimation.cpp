@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./DockTabSelectionAnimation.h"
+#include "./MainSurfaceStyle.h"
 #include "./UiAnimationGate.h"
 #include "../include/ads/DockAreaTabBar.h"
 #include "../include/ads/DockWidgetTab.h"
@@ -111,11 +112,11 @@ namespace ks::ui
 
                 painter.save();
                 painter.setClipRect(tab->rect(), Qt::IntersectClip);
-                painter.fillRect(tab->rect(), KswordTheme::DockTabBackgroundColor(baseState));
+                painter.fillRect(tab->rect(), MainControlSurfaceColor(KswordTheme::DockTabBackgroundColor(baseState), tab));
                 if (!localSelection.isEmpty())
                 {
                     painter.fillRect(localSelection,
-                        KswordTheme::DockTabBackgroundColor(KswordTheme::DockTabState::Active));
+                        MainControlSurfaceColor(KswordTheme::DockTabBackgroundColor(KswordTheme::DockTabState::Active), tab));
                     const QRectF underline(localSelection.left(), qMax(0, tab->height() - 2),
                         localSelection.width(), qMin(2, tab->height())); // 当前帧的连续 2px 下划线。
                     painter.fillRect(underline, KswordTheme::DockTabHighlightColor());

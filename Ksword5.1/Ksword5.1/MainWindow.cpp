@@ -205,6 +205,7 @@ namespace
                 {QStringLiteral("background_image"), settings.backgroundImagePath},
                 {QStringLiteral("background_ready"), backgroundReady},
                 {QStringLiteral("background_opacity_percent"), settings.backgroundOpacityPercent},
+                {QStringLiteral("control_background_opacity_percent"), settings.controlBackgroundOpacityPercent},
                 {QStringLiteral("background_transparency"), settings.backgroundTransparencyEnabled},
                 {QStringLiteral("background_material"), settings.backgroundTranslucencyMaterial},
                 {QStringLiteral("background_blur_percent"), settings.backgroundBlurRadiusPercent},
@@ -1129,8 +1130,11 @@ namespace
             // 子 QLabel 会在父控件 paintEvent 返回后再绘制，因此文字不会被遮住。
             const bool activeTab = property("activeTab").toBool();
             painter.setPen(Qt::NoPen);
-            painter.setBrush(dockTabHoverFillColor(activeTab));
-            painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+            if (!ks::ui::UsesTransparentMainSurface(this))
+            {
+                painter.setBrush(dockTabHoverFillColor(activeTab));
+                painter.drawRect(paintEventObject != nullptr ? paintEventObject->rect() : rect());
+            }
             if (activeTab)
             {
                 // marker 为底部两像素强调边；补绘后仍与生产QSS和预览保持一致。
@@ -13097,6 +13101,9 @@ void MainWindow::applyAppearanceSettings(
     // 但快照采集依赖它，提前求值才能拿到“换色前”的主题状态。
     const bool effectiveThemeChanged =
         isInitialAppearanceApply || KswordTheme::IsDarkModeEnabled() != darkModeEnabled;
+    const bool controlOpacityChanged = isInitialAppearanceApply
+        || previousSettings.controlBackgroundOpacityPercent != settings.controlBackgroundOpacityPercent;
+    ks::ui::SetMainDataSurfaceOpacityPercent(settings.controlBackgroundOpacityPercent);
     // themeVisualRefreshRequired 用途：作为所有专用主题控件的唯一重建条件。
     // 深浅主题、强调色或独立主背景色任一变化，都必须进入同一刷新入口。
     const bool themeVisualRefreshRequired =
@@ -13217,7 +13224,7 @@ void MainWindow::applyAppearanceSettings(
         || (previousBackgroundImageReady || windowTranslucencyActive) != enableDockContentTransparency;
     const bool mainStyleRefreshRequired =
         themeVisualRefreshRequired
-        || dockTransparencyChanged;
+        || dockTransparencyChanged || controlOpacityChanged;
     const bool backgroundRefreshRequired =
         isInitialAppearanceApply
         || effectiveThemeChanged
@@ -13443,6 +13450,8 @@ void MainWindow::applyAppearanceSettings(
             m_notificationCardManager->applySettings(m_currentAppearanceSettings);
         }
     }
+    if (!themeVisualRefreshRequired && (controlOpacityChanged || dockTransparencyChanged))
+        ks::ui::RefreshWidgetThemeBindings();
     if (themeVisualRefreshRequired)
     {
         refreshThemeDependentVisuals(darkModeEnabled);
@@ -14029,7 +14038,8 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
     // tooltipStyle 作用：
     // - 强制全局提示框采用主题化背景和文字；
     // - 修复深色模式下 Tooltip 仍为白底的问题。
-    const QString windowBackgroundText = KswordTheme::MainBackgroundColorHex();
+    const QString windowBackgroundText = ks::ui::MainDataSurfaceStyleColor(
+        KswordTheme::MainBackgroundColor(), enableDockContentTransparency);
     const QString windowTextColor = KswordTheme::MainBackgroundTextColorHex();
     const QString surfaceBackgroundText = KswordTheme::SurfaceColorHex();
     const QString surfaceAltBackgroundText = KswordTheme::SurfaceAltColorHex();
@@ -14404,7 +14414,7 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
             + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
             + tabPluginOpaqueStyle
             + finalOrdinaryTabHoverStyle
-            + KswordTheme::DockNavigationStyleSheet();
+            + KswordTheme::DockNavigationStyleSheet(enableDockContentTransparency ? ks::ui::MainDataSurfaceAlpha() : 255);
     }
 
     return rootStyle
@@ -14460,5 +14470,5 @@ QString MainWindow::buildAppearanceOverlayStyleSheet(
         + ks::ui::BuildMainSurfaceStyle(enableDockContentTransparency)
         + tabPluginOpaqueStyle
         + finalOrdinaryTabHoverStyle
-        + KswordTheme::DockNavigationStyleSheet();
+        + KswordTheme::DockNavigationStyleSheet(enableDockContentTransparency ? ks::ui::MainDataSurfaceAlpha() : 255);
 }

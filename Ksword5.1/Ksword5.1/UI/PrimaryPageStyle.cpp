@@ -145,7 +145,8 @@ namespace ks::ui
                 // 控件自身的完整状态规则优先于 Dock 透明祖先，热切换不留下旧色快照。
                 const QColor surface = UsesMainSurfaceHierarchy(target)
                     ? MainWindowSurfaceColors().input : KswordTheme::ControlInputSurfaceColor();
-                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle(surface));
+                ReplacePrimaryStyle(target, KswordTheme::ThemedComboBoxStyle(surface,
+                    UsesTransparentMainSurface(target) ? MainDataSurfaceAlpha() : 255));
                 if (target->property("ksword_standalone_input").toBool())
                 {
                     StyleStandaloneInput(target);
@@ -198,7 +199,7 @@ namespace ks::ui
                 "subcontrol-origin:padding;subcontrol-position:top left;left:16px;top:10px;"
                 "padding:0;background:transparent;color:%2;font-weight:600;}"
                 "QGroupBox[ksword_primary_group=\"true\"]::title:disabled{color:%3;}")
-                .arg(surface.name(), title.name(), disabled.name())
+                .arg(UsesTransparentMainSurface(target) ? QStringLiteral("transparent") : surface.name(), title.name(), disabled.name())
                 .arg(target->title().isEmpty() ? 10 : 32));
         });
     }
@@ -265,7 +266,7 @@ namespace ks::ui
             const bool mainSurface = UsesMainSurfaceHierarchy(target) || transparentSurface;
             const MainSurfaceColors surfaces = MainWindowSurfaceColors();
             const bool outlined = target->property("ksword_primary_content_panel_outlined").toBool();
-            const QString background = transparentSurface && outlined ? QStringLiteral("transparent")
+            const QString background = transparentSurface ? QStringLiteral("transparent")
                 : mainSurface ? MainDataSurfaceStyleColor(surfaces.content, transparentSurface)
                 : outlined ? QStringLiteral("transparent") : KswordTheme::SurfaceColor().name();
             const QString rules = outlined ? QStringLiteral(
@@ -298,7 +299,8 @@ namespace ks::ui
             const QColor canvas = UsesMainSurfaceHierarchy(target)
                 ? MainWindowSurfaceColors().canvas : KswordTheme::WindowColor();
             ReplacePrimaryStyle(target, QStringLiteral(
-                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;border-radius:8px;}").arg(canvas.name()));
+                "QWidget[ksword_workspace_page=\"true\"]{background:%1;border:0;border-radius:8px;}")
+                    .arg(UsesTransparentMainSurface(target) ? QStringLiteral("transparent") : canvas.name()));
         });
     }
 

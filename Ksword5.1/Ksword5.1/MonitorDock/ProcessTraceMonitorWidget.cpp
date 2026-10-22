@@ -132,15 +132,16 @@ QString ProcessTraceMonitorWidget::collapsePanelStyle(const QWidget* panel)
         "  color:%2;"
         "  border:none;"
         "}")
-        .arg(ks::ui::UsesMainSurfaceHierarchy(panel)
+        .arg(ks::ui::UsesTransparentMainSurface(panel) ? QStringLiteral("transparent")
+            : ks::ui::UsesMainSurfaceHierarchy(panel)
             ? ks::ui::MainWindowSurfaceColors().content.name() : KswordTheme::SurfaceHex())
         .arg(KswordTheme::TextPrimaryHex());
 }
 
-QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle()
+QString ProcessTraceMonitorWidget::collapseHeaderButtonStyle(const QAbstractButton* button)
 {
     // 纯色主题只接管颜色；保留本页按钮尺寸和业务选中状态。
-    return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral)
+    return ks::ui::BuildFlatButtonStyle(ks::ui::FlatButtonTone::Neutral, ks::ui::FlatButtonAppearance::Auto, button)
         + QStringLiteral("QToolButton{border-radius:5px;padding:5px 8px;font-weight:600;text-align:left;}");
 
 }

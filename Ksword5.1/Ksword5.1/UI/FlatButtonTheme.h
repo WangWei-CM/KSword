@@ -51,7 +51,7 @@ namespace ks::ui
     // 返回仅针对 QPushButton/QToolButton 的纯色无线框主题规则；不改变尺寸或业务状态。
     // 页面可继续追加自身 padding/圆角/字号；普通与强调态使用 palette 动态颜色。
     QString BuildFlatButtonStyle(FlatButtonTone tone = FlatButtonTone::Neutral,
-        FlatButtonAppearance appearance = FlatButtonAppearance::Auto);
+        FlatButtonAppearance appearance = FlatButtonAppearance::Auto, const QAbstractButton* button = nullptr);
 
     // Shared main-surface colors apply only to controls that passed the exact
     // palette/cascade checks; every other control retains its local owner.
