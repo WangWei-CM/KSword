@@ -5,6 +5,7 @@
 #include "../UI/FlatButtonTheme.h"
 #include "../UI/ParameterWorkspace.h"
 #include "../UI/PrimaryPageStyle.h"
+#include "../UI/PerfTrace.h"
 
 #include "../theme.h"
 #include "../UI/AdaptivePageScroll.h"
@@ -102,17 +103,47 @@ namespace
     // Values and ownership cross the worker boundary; no QWidget, model or
     // document is accessed by the queued callable. The watcher dies with page.
     template<typename Value, typename Work, typename Apply>
-    void submitPageTransaction(QObject* page, Work work, Apply apply)
+    void submitPageTransaction(QObject* page, Work work, Apply apply
+#if KSWORD_PERF_TRACE_ENABLED
+        , const ks::ui::PerfTraceContext traceContext = {}
+#endif
+        )
     {
         using Result = DdmaTaskResult<Value>;
         auto promise = std::make_shared<QPromise<Result>>();
         auto* const watcher = new QFutureWatcher<Result>(page);
         watcher->setFuture(promise->future());
+#if KSWORD_PERF_TRACE_ENABLED
+        QMetaObject::Connection receiverDestroyed;
+        if (traceContext.requestId != 0 || traceContext.actionId != 0)
+        {
+            receiverDestroyed = QObject::connect(page, &QObject::destroyed,
+                [traceContext]() {
+                // The serialized worker is not cancelled by page destruction.
+                // Its eventual return must never be reported as UI readiness.
+                ks::ui::RecordPerfAsyncTrace("ddma_transaction_receiver_destroyed", traceContext);
+            });
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_submit", traceContext);
+        }
+#endif
         QObject::connect(watcher, &QFutureWatcher<Result>::finished, page,
-            [watcher, apply = std::move(apply)]() {
+            [watcher, apply = std::move(apply)
+#if KSWORD_PERF_TRACE_ENABLED
+                , traceContext, receiverDestroyed
+#endif
+            ]() {
             const auto result = watcher->result();
             watcher->deleteLater();
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope traceScope(traceContext);
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_ui_delivery", traceContext);
+#endif
             apply(result);
+#if KSWORD_PERF_TRACE_ENABLED
+            // Keep the bounded destruction hook through the real apply body;
+            // it is a discard outcome, not a business-ready substitute.
+            QObject::disconnect(receiverDestroyed);
+#endif
         });
         promise->start();
         Result rejected;
@@ -120,7 +151,15 @@ namespace
         try
         {
             accepted = ksword::memory_backend::submitDdmaTransaction(
-            [promise, work = std::move(work)]() {
+            [promise, work = std::move(work)
+#if KSWORD_PERF_TRACE_ENABLED
+                , traceContext
+#endif
+            ]() {
+#if KSWORD_PERF_TRACE_ENABLED
+            const ks::ui::PerfTraceContextScope traceScope(traceContext);
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_worker_begin", traceContext);
+#endif
             Result result;
             try
             {
@@ -134,6 +173,10 @@ namespace
             {
                 result.failure = QStringLiteral("DDMA transaction failed unexpectedly.");
             }
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace(result.failure.isEmpty()
+                ? "ddma_transaction_worker_returned" : "ddma_transaction_worker_exception", traceContext);
+#endif
             promise->addResult(std::move(result));
             promise->finish();
         });
@@ -148,6 +191,9 @@ namespace
         }
         if (!accepted)
         {
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace("ddma_transaction_queue_rejected", traceContext);
+#endif
             if (rejected.failure.isEmpty())
             {
                 rejected.failure = QStringLiteral("DDMA transaction queue is full; wait for the current operation and retry.");
@@ -665,6 +711,12 @@ void DdmaPage::probeChannels()
     {
         return;
     }
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto inputContext = ks::ui::CapturePerfTraceContext();
+    const ks::ui::PerfTraceContextScope inputScope(inputContext);
+    const auto traceContext = ks::ui::BeginPerfAsyncTrace();
+    ks::ui::RecordPerfAsyncTrace("ddma_probe_ui_accepted", traceContext);
+#endif
     std::uint64_t scratchLba = 0ULL;
     QString lbaError;
     const bool lbaValid = parseScratchLbaFromUi(scratchLba, lbaError);
@@ -697,7 +749,14 @@ void DdmaPage::probeChannels()
             const ksword::ark::DriverClient client;
             return client.queryDdmaCapability(lbaValid, scratchLba, lbaValid);
         },
-        [this, lbaValid, lbaError, previousDeviceIndex, hadSelection](const auto& completed) {
+        [this, lbaValid, lbaError, previousDeviceIndex, hadSelection
+#if KSWORD_PERF_TRACE_ENABLED
+            , traceContext
+#endif
+        ](const auto& completed) {
+#if KSWORD_PERF_TRACE_ENABLED
+        const QPointer<DdmaPage> perfAlive(this);
+#endif
         m_operationBusy = false;
         refreshOperationState();
         auto result = completed.value;
@@ -721,6 +780,9 @@ void DdmaPage::probeChannels()
                     QStringLiteral("探测失败：%1").arg(QString::fromStdString(result.io.message)));
             }
             refreshSessionState();
+#if KSWORD_PERF_TRACE_ENABLED
+            if (perfAlive) { ks::ui::RecordPerfAsyncTrace("ddma_probe_failed", traceContext); }
+#endif
             return;
         }
 
@@ -818,8 +880,21 @@ void DdmaPage::probeChannels()
             m_capabilityLabel->setText(capabilityText);
         }
 
+#if KSWORD_PERF_TRACE_ENABLED
+        const auto perfDiskCount = static_cast<qint64>(m_diskCache.size());
+#endif
         refreshSessionState();
-    });
+#if KSWORD_PERF_TRACE_ENABLED
+        // Full canonical disk snapshot, every table cell and selection, labels,
+        // session publication and its original callback have completed. This
+        // says nothing about paint or compositor presentation.
+        if (perfAlive) { ks::ui::RecordPerfAsyncTrace("ddma_probe_business_data_ready", traceContext, perfDiskCount); }
+#endif
+    }
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    );
 }
 
 bool DdmaPage::physicalDriveIndexFromDeviceName(
@@ -1489,6 +1564,12 @@ void DdmaPage::detectScratchFromUi()
         return;
     }
     const auto entry = m_diskCache[static_cast<std::size_t>(row)];
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto inputContext = ks::ui::CapturePerfTraceContext();
+    const ks::ui::PerfTraceContextScope inputScope(inputContext);
+    const auto traceContext = ks::ui::BeginPerfAsyncTrace();
+    ks::ui::RecordPerfAsyncTrace("ddma_scratch_ui_accepted", traceContext);
+#endif
     struct ScratchResult
     {
         ScratchDetection detection;
@@ -1520,7 +1601,11 @@ void DdmaPage::detectScratchFromUi()
         sourceField.translateValue = true;
         result.context.fields.nodes.first().children.prepend(sourceField);
         return result;
-    }, [this](const auto& completed) {
+    }, [this
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    ](const auto& completed) {
         m_operationBusy = false;
         refreshOperationState();
         const auto& detection = completed.value.detection;
@@ -1535,6 +1620,9 @@ void DdmaPage::detectScratchFromUi()
                 m_scratchContextView->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("侦测未得出候选。")));
             }
             if (m_scratchBytesView != nullptr) { m_scratchBytesView->clear(); m_scratchBytesView->hide(); }
+#if KSWORD_PERF_TRACE_ENABLED
+            ks::ui::RecordPerfAsyncTrace("ddma_scratch_failed", traceContext);
+#endif
             return;
         }
         const auto& context = completed.value.context;
@@ -1564,13 +1652,24 @@ void DdmaPage::detectScratchFromUi()
         {
             m_scratchLbaEdit->setText(QString::number(detection.suggestedLba));
         }
+#if KSWORD_PERF_TRACE_ENABLED
+        // Only the candidate's complete canonical document/preview/LBA are
+        // published here. The required automatic channel probe is still pending
+        // and receives a child request ID from this apply context below.
+        ks::ui::RecordPerfAsyncTrace("ddma_scratch_candidate_snapshot_ready", traceContext);
+        ks::ui::RecordPerfAsyncTrace("ddma_scratch_followup_probe", traceContext);
+#endif
 
         // 填完 LBA 立刻重探一次。没有这一步，磁盘表里留着的还是"未探测（需先填写
         // 暂存 LBA）"的旧结果，用户接着点"启用选中磁盘"就会撞上一句
         // "这块磁盘没有通过 DMA 探测"——而他刚刚才把 LBA 填好，那句话只会让人困惑。
         // probeChannels 内部会还原选中行，并在末尾刷新会话状态。
         probeChannels();
-    });
+    }
+#if KSWORD_PERF_TRACE_ENABLED
+        , traceContext
+#endif
+    );
 }
 
 void DdmaPage::activateSelectedDisk()
