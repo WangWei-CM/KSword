@@ -501,6 +501,7 @@ namespace ks::privilege
                 auto* watcher = new QFutureWatcher<OperationResult>(this);
                 m_operationWatcher = watcher;
                 connect(watcher, &QFutureWatcher<OperationResult>::finished, this, [this, watcher] {
+                    disconnect(watcher, nullptr, this, nullptr);
                     auto result = watcher->result();
                     watcher->setFuture({});
                     watcher->deleteLater();
@@ -591,6 +592,7 @@ namespace ks::privilege
                 auto* watcher = new QFutureWatcher<Projection>(this);
                 m_filterWatcher = watcher;
                 connect(watcher, &QFutureWatcher<Projection>::finished, this, [this, watcher, revision] {
+                    disconnect(watcher, nullptr, this, nullptr);
                     auto projection = watcher->result();
                     watcher->setFuture({});
                     watcher->deleteLater();

@@ -202,6 +202,9 @@ namespace
         auto* watcher = new QFutureWatcher<Result>(page);
         QObject::connect(watcher, &QFutureWatcher<Result>::finished, page, [watcher, done, owner = QPointer<QObject>(page)]()
         {
+            // Detaching a finished future posts another finished notification.
+            // Disconnect before reset so this completion can only consume one result.
+            QObject::disconnect(watcher, nullptr, owner.data(), nullptr);
             auto result = watcher->result();
             const QPointer<QObject> alive(watcher);
             watcher->setFuture({});

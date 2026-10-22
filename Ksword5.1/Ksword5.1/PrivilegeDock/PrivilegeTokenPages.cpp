@@ -500,6 +500,7 @@ namespace
         auto* watcher = new QFutureWatcher<SharedResult>(owner);
         QObject::connect(watcher, &QFutureWatcher<SharedResult>::finished, owner, [watcher, done, alive = QPointer<QWidget>(owner)]()
         {
+            QObject::disconnect(watcher, nullptr, alive.data(), nullptr);
             auto result = watcher->result();
             const QPointer<QObject> watcherAlive(watcher);
             watcher->setFuture({});
