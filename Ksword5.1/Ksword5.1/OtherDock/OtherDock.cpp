@@ -4020,6 +4020,10 @@ void OtherDock::initializeUi()
 
     m_thumbnailLabel = new QLabel(m_previewWidget);
     m_thumbnailLabel->setMinimumSize(320, 220);
+    // The pixmap is a projection into this layout slot, never a new size hint.
+    // QLabel otherwise adds its frame to each captured size on every refresh,
+    // steadily enlarging the preview and taking height from the properties.
+    m_thumbnailLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     m_thumbnailLabel->setAlignment(Qt::AlignCenter);
     m_thumbnailLabel->setStyleSheet(QStringLiteral(
         "border:1px solid %1;background:%2;")
@@ -4610,7 +4614,7 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
         m_previewCaptureDue = true;
         m_thumbnailLabel->setPixmap(QPixmap());
     }
-    const QSize targetSize = m_thumbnailLabel->size();
+    const QSize targetSize = m_thumbnailLabel->contentsRect().size();
     const qreal dpr = m_thumbnailLabel->devicePixelRatioF();
     if (targetSize != m_previewSize || dpr != m_previewDpr)
         m_previewCaptureDue = true;
@@ -4620,7 +4624,7 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
         // QScreen/QPixmap remain on their GUI thread. Only owned QImage pixels
         // and size/DPR values cross the worker boundary.
         QPixmap source;
-        if (info->valid)
+        if (info->valid && !info->windowRect.isEmpty())
             if (auto* screen = QGuiApplication::primaryScreen())
                 source = screen->grabWindow(static_cast<WId>(info->hwndValue));
         m_previewCaptureDue = false;
@@ -4655,7 +4659,7 @@ void OtherDock::updatePreviewPanel(const WindowInfo* info)
                     const auto current = m_windowTree->currentIndex();
                     if (!current.isValid() || !m_windowTree->selectionModel()->isSelected(current) || ks::window::windowItemIdentity(current) != result.identity ||
                         result.identity != m_previewIdentity || !m_thumbnailLabel->isVisible() ||
-                        result.size != m_thumbnailLabel->size() || result.dpr != m_thumbnailLabel->devicePixelRatioF())
+                        result.size != m_thumbnailLabel->contentsRect().size() || result.dpr != m_thumbnailLabel->devicePixelRatioF())
                     {
                         m_previewCaptureDue = true;
                         return true;
