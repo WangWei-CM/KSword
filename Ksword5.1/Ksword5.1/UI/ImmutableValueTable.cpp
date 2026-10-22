@@ -241,14 +241,17 @@ namespace ks::ui
         auto* watcher = new QFutureWatcher<PreparedValue>(this);
         state.watcher = watcher;
         connect(watcher, &QFutureWatcher<PreparedValue>::finished, this, [this, watcher, revision, dataRevision] {
-            auto result = watcher->result();
+            // Resetting to the default (finished, result-less) future can post
+            // another finished notification before deleteLater is delivered.
+            disconnect(watcher, nullptr, this, nullptr);
+            auto result = watcher->future().resultCount() > 0 ? watcher->result() : PreparedValue{};
             const QPointer<ImmutableValueTable> completionOwner(this);
             watcher->setFuture({});
             if (!completionOwner) { retire(std::move(result)); return; }
             watcher->deleteLater();
             auto& state = *m_state;
             state.watcher = nullptr; state.running = false;
-            if (dataRevision == state.dataRevision && result->projection)
+            if (result && dataRevision == state.dataRevision && result->projection)
             {
                 retire(std::move(state.source));
                 state.source = result->projection->source;
@@ -257,13 +260,14 @@ namespace ks::ui
             const QPointer<ImmutableValueTable> alive(this);
             if (revision == state.revision->load())
             {
-                if (!result->error.isEmpty())
+                const QString error = result ? result->error : QStringLiteral("后台任务发生异常。");
+                if (!error.isEmpty())
                 {
                     // A failed replacement keeps the previous projection usable. Enabling
                     // may synchronously close the owner or request newer data.
                     setEnabled(true);
                     if (alive && revision == m_state->revision->load() && preparationFailed)
-                        preparationFailed(ks::i18n::sourceText(result->error));
+                        preparationFailed(ks::i18n::sourceText(error));
                 }
                 else if (result->projection)
                 {

@@ -540,3 +540,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 诊断宏1按实际ADS currentChanging→当前widget同步show返回→currentChanged记录同一dock_switch的begin/selected/限定ready/end。ready仅对进入前已初始化、同一Dock/同一内容实例、仍可见且未closed/initializing成立，边界名ads_current_widget_show_returned；不声称queued布局、业务数据或present已完成。嵌套替换/目标改变/内容替换/销毁不伪造ready，初始/焦点观察仍单列。原visibilityChanged的0ms挂载回调仅宏1保存/恢复输入context，原可见/寿命/构造准入保持。61项实际闭包QtCore/QObject替身检查和宏0全MainWindow token恒等通过；真实ADS/GUI/50次循环另由用户验收。没有新增主题准备、系统查询、业务等待或通用接管框架。
 
 - 2026-10-22 用户诊断日志确认持续出现七个复选框一组的StyleChange及双倍PaletteChange。`NormalizeToolbarControl`原来向所有QAbstractButton追加只匹配QPushButton/QToolButton的几何QSS；日志面板七个复选框的独立主题绑定又恢复纯颜色QSS，两者经原队列反复覆盖。几何追加现只对真实QPushButton/QToolButton执行，复选框/单选框原高度、图标尺寸、标记和业务状态保持。不得靠停掉主题绑定、忽略真实换肤或单纯节流掩盖此循环；复用工具行时须检查其QSS选择器实际覆盖的控件类型。诊断记录存在丢失，不能据此计算完整帧率或推定普通版耗时；修复后GUI/实际性能由用户验收。
+
+- 2026-10-22 构建35反馈的线程/模块等崩溃，匹配旧EXE/PDB的dump落在`ImmutableValueTable::startPending`完成回调读取零结果的QFuture。`watcher->setFuture({})`切到默认的已完成空Future，可在`deleteLater`前再投递finished；必须先断开该watcher到接收者的完成连接，并在读取结果前检查resultCount。空/空指针结果沿既有失败通道恢复旧表可用性，不能当作空成功覆盖数据；旧代结果继续受revision门禁。分析旧dump须匹配其实际模块路径/PE-PDB身份，反馈文件引用一个发行目录不代表所有dump都来自同一构建。
