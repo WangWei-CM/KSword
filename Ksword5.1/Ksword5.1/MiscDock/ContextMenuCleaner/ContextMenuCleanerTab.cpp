@@ -72,8 +72,8 @@ QString contextBodySource(ContextBody id)
 }
 QString contextAreaTarget(int area, const char* suffix)
 {
-    return QStringLiteral("ks_context_%1_%2")
-        .arg(QString::fromLatin1(kContextMenuNavigation[area].id), QString::fromLatin1(suffix));
+    return QString::fromLatin1("ks_context_") + QString::fromLatin1(kContextMenuNavigation[area].id)
+        + QLatin1Char('_') + QString::fromLatin1(suffix);
 }
 QStringList contextHeaderSources()
 {
