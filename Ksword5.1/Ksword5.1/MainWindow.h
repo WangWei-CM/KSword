@@ -283,6 +283,9 @@ private:
     void applyDdmaButtonState();
     void showHvmMenu(const QPoint& globalPosition);
     void refreshHvmStatusAsync();
+    void bindMemoryHvmAvailabilityConsumer();
+    bool canRefreshHvmMemoryAvailability() const;
+    void invalidateMemoryHvmAvailability(const QString& reason = {});
     void applyHvmButtonState();
     // runHvmSoak：启动常驻、保持指定毫秒数、再停止，用于证明常驻能长期存活。
     void runHvmSoak(unsigned long milliseconds);
@@ -826,6 +829,10 @@ private:
         ksword::hvm::HvmAvailability::DriverNotRunning;
     bool m_hvmFaulted = false;                  // m_hvmFaulted：存在故障或待回滚，点击前必须先重置。
     bool m_hvmQueryInFlight = false;            // m_hvmQueryInFlight：合并并发的后台状态查询，避免请求堆积。
+    bool m_hvmQueryIncludesMemoryAvailability = false;
+    bool m_hvmMemoryAvailabilityFollowupPending = false;
+    quint64 m_hvmMemoryAvailabilityQueryEpoch = 0;
+    quint64 m_hvmMemoryAvailabilityGeneration = 0;
     bool m_hvmOperationRunning = false;         // m_hvmOperationRunning：常驻切换或保持自检期间禁用按钮。
     unsigned long m_hvmGeneration = 0;          // m_hvmGeneration：用于 compare-before 控制请求的状态代次。
     // m_hvmBackend：驱动当前选定的虚拟化后端，取 KSWORD_ARK_HVM_BACKEND_*。

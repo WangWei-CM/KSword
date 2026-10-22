@@ -5743,6 +5743,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // 异步停驱会保留事件循环，窗口仍存活时也不能再让旧预检弹出新的 R0 选择框。
     m_r0UnavailablePromptArmed = false;
     m_r0UnavailablePromptShowing = false;
+    invalidateMemoryHvmAvailability();
     m_r0NotificationLifetime->store(false, std::memory_order_release);
 
     // 救援实例临时借用驱动和布局；退出时不覆盖主实例的配置，也不停止全局 R0 服务。
@@ -5856,6 +5857,7 @@ void MainWindow::beginCoordinatedShutdownWait()
     if (m_shutdownOriginalTitle.isEmpty()) m_shutdownOriginalTitle = windowTitle();
     m_shutdownWaiting = true;
     m_r0UnavailablePromptArmed = false;
+    invalidateMemoryHvmAvailability();
     m_r0NotificationLifetime->store(false, std::memory_order_release);
     m_shutdownLastPending = static_cast<std::size_t>(-1);
     m_shutdownClock.start();
@@ -8887,7 +8889,8 @@ void MainWindow::attachPrivilegeStatusButtonsToPrimaryDockTabBar()
 
 void MainWindow::handleR0DriverUnavailable(const unsigned long win32Error)
 {
-    Q_UNUSED(win32Error);
+    invalidateMemoryHvmAvailability(
+        QStringLiteral("查询 R-1 内存窗口失败：%1").arg(formatWin32ErrorText(win32Error)));
     // 先合并通知，再把只读 SCM 查询放到线程池，避免弹框前在 UI 线程等待系统服务调用。
     // pending 与正在显示共用同一守卫，预检期间多个页面的失败不会另起查询或重复提示。
     if (!m_r0UnavailablePromptArmed || m_r0UnavailablePromptShowing
@@ -8937,7 +8940,13 @@ void MainWindow::handleR0DriverUnavailable(const unsigned long win32Error)
                         window->m_r0UnavailablePromptShowing = false;
                         return;
                     }
+                    const bool runningChanged = window->m_r0DriverServiceRunning != serviceState.running;
                     window->m_r0DriverServiceRunning = serviceState.running;
+                    if (runningChanged)
+                    {
+                        window->invalidateMemoryHvmAvailability();
+                    }
+                    if (!guardedWindow) { return; }
                     if (serviceState.running || window->m_suppressR0PromptsForSession
                         || window->m_currentAppearanceSettings.suppressR0FeaturePrompts)
                     {
@@ -9144,6 +9153,33 @@ void MainWindow::applyPrivilegeButtonVisibility()
         m_hvmStatusButton->setToolTip(
             QStringLiteral("%1：KSwordVM 硬件虚拟化（R-1）常驻状态。左键启动或停止常驻，右键打开 R-1 能力菜单。")
                 .arg(displayName));
+    }
+}
+
+bool MainWindow::canRefreshHvmMemoryAvailability() const
+{
+    return m_r0DriverServiceRunning && !m_shutdownWaiting && !m_shutdownCleanupReady
+        && m_r0NotificationLifetime->load(std::memory_order_acquire)
+        && !g_r0ServiceOperationInFlight.load(std::memory_order_acquire)
+        && !(qApp != nullptr && qApp->property("ksword_memory_quit_guard_active").toBool());
+}
+
+void MainWindow::invalidateMemoryHvmAvailability(const QString& reason)
+{
+    ++m_hvmMemoryAvailabilityGeneration;
+    m_hvmMemoryAvailabilityFollowupPending = false;
+    const QPointer<MemoryDock> consumer(m_memoryWidget);
+    if (!consumer) { return; }
+    const bool driverUnavailable = !m_r0DriverServiceRunning;
+    consumer->invalidateHvmMemoryAvailability();
+    // A device failure notification can precede the worker result which caused it.
+    // Publish that failure on the new epoch instead of leaving an unfinishable pending state.
+    if (consumer && (!reason.isEmpty() || driverUnavailable))
+    {
+        consumer->applyHvmMemoryAvailability(consumer->hvmMemoryAvailabilityEpoch(), false,
+            reason.isEmpty()
+                ? QStringLiteral("KswordARK 驱动未运行。请先点击 R0 启动驱动服务。")
+                : reason);
     }
 }
 
@@ -9690,6 +9726,7 @@ void MainWindow::startR0DriverLogPoller()
 
 void MainWindow::prepareR0DriverServiceStop()
 {
+    invalidateMemoryHvmAvailability();
     // 停驱前统一清理入口：
     // 输入：无。
     // 处理：
@@ -10218,6 +10255,8 @@ bool MainWindow::stopR0DriverService(const bool suppressErrorDialog)
             if (operationOutcome.succeeded)
             {
                 guardedSelf->m_r0DriverServiceRunning = false;
+                guardedSelf->invalidateMemoryHvmAvailability();
+                if (!guardedSelf) { return; }
                 // 本次安装只绑定当前内核驱动映像，服务卸载成功后入口随之恢复配置态可见性。
                 guardedSelf->m_bugcheckDiagnosticsInstalledForSession = false;
                 guardedSelf->m_bugcheckDiagnosticsEntryRequestedForSession = false;
@@ -10449,6 +10488,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
 
     // 接受启用意图即淘汰旧预检；后续文件校验失败和错误框也不能恢复旧的 STOPPED 提示。
     g_r0ServiceOperationGeneration.fetch_add(1, std::memory_order_acq_rel);
+    invalidateMemoryHvmAvailability();
 
     const QString driverPath = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("KswordARK.sys"));
     const QString nativeDriverPath = QDir::toNativeSeparators(driverPath);
@@ -10459,6 +10499,7 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
         // 驱动文件缺失是立即可判的失败，不必为它派发后台任务。
         g_r0ServiceOperationInFlight.store(false);
         m_r0DriverServiceRunning = false;
+        invalidateMemoryHvmAvailability();
         showR0FatalError(
             QStringLiteral("R0 启动失败：当前程序目录下不存在 KswordARK.sys。"),
             ERROR_FILE_NOT_FOUND,
@@ -10490,6 +10531,8 @@ bool MainWindow::startR0DriverService(const bool suppressPrivilegeElevationPromp
             if (!operationOutcome.succeeded)
             {
                 guardedSelf->m_r0DriverServiceRunning = false;
+                guardedSelf->invalidateMemoryHvmAvailability();
+                if (!guardedSelf) { return; }
                 if (operationOutcome.startServiceCallFailed
                     && guardedSelf->isR0DriverSignatureFailure(operationOutcome.errorCode))
                 {
@@ -10543,7 +10586,9 @@ void MainWindow::handleR0StatusButtonClicked()
     {
         return;
     }
+    const bool runningChanged = m_r0DriverServiceRunning != runningNow;
     m_r0DriverServiceRunning = runningNow;
+    if (runningChanged) { invalidateMemoryHvmAvailability(); }
 
     const bool dispatchOk = runningNow
         ? stopR0DriverService()
@@ -10921,6 +10966,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         m_memoryWidget->openPoolModuleDetails = [guard = QPointer<MainWindow>(this)](const QString& path) {
             if (guard) { guard->openFileDetailDockByPath(path); }
         };
+        bindMemoryHvmAvailabilityConsumer();
         realWidget = m_memoryWidget;
     }
     else if (dockKey == QStringLiteral("file"))
@@ -11585,6 +11631,7 @@ void MainWindow::initDockWidgets()
         m_memoryWidget->openPoolModuleDetails = [guard = QPointer<MainWindow>(this)](const QString& path) {
             if (guard) { guard->openFileDetailDockByPath(path); }
         };
+        bindMemoryHvmAvailabilityConsumer();
     }
     if (shouldEagerLoad(QStringLiteral("file"))) { m_fileWidget = new FileDock(this); }
     if (shouldEagerLoad(QStringLiteral("driver"))) { m_driverWidget = new DriverDock(this); }

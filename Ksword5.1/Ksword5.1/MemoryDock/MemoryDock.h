@@ -101,6 +101,14 @@ public:
     // - 作用：在控件销毁前释放进程句柄、停止定时器与后台扫描状态。
     ~MemoryDock() override;
 
+    // The existing host status worker publishes actual window observations;
+    // DDMA broadcasts never request HVM IO. Hidden pages consume no polling.
+    bool needsHvmMemoryAvailability() const;
+    quint64 hvmMemoryAvailabilityEpoch() const;
+    void invalidateHvmMemoryAvailability();
+    void applyHvmMemoryAvailability(quint64 epoch, bool usable, const QString& reason);
+    std::function<void()> requestHvmMemoryAvailability;
+
     // focusProcessForOperations：
     // - 作用：从进程页跳转到内存页后自动定位并附加目标 PID；
     // - 调用方式：MainWindow::focusMemoryDockByPid 调用。

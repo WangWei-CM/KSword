@@ -49,8 +49,8 @@ class CodeEditorWidget;
 class QPushButton;
 class QSpinBox;
 class QShowEvent;
+class QHideEvent;
 class QTableWidget;
-class QTimer;
 
 namespace ks::memory_detail { class CoreListModel; }
 
@@ -126,16 +126,17 @@ namespace ksword::memory_dock
 
         // refreshChannelAvailability：DDMA 会话变化时由 MemoryDock 调用。
         void refreshChannelAvailability();
+        void setHvmAvailabilityRequester(std::function<void()> request);
+        std::uint64_t hvmAvailabilityEpoch() const { return m_channelQueryVersion; }
+        void invalidateHvmAvailability();
+        void applyHvmAvailability(std::uint64_t epoch, bool usable, const QString& reason);
 
     private:
         void showEvent(QShowEvent* event) override;
-        struct ChannelQueryJob;
+        void hideEvent(QHideEvent* event) override;
         void requestHvmAvailability();
-        void pollHvmAvailability();
-        std::shared_ptr<ChannelQueryJob> m_channelQueryJob;
-        QTimer* m_channelQueryPoll = nullptr;
-        QTimer* m_channelQueryDebounce = nullptr;
-        std::uint64_t m_channelQueryVersion = 0, m_channelPublishedVersion = 0, m_channelTargetEpoch = 0;
+        std::function<void()> m_requestHvmAvailability;
+        std::uint64_t m_channelQueryVersion = 0, m_channelPublishedVersion = 0;
         void buildUi();
         void wireSignals();
         void startScan();

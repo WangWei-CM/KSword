@@ -727,12 +727,36 @@ void MemoryDock::initializeTamperDetectionTab()
     // CPU 页表的读取路径，没有它这一页就只能发现普通补丁。页面自己会在通道不可用
     // 时把这句话写在界面上，而不是只把复选框置灰。
     m_tamperDetectionPage = new ksword::memory_dock::TamperDetectionPage(m_tabWidget);
+    const QPointer<MemoryDock> owner(this);
+    m_tamperDetectionPage->setHvmAvailabilityRequester([owner]() {
+        if (owner && owner->requestHvmMemoryAvailability) owner->requestHvmMemoryAvailability();
+    });
     m_tabWidget->addTab(m_tamperDetectionPage, QStringLiteral("篡改检测"));
     ks::i18n::LanguageManager::instance().bindTab(
         m_tabWidget,
         m_tamperDetectionPage,
         QStringLiteral("memory.tab.tamper_detection"),
         QStringLiteral("篡改检测"));
+}
+
+bool MemoryDock::needsHvmMemoryAvailability() const
+{
+    return m_tamperDetectionPage && m_tamperDetectionPage->isVisible();
+}
+
+quint64 MemoryDock::hvmMemoryAvailabilityEpoch() const
+{
+    return m_tamperDetectionPage ? m_tamperDetectionPage->hvmAvailabilityEpoch() : 0;
+}
+
+void MemoryDock::invalidateHvmMemoryAvailability()
+{
+    if (m_tamperDetectionPage) m_tamperDetectionPage->invalidateHvmAvailability();
+}
+
+void MemoryDock::applyHvmMemoryAvailability(const quint64 epoch, const bool usable, const QString& reason)
+{
+    if (m_tamperDetectionPage) m_tamperDetectionPage->applyHvmAvailability(epoch, usable, reason);
 }
 
 void MemoryDock::initializeDdmaTab()

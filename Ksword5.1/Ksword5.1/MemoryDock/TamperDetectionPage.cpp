@@ -29,6 +29,7 @@
 #include <QPushButton>
 #include <QRunnable>
 #include <QShowEvent>
+#include <QHideEvent>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidgetItem>
@@ -37,7 +38,6 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <atomic>
 #include <memory>
 
 // ============================================================
@@ -369,42 +369,34 @@ namespace ksword::memory_dock
         }
     }
 
-    struct TamperDetectionPage::ChannelQueryJob
-    {
-        std::atomic_bool done{false},cancel{false};
-        std::uint64_t version=0,targetEpoch=0;
-        bool usable=false;
-        QString reason;
-    };
-
     TamperDetectionPage::TamperDetectionPage(QWidget* const parent)
         : QWidget(parent)
     {
         buildUi();
         wireSignals();
-        m_channelQueryPoll=new QTimer(this);m_channelQueryPoll->setInterval(25);
-        m_channelQueryDebounce=new QTimer(this);m_channelQueryDebounce->setSingleShot(true);m_channelQueryDebounce->setInterval(25);
-        connect(m_channelQueryPoll,&QTimer::timeout,this,[this]{pollHvmAvailability();});
-        connect(m_channelQueryDebounce,&QTimer::timeout,this,[this]{pollHvmAvailability();});
         refreshChannelAvailability();
-        updateRunButtonState();
+        invalidateHvmAvailability();
     }
 
-    TamperDetectionPage::~TamperDetectionPage()
-    {
-        if(m_channelQueryJob)m_channelQueryJob->cancel.store(true,std::memory_order_relaxed);
-    }
+    TamperDetectionPage::~TamperDetectionPage() = default;
 
     void TamperDetectionPage::showEvent(QShowEvent* event)
     {
         QWidget::showEvent(event);
-        // A hidden DDMA consumer only invalidates its previous result. Query
-        // when this page is actually shown, before enabling the HVM path.
-        if (m_channelQueryPoll && m_channelPublishedVersion != m_channelQueryVersion)
-        {
-            m_channelQueryDebounce->start();
-            m_channelQueryPoll->start();
-        }
+        requestHvmAvailability();
+    }
+
+    void TamperDetectionPage::hideEvent(QHideEvent* event)
+    {
+        QWidget::hideEvent(event);
+        // Reject the late observation of a previous visible branch.
+        invalidateHvmAvailability();
+    }
+
+    void TamperDetectionPage::setHvmAvailabilityRequester(std::function<void()> request)
+    {
+        m_requestHvmAvailability = std::move(request);
+        if (isVisible()) requestHvmAvailability();
     }
 
     void TamperDetectionPage::buildUi()
@@ -563,8 +555,7 @@ namespace ksword::memory_dock
         ++m_candidateContextGeneration;
         m_attachedPid = processId;
         m_attachedProcessName = processName;
-        ++m_channelTargetEpoch;
-        if(m_channelQueryJob)requestHvmAvailability();
+        if (m_channelPublishedVersion != m_channelQueryVersion) requestHvmAvailability();
         updateRunButtonState();
     }
 
@@ -604,11 +595,8 @@ namespace ksword::memory_dock
             ksword::memory_backend::currentDdmaSession(), &reason);
         m_useDmaCheck->setEnabled(ddmaUsable);
 
-        // A DDMA broadcast never performs HVM IO on the GUI thread. Merge its
-        // latest request with any in-flight read; hidden pages remain pending
-        // until shown. Every actual probe remains an authoritative QUERY_WINDOW,
-        // with no capability TTL/cache conclusion.
-        requestHvmAvailability();
+        // HVM observations arrive independently from the host status worker.
+        // Even a visible DDMA-only update must not invalidate or query HVM.
         if (ddmaUsable)
         {
             const auto hint=ks::i18n::packedSourceText(QStringLiteral("DDMA 通道就绪，本页可以判定 SLAT / EPT 级别的重定向。"));
@@ -629,60 +617,43 @@ namespace ksword::memory_dock
         updateRunButtonState();
     }
 
-    void TamperDetectionPage::requestHvmAvailability()
+    void TamperDetectionPage::invalidateHvmAvailability()
     {
         ++m_channelQueryVersion;
-        if(m_channelQueryJob)m_channelQueryJob->cancel.store(true,std::memory_order_relaxed);
-        // Keep the user's check preference while a new read is pending. The
-        // disabled path is excluded from new requests until its own IO returns.
+        const QPointer<TamperDetectionPage> guard(this);
+        // Preserve the user's preference while the authoritative result is
+        // pending, but exclude the disabled path from all new scan requests.
         m_useHvmCheck->setEnabled(false);
+        if (!guard) return;
         m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("正在查询 HVM 私有页表窗口。")));
-        if (isVisible())
-        {
-            m_channelQueryDebounce->start();
-            m_channelQueryPoll->start();
-        }
-        else
-        {
-            m_channelQueryDebounce->stop();
-            if (!m_channelQueryJob) { m_channelQueryPoll->stop(); }
-        }
+        if (guard) updateRunButtonState();
     }
 
-    void TamperDetectionPage::pollHvmAvailability()
+    void TamperDetectionPage::requestHvmAvailability()
     {
-        if(m_channelQueryJob&&m_channelQueryJob->done.load(std::memory_order_acquire))
+        const QPointer<TamperDetectionPage> guard(this);
+        invalidateHvmAvailability();
+        if (guard && isVisible() && m_requestHvmAvailability) m_requestHvmAvailability();
+    }
+
+    void TamperDetectionPage::applyHvmAvailability(const std::uint64_t epoch,
+        const bool usable, const QString& reason)
+    {
+        if (epoch != m_channelQueryVersion) return;
+        m_channelPublishedVersion = epoch;
+        const QPointer<TamperDetectionPage> guard(this);
+        if (m_useHvmCheck->isEnabled() != usable) m_useHvmCheck->setEnabled(usable);
+        if (!guard) return;
+        if (!usable)
         {
-            auto job=std::move(m_channelQueryJob);
-            if(!job->cancel.load(std::memory_order_relaxed)&&job->version==m_channelQueryVersion&&job->targetEpoch==m_channelTargetEpoch)
-            {
-                m_channelPublishedVersion=job->version;
-                const QPointer<TamperDetectionPage> guard(this);
-                m_useHvmCheck->setEnabled(job->usable);
-                if(!job->usable)
-                {
-                    m_useHvmCheck->setChecked(false);if(!guard)return;
-                    m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(job->reason));
-                }
-                else m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。")));
-                updateRunButtonState();if(!guard)return;
-            }
+            m_useHvmCheck->setChecked(false);
+            if (!guard) return;
         }
-        if(isVisible()&&!m_channelQueryJob&&m_channelPublishedVersion!=m_channelQueryVersion&&!m_channelQueryDebounce->isActive())
-        {
-            auto job=std::make_shared<ChannelQueryJob>();job->version=m_channelQueryVersion;job->targetEpoch=m_channelTargetEpoch;m_channelQueryJob=job;
-            try
-            {
-                QThreadPool::globalInstance()->start([job]
-                {
-                    try { if(!job->cancel.load(std::memory_order_relaxed))job->usable=ksword::memory_backend::isHvmMemoryUsable(&job->reason); }
-                    catch (...) { job->reason=QStringLiteral("查询 HVM 私有页表窗口失败。"); }
-                    job->done.store(true,std::memory_order_release);
-                },-1);
-            }
-            catch (...) {job->reason=QStringLiteral("查询 HVM 私有页表窗口失败。");job->done.store(true,std::memory_order_release);}
-        }
-        if(!m_channelQueryJob&&(!isVisible()||m_channelPublishedVersion==m_channelQueryVersion))m_channelQueryPoll->stop();
+        const QString tooltip = ks::i18n::packedSourceText(usable
+            ? QStringLiteral("改写自有页表项指向目标帧，整条路径不调用文档化的内存管理器例程。它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，不是重定向。")
+            : reason);
+        if (m_useHvmCheck->toolTip() != tooltip) m_useHvmCheck->setToolTip(tooltip);
+        if (guard) updateRunButtonState();
     }
 
     void TamperDetectionPage::updateRunButtonState()
