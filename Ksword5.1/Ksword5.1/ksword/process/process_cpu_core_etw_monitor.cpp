@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 #pragma comment(lib, "Advapi32.lib")
@@ -40,11 +42,149 @@ namespace
         wchar_t loggerName[EtwSessionNameCapacity]{};
     };
 
-    GUID buildSessionGuid()
+    GUID buildSessionGuid(const DWORD processId)
     {
         GUID sessionGuid = KswordCpuCoreSessionGuidBase;
-        sessionGuid.Data1 ^= static_cast<unsigned long>(::GetCurrentProcessId());
+        sessionGuid.Data1 ^= static_cast<unsigned long>(processId);
         return sessionGuid;
+    }
+
+    GUID buildSessionGuid()
+    {
+        return buildSessionGuid(::GetCurrentProcessId());
+    }
+
+    // Query buffers must also accommodate unrelated sessions' maximum-length names.
+    struct TraceQueryPropertiesBlock
+    {
+        EVENT_TRACE_PROPERTIES properties{};
+        wchar_t loggerName[1025]{};
+        wchar_t logFileName[1025]{};
+    };
+
+    void initializeTraceQueryProperties(TraceQueryPropertiesBlock& block)
+    {
+        block = TraceQueryPropertiesBlock{};
+        block.properties.Wnode.BufferSize = sizeof(TraceQueryPropertiesBlock);
+        block.properties.LoggerNameOffset = static_cast<ULONG>(offsetof(TraceQueryPropertiesBlock, loggerName));
+        block.properties.LogFileNameOffset = static_cast<ULONG>(offsetof(TraceQueryPropertiesBlock, logFileName));
+    }
+
+    bool identifyKswordSystemLogger(const TraceQueryPropertiesBlock& block, DWORD& processId)
+    {
+        if (block.properties.LoggerNameOffset != offsetof(TraceQueryPropertiesBlock, loggerName)
+            || block.properties.LogFileMode != (EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_SYSTEM_LOGGER_MODE)
+            || block.properties.EnableFlags != (EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_CSWITCH)
+            || block.properties.Wnode.HistoricalContext == 0)
+        {
+            return false;
+        }
+        std::size_t length = 0;
+        while (length < 1025 && block.loggerName[length] != L'\0') { ++length; }
+        if (length == 1025) { return false; }
+        const std::wstring_view name(block.loggerName, length);
+        constexpr std::wstring_view prefix = L"KSword.ProcessCpuCore.";
+        if (name.size() <= prefix.size() || name.substr(0, prefix.size()) != prefix
+            || name[prefix.size()] < L'1' || name[prefix.size()] > L'9')
+        {
+            return false;
+        }
+        DWORD ownerPid = 0;
+        for (std::size_t i = prefix.size(); i < name.size(); ++i)
+        {
+            if (name[i] < L'0' || name[i] > L'9') { return false; }
+            const DWORD digit = static_cast<DWORD>(name[i] - L'0');
+            if (ownerPid > (MAXDWORD - digit) / 10U) { return false; }
+            ownerPid = ownerPid * 10U + digit;
+        }
+        if (ownerPid == ::GetCurrentProcessId()
+            || !::IsEqualGUID(block.properties.Wnode.Guid, buildSessionGuid(ownerPid)))
+        {
+            return false;
+        }
+        processId = ownerPid;
+        return true;
+    }
+
+    bool openExitedProcess(const DWORD processId, HANDLE& process)
+    {
+        process = ::OpenProcess(SYNCHRONIZE, FALSE, processId);
+        if (process == nullptr)
+        {
+            // Only a nonexistent nonzero PID proves absence; access denied and
+            // every other error leave that session alone.
+            return processId != 0 && ::GetLastError() == ERROR_INVALID_PARAMETER;
+        }
+        return ::WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+    }
+
+    bool stopExitedKswordSystemLoggers()
+    {
+        try
+        {
+            std::vector<TraceQueryPropertiesBlock> blocks(64);
+            std::vector<PEVENT_TRACE_PROPERTIES> properties(blocks.size());
+            const auto prepare = [&]() {
+                for (std::size_t i = 0; i < blocks.size(); ++i)
+                {
+                    initializeTraceQueryProperties(blocks[i]);
+                    properties[i] = &blocks[i].properties;
+                }
+            };
+            prepare();
+            ULONG count = 0;
+            ULONG status = ::QueryAllTracesW(properties.data(), static_cast<ULONG>(properties.size()), &count);
+            // One bounded retry covers the documented configurable system cap.
+            if (status == ERROR_MORE_DATA && count > blocks.size() && count <= 256U)
+            {
+                blocks.resize(count);
+                properties.resize(count);
+                prepare();
+                status = ::QueryAllTracesW(properties.data(), static_cast<ULONG>(properties.size()), &count);
+            }
+            if (status != ERROR_SUCCESS || count > blocks.size()) { return false; }
+
+            bool stopped = false;
+            for (ULONG i = 0; i < count; ++i)
+            {
+                const TraceQueryPropertiesBlock& candidate = blocks[i];
+                DWORD ownerPid = 0;
+                if (!identifyKswordSystemLogger(candidate, ownerPid)) { continue; }
+                HANDLE ownerProcess = nullptr;
+                const bool exited = openExitedProcess(ownerPid, ownerProcess);
+                if (exited)
+                {
+                    // Re-query the exact enumerated session before STOP and
+                    // reject any observed identity or session-handle change.
+                    const TRACEHANDLE handle = candidate.properties.Wnode.HistoricalContext;
+                    TraceQueryPropertiesBlock current;
+                    initializeTraceQueryProperties(current);
+                    current.properties.Wnode.Guid = candidate.properties.Wnode.Guid;
+                    DWORD currentPid = 0;
+                    const ULONG queryStatus = ::ControlTraceW(handle, candidate.loggerName,
+                        &current.properties, EVENT_TRACE_CONTROL_QUERY);
+                    if (queryStatus == ERROR_SUCCESS && identifyKswordSystemLogger(current, currentPid)
+                        && currentPid == ownerPid && current.properties.Wnode.HistoricalContext == handle
+                        // A retained exited-process handle prevents PID reuse;
+                        // absent PIDs must be checked again after the query.
+                        && (ownerProcess != nullptr || openExitedProcess(ownerPid, ownerProcess)))
+                    {
+                        current.properties.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+                        current.properties.LogFileNameOffset = 0;
+                        const ULONG stopStatus = ::ControlTraceW(handle, candidate.loggerName,
+                            &current.properties, EVENT_TRACE_CONTROL_STOP);
+                        stopped = stopped || stopStatus == ERROR_SUCCESS;
+                    }
+                }
+                if (ownerProcess != nullptr) { ::CloseHandle(ownerProcess); }
+            }
+            return stopped;
+        }
+        catch (const std::bad_alloc&)
+        {
+            // Keep the original StartTrace error when recovery cannot allocate.
+            return false;
+        }
     }
 
     std::vector<ks::process::EtwLogicalProcessorCoordinate> enumerateActiveProcessors()
@@ -241,10 +381,16 @@ namespace ks::process
         initializeTraceProperties(&propertiesBlock, sessionName, m_processors.size());
 
         TRACEHANDLE sessionHandle = 0;
-        const ULONG startStatus = ::StartTraceW(
+        ULONG startStatus = ::StartTraceW(
             &sessionHandle,
             sessionName.c_str(),
             &propertiesBlock.properties);
+        if (startStatus == ERROR_NO_SYSTEM_RESOURCES && stopExitedKswordSystemLoggers())
+        {
+            initializeTraceProperties(&propertiesBlock, sessionName, m_processors.size());
+            sessionHandle = 0;
+            startStatus = ::StartTraceW(&sessionHandle, sessionName.c_str(), &propertiesBlock.properties);
+        }
         if (startStatus != ERROR_SUCCESS)
         {
             setLastErrorText(makeEtwErrorText("StartTraceW(CSwitch)", startStatus), startStatus, true);
