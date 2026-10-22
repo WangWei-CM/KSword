@@ -536,3 +536,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 
 - 2026-10-22 T00离线分析补齐navigation_stage及parent_request_id、路径/index/边界/原结果；无输入begin的程序化导航单列。每个ready/显式business_data_ready以QPC误差上界之后首条显示独立作非因果候选，嵌套请求不合并，重复ready拒绝、无后续为空。外壳ready不升级为业务ready/呈现证明。26离线回归通过。
 - 同次按原MR-001条目复核：现有QApplication notify真实包围、inclusive/self与ns、queue指标更名、宏0探针移除及外部栈工具已实现；当前生产PerfTrace.cpp在QCoreApplication+QObject夹具重跑2ms事件/16ms外部工作，45项及宏0无日志1项通过。无QApplication/QWidget/业务/ETW采集。MR-001源码实施可以关闭，真实GUI/栈采集验收仍待用户；MR-003预热Dock的真实ready与MR-004实测不随之关闭，不要求新增全库业务封装。
+
+- 2026-10-22 诊断宏1按实际ADS currentChanging→当前widget同步show返回→currentChanged记录同一dock_switch的begin/selected/限定ready/end。ready仅对进入前已初始化、同一Dock/同一内容实例、仍可见且未closed/initializing成立，边界名ads_current_widget_show_returned；不声称queued布局、业务数据或present已完成。嵌套替换/目标改变/内容替换/销毁不伪造ready，初始/焦点观察仍单列。原visibilityChanged的0ms挂载回调仅宏1保存/恢复输入context，原可见/寿命/构造准入保持。61项实际闭包QtCore/QObject替身检查和宏0全MainWindow token恒等通过；真实ADS/GUI/50次循环另由用户验收。没有新增主题准备、系统查询、业务等待或通用接管框架。

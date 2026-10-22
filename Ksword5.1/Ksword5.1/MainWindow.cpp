@@ -11877,7 +11877,17 @@ void MainWindow::initDockWidgets()
                 {
                     if (visible)
                     {
-                        QTimer::singleShot(0, this, [this, guardedDock]() {
+#if KSWORD_PERF_TRACE_ENABLED
+                        const auto traceContext = ks::ui::CapturePerfTraceContext();
+#endif
+                        QTimer::singleShot(0, this, [this, guardedDock
+#if KSWORD_PERF_TRACE_ENABLED
+                            , traceContext
+#endif
+                        ]() {
+#if KSWORD_PERF_TRACE_ENABLED
+                            const ks::ui::PerfTraceContextScope context(traceContext);
+#endif
                             // 快速切走后不再构造旧的隐藏页；明确 focus/jump 仍走原同步入口。
                             if (guardedDock != nullptr && guardedDock->isVisible())
                             {
@@ -12052,14 +12062,76 @@ void MainWindow::setupDockLayout()
             return;
         }
         area->setProperty("ksword_perf_trace_connected", true);
-        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, this,
-            [area, describePerfDock, recordEnvironment](int index)
+        struct PendingDockSwitch
+        {
+            ks::ui::PerfNavigationTrace navigation;
+            QPointer<ads::CDockWidget> target;
+            QPointer<QWidget> content;
+            bool warm = false;
+        };
+        const auto pending = std::make_shared<PendingDockSwitch>();
+        const QPointer<ads::CDockAreaWidget> observedArea(area);
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanging, this,
+            [observedArea, pending](int index)
             {
-                if (index == area->currentIndex())
-                    RecordDockNavigationObservation(area->currentDockWidget(), "selected");
+                if (pending->navigation.id)
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_changing", "superseded");
+                *pending = {};
+                if (!observedArea || index < 0 || index >= observedArea->dockWidgetsCount()) return;
+                auto* target = observedArea->dockWidget(index);
+                if (!target) return;
+                pending->target = target;
+                pending->content = target->widget();
+                pending->warm = pending->content &&
+                    (!target->property("ks_lazy_initialized").isValid()
+                        || target->property("ks_lazy_initialized").toBool());
+                pending->navigation = ks::ui::BeginPerfNavigationTrace("dock_switch",
+                    ks::ui::CapturePerfNavigationTarget(observedArea.data(), target, index), "begin");
+            });
+        QObject::connect(area, &ads::CDockAreaWidget::currentChanged, this,
+            [observedArea, pending, describePerfDock, recordEnvironment](int index)
+            {
+                if (!observedArea) return;
+                auto* current = observedArea->currentDockWidget();
+                if (pending->navigation.id && pending->target && pending->target == current
+                    && index == observedArea->currentIndex())
+                {
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "selected",
+                        "ads_current_index", "observed");
+                    // In the bundled ADS, currentChanged follows the selected
+                    // widget's synchronous show(). This proves that boundary,
+                    // not completion of queued layout, business work or present.
+                    const bool shown = pending->warm && current->isVisible() && !current->isClosed()
+                        && pending->content && current->widget() == pending->content
+                        && (!current->property("ks_lazy_initialized").isValid()
+                            || current->property("ks_lazy_initialized").toBool())
+                        && !current->property("ks_lazy_initializing").toBool();
+                    if (shown)
+                        ks::ui::RecordPerfNavigationStage(pending->navigation, "ready",
+                            "ads_current_widget_show_returned", "warm_content_visible");
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_widget_show_returned", shown ? "warm_content_visible" : "readiness_unproven");
+                }
+                else
+                {
+                    if (pending->navigation.id)
+                        ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                            "ads_current_changed", "target_changed");
+                    if (index == observedArea->currentIndex())
+                        RecordDockNavigationObservation(current, "selected");
+                }
+                *pending = {};
                 ks::ui::RecordPerfMark("perf_dock_focus",
-                    describePerfDock(area->currentDockWidget()));
+                    describePerfDock(current));
                 recordEnvironment();
+            });
+        QObject::connect(area, &QObject::destroyed, this, [pending]()
+            {
+                if (pending->navigation.id)
+                    ks::ui::RecordPerfNavigationStage(pending->navigation, "end",
+                        "ads_current_changing", "owner_destroyed");
+                *pending = {};
             });
         if (area->currentDockWidget() != nullptr)
         {
