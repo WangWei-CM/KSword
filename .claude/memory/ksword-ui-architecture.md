@@ -549,3 +549,10 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 构建35字段反馈：DetailFieldProjection物化范围继续按原requestedFirst/requestedLast取行，但宿主clipFirst/clipLast必须覆盖这些行的完整高度；只修上边界会把最后一个长字段压缩在局部卡片内。0231346b保留两端完整行，另一列不因卡片变高而多物化。已有snapshot更新/视口预算未完成时保持原字段可见，4940582a只让首份加载使用整视口加载层。不要把QLabel大小策略调用顺序当作充分归因：本机Qt6.9.3的setText也会在updateLabel恢复height-for-width。8项纯值生产几何检查不是GUI验收。
 - 2026-10-22 组合框Show后排队加不透明frame/QSS会改变实际viewport和item度量，而Qt showPopup在Show前已计算窗口高度。223c6b2a仅在既有queued主题回调内用真实列表rect补足短列表缺口（最多32项并遵守maxVisibleItems/屏幕/maximumHeight），不改焦点、选中、长列表限制或提前创建Popup；仍禁止在Show/Resize栈内同步repolish。
 - 2026-10-22 保存布局和启动页：ADS 5.1.1会在各area的currentDockWidget属性保存XML Current身份。b330022f在初次外观挂载结束且restore成功时一次性收口所保存选中项；关闭/移出原area的目标跳过，没有第二份配置或重试timer。跨固定发行目录测试会使用不同exe/config，验证退出恢复必须在同一测试副本内进行。
+
+- 2026-10-22 c1bdcc83实测反馈：权限页自身的Account/Token/Snapshot完成回调也有`setFuture({})`重复finished问题；修共享ImmutableValueTable不会修到这些独立实现，四个完成入口均须先断开接收者再解绑future。两个实际生产回调的QtCore寿命检查覆盖先完成、后完成、接收者先销毁，不代替业务GUI验收。
+- 进程详情性能/CPU核心页的曝光过滤器必须在轻量页壳创建时安装。QTabWidget先Show再发currentChanged，若在惰性内容工厂才安装，会永久漏掉首次Show；这是确定事件顺序问题，不是机器速度或应增加固定延时。隐藏/最小化门禁仍保留。
+- 窗口图标的规范缓存路径可以用正斜杠，但传给SHGetFileInfoW前必须转原生分隔符。本机只读对照同一notepad/主程序EXE，正斜杠查询失败、反斜杠成功。预览QLabel的pixmap不能拥有布局尺寸：Ignored策略、contentsRect缩放/回投校验及空窗口矩形回退共同避免逐次加边框尺寸的放大回路。
+- USB等设备审计表的行增删通知保留，单元格批量填充阶段仅屏蔽model数据通知，结束后一次dataChanged，再恢复排序/选择/业务过滤。不得连结构信号一起屏蔽，否则持久行身份与冻结/搜索观察器失效。真实USB切页停顿仍须用户复测，不能由通知次数推算帧率。
+- 网络监控已有投影可继续交互，不能每批数据禁用整表导致按钮/图标变成Disabled再恢复。趋势捕获允许尾部追加，完整旧快照可在同代/同epoch及交互参数有效时先展示，再合并dirty追上，避免高负载下连续拒绝所有完成值；速率复用原接收/淘汰维护的秒桶。R0进入原预算消费通道前按队列余量限制查询，满则不前移cursor，不新增用户态丢包；R3原策略保留。设备打开失败且ENABLE未发出时才免除R0停用义务，真正IOCTL失败仍保留失败回执。
+- 透明主宿主的数据衬底统一由MainSurfaceStyle的TransparentMainDataSurfaceAlpha控制（192/255），表头节与工具带同入口；表头画布不再额外叠同色alpha层，前景按同一alpha的黑/白极端背板校准。独立窗和无背景模式保留原不透明配方，不用setWindowOpacity淡化文字。亮暗/主题色/背景模式热切换和GPU/普通表格实际合成仍由用户验收。
