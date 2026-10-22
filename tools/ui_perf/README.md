@@ -36,6 +36,8 @@ python tools/ui_perf/analyze_presentations.py --manifest '<本次目录>/capture
 
 新诊断日志另有 `scroll_paint_observations`：按真实 viewport 身份统计 Paint 分派间隔、值观测至稳定 Paint 入口，以及同一 Paint 至 GL swap 回调的间隔，动画关闭时也可观察。被替换的值、绘制期间变化/销毁、未知观测时刻和缺失/重复 swap 单列。信号回调的 action 上下文只表示该回调现场；Qt 重入可能先执行其它处理，因此这些数值不作为输入到显示的因果延迟或实际 FPS。
 
+逐操作 `diagnostic_stages` 保留导航路径、目标索引、导航/请求身份、父请求、ready 边界及原始结果；没有输入 begin 的程序化导航另列，不能归到后来的输入。`ready_display_candidates` 为每个已记录的导航 ready 或 `*_business_data_ready` 单独选择时钟误差上界之后的首条可观测显示记录，便于人工比较原始输入候选与 ready 之后的候选。嵌套请求分开保留，重复 ready 拒绝关联；没有后续记录就为空。外壳 ready 仍只代表原外壳边界，这些时间关系不证明目标内容已经呈现或整个动作完成。
+
 ## 接口依据
 
 - [PresentMon 控制台参数与 CSV 指标](https://github.com/GameTechDev/PresentMon/blob/main/README-ConsoleApplication.md)：使用 v2/QPC、独立会话名及定时退出；未显示的 `NA` 不作为零延迟。

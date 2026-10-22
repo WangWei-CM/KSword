@@ -127,6 +127,81 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report["invalid_observations"], 1)
         self.assertEqual(report["streams"][0]["paint_dispatch_intervals_ms"]["samples"], 0)
 
+    def test_navigation_identity_and_recorded_ready_anchor_survive_analysis(self):
+        self.csv([self.row(100), self.row(20000)])
+        stage = self.event("navigation_stage", 1000000, navigation_id="9", request_id="8",
+                           parent_request_id="7", navigation_kind="dock_mount", navigation_stage="ready",
+                           target_id="dock-memory", target_path=["内存", "内存搜索"], target_index=2,
+                           target_identity_scope="object_lifetime", target_path_complete=True,
+                           readiness_boundary="dock_content_mounted_theme_layout", outcome="shell_prepared",
+                           operation_scope="navigation_shell_only", business_ready_proven=False, present_proven=False)
+        self.trace([self.session(), self.event("input_begin"), stage])
+        summary = self.run_analysis()["action_display_candidates"]
+        action = summary["items"][0]
+        self.assertEqual(action["candidate_display_qpc"], str(self.base + 101))
+        retained = action["diagnostic_stages"][0]
+        for field in ("parent_request_id", "navigation_id", "target_id", "target_path", "target_index",
+                      "target_identity_scope", "target_path_complete", "readiness_boundary", "outcome",
+                      "operation_scope", "business_ready_proven", "present_proven"):
+            self.assertEqual(retained[field], stage[field])
+        ready = summary["ready_display_candidates"][0]
+        self.assertEqual(ready["candidate_display_qpc"], str(self.base + 20001))
+        self.assertGreaterEqual(Decimal(ready["ready_to_display_delta_ms_bounds"][0]), 0)
+        self.assertEqual(ready["recorded_ready_stage"]["operation_scope"], "navigation_shell_only")
+        self.assertFalse(ready["actual_action_completion_measured"])
+        self.assertFalse(ready["content_presented_proven"])
+
+    def test_programmatic_and_nested_ready_boundaries_remain_separate(self):
+        self.csv([self.row(20000), self.row(40000)])
+        stages = [self.event("navigation_stage", 1000000, "0", request_id="0", navigation_id="9",
+                             navigation_stage="ready", origin="programmatic_navigation"),
+                  self.event("navigation_stage", 3000000, "0", request_id="0", navigation_id="10",
+                             navigation_stage="ready", origin="programmatic_navigation"),
+                  self.event("async_stage", 3000000, "1", request_id="8", parent_request_id="7",
+                             op="ddma_probe_business_data_ready")]
+        self.trace([self.session(), *stages])
+        summary = self.run_analysis()["action_display_candidates"]
+        self.assertEqual(summary["items"], [])
+        self.assertEqual(len(summary["ready_display_candidates"]), 3)
+        self.assertEqual(summary["ready_display_candidates"][0]["candidate_display_qpc"], str(self.base + 20001))
+        self.assertEqual(summary["ready_display_candidates"][1]["candidate_display_qpc"], str(self.base + 40001))
+        self.assertEqual(summary["ready_display_candidates"][2]["recorded_ready_stage"]["parent_request_id"], "7")
+        self.assertEqual(len(summary["diagnostic_stages_without_input_begin"]), 2)
+
+    def test_ready_clock_uncertainty_excludes_display_inside_bracket(self):
+        self.csv([self.row(10, DisplayLatency="0"), self.row(100, DisplayLatency="0")])
+        self.trace([self.session(), self.event("input_begin"),
+                    self.event("navigation_stage", navigation_id="9", navigation_stage="ready")])
+        summary = self.run_analysis()["action_display_candidates"]
+        self.assertEqual(summary["items"][0]["candidate_display_qpc"], str(self.base + 10))
+        self.assertEqual(summary["ready_display_candidates"][0]["candidate_display_qpc"], str(self.base + 100))
+
+    def test_duplicate_or_absent_ready_never_becomes_completion(self):
+        self.csv([self.row(100)])
+        ready = self.event("navigation_stage", 1000000, navigation_id="9", navigation_stage="ready")
+        self.trace([self.session(), self.event("input_begin"), ready])
+        item = self.run_analysis()["action_display_candidates"]["ready_display_candidates"][0]
+        self.assertIsNone(item["candidate_display_qpc"])
+        self.assertFalse(item["content_presented_proven"])
+        self.trace([self.session(), self.event("input_begin"), ready, ready])
+        report = self.run_analysis()
+        self.assertEqual(report["action_display_candidates"]["ready_display_candidates"], [])
+        self.assertTrue(any("duplicate ready" in gap for gap in report["coverage_gaps"]))
+        self.trace([self.session(), self.event("input_begin"),
+                    self.event("navigation_stage", navigation_id="9", navigation_stage="end", outcome="ready_unproven"),
+                    self.event("async_stage", op="ddma_scratch_snapshot_ready")])
+        self.assertEqual(self.run_analysis()["action_display_candidates"]["ready_display_candidates"], [])
+
+    def test_malformed_ready_identifiers_are_rejected_without_losing_other_actions(self):
+        self.csv([self.row(100)])
+        self.trace([self.session(), self.event("input_begin"),
+                    self.event("navigation_stage", navigation_stage="ready", request_id=[]),
+                    self.event("async_stage", op=[])])
+        report = self.run_analysis()
+        self.assertEqual(report["action_display_candidates"]["ready_display_candidates"], [])
+        self.assertEqual(len(report["action_display_candidates"]["items"]), 1)
+        self.assertTrue(any("rejected timestamp/action/duration" in gap for gap in report["coverage_gaps"]))
+
     def test_qpc_above_double_precision_retains_one_tick_intervals(self):
         self.csv([self.row(0), self.row(1), self.row(2, AllInputToPhotonLatency="3.25", ClickToPhotonLatency="1.75")])
         report = self.run_analysis()

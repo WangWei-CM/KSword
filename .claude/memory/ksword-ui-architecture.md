@@ -533,3 +533,6 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 DDMA原串行transaction以诊断宏1值上下文关联worker/UI回投：探测完整磁盘缓存、表格/选区、标签及原会话回调完成后才记ddma_probe_business_data_ready；候选扫描只记候选规范快照ready并由原自动重探子request提供最终探测ready。队列拒绝/异常/业务失败/接收者销毁分别记录，不改变原无取消/替换准入。宏0预处理去诊断块后业务token与原文件一致；不能将此边界当paint/present，也不据源码与构建声明DDMA硬件或GUI已验收。
 
 - 2026-10-22 诊断宏1仅为明确ScrollArea的现有viewport/两bar注册观测，4096宿主上限，无新timer/布局/paint请求。valueChanged回调保存实际双轴值和回调上下文；Qt早先slot可重入，因此它明确不是输入因果证明。实际notify Paint入口复核真实bar值，早于回调时上下文置未知，分派退出只在同viewport身份/观测revision仍相符时接纳稳定观察；GPU swap仅关联最近完整Paint scope且不重复。换viewport/换bar/重挂/销毁有弱身份和失效保护，动画关时同样观察。离线仅统计Paint分派/值观察到Paint/同Paint到GL swap的间隔，不称呈现FPS或input-to-present；缺失/重复/变化/销毁显式分开。67项实际纯值/序列化QtCore和21项离线分析通过，宏0三文件原执行tokens保持；真实QtWidgets/GL/呈现/WPR由用户验收。
+
+- 2026-10-22 T00离线分析补齐navigation_stage及parent_request_id、路径/index/边界/原结果；无输入begin的程序化导航单列。每个ready/显式business_data_ready以QPC误差上界之后首条显示独立作非因果候选，嵌套请求不合并，重复ready拒绝、无后续为空。外壳ready不升级为业务ready/呈现证明。26离线回归通过。
+- 同次按原MR-001条目复核：现有QApplication notify真实包围、inclusive/self与ns、queue指标更名、宏0探针移除及外部栈工具已实现；当前生产PerfTrace.cpp在QCoreApplication+QObject夹具重跑2ms事件/16ms外部工作，45项及宏0无日志1项通过。无QApplication/QWidget/业务/ETW采集。MR-001源码实施可以关闭，真实GUI/栈采集验收仍待用户；MR-003预热Dock的真实ready与MR-004实测不随之关闭，不要求新增全库业务封装。

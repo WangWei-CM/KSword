@@ -454,6 +454,7 @@ def scroll_paint_observations(events, gaps):
 
 def action_candidates(events, calibration, timelines, swapchain, frequency, start, stop, gaps):
     begins, ends, diagnostics = defaultdict(list), defaultdict(list), defaultdict(list)
+    ready_records = defaultdict(list)
     stage_counts, stage_durations = Counter(), defaultdict(list)
     rejected = 0
     for record in events:
@@ -464,6 +465,8 @@ def action_candidates(events, calibration, timelines, swapchain, frequency, star
             action = integer(record.get("action_id", "0"), "action_id")
             kind = record.get("event", "")
             op = record.get("op", "")
+            if not isinstance(kind, str) or not isinstance(op, str):
+                raise EvidenceError("trace event/op must be strings")
             stage_counts[f"{kind}:{op}"] += 1
             duration = None
             if "duration_ns" in record:
@@ -474,9 +477,21 @@ def action_candidates(events, calibration, timelines, swapchain, frequency, star
                     begins[action].append(record)
                 elif kind == "input_dispatch_end":
                     ends[action].append(at)
-                elif kind in ("async_stage", "span", "notify_dispatch"):
-                    diagnostics[action].append({"event": kind, "op": op, "request_id": record.get("request_id"),
-                        "t_ns": str(at), "duration_ms": decimal_text(duration) if duration is not None else None})
+            if kind in ("async_stage", "span", "notify_dispatch", "navigation_stage") and (action or kind == "navigation_stage"):
+                stage = {"event": kind, "op": op, "request_id": record.get("request_id"),
+                         "t_ns": str(at), "duration_ms": decimal_text(duration) if duration is not None else None}
+                for field in ("parent_request_id", "navigation_id", "navigation_kind", "navigation_stage",
+                              "origin", "target_id", "target_path", "target_index", "target_identity_scope",
+                              "target_path_complete", "readiness_boundary", "outcome", "operation_scope",
+                              "business_ready_proven", "present_proven"):
+                    if field in record:
+                        stage[field] = record[field]
+                diagnostics[action].append(stage)
+                if (kind == "navigation_stage" and record.get("navigation_stage") == "ready"
+                        or kind == "async_stage" and op.endswith("_business_data_ready")):
+                    identity = (action, kind, integer(record.get("request_id", "0"), "request_id"),
+                                integer(record.get("navigation_id", "0"), "navigation_id"), op)
+                    ready_records[identity].append(stage)
         except EvidenceError:
             rejected += 1
     if rejected:
@@ -484,6 +499,10 @@ def action_candidates(events, calibration, timelines, swapchain, frequency, star
     summary = {"items": [], "stage_counts": dict(stage_counts),
                "stage_duration_ms": {name: stats(values) for name, values in sorted(stage_durations.items())},
                "diagnostic_actions_without_input_begin": len(set(diagnostics) - set(begins)),
+               "diagnostic_stages_without_input_begin": [
+                   {"action_id": str(action), "diagnostic_stages": diagnostics[action]}
+                   for action in sorted(set(diagnostics) - set(begins))],
+               "ready_display_candidates": [],
                "interpretation": "Next observed display after the earliest input clock bound, with possible shared/overlapping actions; no causal present ID exists"}
     eligible = {key: rows for key, rows in timelines.items() if rows and (swapchain is None or key[1] == swapchain)}
     if len(eligible) != 1:
@@ -496,6 +515,39 @@ def action_candidates(events, calibration, timelines, swapchain, frequency, star
         by_time[row["qpc"]].append(row)
     times = sorted(by_time)
     qpc, before, after = calibration
+
+    def qpc_bounds(at):
+        rounding = rounding_ns(at) + max(rounding_ns(before), rounding_ns(after))
+        return (Decimal(qpc) + (Decimal(at - after) - rounding) * frequency / 1000000000 - 1,
+                Decimal(qpc) + (Decimal(at - before) + rounding) * frequency / 1000000000 + 1)
+
+    # Keep each recorded readiness boundary separate. A shell-ready record is
+    # not business readiness, and temporal ordering does not prove presentation.
+    for identity, records in ready_records.items():
+        action = identity[0]
+        if len(records) != 1:
+            gaps.append(f"Action {action} has duplicate ready records for request {identity[2]}; no ready/display association")
+            continue
+        stage = records[0]
+        lower, upper = qpc_bounds(integer(stage["t_ns"], "ready t_ns"))
+        if upper < start or lower > stop:
+            continue
+        # Unlike the input-only candidate, this observation must be after the
+        # latest clock bound of ready; an earlier display cannot contain it.
+        index = bisect.bisect_left(times, max(upper, Decimal(start)))
+        display = times[index] if index < len(times) else None
+        item = {"action_id": str(action), "recorded_ready_stage": stage,
+                "attribution": "NONCAUSAL_AFTER_RECORDED_READY_BOUNDARY",
+                "actual_action_completion_measured": False, "content_presented_proven": False,
+                "ready_qpc_bounds": [decimal_text(lower), decimal_text(upper)],
+                "candidate_display_qpc": decimal_text(display) if display is not None else None,
+                "pid": key[0], "swapchain": key[1], "vidpn_source_id": key[2] or None, "layer_index": key[3] or None}
+        if display is not None:
+            item.update({"candidate_present_ids": [row["present_id"] for row in by_time[display]],
+                         "candidate_csv_rows": [row["csv_row"] for row in by_time[display]],
+                         "ready_to_display_delta_ms_bounds": [decimal_text((display - upper) * 1000 / frequency),
+                                                              decimal_text((display - lower) * 1000 / frequency)]})
+        summary["ready_display_candidates"].append(item)
     candidates = []
     for action, records in sorted(begins.items()):
         if len(records) != 1:
@@ -503,9 +555,7 @@ def action_candidates(events, calibration, timelines, swapchain, frequency, star
             continue
         record = records[0]
         at = integer(record["t_ns"], "t_ns")
-        rounding = rounding_ns(at) + max(rounding_ns(before), rounding_ns(after))
-        lower = Decimal(qpc) + (Decimal(at - after) - rounding) * frequency / 1000000000 - 1
-        upper = Decimal(qpc) + (Decimal(at - before) + rounding) * frequency / 1000000000 + 1
+        lower, upper = qpc_bounds(at)
         if upper < start or lower > stop:
             continue
         index = bisect.bisect_left(times, max(lower, Decimal(start)))
