@@ -30,6 +30,35 @@
 
 namespace
 {
+    enum class BugcheckBody { Warning, Persistence, Control, Delay, Acknowledge,
+        TryIgnore, Screenshot, Refresh, Enable, Status, Waiting };
+    struct BugcheckBodyEntry { const char* target; const char* key; const char* source; };
+    constexpr BugcheckBodyEntry kBugcheckBody[] = {
+        {"ks_bugcheck_warning", "misc.experimental.bugcheck.warning", "⚠ 这个功能不能修好蓝屏，只能在蓝屏前暂停几秒。"
+                "开启“内存完整性（HVCI）”时只能暂停，不能忽略。"
+                "要尝试继续运行，必须先关闭“内存完整性”并重启；"
+                "即使如此，电脑仍可能马上蓝屏、死机或丢失数据。只在测试机上使用。"},
+        {"ks_bugcheck_persistence", "misc.experimental.bugcheck.persistence", "开启后持续拦截：尝试继续运行时保留 Hook，后续触发仍会拦截，直到手动关闭。仅暂停模式仍会在暂停后进入蓝屏。"},
+        {"ks_bugcheck_control", "misc.experimental.bugcheck.control.title", "实验性控制"},
+        {"ks_bugcheck_delay", "misc.experimental.bugcheck.delay", "蓝屏前暂停："},
+        {"ks_bugcheck_acknowledge", "misc.experimental.bugcheck.ack", "我已保存工作，并知道电脑仍可能立即蓝屏或丢失数据"},
+        {"ks_bugcheck_try_ignore", "misc.experimental.bugcheck.try_ignore", "暂停后尝试继续运行（仅关闭 HVCI 时可用，极危险）"},
+        {"ks_bugcheck_screenshot", "misc.experimental.bugcheck.screenshot", "蓝屏前尝试截图（仅关闭 HVCI 时可用）"},
+        {"ks_bugcheck_refresh", "misc.experimental.bugcheck.refresh", "刷新状态"},
+        {"ks_bugcheck_enable", "misc.experimental.bugcheck.switch", "拦截开关"},
+        {"ks_bugcheck_status", "misc.experimental.bugcheck.status.title", "当前状态"},
+        {"ks_bugcheck_waiting", "misc.experimental.bugcheck.status.waiting", "正在读取状态…"}
+    };
+    const BugcheckBodyEntry& bugcheckBodyEntry(BugcheckBody id)
+    {
+        return kBugcheckBody[static_cast<int>(id)];
+    }
+    QString bugcheckBodyText(BugcheckBody id)
+    {
+        const auto& entry = bugcheckBodyEntry(id);
+        return ks::i18n::text(QString::fromLatin1(entry.key), QString::fromUtf8(entry.source));
+    }
+
     bool sendWinPrintScreen()
     {
         INPUT inputs[4]{};
@@ -157,6 +186,28 @@ namespace
 
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> BugcheckGuardPage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(11);
+        const auto append = [&body](BugcheckBody id, const QStringList& groups = {}, bool mnemonic = false)
+        {
+            body.append({bugcheckBodyText(id), QString::fromLatin1(bugcheckBodyEntry(id).target), groups, mnemonic});
+        };
+        append(BugcheckBody::Warning);
+        append(BugcheckBody::Persistence);
+        append(BugcheckBody::Control);
+        const QStringList control{bugcheckBodyText(BugcheckBody::Control)};
+        append(BugcheckBody::Delay, control);
+        for (const auto id : {BugcheckBody::Acknowledge, BugcheckBody::TryIgnore, BugcheckBody::Screenshot})
+            append(id, control, true);
+        append(BugcheckBody::Refresh, {}, true);
+        append(BugcheckBody::Enable, {}, true);
+        append(BugcheckBody::Status);
+        append(BugcheckBody::Waiting, {bugcheckBodyText(BugcheckBody::Status)});
+        return body;
+    }
+
     BugcheckGuardPage::BugcheckGuardPage(QWidget* parent)
         : QWidget(parent)
     {
@@ -232,17 +283,16 @@ namespace ks::misc
         rootLayout->addWidget(introduction);
 
         auto& language = ks::i18n::LanguageManager::instance();
+        const auto bindBody = [&language](QWidget* widget, BugcheckBody id)
+        {
+            const auto& entry = bugcheckBodyEntry(id);
+            widget->setObjectName(QString::fromLatin1(entry.target));
+            language.bindText(widget, QString::fromLatin1(entry.key), QString::fromUtf8(entry.source));
+        };
         m_warningLabel = new QLabel(this);
         m_warningLabel->setWordWrap(true);
         applyWarningBannerStyle();
-        language.bindText(
-            m_warningLabel,
-            QStringLiteral("misc.experimental.bugcheck.warning"),
-            QStringLiteral(
-                "⚠ 这个功能不能修好蓝屏，只能在蓝屏前暂停几秒。"
-                "开启“内存完整性（HVCI）”时只能暂停，不能忽略。"
-                "要尝试继续运行，必须先关闭“内存完整性”并重启；"
-                "即使如此，电脑仍可能马上蓝屏、死机或丢失数据。只在测试机上使用。"));
+        bindBody(m_warningLabel, BugcheckBody::Warning);
         introductionLayout->addWidget(m_warningLabel);
 
         m_persistenceLabel = new QLabel(this);
@@ -250,11 +300,7 @@ namespace ks::misc
         m_persistenceLabel->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(KswordTheme::TextSecondaryHex()));
-        language.bindText(
-            m_persistenceLabel,
-            QStringLiteral("misc.experimental.bugcheck.persistence"),
-            QStringLiteral(
-                "开启后持续拦截：尝试继续运行时保留 Hook，后续触发仍会拦截，直到手动关闭。仅暂停模式仍会在暂停后进入蓝屏。"));
+        bindBody(m_persistenceLabel, BugcheckBody::Persistence);
         introductionLayout->addWidget(m_persistenceLabel);
 
         // 风险说明保持页顶，参数和实时回执各有独立区域。
@@ -266,17 +312,11 @@ namespace ks::misc
         auto* controlGroup = new QGroupBox(this);
         // 控制与回执采用同一轻边界，风险提示仍保留自己的语义颜色。
         ks::ui::StylePrimaryGroup(controlGroup);
-        language.bindText(
-            controlGroup,
-            QStringLiteral("misc.experimental.bugcheck.control.title"),
-            QStringLiteral("实验性控制"));
+        bindBody(controlGroup, BugcheckBody::Control);
         auto* controlLayout = new QVBoxLayout(controlGroup);
         auto* delayLayout = new QHBoxLayout();
         m_delayLabel = new QLabel(controlGroup);
-        language.bindText(
-            m_delayLabel,
-            QStringLiteral("misc.experimental.bugcheck.delay"),
-            QStringLiteral("蓝屏前暂停："));
+        bindBody(m_delayLabel, BugcheckBody::Delay);
         m_delaySpin = new QSpinBox(controlGroup);
         m_delaySpin->setRange(
             static_cast<int>(KSWORD_ARK_BUGCHECK_GUARD_MIN_DELAY_SECONDS),
@@ -298,20 +338,12 @@ namespace ks::misc
         controlLayout->addLayout(delayLayout);
 
         m_acknowledgeCheck = new QCheckBox(controlGroup);
-        language.bindText(
-            m_acknowledgeCheck,
-            QStringLiteral("misc.experimental.bugcheck.ack"),
-            QStringLiteral(
-                "我已保存工作，并知道电脑仍可能立即蓝屏或丢失数据"));
+        bindBody(m_acknowledgeCheck, BugcheckBody::Acknowledge);
         controlLayout->addWidget(m_acknowledgeCheck);
 
         m_tryIgnoreErrorCheck = new QCheckBox(controlGroup);
         m_tryIgnoreErrorCheck->setChecked(true);
-        language.bindText(
-            m_tryIgnoreErrorCheck,
-            QStringLiteral("misc.experimental.bugcheck.try_ignore"),
-            QStringLiteral(
-                "暂停后尝试继续运行（仅关闭 HVCI 时可用，极危险）"));
+        bindBody(m_tryIgnoreErrorCheck, BugcheckBody::TryIgnore);
         m_tryIgnoreErrorCheck->setToolTip(
             ks::i18n::text(
                 QStringLiteral("misc.experimental.bugcheck.try_ignore.tooltip"),
@@ -321,10 +353,7 @@ namespace ks::misc
         controlLayout->addWidget(m_tryIgnoreErrorCheck);
 
         m_screenshotOnTriggerCheck = new QCheckBox(controlGroup);
-        language.bindText(
-            m_screenshotOnTriggerCheck,
-            QStringLiteral("misc.experimental.bugcheck.screenshot"),
-            QStringLiteral("蓝屏前尝试截图（仅关闭 HVCI 时可用）"));
+        bindBody(m_screenshotOnTriggerCheck, BugcheckBody::Screenshot);
         m_screenshotOnTriggerCheck->setToolTip(
             ks::i18n::text(
                 QStringLiteral("misc.experimental.bugcheck.screenshot.tooltip"),
@@ -344,14 +373,8 @@ namespace ks::misc
             QString(),
             controlGroup);
         m_enableButton->setCheckable(true);
-        language.bindText(
-            m_refreshButton,
-            QStringLiteral("misc.experimental.bugcheck.refresh"),
-            QStringLiteral("刷新状态"));
-        language.bindText(
-            m_enableButton,
-            QStringLiteral("misc.experimental.bugcheck.switch"),
-            QStringLiteral("拦截开关"));
+        bindBody(m_refreshButton, BugcheckBody::Refresh);
+        bindBody(m_enableButton, BugcheckBody::Enable);
         for (QPushButton* button :
              { m_refreshButton, m_enableButton }) {
             button->setStyleSheet(KswordTheme::ThemedButtonStyle());
@@ -365,16 +388,12 @@ namespace ks::misc
 
         auto* statusGroup = new QGroupBox(this);
         ks::ui::StylePrimaryGroup(statusGroup);
-        language.bindText(
-            statusGroup,
-            QStringLiteral("misc.experimental.bugcheck.status.title"),
-            QStringLiteral("当前状态"));
+        bindBody(statusGroup, BugcheckBody::Status);
         auto* statusLayout = new QVBoxLayout(statusGroup);
         m_statusLabel = new QLabel(
-            ks::i18n::text(
-                QStringLiteral("misc.experimental.bugcheck.status.waiting"),
-                QStringLiteral("正在读取状态…")),
+            bugcheckBodyText(BugcheckBody::Waiting),
             statusGroup);
+        m_statusLabel->setObjectName(QString::fromLatin1(bugcheckBodyEntry(BugcheckBody::Waiting).target));
         m_statusLabel->setWordWrap(true);
         m_statusLabel->setStyleSheet(
             QStringLiteral("font-size:15px;font-weight:650;color:%1;")

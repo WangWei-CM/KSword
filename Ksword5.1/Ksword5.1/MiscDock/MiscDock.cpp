@@ -568,6 +568,7 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
                 || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
                 || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)
+                || (m_navigationPrepareCursor == m_bugcheckGuardTabIndex && !m_bugcheckGuardPage)
                 || (m_navigationPrepareCursor == m_desktopDrawingTabIndex && !m_desktopDrawingPage && m_desktopDrawingSearchDisplays)
                 || (m_navigationPrepareCursor == m_clipboardGuardTabIndex && !m_clipboardGuardPage)))
                 m_navigationSkippedColdBodies = true;
@@ -680,8 +681,10 @@ void MiscDock::initializeBugcheckGuardPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_bugcheckGuardHostWidget);
+    const QPointer<QWidget> host(m_bugcheckGuardHostWidget);
     m_bugcheckGuardPage = new ks::misc::BugcheckGuardPage(m_bugcheckGuardHostWidget);
     hostLayout->addWidget(m_bugcheckGuardPage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeDisableDsePage()
@@ -953,6 +956,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
     {
         main[3].coldBodyTexts = ks::misc::VirtualLocationPage::coldSearchBody();
         main[3].coldBodyComplete = true;
+    }
+    if (!existing || !existing->m_bugcheckGuardPage)
+    {
+        main[4].coldBodyTexts = ks::misc::BugcheckGuardPage::coldSearchBody();
+        main[4].coldBodyComplete = true;
     }
     if (!existing || !existing->m_clipboardGuardPage)
     {

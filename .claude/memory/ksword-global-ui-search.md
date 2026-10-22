@@ -79,3 +79,5 @@
 - 2026-10-22 ClipboardGuard未激活初态28条/12真实目标：策略控件5条、规则表7表头、事件标题/A/B3条、事件11表头及Compact2动作。规则表None、事件表Compact不变，隐藏列照原完整索引；无初始数据行。Misc完整冷正文5→6/20，冷搜索不创建Runtime/UI；激活沿原notifyPageActivated加载/扫描，已存在页仍真实扫描。构造、规则/注入/监控/会话/管道/驱动/列组/布局主题源码不变；345实际值、173实际prepare/AsyncOperation、42静态保持及2真实TU通过，未执行剪贴板/GUI/native业务。
 
 - 2026-10-22 DesktopDrawing冷正文使用原PhysicalPixels/EnumDisplayMonitors只读枚举的实际值，经既有AsyncOperation一次完成回调续作；无空转轮询、UI/native过滤器/绘制器创建。20+N条、17目标（空或超60项按原combo规则），空结果沿原DisplayChanged，失败/拒绝沿原工厂。真实激活取消晚到发布、清cold标记并保留原新鲜refreshDisplays；兼容完整准备仍构造页面。Misc完整源6→7/20。225项实际prepare/activation+真实AsyncOperation受控QtCore及882项实际值与冻结旧双语来源对照通过；显示器原生查询和GUI未运行，后续由用户手测。
+
+- 2026-10-22 BugcheckGuard未显示初态11条/11目标共享原key/source：风险说明、控制分组/选项、固定动作、状态标题及原waiting文案。原构造不查询R0，Show查询、所有开关/截图/驱动函数保持。Misc未构造页冷源7→8/20，目录仍服从原实验入口visible；真正激活清标记并执行原Show。51项静态检查证明10条既有bind文本/两语言key和14个非布局方法保持；未运行GUI或危险业务，不能关闭整个B03。

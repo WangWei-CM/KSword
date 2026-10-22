@@ -2,6 +2,7 @@
 #include "../../ArkDriverClient/ArkDriverTypes.h"
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QWidget>
 #include <atomic>
@@ -22,6 +23,8 @@ namespace ks::misc
     class BugcheckGuardPage final : public QWidget
     {
     public:
+        // Complete unshown initial body; real Show still queries the driver.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
         explicit BugcheckGuardPage(QWidget* parent = nullptr);
         ~BugcheckGuardPage() override;
 
