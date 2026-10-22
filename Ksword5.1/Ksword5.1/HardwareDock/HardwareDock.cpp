@@ -1334,30 +1334,39 @@ namespace
         // QTableWidget appends this tail through one insertRows notification. USB
         // snapshots can otherwise synchronously notify layout/filter observers 1024 times.
         if (requiredRowCount != table->rowCount()) table->setRowCount(requiredRowCount);
-        for (int rank = 0; rank < rows.size(); ++rank)
+        // Structural notifications above remain live so persistent row identities follow
+        // inserts/removals. Cell replacement is one atomic data update: otherwise each
+        // of up to 1024 x 28 cells synchronously invalidates header/sort/filter observers.
         {
-            const QString& key = desiredKeys.at(rank);
-            const int rowIndex = rowByKey.value(key);
-            const QStringList& row = rows.at(rank);
-            for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
+            const QSignalBlocker cellNotifications(table->model());
+            for (int rank = 0; rank < rows.size(); ++rank)
             {
-                auto* item = table->item(rowIndex, columnIndex);
-                const QString cellText = row.value(columnIndex);
-                if (item == nullptr)
+                const QString& key = desiredKeys.at(rank);
+                const int rowIndex = rowByKey.value(key);
+                const QStringList& row = rows.at(rank);
+                for (int columnIndex = 0; columnIndex < table->columnCount(); ++columnIndex)
                 {
-                    item = makeDeviceAuditItem(cellText);
-                    table->setItem(rowIndex, columnIndex, item);
-                }
-                else if (item->text() != cellText) item->setText(cellText);
-                if (columnIndex == 0)
-                {
-                    if (item->data(identityRole).toString() != key) item->setData(identityRole, key);
-                    if (item->data(Qt::UserRole + 28).toInt() != rank
-                        || !item->data(Qt::UserRole + 28).isValid())
-                        item->setData(Qt::UserRole + 28, rank);
+                    auto* item = table->item(rowIndex, columnIndex);
+                    const QString cellText = row.value(columnIndex);
+                    if (item == nullptr)
+                    {
+                        item = makeDeviceAuditItem(cellText);
+                        table->setItem(rowIndex, columnIndex, item);
+                    }
+                    else if (item->text() != cellText) item->setText(cellText);
+                    if (columnIndex == 0)
+                    {
+                        if (item->data(identityRole).toString() != key) item->setData(identityRole, key);
+                        if (item->data(Qt::UserRole + 28).toInt() != rank
+                            || !item->data(Qt::UserRole + 28).isValid())
+                            item->setData(Qt::UserRole + 28, rank);
+                    }
                 }
             }
         }
+        if (table->rowCount() > 0 && table->columnCount() > 0)
+            emit table->model()->dataChanged(table->model()->index(0, 0),
+                table->model()->index(table->rowCount() - 1, table->columnCount() - 1));
         if (wasSortingEnabled) table->setSortingEnabled(true);
         else
         {
