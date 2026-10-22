@@ -24,6 +24,7 @@
 #include <QAction>
 #include <QAbstractScrollArea>
 #include <QAbstractItemView>
+#include <QListView>
 #include <QAbstractItemModel>
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
@@ -1662,6 +1663,40 @@ namespace
         }
         applyOpaqueComboPopupPalette(itemView->viewport());
         itemView->setProperty(kKswordComboPopupAutoThemedPropertyName, true);
+
+        // Qt sizes the popup before Show; the queued opaque theme may add frame
+        // margins or change item metrics afterwards. Restore room for short lists
+        // using their actual item rectangles, without changing long-list limits.
+        const QPointer<QListView> list(qobject_cast<QListView*>(itemView));
+        const QPointer<QWidget> popup(popupContainer);
+        if (hasDedicatedPopupContainer && popup->isVisible() && list
+            && !list->isWrapping() && list->flow() == QListView::TopToBottom
+            && comboBox->count() > 0 && comboBox->count() <= qMin(32, comboBox->maxVisibleItems()))
+        {
+            list->doItemsLayout();
+            if (!popup || !list || !popup->isVisible()) return;
+            QRect rows;
+            for (int row = 0; row < list->model()->rowCount(list->rootIndex()); ++row)
+                if (!list->isRowHidden(row))
+                    rows = rows.united(list->visualRect(list->model()->index(
+                        row, comboBox->modelColumn(), list->rootIndex())));
+            const int missingHeight = rows.height() + 2 * list->spacing() - list->viewport()->height();
+            if (missingHeight > 0)
+            {
+                const QScreen* const screen = popup->screen();
+                if (!screen) return;
+                const QRect available = screen->availableGeometry();
+                QRect geometry = popup->geometry();
+                const int height = qMin(geometry.height() + missingHeight,
+                    qMin(available.height(), popup->maximumHeight()));
+                if (height > geometry.height())
+                {
+                    geometry.setHeight(height);
+                    geometry.moveTop(qBound(available.top(), geometry.top(), available.bottom() - height + 1));
+                    popup->setGeometry(geometry);
+                }
+            }
+        }
     }
 
     // scheduleOpaqueComboPopupTheme 作用：
