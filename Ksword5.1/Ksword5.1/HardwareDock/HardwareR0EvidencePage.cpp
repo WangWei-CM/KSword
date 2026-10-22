@@ -1024,6 +1024,11 @@ namespace
                     : column == columnIndex(R0EvidenceColumn::RiskScore) ? 3 : -1;
                 return slot < 0 ? QVariant() : QVariant::fromValue(row->numbers[slot]);
             }
+            // An invalid color role inherits the view palette. A valid NoBrush
+            // still replaces QPalette::Text with its default black in Qt's delegate.
+            if ((role == Qt::ForegroundRole || role == Qt::BackgroundRole)
+                && ks::ui::integrity::tierOf(row->riskFlags) == ks::ui::integrity::Tier::Clean)
+                return {};
             return ks::ui::integrity::riskRoleData(row->riskFlags, role);
         }
         void setSnapshot(std::shared_ptr<const HardwareEvidenceSnapshot> value)
