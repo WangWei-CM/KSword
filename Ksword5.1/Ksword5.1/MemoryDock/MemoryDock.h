@@ -380,6 +380,7 @@ private:
     // - 处理逻辑：只读取当前附加进程的工作集 / 虚拟内存属性，不提供任何写入动作。
     // - 返回：无。
     static QVector<ks::ui::PageSearchBodyText> coldProcessPteSearchBody();
+    static QVector<ks::ui::PageSearchBodyText> coldMemorySearchBody();
     void initializeProcessPteTranslateTab();
 
     // initializeProcessMemoryEvidenceTab：

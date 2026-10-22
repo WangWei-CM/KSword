@@ -111,7 +111,8 @@ bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool s
             if (index < lazyCount)
             {
                 const auto& page = m_lazyPages[index];
-                if (useColdBodies && !page.ready && page.id == QLatin1String("process_pte"))
+                if (useColdBodies && !page.ready &&
+                    (page.id == QLatin1String("process_pte") || page.id == QLatin1String("search")))
                     m_navigationSkippedColdBodies = true;
                 else { const QString id = page.id; ensureLazyPage(id); }
             }

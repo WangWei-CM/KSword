@@ -20,6 +20,7 @@
 #include <QFormLayout>
 #include "../UI/TableColumnAutoFit.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/TableInteractionSupport.h"
 #include "../Internationalization/LanguageManager.h"
 
 #include <QCompleter> // 进程下拉的包含式补全需要完整类型。
@@ -45,6 +46,94 @@ using namespace ksword::memory_dock_internal;
 
 namespace
 {
+    enum class MemorySearchText
+    {
+        Condition, TypeByte, TypeInt16, TypeInt32, TypeInt64, TypeFloat32, TypeFloat64,
+        TypeBytes, TypeAscii, TypeUnicode, ValuePlaceholder, RangeAll, RangeCustom,
+        RangeStart, RangeEnd, ImageOnly, HeapOnly, StackOnly, FirstScan, NextScan,
+        Reset, Cancel, TypeCaption, ValueCaption, RangeCaption, Compare,
+        Equal, Greater, Less, Between, Changed, Unchanged, Increased, Decreased,
+        ValueA, ValueB, CompareConditionCaption, CompareValueCaption,
+        BackendUser, BackendDriver, BackendHvm, BackendDdma, BackendCaption, Status
+    };
+    struct MemorySearchTextEntry
+    {
+        const char* target;
+        const char* source;
+        bool mnemonic;
+    };
+    constexpr MemorySearchTextEntry kMemorySearchTexts[] = {
+        {"ks_memory_search_condition", "搜索条件", false},
+        {"ks_memory_search_type", "字节", false},
+        {"ks_memory_search_type", "2字节", false},
+        {"ks_memory_search_type", "4字节", false},
+        {"ks_memory_search_type", "8字节", false},
+        {"ks_memory_search_type", "浮点数", false},
+        {"ks_memory_search_type", "双精度", false},
+        {"ks_memory_search_type", "字节数组(支持??)", false},
+        {"ks_memory_search_type", "ASCII字符串", false},
+        {"ks_memory_search_type", "Unicode字符串", false},
+        {"ks_memory_search_value", "输入搜索值", false},
+        {"ks_memory_search_range", "整个内存", false},
+        {"ks_memory_search_range", "自定义范围", false},
+        {"ks_memory_search_range_start", "起始地址", false},
+        {"ks_memory_search_range_end", "结束地址", false},
+        {"ks_memory_search_image_only", "仅映像", true},
+        {"ks_memory_search_heap_only", "仅堆(近似)", true},
+        {"ks_memory_search_stack_only", "仅栈(近似)", true},
+        {"ks_memory_search_first_scan", "首次扫描", true},
+        {"ks_memory_search_next_scan", "再次扫描", true},
+        {"ks_memory_search_reset", "重置", true},
+        {"ks_memory_search_cancel", "取消扫描", true},
+        {"ks_memory_search_type_caption", "数据类型", false},
+        {"ks_memory_search_value_caption", "值", false},
+        {"ks_memory_search_range_caption", "范围", false},
+        {"ks_memory_search_compare", "再次扫描过滤", false},
+        {"ks_memory_search_compare_mode", "等于", false},
+        {"ks_memory_search_compare_mode", "大于", false},
+        {"ks_memory_search_compare_mode", "小于", false},
+        {"ks_memory_search_compare_mode", "介于", false},
+        {"ks_memory_search_compare_mode", "变化", false},
+        {"ks_memory_search_compare_mode", "未变化", false},
+        {"ks_memory_search_compare_mode", "增加", false},
+        {"ks_memory_search_compare_mode", "减少", false},
+        {"ks_memory_search_value_a", "值A", false},
+        {"ks_memory_search_value_b", "值B", false},
+        {"ks_memory_search_compare_condition_caption", "条件", false},
+        {"ks_memory_search_compare_value_caption", "值", false},
+        {"ks_memory_search_backend", "R3（ReadProcessMemory）", false},
+        {"ks_memory_search_backend", "R0（驱动通道）", false},
+        {"ks_memory_search_backend", "HVM（私有页表窗口）", false},
+        {"ks_memory_search_backend", "DDMA（磁盘 DMA）", false},
+        {"ks_memory_search_backend_caption", "访问后端", false},
+        {"ks_memory_search_status", "就绪", false}
+    };
+    constexpr char kMemorySearchBackendHintTarget[] = "ks_memory_search_backend_hint";
+    constexpr char kMemorySearchTableTarget[] = "ks_memory_search_table";
+    constexpr char kMemorySearchActionsPrefix[] = "ks_memory_search_actions";
+
+    const MemorySearchTextEntry& memorySearchEntry(MemorySearchText id)
+    {
+        return kMemorySearchTexts[static_cast<int>(id)];
+    }
+    QString memorySearchSource(MemorySearchText id)
+    {
+        return QString::fromUtf8(memorySearchEntry(id).source);
+    }
+    QString memorySearchTarget(MemorySearchText id)
+    {
+        return QString::fromLatin1(memorySearchEntry(id).target);
+    }
+    QStringList memorySearchHeaders()
+    {
+        return {QStringLiteral("地址"), QStringLiteral("当前值"), QStringLiteral("前次值"), QStringLiteral("备注")};
+    }
+    QString memorySearchBackendHint(bool ddmaUsable, const QString& reason)
+    {
+        return ddmaUsable ? QStringLiteral("DDMA 通道已就绪，可随时切换。")
+            : QStringLiteral("DDMA 暂不可用：%1").arg(reason);
+    }
+
     // PopupLifecycleGuardedComboBox 作用：
     // - 在 QComboBox::showPopup() 进入前登记弹层生命周期，避开 Qt 滚动动画把
     //   真实弹层暂时隐藏、isVisible() 错报 false 的窗口；
@@ -460,6 +549,11 @@ ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* ex
             page.coldBodyTexts = coldProcessPteSearchBody();
             page.coldBodyComplete = true;
         }
+        else if (!actual && page.id == QLatin1String("search"))
+        {
+            page.coldBodyTexts = coldMemorySearchBody();
+            page.coldBodyComplete = true;
+        }
         catalog.append(page);
         appendMemoryNavigationChildren(catalog, page.id, factory.children, actual);
     }
@@ -568,7 +662,7 @@ void MemoryDock::initializeTabs()
         } else {
             state.widget = new QWidget(m_tabWidget);
             state.widget->setProperty("ksword_memory_lazy_page", state.id);
-            if (state.id == QLatin1String("process_pte"))
+            if (state.id == QLatin1String("process_pte") || state.id == QLatin1String("search"))
                 state.widget->setProperty("ksword_search_body_page_id", state.id);
             m_tabWidget->addTab(state.widget, QString::fromUtf8(factory.title));
             if (factory.assignShell) { factory.assignShell(*this, state.widget); }
@@ -820,10 +914,10 @@ QWidget* MemoryDock::createBackendSelector(
     ks::ui::StylePrimaryCombo(comboOut);
     ks::ui::NormalizeToolbarControl(comboOut);
     // 条目顺序必须与 MemoryAccessBackend 枚举一致，界面按索引直接转换。
-    comboOut->addItem(QStringLiteral("R3（ReadProcessMemory）"));
-    comboOut->addItem(QStringLiteral("R0（驱动通道）"));
-    comboOut->addItem(QStringLiteral("HVM（私有页表窗口）"));
-    comboOut->addItem(QStringLiteral("DDMA（磁盘 DMA）"));
+    comboOut->addItem(memorySearchSource(MemorySearchText::BackendUser));
+    comboOut->addItem(memorySearchSource(MemorySearchText::BackendDriver));
+    comboOut->addItem(memorySearchSource(MemorySearchText::BackendHvm));
+    comboOut->addItem(memorySearchSource(MemorySearchText::BackendDdma));
     comboOut->setToolTip(
         QStringLiteral("R3 走 ReadProcessMemory / WriteProcessMemory，不经驱动，受句柄权限与进程保护约束，也读不了内核地址和物理地址。\nR0 走驱动的 MmCopyVirtualMemory / MmMapIoSpaceEx，绕开句柄权限，能读内核地址与物理地址，但仍受 SLAT / EPT 约束。\nHVM 改写自有页表项指向目标帧，整条路径不调用任何文档化的内存管理器例程，别的驱动挂钩那些例程挂不到它头上；它同样受 SLAT / EPT 约束，与 R0 分歧说明的是内存管理器被挂了钩，而不是重定向。\nDDMA 走磁盘控制器的总线主控 DMA，不受 SLAT 约束，能读到被上层虚拟化重定向或隐藏的物理页；代价是必须借用磁盘扇区中转，而且明显更慢，需要先在“DDMA”子页配置通道。\n同一个地址几条读到的结果不一样本身就是判据，而分歧落在哪两条之间决定了它说明什么。"));
 
@@ -831,7 +925,7 @@ QWidget* MemoryDock::createBackendSelector(
     hintOut->setWordWrap(true);
     hintOut->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-    layout->addWidget(new QLabel(QStringLiteral("访问后端"), container));
+    layout->addWidget(new QLabel(memorySearchSource(MemorySearchText::BackendCaption), container));
     layout->addWidget(comboOut);
     layout->addWidget(hintOut, 1);
 
@@ -876,12 +970,12 @@ void MemoryDock::refreshBackendSelectors()
         }
         if (ddmaUsable)
         {
-            hint->setText(QStringLiteral("DDMA 通道已就绪，可随时切换。"));
+            hint->setText(memorySearchBackendHint(ddmaUsable, reason));
             hint->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::SuccessHex()));
         }
         else
         {
-            hint->setText(QStringLiteral("DDMA 暂不可用：%1").arg(reason));
+            hint->setText(memorySearchBackendHint(ddmaUsable, reason));
             hint->setStyleSheet(QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex()));
         }
         };
@@ -1182,6 +1276,53 @@ void MemoryDock::initializeMemoryRegionTab()
         m_tabWidget, m_tabRegions, QStringLiteral("memory.tab.regions"), QStringLiteral("内存区域"));
 }
 
+QVector<ks::ui::PageSearchBodyText> MemoryDock::coldMemorySearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    body.reserve(50);
+    const auto text = [](MemorySearchText id) { return ks::i18n::sourceText(memorySearchSource(id)); };
+    const auto append = [&body, &text](MemorySearchText id, const QStringList& groups = {})
+    {
+        body.append({text(id), memorySearchTarget(id), groups, memorySearchEntry(id).mnemonic});
+    };
+    // ParameterWorkspace reparents the condition/compare/backend panels into
+    // the parameter canvas and the four buttons into its fixed action footer.
+    append(MemorySearchText::Condition);
+    const QStringList condition{text(MemorySearchText::Condition)};
+    for (const auto id : {MemorySearchText::TypeByte, MemorySearchText::TypeInt16,
+        MemorySearchText::TypeInt32, MemorySearchText::TypeInt64, MemorySearchText::TypeFloat32,
+        MemorySearchText::TypeFloat64, MemorySearchText::TypeBytes, MemorySearchText::TypeAscii,
+        MemorySearchText::TypeUnicode, MemorySearchText::ValuePlaceholder, MemorySearchText::RangeAll,
+        MemorySearchText::RangeCustom, MemorySearchText::RangeStart, MemorySearchText::RangeEnd,
+        MemorySearchText::ImageOnly, MemorySearchText::HeapOnly, MemorySearchText::StackOnly,
+        MemorySearchText::TypeCaption, MemorySearchText::ValueCaption, MemorySearchText::RangeCaption})
+        append(id, condition);
+    append(MemorySearchText::Compare);
+    const QStringList compare{text(MemorySearchText::Compare)};
+    for (const auto id : {MemorySearchText::Equal, MemorySearchText::Greater, MemorySearchText::Less,
+        MemorySearchText::Between, MemorySearchText::Changed, MemorySearchText::Unchanged,
+        MemorySearchText::Increased, MemorySearchText::Decreased, MemorySearchText::ValueA,
+        MemorySearchText::CompareConditionCaption, MemorySearchText::CompareValueCaption})
+        append(id, compare);
+    // ValueB is explicitly hidden in the initial Equal mode. Disabled range
+    // inputs and scan actions stay revealable and retain their original texts.
+    for (const auto id : {MemorySearchText::BackendUser, MemorySearchText::BackendDriver,
+        MemorySearchText::BackendHvm, MemorySearchText::BackendDdma}) append(id);
+    QString reason;
+    const bool ddmaUsable = ksword::memory_backend::isDdmaUsable(
+        ksword::memory_backend::currentDdmaSession(), &reason);
+    body.append({ks::i18n::sourceText(memorySearchBackendHint(ddmaUsable, reason)),
+        QString::fromLatin1(kMemorySearchBackendHintTarget), {}, false});
+    append(MemorySearchText::BackendCaption);
+    for (const auto id : {MemorySearchText::FirstScan, MemorySearchText::NextScan,
+        MemorySearchText::Reset, MemorySearchText::Cancel}) append(id);
+    for (const auto& header : memorySearchHeaders())
+        body.append({ks::i18n::sourceText(header), QString::fromLatin1(kMemorySearchTableTarget), {}, false});
+    body += ks::ui::ColdCompactTableActionBody(QString::fromLatin1(kMemorySearchActionsPrefix));
+    append(MemorySearchText::Status);
+    return body;
+}
+
 void MemoryDock::initializeMemorySearchTab()
 {
     // Tab3 初始化日志：用于扫描页控件异常时定位阶段。
@@ -1204,55 +1345,68 @@ void MemoryDock::initializeMemorySearchTab()
     const QString buttonStyle = buildBlueButtonStyle();
 
     // 搜索条件面板。
-    QGroupBox* conditionGroup = new QGroupBox("搜索条件", m_tabSearch);
+    QGroupBox* conditionGroup = new QGroupBox(memorySearchSource(MemorySearchText::Condition), m_tabSearch);
+    conditionGroup->setObjectName(memorySearchTarget(MemorySearchText::Condition));
     ks::ui::StyleParameterSection(conditionGroup);
     QGridLayout* conditionLayout = new QGridLayout(conditionGroup);
     conditionLayout->setHorizontalSpacing(8);
     conditionLayout->setVerticalSpacing(6);
 
     m_searchTypeCombo = new QComboBox(conditionGroup);
-    m_searchTypeCombo->addItem("字节", static_cast<int>(SearchValueType::Byte));
-    m_searchTypeCombo->addItem("2字节", static_cast<int>(SearchValueType::Int16));
-    m_searchTypeCombo->addItem("4字节", static_cast<int>(SearchValueType::Int32));
-    m_searchTypeCombo->addItem("8字节", static_cast<int>(SearchValueType::Int64));
-    m_searchTypeCombo->addItem("浮点数", static_cast<int>(SearchValueType::Float32));
-    m_searchTypeCombo->addItem("双精度", static_cast<int>(SearchValueType::Float64));
-    m_searchTypeCombo->addItem("字节数组(支持??)", static_cast<int>(SearchValueType::ByteArray));
-    m_searchTypeCombo->addItem("ASCII字符串", static_cast<int>(SearchValueType::StringAscii));
-    m_searchTypeCombo->addItem("Unicode字符串", static_cast<int>(SearchValueType::StringUnicode));
+    m_searchTypeCombo->setObjectName(memorySearchTarget(MemorySearchText::TypeByte));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeByte), static_cast<int>(SearchValueType::Byte));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeInt16), static_cast<int>(SearchValueType::Int16));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeInt32), static_cast<int>(SearchValueType::Int32));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeInt64), static_cast<int>(SearchValueType::Int64));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeFloat32), static_cast<int>(SearchValueType::Float32));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeFloat64), static_cast<int>(SearchValueType::Float64));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeBytes), static_cast<int>(SearchValueType::ByteArray));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeAscii), static_cast<int>(SearchValueType::StringAscii));
+    m_searchTypeCombo->addItem(memorySearchSource(MemorySearchText::TypeUnicode), static_cast<int>(SearchValueType::StringUnicode));
     ks::ui::StylePrimaryCombo(m_searchTypeCombo);
 
     m_searchValueEdit = new QLineEdit(conditionGroup);
-    m_searchValueEdit->setPlaceholderText("输入搜索值");
+    m_searchValueEdit->setObjectName(memorySearchTarget(MemorySearchText::ValuePlaceholder));
+    m_searchValueEdit->setPlaceholderText(memorySearchSource(MemorySearchText::ValuePlaceholder));
     m_searchValueEdit->setStyleSheet(inputStyle);
 
     m_searchRangeCombo = new QComboBox(conditionGroup);
-    m_searchRangeCombo->addItem("整个内存");
-    m_searchRangeCombo->addItem("自定义范围");
+    m_searchRangeCombo->setObjectName(memorySearchTarget(MemorySearchText::RangeAll));
+    m_searchRangeCombo->addItem(memorySearchSource(MemorySearchText::RangeAll));
+    m_searchRangeCombo->addItem(memorySearchSource(MemorySearchText::RangeCustom));
     ks::ui::StylePrimaryCombo(m_searchRangeCombo);
 
     m_searchRangeStartEdit = new QLineEdit(conditionGroup);
     m_searchRangeEndEdit = new QLineEdit(conditionGroup);
-    m_searchRangeStartEdit->setPlaceholderText("起始地址");
-    m_searchRangeEndEdit->setPlaceholderText("结束地址");
+    m_searchRangeStartEdit->setObjectName(memorySearchTarget(MemorySearchText::RangeStart));
+    m_searchRangeEndEdit->setObjectName(memorySearchTarget(MemorySearchText::RangeEnd));
+    m_searchRangeStartEdit->setPlaceholderText(memorySearchSource(MemorySearchText::RangeStart));
+    m_searchRangeEndEdit->setPlaceholderText(memorySearchSource(MemorySearchText::RangeEnd));
     m_searchRangeStartEdit->setStyleSheet(inputStyle);
     m_searchRangeEndEdit->setStyleSheet(inputStyle);
     m_searchRangeStartEdit->setEnabled(false);
     m_searchRangeEndEdit->setEnabled(false);
 
-    m_searchImageOnlyCheck = new QCheckBox("仅映像", conditionGroup);
-    m_searchHeapOnlyCheck = new QCheckBox("仅堆(近似)", conditionGroup);
-    m_searchStackOnlyCheck = new QCheckBox("仅栈(近似)", conditionGroup);
+    m_searchImageOnlyCheck = new QCheckBox(memorySearchSource(MemorySearchText::ImageOnly), conditionGroup);
+    m_searchHeapOnlyCheck = new QCheckBox(memorySearchSource(MemorySearchText::HeapOnly), conditionGroup);
+    m_searchStackOnlyCheck = new QCheckBox(memorySearchSource(MemorySearchText::StackOnly), conditionGroup);
+    m_searchImageOnlyCheck->setObjectName(memorySearchTarget(MemorySearchText::ImageOnly));
+    m_searchHeapOnlyCheck->setObjectName(memorySearchTarget(MemorySearchText::HeapOnly));
+    m_searchStackOnlyCheck->setObjectName(memorySearchTarget(MemorySearchText::StackOnly));
     m_searchTypeCombo->setToolTip("选择要搜索的数据类型；类型必须和内存中实际存放的格式一致才能搜到");
     m_searchRangeCombo->setToolTip("限定搜索的地址范围；选“自定义范围”后可填写起止地址");
     m_searchImageOnlyCheck->setToolTip("只在 exe/dll 映射的内存中搜索");
     m_searchHeapOnlyCheck->setToolTip("只在推测为堆（程序动态分配）的内存中搜索，判定为近似值");
     m_searchStackOnlyCheck->setToolTip("只在推测为栈（函数局部变量）的内存中搜索，判定为近似值");
 
-    m_firstScanButton = new QPushButton(QIcon(":/Icon/log_track.svg"), "首次扫描", conditionGroup);
-    m_nextScanButton = new QPushButton(QIcon(":/Icon/codeeditor_find.svg"), "再次扫描", conditionGroup);
-    m_resetScanButton = new QPushButton(QIcon(":/Icon/log_clear.svg"), "重置", conditionGroup);
-    m_cancelScanButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), "取消扫描", conditionGroup);
+    m_firstScanButton = new QPushButton(QIcon(":/Icon/log_track.svg"), memorySearchSource(MemorySearchText::FirstScan), conditionGroup);
+    m_nextScanButton = new QPushButton(QIcon(":/Icon/codeeditor_find.svg"), memorySearchSource(MemorySearchText::NextScan), conditionGroup);
+    m_resetScanButton = new QPushButton(QIcon(":/Icon/log_clear.svg"), memorySearchSource(MemorySearchText::Reset), conditionGroup);
+    m_cancelScanButton = new QPushButton(QIcon(":/Icon/process_terminate.svg"), memorySearchSource(MemorySearchText::Cancel), conditionGroup);
+    m_firstScanButton->setObjectName(memorySearchTarget(MemorySearchText::FirstScan));
+    m_nextScanButton->setObjectName(memorySearchTarget(MemorySearchText::NextScan));
+    m_resetScanButton->setObjectName(memorySearchTarget(MemorySearchText::Reset));
+    m_cancelScanButton->setObjectName(memorySearchTarget(MemorySearchText::Cancel));
     m_firstScanButton->setToolTip("按上面的条件全新搜索一遍内存，得到初始结果集");
     m_nextScanButton->setToolTip("在上次结果的基础上继续筛选，逐步缩小范围（需先完成首次扫描）");
     m_resetScanButton->setToolTip("清空已有搜索结果，回到可重新首次扫描的状态");
@@ -1270,11 +1424,17 @@ void MemoryDock::initializeMemorySearchTab()
     m_cancelScanButton->setEnabled(false);
 
     // 原七列表单拆为单列；起止地址和区域开关保持可见，不依赖横向滚动。
-    conditionLayout->addWidget(new QLabel("数据类型", conditionGroup), 0, 0);
+    auto* typeCaption = new QLabel(memorySearchSource(MemorySearchText::TypeCaption), conditionGroup);
+    typeCaption->setObjectName(memorySearchTarget(MemorySearchText::TypeCaption));
+    conditionLayout->addWidget(typeCaption, 0, 0);
     conditionLayout->addWidget(m_searchTypeCombo, 1, 0);
-    conditionLayout->addWidget(new QLabel("值", conditionGroup), 2, 0);
+    auto* valueCaption = new QLabel(memorySearchSource(MemorySearchText::ValueCaption), conditionGroup);
+    valueCaption->setObjectName(memorySearchTarget(MemorySearchText::ValueCaption));
+    conditionLayout->addWidget(valueCaption, 2, 0);
     conditionLayout->addWidget(m_searchValueEdit, 3, 0);
-    conditionLayout->addWidget(new QLabel("范围", conditionGroup), 4, 0);
+    auto* rangeCaption = new QLabel(memorySearchSource(MemorySearchText::RangeCaption), conditionGroup);
+    rangeCaption->setObjectName(memorySearchTarget(MemorySearchText::RangeCaption));
+    conditionLayout->addWidget(rangeCaption, 4, 0);
     conditionLayout->addWidget(m_searchRangeCombo, 5, 0);
     conditionLayout->addWidget(m_searchRangeStartEdit, 6, 0);
     conditionLayout->addWidget(m_searchRangeEndEdit, 7, 0);
@@ -1292,7 +1452,8 @@ void MemoryDock::initializeMemorySearchTab()
     scanActions->addWidget(m_cancelScanButton, 1, 1);
     workspace->actions()->addLayout(scanActions, 1);
 
-    QGroupBox* compareGroup = new QGroupBox("再次扫描过滤", m_tabSearch);
+    QGroupBox* compareGroup = new QGroupBox(memorySearchSource(MemorySearchText::Compare), m_tabSearch);
+    compareGroup->setObjectName(memorySearchTarget(MemorySearchText::Compare));
     ks::ui::StyleParameterSection(compareGroup);
     QFormLayout* compareLayout = new QFormLayout(compareGroup);
     compareLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
@@ -1301,40 +1462,50 @@ void MemoryDock::initializeMemorySearchTab()
     compareLayout->setSpacing(8);
 
     m_nextScanCompareCombo = new QComboBox(compareGroup);
-    m_nextScanCompareCombo->addItem("等于", static_cast<int>(SearchCompareMode::Equal));
-    m_nextScanCompareCombo->addItem("大于", static_cast<int>(SearchCompareMode::Greater));
-    m_nextScanCompareCombo->addItem("小于", static_cast<int>(SearchCompareMode::Less));
-    m_nextScanCompareCombo->addItem("介于", static_cast<int>(SearchCompareMode::Between));
-    m_nextScanCompareCombo->addItem("变化", static_cast<int>(SearchCompareMode::Changed));
-    m_nextScanCompareCombo->addItem("未变化", static_cast<int>(SearchCompareMode::Unchanged));
-    m_nextScanCompareCombo->addItem("增加", static_cast<int>(SearchCompareMode::Increased));
-    m_nextScanCompareCombo->addItem("减少", static_cast<int>(SearchCompareMode::Decreased));
+    m_nextScanCompareCombo->setObjectName(memorySearchTarget(MemorySearchText::Equal));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Equal), static_cast<int>(SearchCompareMode::Equal));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Greater), static_cast<int>(SearchCompareMode::Greater));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Less), static_cast<int>(SearchCompareMode::Less));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Between), static_cast<int>(SearchCompareMode::Between));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Changed), static_cast<int>(SearchCompareMode::Changed));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Unchanged), static_cast<int>(SearchCompareMode::Unchanged));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Increased), static_cast<int>(SearchCompareMode::Increased));
+    m_nextScanCompareCombo->addItem(memorySearchSource(MemorySearchText::Decreased), static_cast<int>(SearchCompareMode::Decreased));
     ks::ui::StylePrimaryCombo(m_nextScanCompareCombo);
     m_nextScanCompareCombo->setToolTip("再次扫描时的筛选方式：可按新值比较，也可按“变化/未变化/增加/减少”筛选");
 
     m_nextScanValueEdit = new QLineEdit(compareGroup);
     m_nextScanValueBEdit = new QLineEdit(compareGroup);
-    m_nextScanValueEdit->setPlaceholderText("值A");
-    m_nextScanValueBEdit->setPlaceholderText("值B");
+    m_nextScanValueEdit->setObjectName(memorySearchTarget(MemorySearchText::ValueA));
+    m_nextScanValueBEdit->setObjectName(memorySearchTarget(MemorySearchText::ValueB));
+    m_nextScanValueEdit->setPlaceholderText(memorySearchSource(MemorySearchText::ValueA));
+    m_nextScanValueBEdit->setPlaceholderText(memorySearchSource(MemorySearchText::ValueB));
     m_nextScanValueEdit->setStyleSheet(inputStyle);
     m_nextScanValueBEdit->setStyleSheet(inputStyle);
     m_nextScanValueBEdit->setVisible(false);
 
-    compareLayout->addRow(QStringLiteral("条件"), m_nextScanCompareCombo);
-    compareLayout->addRow(QStringLiteral("值"), m_nextScanValueEdit);
+    compareLayout->addRow(memorySearchSource(MemorySearchText::CompareConditionCaption), m_nextScanCompareCombo);
+    compareLayout->labelForField(m_nextScanCompareCombo)->setObjectName(memorySearchTarget(MemorySearchText::CompareConditionCaption));
+    compareLayout->addRow(memorySearchSource(MemorySearchText::CompareValueCaption), m_nextScanValueEdit);
+    compareLayout->labelForField(m_nextScanValueEdit)->setObjectName(memorySearchTarget(MemorySearchText::CompareValueCaption));
     compareLayout->addRow(m_nextScanValueBEdit);
     workspace->parameters()->addWidget(compareGroup);
 
     // 只在本页将访问后端横条转为纵向，其他专业编辑器工具条保持原布局。
     QWidget* backendSelector = createBackendSelector(
         m_tabSearch, m_searchBackendCombo, m_searchBackendHintLabel);
+    m_searchBackendCombo->setObjectName(memorySearchTarget(MemorySearchText::BackendUser));
+    m_searchBackendHintLabel->setObjectName(QString::fromLatin1(kMemorySearchBackendHintTarget));
+    backendSelector->layout()->itemAt(0)->widget()->setObjectName(memorySearchTarget(MemorySearchText::BackendCaption));
     static_cast<QHBoxLayout*>(backendSelector->layout())->setDirection(QBoxLayout::TopToBottom);
     workspace->parameters()->addWidget(backendSelector);
 
     m_searchResultTable = new MemoryTableView(m_tabSearch);
+    m_searchResultTable->setObjectName(QString::fromLatin1(kMemorySearchTableTarget));
     // 搜索已经提供前次值/再次扫描比较，通用快照会重复同一信息。
     ks::ui::SetTableActionBarMode(m_searchResultTable, ks::ui::TableActionBarMode::Compact);
-    m_searchResultTable->setHorizontalHeaderLabels(QStringList{ "地址", "当前值", "前次值", "备注" });
+    ks::ui::SetCompactTableSearchTargetPrefix(m_searchResultTable, QString::fromLatin1(kMemorySearchActionsPrefix));
+    m_searchResultTable->setHorizontalHeaderLabels(memorySearchHeaders());
     m_searchResultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_searchResultTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_searchResultTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1354,7 +1525,8 @@ void MemoryDock::initializeMemorySearchTab()
     progressLayout->setSpacing(8);
     m_scanProgressBar = new QProgressBar(m_tabSearch);
     m_scanProgressBar->setRange(0, 100);
-    m_scanStatusLabel = new QLabel("就绪", m_tabSearch);
+    m_scanStatusLabel = new QLabel(memorySearchSource(MemorySearchText::Status), m_tabSearch);
+    m_scanStatusLabel->setObjectName(memorySearchTarget(MemorySearchText::Status));
     progressLayout->addWidget(m_scanProgressBar, 1);
     progressLayout->addWidget(m_scanStatusLabel);
     workspace->results()->addLayout(progressLayout);
