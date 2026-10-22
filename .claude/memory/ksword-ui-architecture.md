@@ -544,3 +544,8 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 构建35反馈的线程/模块等崩溃，匹配旧EXE/PDB的dump落在`ImmutableValueTable::startPending`完成回调读取零结果的QFuture。`watcher->setFuture({})`切到默认的已完成空Future，可在`deleteLater`前再投递finished；必须先断开该watcher到接收者的完成连接，并在读取结果前检查resultCount。空/空指针结果沿既有失败通道恢复旧表可用性，不能当作空成功覆盖数据；旧代结果继续受revision门禁。分析旧dump须匹配其实际模块路径/PE-PDB身份，反馈文件引用一个发行目录不代表所有dump都来自同一构建。
 
 - 同轮关闭dump的真实事件为`ChildRemoved(71)`，旧EXE反汇编在事件类型分派前调用QTabWidget::currentWidget，进入已经拆除子布局的QStackedLayout崩溃。PageTabEnvelope对ChildAdded/Removed只记布局失效并合并排队，不同步读取当前页；QPointer非空不代表Qt内部布局仍可访问。既有布局/几何/动画准备实现保持，真实GUI关闭仍须用户回归。
+
+
+- 2026-10-22 构建35字段反馈：DetailFieldProjection物化范围继续按原requestedFirst/requestedLast取行，但宿主clipFirst/clipLast必须覆盖这些行的完整高度；只修上边界会把最后一个长字段压缩在局部卡片内。0231346b保留两端完整行，另一列不因卡片变高而多物化。已有snapshot更新/视口预算未完成时保持原字段可见，4940582a只让首份加载使用整视口加载层。不要把QLabel大小策略调用顺序当作充分归因：本机Qt6.9.3的setText也会在updateLabel恢复height-for-width。8项纯值生产几何检查不是GUI验收。
+- 2026-10-22 组合框Show后排队加不透明frame/QSS会改变实际viewport和item度量，而Qt showPopup在Show前已计算窗口高度。223c6b2a仅在既有queued主题回调内用真实列表rect补足短列表缺口（最多32项并遵守maxVisibleItems/屏幕/maximumHeight），不改焦点、选中、长列表限制或提前创建Popup；仍禁止在Show/Resize栈内同步repolish。
+- 2026-10-22 保存布局和启动页：ADS 5.1.1会在各area的currentDockWidget属性保存XML Current身份。b330022f在初次外观挂载结束且restore成功时一次性收口所保存选中项；关闭/移出原area的目标跳过，没有第二份配置或重试timer。跨固定发行目录测试会使用不同exe/config，验证退出恢复必须在同一测试副本内进行。
