@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QEvent>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPalette>
@@ -350,30 +351,60 @@ namespace
         return nullptr;
     }
 
-    // 从待刷新控件向上验证宿主，不再扫描没有请求的整棵控件树。
+    // 只读取当前父级/可见性；不发事件、不运行样式回调。
+    QWidget* visibleThemeParent(QWidget* widget)
+    {
+        if (widget->isWindow()) return nullptr;
+        QWidget* parent = widget->parentWidget();
+        if (parent == nullptr || !widget->isVisibleTo(parent)) return nullptr;
+        if (auto* stack = qobject_cast<QStackedWidget*>(parent);
+            stack != nullptr && widget != stack->currentWidget()) return nullptr;
+        return parent;
+    }
+
+    // 回调前必须读取真实父链，不能复用收集阶段的结论。
     int visibleDepthInScope(QWidget* widget, QWidget* scope)
     {
         int depth = 0;
         while (widget != nullptr && widget != scope)
         {
-            if (widget->isWindow())
-            {
-                return -1;
-            }
-            QWidget* parent = widget->parentWidget();
-            if (parent == nullptr || !widget->isVisibleTo(parent))
-            {
-                return -1;
-            }
-            if (auto* stack = qobject_cast<QStackedWidget*>(parent);
-                stack != nullptr && widget != stack->currentWidget())
-            {
-                return -1;
-            }
-            widget = parent;
+            widget = visibleThemeParent(widget);
+            if (widget == nullptr) return -1;
             ++depth;
         }
         return widget == scope ? depth : -1;
+    }
+
+    // 缓存只活在无回调的收集阶段。多个脏控件共享的祖先（包括无关宿主）
+    // 每次准备只检查一次；切页、重挂、销毁或下一次主题请求不保留旧结论。
+    int collectVisibleDepth(QWidget* widget, QWidget* scope,
+        QHash<QWidget*, int>& depths, QVector<QWidget*>& branch)
+    {
+        if (widget == scope) return 0;
+        if (widget == nullptr || scope == nullptr) return -1;
+        widget = visibleThemeParent(widget);
+        if (widget == nullptr) return -1;
+        if (widget == scope) return 1;
+        branch.clear(); // 只缓存共享祖先，不为每个叶绑定存一份哈希节点。
+        int depth = -1;
+        while (widget != nullptr && widget != scope)
+        {
+            const auto found = depths.constFind(widget);
+            if (found != depths.cend())
+            {
+                depth = found.value();
+                break;
+            }
+            branch.append(widget);
+            widget = visibleThemeParent(widget);
+        }
+        if (widget == scope) depth = 0;
+        for (qsizetype index = branch.size(); index > 0; --index)
+        {
+            if (depth >= 0) ++depth;
+            depths.insert(branch[index - 1], depth);
+        }
+        return depth >= 0 ? depth + 1 : -1;
     }
 
     void ThemeBindingRegistry::applyPendingForScope(QWidget* scope)
@@ -389,12 +420,16 @@ namespace
         };
         QVector<Pending> pending;
         pending.reserve(m_dirtyBindings.size());
-        for (WidgetThemeBinding* binding : m_dirtyBindings)
         {
-            const int depth = visibleDepthInScope(binding->widget(), scope);
-            if (depth >= 0)
+            QHash<QWidget*, int> depths;
+            QVector<QWidget*> branch; // 复用路径，缓存随收集结束释放。
+            for (WidgetThemeBinding* binding : m_dirtyBindings)
             {
-                pending.append({binding, depth});
+                const int depth = collectVisibleDepth(binding->widget(), scope, depths, branch);
+                if (depth >= 0)
+                {
+                    pending.append({binding, depth});
+                }
             }
         }
         std::stable_sort(pending.begin(), pending.end(), [](const Pending& left, const Pending& right)
