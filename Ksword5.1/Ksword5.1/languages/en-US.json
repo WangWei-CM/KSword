@@ -42406,6 +42406,7 @@
     "风险标记: 不执行卸载/删除/patch。": "Risk note: does not unload, delete, or patch.",
     "风险标记: 保持只读，不做 patch/remove/disable。": "Risk note: read-only; does not patch, remove, or disable.",
     "首Range基址: 0x%7\n": "First range base: 0x%7\n",
-    "监控启动完成，正在监听目标进程": "Monitoring started; listening to target processes"
+    "监控启动完成，正在监听目标进程": "Monitoring started; listening to target processes",
+    "currentDockWidget": "currentDockWidget"
   }
 }
