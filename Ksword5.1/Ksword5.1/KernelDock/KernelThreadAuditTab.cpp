@@ -10,6 +10,7 @@
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableInteractionSupport.h"
 #include "../UI/TableRowFilterSupport.h"
+#include "../UI/TableColumnAutoFit.h"
 #include "../theme.h"
 
 #include <QAbstractItemView>
@@ -191,8 +192,9 @@ void KernelThreadAuditTab::initializeUi()
     m_evidenceButton = new QPushButton(QStringLiteral("B"), this);
     m_overviewButton->setFixedSize(28, 28);
     m_evidenceButton->setFixedSize(28, 28);
-    m_overviewButton->setVisible(m_mode != Mode::WorkQueueThreads);
-    m_evidenceButton->setVisible(m_mode != Mode::WorkQueueThreads);
+    // System-thread overview and address evidence now share one visible table.
+    m_overviewButton->hide();
+    m_evidenceButton->hide();
 
     m_filterEdit = new QLineEdit(this);
     ks::ui::StyleSearchField(m_filterEdit);
@@ -235,6 +237,13 @@ void KernelThreadAuditTab::initializeUi()
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
+    if (m_mode == Mode::SystemThreads)
+    {
+        // Keep the content widths measured below, including the complete entry-module
+        // name. This address-heavy view may scroll horizontally rather than compress it.
+        ks::ui::SetTableColumnAutoFitEnabled(m_table, false);
+        m_table->horizontalHeader()->setStretchLastSection(false);
+    }
 
     m_detailEditor = new ks::ui::StructuredFieldView(splitter);
 
@@ -609,7 +618,7 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
 {
     m_viewPreset = preset;
 
-    // A：调度/队列概览；B：地址/模块/R0 证据。两组均保持精简。
+    // Work-queue evidence retains its layout; system threads combine the former A/B fields.
     std::vector<Column> visibleColumns;
     if (m_mode == Mode::WorkQueueThreads)
     {
@@ -625,18 +634,6 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
             Column::ModulePath,
             Column::R0Status };
     }
-    else if (preset == ViewPreset::Evidence)
-    {
-        visibleColumns = {
-            Column::ThreadId,
-            Column::StartRoutine,
-            Column::Parameter,
-            Column::Module,
-            Column::ModuleBase,
-            Column::ModulePath,
-            Column::R0Status,
-            Column::Protection };
-    }
     else
     {
         visibleColumns = {
@@ -645,10 +642,14 @@ void KernelThreadAuditTab::applyColumnPreset(const ViewPreset preset)
             Column::QueueType,
             Column::State,
             Column::WaitReason,
+            Column::StartRoutine,
+            Column::Parameter,
             Column::Module,
+            Column::ModuleBase,
+            Column::ModulePath,
+            Column::R0Status,
             Column::Protection };
     }
-
     for (int columnIndex = 0; columnIndex < static_cast<int>(Column::Count); ++columnIndex)
     {
         const Column column = static_cast<Column>(columnIndex);
