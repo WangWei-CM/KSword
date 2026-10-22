@@ -371,6 +371,11 @@ void SettingsDock::bindAppearanceSignals()
         }
         });
 
+    connect(m_controlBackgroundOpacitySlider, &QSlider::valueChanged, this, [this](const int value) {
+        m_controlBackgroundOpacityValueLabel->setText(QStringLiteral("%1%").arg(value));
+        markPendingChanges(QString());
+        });
+
     connect(m_backgroundTransparencyCheckBox, &QCheckBox::toggled, this, [this](const bool /*checkedState*/) {
         markPendingChanges(QString());
         });
@@ -563,6 +568,9 @@ void SettingsDock::applySettingsToUi(const ks::settings::AppearanceSettings& set
 
     m_backgroundPathEdit->setText(settings.backgroundImagePath);
     m_backgroundOpacitySlider->setValue(settings.backgroundOpacityPercent);
+    m_controlBackgroundOpacitySlider->setValue(settings.controlBackgroundOpacityPercent);
+    m_controlBackgroundOpacityValueLabel->setText(
+        QStringLiteral("%1%").arg(m_controlBackgroundOpacitySlider->value()));
     if (m_backgroundTransparencyCheckBox != nullptr)
     {
         m_backgroundTransparencyCheckBox->setChecked(settings.backgroundTransparencyEnabled);
@@ -814,6 +822,7 @@ ks::settings::AppearanceSettings SettingsDock::collectSettingsFromUi() const
         : rawPathText;
 
     collectedSettings.backgroundOpacityPercent = m_backgroundOpacitySlider->value();
+    collectedSettings.controlBackgroundOpacityPercent = m_controlBackgroundOpacitySlider->value();
     collectedSettings.backgroundTransparencyEnabled = m_backgroundTransparencyCheckBox != nullptr
         && m_backgroundTransparencyCheckBox->isChecked();
     collectedSettings.backgroundTranslucencyMaterial = m_backgroundTranslucencyMaterialCombo != nullptr
@@ -1206,6 +1215,7 @@ void SettingsDock::saveAndEmitFromUi(const QString& triggerReason)
         && nextSettings.uiLanguage.compare(m_currentAppearanceSettings.uiLanguage, Qt::CaseInsensitive) == 0
         && nextSettings.backgroundImagePath == m_currentAppearanceSettings.backgroundImagePath
         && nextSettings.backgroundOpacityPercent == m_currentAppearanceSettings.backgroundOpacityPercent
+        && nextSettings.controlBackgroundOpacityPercent == m_currentAppearanceSettings.controlBackgroundOpacityPercent
         && nextSettings.backgroundTransparencyEnabled == m_currentAppearanceSettings.backgroundTransparencyEnabled
         && nextSettings.backgroundTranslucencyMaterial == m_currentAppearanceSettings.backgroundTranslucencyMaterial
         && nextSettings.backgroundBlurRadiusPercent == m_currentAppearanceSettings.backgroundBlurRadiusPercent

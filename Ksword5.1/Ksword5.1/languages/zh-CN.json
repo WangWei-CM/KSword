@@ -8,6 +8,9 @@
   "text_direction": "ltr",
   "fallback": "en-US",
   "translations": {
+    "settings.background.control_opacity.short": "控件背景不透明度",
+    "settings.background.control_opacity.tooltip": "统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。",
+    "settings.background.control_opacity.legend": "越低越透明，文字和图标保持不透明",
     "hardware.power.error.scheme_enumerate": "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。",
     "monitor.export.action": "导出",
     "monitor.export.ready_hint": "导出当前结果范围",
@@ -7102,6 +7105,9 @@
     "notification.copy.log_template": "%1\n%2\n%3\n文件：%4\n函数：%5\nGUID：%6"
   },
   "source_translations": {
+    "控件背景不透明度": "控件背景不透明度",
+    "统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。": "统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。",
+    "越低越透明，文字和图标保持不透明": "越低越透明，文字和图标保持不透明",
     "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。": "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。",
     ", advice=": ", advice=",
     "CloseTrace": "CloseTrace",

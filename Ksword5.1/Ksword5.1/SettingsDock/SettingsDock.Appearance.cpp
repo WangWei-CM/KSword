@@ -289,6 +289,25 @@ void SettingsDock::initializeAppearanceTab()
         QStringLiteral("settings.background.opacity.short"), QStringLiteral("背景图透明度")),
         ks::settings::ui::ControlRow(opacityLayout, backgroundGroupBox));
 
+    auto* controlOpacityLayout = new QHBoxLayout();
+    m_controlBackgroundOpacitySlider = new ks::ui::ThemedSlider(Qt::Horizontal, backgroundGroupBox);
+    m_controlBackgroundOpacitySlider->setRange(0, 100);
+    m_controlBackgroundOpacitySlider->setSingleStep(1);
+    m_controlBackgroundOpacitySlider->setPageStep(5);
+    languageManager.bindToolTip(m_controlBackgroundOpacitySlider,
+        QStringLiteral("settings.background.control_opacity.tooltip"),
+        QStringLiteral("统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。"));
+    controlOpacityLayout->addWidget(m_controlBackgroundOpacitySlider, 1);
+    m_controlBackgroundOpacityValueLabel = new QLabel(QStringLiteral("75%"), backgroundGroupBox);
+    controlOpacityLayout->addWidget(m_controlBackgroundOpacityValueLabel);
+    ks::settings::ui::SliderLegend(controlOpacityLayout, m_controlBackgroundOpacitySlider,
+        m_controlBackgroundOpacityValueLabel, backgroundGroupBox,
+        QStringLiteral("settings.background.control_opacity.legend"),
+        QStringLiteral("越低越透明，文字和图标保持不透明"));
+    backgroundForm->addRow(ks::settings::ui::Label(backgroundGroupBox,
+        QStringLiteral("settings.background.control_opacity.short"), QStringLiteral("控件背景不透明度")),
+        ks::settings::ui::ControlRow(controlOpacityLayout, backgroundGroupBox));
+
     // 透明窗口效果单独成区，避免把系统合成参数与图片参数混在一起。
     auto* transparencyGroupBox = new QGroupBox(m_appearanceTab);
     languageManager.bindText(transparencyGroupBox,

@@ -391,6 +391,7 @@ namespace
         defaultSettings.uiLanguage = QStringLiteral("system");
         defaultSettings.backgroundImagePath = QStringLiteral("Style/ksword_background.png");
         defaultSettings.backgroundOpacityPercent = 35;
+        defaultSettings.controlBackgroundOpacityPercent = 75;
         defaultSettings.backgroundTransparencyEnabled = false;
         defaultSettings.utilizationFloatingScalePercent = 100;
         defaultSettings.utilizationFloatingBackgroundOpacityPercent = 100;
@@ -649,6 +650,9 @@ ks::settings::AppearanceSettings ks::settings::loadAppearanceSettings()
     const int backgroundOpacityPercentValue = rootObject.value(QStringLiteral("background_opacity_percent"))
         .toInt(loadedSettings.backgroundOpacityPercent);
     loadedSettings.backgroundOpacityPercent = clampOpacityPercent(backgroundOpacityPercentValue);
+    loadedSettings.controlBackgroundOpacityPercent = clampOpacityPercent(rootObject
+        .value(QStringLiteral("control_background_opacity_percent"))
+        .toInt(loadedSettings.controlBackgroundOpacityPercent));
 
     loadedSettings.backgroundTransparencyEnabled = rootObject
         .value(QStringLiteral("background_transparency_enabled"))
@@ -940,6 +944,8 @@ bool ks::settings::saveAppearanceSettings(const AppearanceSettings& settings, QS
         settings.uiLanguage.trimmed().isEmpty() ? QStringLiteral("system") : settings.uiLanguage.trimmed());
     rootObject.insert(QStringLiteral("background_image_path"), settings.backgroundImagePath);
     rootObject.insert(QStringLiteral("background_opacity_percent"), clampOpacityPercent(settings.backgroundOpacityPercent));
+    rootObject.insert(QStringLiteral("control_background_opacity_percent"),
+        clampOpacityPercent(settings.controlBackgroundOpacityPercent));
     rootObject.insert(QStringLiteral("background_transparency_enabled"), settings.backgroundTransparencyEnabled);
     rootObject.insert(QStringLiteral("utilization_floating_scale_percent"),
         std::clamp(settings.utilizationFloatingScalePercent, 25, 300));

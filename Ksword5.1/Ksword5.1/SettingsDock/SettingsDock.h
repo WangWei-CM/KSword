@@ -369,6 +369,10 @@ private:
     // m_backgroundOpacityValueLabel 作用：显示透明度百分比文本。
     QLabel* m_backgroundOpacityValueLabel = nullptr;
 
+    // 共享主题控件底色单独调节，保留文字、图标与窗口背景图的原有不透明度。
+    QSlider* m_controlBackgroundOpacitySlider = nullptr;
+    QLabel* m_controlBackgroundOpacityValueLabel = nullptr;
+
     // m_backgroundTransparencyCheckBox 作用：让背景图自身的透明区域透出窗口后方。
     QCheckBox* m_backgroundTransparencyCheckBox = nullptr;
 

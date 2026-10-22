@@ -8,6 +8,9 @@
   "text_direction": "ltr",
   "fallback": "zh-CN",
   "translations": {
+    "settings.background.control_opacity.short": "Control background opacity",
+    "settings.background.control_opacity.tooltip": "Adjust the backgrounds of tables, collapsible sections, toolbars, buttons and input fields together. Lower values are more transparent. Text and icons remain opaque. Click Apply to use this setting.",
+    "settings.background.control_opacity.legend": "Lower values are more transparent; text and icons remain opaque",
     "hardware.power.error.scheme_enumerate": "Windows power scheme enumeration did not complete (index %1, Win32=%2). Earlier schemes were retained; refresh to retry.",
     "monitor.export.action": "Export",
     "monitor.export.ready_hint": "Export the current result scope",
@@ -7102,6 +7105,9 @@
     "notification.copy.log_template": "%1\n%2\n%3\nFile: %4\nFunction: %5\nGUID: %6"
   },
   "source_translations": {
+    "控件背景不透明度": "Control background opacity",
+    "统一调整表格、折叠区、工具带、按钮和输入框的背景。数值越低越透明，文字和图标保持不透明；点击应用后生效。": "Adjust the backgrounds of tables, collapsible sections, toolbars, buttons and input fields together. Lower values are more transparent. Text and icons remain opaque. Click Apply to use this setting.",
+    "越低越透明，文字和图标保持不透明": "Lower values are more transparent; text and icons remain opaque",
     "Windows 电源方案枚举未完成（索引 %1，Win32=%2）；已保留此前读取的方案，请刷新重试。": "Windows power scheme enumeration did not complete (index %1, Win32=%2). Earlier schemes were retained; refresh to retry.",
     ", advice=": ", advice=",
     "CloseTrace": "CloseTrace",
