@@ -13,6 +13,7 @@
 #include <QPointer>
 #include <QBoxLayout>
 #include <QFont>
+#include <utility>
 
 namespace
 {
@@ -42,7 +43,7 @@ namespace
     {
         const QString begin = QStringLiteral("/* ks_primary_begin */");
         const QString end = QStringLiteral("/* ks_primary_end */");
-        QString style = widget->styleSheet(); // 当前页面专用样式保留在拥有块之外。
+        QString style = ks::ui::InitialStandaloneInputThemeStyle(widget); // 页面专用样式保留在拥有块之外。
         const qsizetype first = style.indexOf(begin);
         const qsizetype last = first < 0 ? -1 : style.indexOf(end, first);
         if (first >= 0 && last >= first)
@@ -52,6 +53,12 @@ namespace
         const QString ownedBlock = begin + rules + end; // 仅本模块的容器/输入规则，不拥有按钮颜色。
         widget->setProperty("ksword_primary_style_block", ownedBlock);
         style = style.trimmed() + QLatin1Char('\n') + ownedBlock;
+        // The combo callback formerly appended standalone geometry after this
+        // write (trimmed() can remove its leading newline). Compose that exact
+        // final order here, including any required legacy duplicate rule.
+        if (widget->property("ksword_primary_combo").toBool()
+            && widget->property("ksword_standalone_input").toBool())
+            style = ks::ui::WithStandaloneInputGeometry(std::move(style));
         if (style != widget->styleSheet())
         {
             widget->setStyleSheet(style);
@@ -61,6 +68,26 @@ namespace
 
 namespace ks::ui
 {
+    QString WithParameterInputGeometry(QString style)
+    {
+        const QString geometry = QStringLiteral(
+            "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}");
+        if (!style.contains(geometry)) style += geometry;
+        return style;
+    }
+
+    QString WithStandaloneInputGeometry(QString style)
+    {
+        const QString geometry = QStringLiteral(
+            "\nQComboBox[ksword_standalone_input=\"true\"],"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"],"
+            "QLineEdit[ksword_standalone_input=\"true\"]{border-radius:5px;}"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::up-button{border-top-right-radius:4px;}"
+            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::down-button{border-bottom-right-radius:4px;}");
+        if (!style.contains(geometry)) style += geometry;
+        return style;
+    }
+
     void StyleStandaloneInput(QWidget* input)
     {
         if (!input || (!qobject_cast<QComboBox*>(input)
@@ -83,22 +110,22 @@ namespace ks::ui
             new StandaloneInputMetrics(input);
         }
         input->setProperty("ksword_standalone_input", true);
-        const QString geometry = QStringLiteral(
-            "\nQComboBox[ksword_standalone_input=\"true\"],"
-            "QAbstractSpinBox[ksword_standalone_input=\"true\"],"
-            "QLineEdit[ksword_standalone_input=\"true\"]{border-radius:5px;}"
-            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::up-button{border-top-right-radius:4px;}"
-            "QAbstractSpinBox[ksword_standalone_input=\"true\"]::down-button{border-bottom-right-radius:4px;}");
-        if (!input->styleSheet().contains(geometry))
-        {
-            input->setStyleSheet(input->styleSheet() + geometry);
-        }
         // 明确独立输入才接管完整底色；已有业务主题绑定保留所有权，不覆盖状态语义。
+        const QPointer<QWidget> target(input);
         if (!HasWidgetThemeBinding(input))
         {
             if (auto* combo = qobject_cast<QComboBox*>(input)) StylePrimaryCombo(combo);
             else if (auto* spin = qobject_cast<QAbstractSpinBox*>(input)) BindSpinBoxTheme(spin);
             else if (auto* edit = qobject_cast<QLineEdit*>(input)) BindLineEditTheme(edit);
+        }
+        if (!target) return;
+        const QString current = target->styleSheet();
+        const QString finalStyle = WithStandaloneInputGeometry(current);
+        if (finalStyle != current && !RequestStandaloneInputThemeGeometry(target))
+        {
+            // A custom owner (including the automatic combo policy) already
+            // has its own rules. Preserve its original single geometry write.
+            target->setStyleSheet(finalStyle);
         }
     }
 
@@ -124,7 +151,7 @@ namespace ks::ui
                     StyleStandaloneInput(target);
                 }
             }
-        });
+        }, ThemePalettePolicy::FollowApplication, true);
     }
 
     void StylePrimaryGroup(QGroupBox* group)

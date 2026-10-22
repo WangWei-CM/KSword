@@ -634,13 +634,15 @@ namespace ks::ui
                     || qobject_cast<QAbstractSpinBox*>(edit->parentWidget())) continue;
                 NormalizeToolbarControl(edit);
                 // 搜索、参数输入和数值框使用同一编辑层；这里只拥有紧凑表单的横向留白。
-                const QString geometry = QStringLiteral(
-                    "QLineEdit[ksword_standalone_input=\"true\"]{padding:0 8px;}");
-                if (!edit->styleSheet().contains(geometry))
-                {
-                    edit->setStyleSheet(edit->styleSheet() + geometry); // 重复finish不累加同一几何规则。
-                }
                 BindLineEditTheme(edit);
+                const QString current = edit->styleSheet();
+                const QString geometry = WithParameterInputGeometry(current);
+                if (current != geometry)
+                {
+                    edit->setProperty("ksword_parameter_input_padding", true);
+                    if (!RequestStandaloneInputThemeGeometry(edit))
+                        edit->setStyleSheet(geometry); // 已准备/自定义拥有者保留原即时几何。
+                }
                 StyleStandaloneInput(edit);
             }
         }

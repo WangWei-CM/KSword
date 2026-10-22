@@ -6,6 +6,7 @@
 class QWidget;
 class QAbstractSpinBox;
 class QLineEdit;
+class QString;
 
 namespace ks::ui
 {
@@ -21,8 +22,18 @@ namespace ks::ui
     // 构造期登记及主题变化分片排队；完整页面挂载可局部消费首帧请求，Popup 保留延迟约束。
     // 返回 false 表示空参数、没有 QApplication 或调用线程不属于 GUI 线程。
     // PreserveLocal 会在重建 QSS 后恢复调用前的局部 palette，防止 Qt repolish 丢失独立底色。
+    // Only input refreshers that compose the standalone geometry opt in; a
+    // replacement binding resets this capability together with its callback.
     bool BindWidgetTheme(QWidget* widget, std::function<void()> refresh,
-        ThemePalettePolicy palettePolicy = ThemePalettePolicy::FollowApplication);
+        ThemePalettePolicy palettePolicy = ThemePalettePolicy::FollowApplication,
+        bool ownsStandaloneInputGeometry = false);
+
+    // Reuse the existing queue for a known input owner. Custom bindings return
+    // false so the caller preserves their original immediate geometry path.
+    bool RequestStandaloneInputThemeGeometry(QWidget* widget);
+    // Compose only for the first preparation of an opted-in input binding.
+    // Later business replacements must not have old geometry reinserted.
+    QString InitialStandaloneInputThemeStyle(QWidget* widget);
 
     // 仅在构造完成、最终父级建立后准备当前显示分支；从待刷新登记项验证宿主，不扫描整树。
     // 与原分片消费同一待刷新标记，已准备项不会在旧队列中重复执行。
