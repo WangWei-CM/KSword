@@ -84,3 +84,6 @@ __pycache__/
 # removed from history once committed, and exceeds what hosting will accept.
 # Keep them next to the other logs on disk, out of version control.
 docs/next/logs/*full*.dmp
+# Local generated CMake and standalone-test outputs.
+/build/
+/.out/
