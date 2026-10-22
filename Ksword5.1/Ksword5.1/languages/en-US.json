@@ -15540,6 +15540,7 @@
     "%1；已执行一次缓存删除重建但仍失败。": "%1; Cache rebuild failed after one deletion attempt.",
     "%1；状态=%2；来源=%3；%4": "%1; Status=%2; Source=%3; %4",
     "%2e%2e": "%2e%2e",
+    "%2F": "%2F",
     "%APPDATA%": "%APPDATA%",
     "%LOCALAPPDATA%": "%LOCALAPPDATA%",
     "%OSDRIVE%": "%OSDRIVE%",
