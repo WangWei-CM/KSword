@@ -481,8 +481,8 @@ namespace
             Row row;
             auto* value = new QLabel(card.widget);
             row.value = value;
-            value->setTextFormat(Qt::PlainText); value->setWordWrap(true); value->setMinimumWidth(0);
             value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            value->setTextFormat(Qt::PlainText); value->setWordWrap(true); value->setMinimumWidth(0);
             value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             value->setProperty("ksword_card_focus_policy", static_cast<int>(value->focusPolicy()));
             value->setProperty("ks_i18n_preserve_data_text", true);
