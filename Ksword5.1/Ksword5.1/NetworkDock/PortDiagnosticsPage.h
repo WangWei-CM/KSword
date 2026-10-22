@@ -32,6 +32,7 @@ private:
     int selectedRecord() const;
 
     ks::ui::AsyncOperation* m_operation = nullptr; // 页面析构先关闭异步投递门禁。
+    ks::ui::AsyncOperation* m_iconOperation = nullptr; // 图标异步回补，不阻塞诊断结果与操作状态。
     QSpinBox* m_port = nullptr;                    // 只接受 1..65535 的本地端口。
     QComboBox* m_protocol = nullptr;               // TCP/UDP 查询范围。
     QPushButton* m_diagnose = nullptr;             // 主动查询入口。
