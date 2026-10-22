@@ -316,6 +316,9 @@ namespace ks::ui
         std::shared_ptr<TableCellSearchCursor> m_tableSearchCursor;
         struct DockSearchCursor;
         std::shared_ptr<DockSearchCursor> m_dockSearchCursor;
+        // Query-local preparation identity; a changed content root must be prepared again.
+        QPointer<ads::CDockWidget> m_preparingSearchDock;
+        QPointer<QWidget> m_preparingSearchContent;
         QPointer<QTableView> m_pendingDirectTableView; // m_pendingDirectTableView：当前表格范围待扫描对象。
         QList<QPointer<QTableView>> m_filteredTableViewList; // m_filteredTableViewList：当前由通用搜索附加过滤的表格。
     };

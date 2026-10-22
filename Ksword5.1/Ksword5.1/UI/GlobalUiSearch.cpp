@@ -1004,7 +1004,9 @@ namespace ks::ui
         {
             ++m_searchGeneration;
             m_tableSearchCursor.reset();
-        m_dockSearchCursor.reset();
+            m_dockSearchCursor.reset();
+            m_preparingSearchDock.clear();
+            m_preparingSearchContent.clear();
             m_searchInProgress = false;
         }
         if (!m_searchModeActive)
@@ -1085,6 +1087,8 @@ namespace ks::ui
         ++m_searchGeneration;
         m_tableSearchCursor.reset();
         m_dockSearchCursor.reset();
+        m_preparingSearchDock.clear();
+        m_preparingSearchContent.clear();
         m_searchInProgress = false;
         if (m_searchDebounceTimer != nullptr)
         {
@@ -1500,6 +1504,8 @@ namespace ks::ui
         m_pendingDirectTableView.clear();
         m_tableSearchCursor.reset();
         m_dockSearchCursor.reset();
+        m_preparingSearchDock.clear();
+        m_preparingSearchContent.clear();
         if (m_activeSearchScope == UiSearchScope::CurrentTable)
         {
             m_pendingDirectTableView = resolveCurrentTable();
@@ -1614,26 +1620,39 @@ namespace ks::ui
                 {
                     updateSearchProgressUi(dock->windowTitle());
                     const QPointer<GlobalUiSearchController> alive(this);
-                    std::optional<QVector<ResolvedPageNavigationDescriptor>> descriptors;
-                    if (m_pageCatalogProvider)
-                    {
-                        const auto provider = m_pageCatalogProvider;
-                        const auto catalog = provider(dock);
-                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
-                        if (dock && catalog) descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
-                    }
+                    // Nested factories can yield many times. Their incomplete body
+                    // coverage does not change per slice; do not rediscover the
+                    // growing navigation tree or re-run root preparation each time.
+                    const bool continuingPreparation = m_preparingSearchDock == dock
+                        && m_preparingSearchContent == dock->widget();
                     bool searchComplete = false;
-                    if (descriptors && m_pageCatalogSearchCompleteness)
+                    if (!continuingPreparation)
                     {
-                        const auto completeness = m_pageCatalogSearchCompleteness;
-                        searchComplete = completeness(dock);
-                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        std::optional<QVector<ResolvedPageNavigationDescriptor>> descriptors;
+                        if (m_pageCatalogProvider)
+                        {
+                            const auto provider = m_pageCatalogProvider;
+                            const auto catalog = provider(dock);
+                            if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                            if (dock && catalog) descriptors = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
+                        }
+                        if (descriptors && m_pageCatalogSearchCompleteness)
+                        {
+                            const auto completeness = m_pageCatalogSearchCompleteness;
+                            searchComplete = completeness(dock);
+                            if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        }
+                        if (!searchComplete)
+                        {
+                            if (dock && m_dockPreparer) m_dockPreparer(dock.data());
+                            if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                            m_preparingSearchDock = dock;
+                            m_preparingSearchContent = dock ? dock->widget() : nullptr;
+                        }
                     }
-                    if (!descriptors || !searchComplete)
+                    if (!searchComplete)
                     {
                         // 纯导航目录不代表冷页正文完整；未证明全文覆盖时保留原factory正文搜索。
-                        if (dock && m_dockPreparer) m_dockPreparer(dock.data());
-                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
                         const bool prepared = !dock || !m_nestedDockPreparer
                             || m_nestedDockPreparer(dock.data(), m_activeSearchScope, true);
                         if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
@@ -1643,6 +1662,8 @@ namespace ks::ui
                             return;
                         }
                     }
+                    m_preparingSearchDock.clear();
+                    m_preparingSearchContent.clear();
                     if (dock) m_dockSearchCursor = std::make_shared<DockSearchCursor>(dock.data(),
                         m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage);
                 }
