@@ -2760,6 +2760,11 @@ void ProcessDetailWindow::initializeUi()
     m_pebTab = new QWidget(m_tabWidget);
     m_kernelCallbackTab = new QWidget(m_tabWidget);
 
+    // QTabWidget 先显示新页，再发 currentChanged 触发惰性构造。
+    // 在轻量页壳上提前监听，才能记录首次 Show，避免图表和汇总读数一直被可见性守卫跳过。
+    m_performanceTab->installEventFilter(this);
+    m_cpuCoreTab->installEventFilter(this);
+
     m_detailTab->setObjectName(QStringLiteral("ProcessDetailTab_Detail"));
     m_performanceTab->setObjectName(QStringLiteral("ProcessDetailTab_Performance"));
     m_cpuCoreTab->setObjectName(QStringLiteral("ProcessDetailTab_CpuCore"));
@@ -4071,7 +4076,6 @@ void ProcessDetailWindow::initializeDetailTab()
 
 void ProcessDetailWindow::initializePerformanceTab()
 {
-    m_performanceTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     const auto configureCopyableLabel = [&languageManager](QLabel* label) {
         if (label == nullptr)
@@ -4292,7 +4296,6 @@ void ProcessDetailWindow::refreshPerformanceHistoryCharts()
 
 void ProcessDetailWindow::initializeCpuCoreTab()
 {
-    m_cpuCoreTab->installEventFilter(this);
     auto& languageManager = ks::i18n::LanguageManager::instance();
     QVBoxLayout* layout = nullptr;
     QWidget* const contentWidget = createScrollableTabContent(m_cpuCoreTab, layout, 12, 10);
