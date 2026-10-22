@@ -12711,7 +12711,10 @@ void HardwareDock::refreshStaticHardwareTexts(const bool forceRefresh)
         ks::ui::StructuredFieldView* editor, const ks::ui::FieldDocument& document,
         QTableWidget* table = nullptr, const QVector<QStringList>* rows = nullptr)
     {
-        if (page == nullptr || !page->isVisible()
+        // Newly mounted content becomes visible after QLayout's queued show. Its selected
+        // host is already visible, so fill it now instead of waiting for a second tab visit.
+        if (page == nullptr || (!page->isVisible()
+                && (!isVisible() || currentHardwarePage() != page))
             || m_staticPresentedRevisions[index] == m_staticDataRevisions[index])
         {
             return;
