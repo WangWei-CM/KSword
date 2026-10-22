@@ -84,6 +84,47 @@ struct MinidumpAsyncState
 
 namespace
 {
+    enum class InitialBodyText
+    {
+        PathLabel, PathPlaceholder, Browse, SystemDirectory, Parse, Export,
+        SymbolLabel, SymbolPlaceholder, Idle
+    };
+    struct InitialBodyEntry
+    {
+        const char* targetObjectName;
+        const char* key;
+        const char* fallback;
+        bool mnemonic;
+    };
+    // The UI and cold search consume the same text/target definitions. No
+    // result-page content is searchable before a real dump has been parsed.
+    constexpr InitialBodyEntry kInitialBody[] = {
+        {"ksword_minidump_path_label", "minidump.path.label", "转储文件", false},
+        {"ksword_minidump_path_input", "minidump.path.placeholder",
+            "选择要解析的转储文件（应用崩溃 .dmp / 蓝屏 Minidump / MEMORY.DMP）", false},
+        {"ksword_minidump_browse", "minidump.action.browse", "浏览…", true},
+        {"ksword_minidump_system_directory", "minidump.action.system_dir", "系统转储", true},
+        {"ksword_minidump_parse", "minidump.action.parse", "解析", true},
+        {"ksword_minidump_export", "minidump.action.export", "导出报告", true},
+        {"ksword_minidump_symbol_label", "minidump.symbol.label", "符号路径", false},
+        {"ksword_minidump_symbol_input", "minidump.symbol.placeholder",
+            "留空则搜索转储所在目录与本机符号缓存；分号分隔可加自己的构建输出目录", false},
+        {"ksword_minidump_status", "minidump.status.idle",
+            "选择一个转储文件开始解析：支持应用崩溃 MDMP 与系统蓝屏 DMP。", false}
+    };
+    const InitialBodyEntry& initialBodyEntry(const InitialBodyText id)
+    {
+        return kInitialBody[static_cast<int>(id)];
+    }
+    QString initialBodyText(const InitialBodyText id)
+    {
+        const auto& entry = initialBodyEntry(id);
+        return ks::i18n::text(QString::fromLatin1(entry.key), QString::fromUtf8(entry.fallback));
+    }
+    QString initialBodyObjectName(const InitialBodyText id)
+    {
+        return QString::fromLatin1(initialBodyEntry(id).targetObjectName);
+    }
     // All encoding and file work is worker-owned. The writer adapter also permits
     // pure-value short-write/failure tests without touching a real filesystem.
     template<class Writer>
@@ -161,6 +202,18 @@ namespace
     }
 }
 
+QVector<ks::ui::PageSearchBodyText> MinidumpDock::coldSearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    body.reserve(static_cast<qsizetype>(sizeof(kInitialBody) / sizeof(kInitialBody[0])));
+    for (const auto& entry : kInitialBody)
+    {
+        body.append({ks::i18n::text(QString::fromLatin1(entry.key), QString::fromUtf8(entry.fallback)),
+            QString::fromLatin1(entry.targetObjectName), {}, entry.mnemonic});
+    }
+    return body;
+}
+
 MinidumpDock::MinidumpDock(QWidget* parent)
     : QWidget(parent)
 {
@@ -169,9 +222,8 @@ MinidumpDock::MinidumpDock(QWidget* parent)
     m_asyncState->owner = this;
     buildUi();
     retranslateUi();
-    setStatus(
-        "minidump.status.idle",
-        "选择一个转储文件开始解析：支持应用崩溃 MDMP 与系统蓝屏 DMP。");
+    const auto& idle = initialBodyEntry(InitialBodyText::Idle);
+    setStatus(idle.key, idle.fallback);
     // 转储页头与结果共用整页外框，结果Tab本身不制造外圆，原8px留白保持一致。
     ks::ui::StyleWorkspaceContentFrame(this, 8);
 }
@@ -213,12 +265,18 @@ void MinidumpDock::buildUi()
     auto* pathLayout = new QHBoxLayout();
     pathLayout->setSpacing(6);
     m_pathLabel = new QLabel(this);
+    m_pathLabel->setObjectName(initialBodyObjectName(InitialBodyText::PathLabel));
     m_pathEdit = new QLineEdit(this);
+    m_pathEdit->setObjectName(initialBodyObjectName(InitialBodyText::PathPlaceholder));
     m_pathEdit->setClearButtonEnabled(true);
     m_browseButton = new QPushButton(this);
+    m_browseButton->setObjectName(initialBodyObjectName(InitialBodyText::Browse));
     m_systemDirButton = new QPushButton(this);
+    m_systemDirButton->setObjectName(initialBodyObjectName(InitialBodyText::SystemDirectory));
     m_parseButton = new QPushButton(this);
+    m_parseButton->setObjectName(initialBodyObjectName(InitialBodyText::Parse));
     m_exportButton = new QPushButton(this);
+    m_exportButton->setObjectName(initialBodyObjectName(InitialBodyText::Export));
     // 图标：含义简单的按钮用标准图标表达，文字配合悬停释义。
     m_browseButton->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
     m_systemDirButton->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
@@ -252,7 +310,9 @@ void MinidumpDock::buildUi()
     symbolLayout->setContentsMargins(0, 0, 0, 0);
     symbolLayout->setSpacing(6);
     m_symbolPathLabel = new QLabel(this);
+    m_symbolPathLabel->setObjectName(initialBodyObjectName(InitialBodyText::SymbolLabel));
     m_symbolPathEdit = new QLineEdit(this);
+    m_symbolPathEdit->setObjectName(initialBodyObjectName(InitialBodyText::SymbolPlaceholder));
     m_symbolPathEdit->setClearButtonEnabled(true);
     m_symbolPathEdit->setStyleSheet(inputStyle);
     // 文件路径和符号路径采用普通参数输入，不套搜索语义或改变加载时机。
@@ -274,6 +334,7 @@ void MinidumpDock::buildUi()
 
     // m_statusLabel：允许复制诊断状态，长路径自动换行。
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(initialBodyObjectName(InitialBodyText::Idle));
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     sourceLayout->addWidget(m_statusLabel);
@@ -388,31 +449,27 @@ QString MinidumpDock::translated(const char* key, const char* fallback) const
 
 void MinidumpDock::retranslateUi()
 {
-    m_pathLabel->setText(translated("minidump.path.label", "转储文件"));
-    m_pathEdit->setPlaceholderText(translated(
-        "minidump.path.placeholder",
-        "选择要解析的转储文件（应用崩溃 .dmp / 蓝屏 Minidump / MEMORY.DMP）"));
-    m_symbolPathLabel->setText(translated("minidump.symbol.label", "符号路径"));
-    m_symbolPathEdit->setPlaceholderText(translated(
-        "minidump.symbol.placeholder",
-        "留空则搜索转储所在目录与本机符号缓存；分号分隔可加自己的构建输出目录"));
+    m_pathLabel->setText(initialBodyText(InitialBodyText::PathLabel));
+    m_pathEdit->setPlaceholderText(initialBodyText(InitialBodyText::PathPlaceholder));
+    m_symbolPathLabel->setText(initialBodyText(InitialBodyText::SymbolLabel));
+    m_symbolPathEdit->setPlaceholderText(initialBodyText(InitialBodyText::SymbolPlaceholder));
     m_symbolPathEdit->setToolTip(translated(
         "minidump.symbol.tooltip",
         "只搜索本地目录，不联网下载符号。"
         "映像与转储记录不一致时会明确判为不匹配，并拒绝给出会误导人的行号。"));
-    m_browseButton->setText(translated("minidump.action.browse", "浏览…"));
+    m_browseButton->setText(initialBodyText(InitialBodyText::Browse));
     m_browseButton->setToolTip(translated(
         "minidump.action.browse.tooltip",
         "选择一个转储文件进行只读解析"));
-    m_systemDirButton->setText(translated("minidump.action.system_dir", "系统转储"));
+    m_systemDirButton->setText(initialBodyText(InitialBodyText::SystemDirectory));
     m_systemDirButton->setToolTip(translated(
         "minidump.action.system_dir.tooltip",
         "定位到系统蓝屏转储目录（C:\\Windows\\Minidump）"));
-    m_parseButton->setText(translated("minidump.action.parse", "解析"));
+    m_parseButton->setText(initialBodyText(InitialBodyText::Parse));
     m_parseButton->setToolTip(translated(
         "minidump.action.parse.tooltip",
         "在后台解析转储结构，不会修改目标文件"));
-    m_exportButton->setText(translated("minidump.action.export", "导出报告"));
+    m_exportButton->setText(initialBodyText(InitialBodyText::Export));
     m_exportButton->setToolTip(translated(
         "minidump.action.export.tooltip",
         "把当前解析结果的全文报告保存为文本文件"));

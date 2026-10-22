@@ -348,7 +348,7 @@ private:
     void initDockWidgets();
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
     void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
-    bool prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, bool currentPageOnly = false, bool singleStep = false);
+    bool prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
 
     // BackdropBlurKind 作用：
     // - 描述“透明背景效果”配置解析后的磨砂实现方式；

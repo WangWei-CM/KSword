@@ -451,7 +451,7 @@ void MiscDock::activateTabByIndex(const int tabIndex)
     m_mainTabWidget->setCurrentIndex(tabIndex);
 }
 
-bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep)
+bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep, const bool useColdBodies)
 {
     if (currentPageOnly)
     {
@@ -460,13 +460,25 @@ bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool sin
     }
     if (m_navigationPagesPrepared || !m_mainTabWidget) { return true; }
     if (m_navigationPagePreparing) { return false; }
+    if (!useColdBodies && m_navigationSkippedColdBodies)
+    {
+        // A compatibility caller still requests actual widgets, even after a
+        // full search has consumed their complete cold body values.
+        m_navigationPrepareCursor = 0;
+        m_navigationSkippedColdBodies = false;
+    }
 
     const QPointer<MiscDock> owner(this);
     // Preserve the original hidden/disabled policy and never activate a page.
     while (m_navigationPrepareCursor < m_mainTabWidget->count())
     {
         m_navigationPagePreparing = true;
-        try { ensureTabInitialized(m_navigationPrepareCursor, false); }
+        try
+        {
+            if (useColdBodies && m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
+                m_navigationSkippedColdBodies = true;
+            else ensureTabInitialized(m_navigationPrepareCursor, false);
+        }
         catch (...)
         {
             if (owner) { m_navigationPagePreparing = false; }
@@ -477,8 +489,9 @@ bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool sin
         ++m_navigationPrepareCursor;
         if (singleStep) { break; }
     }
-    m_navigationPagesPrepared = m_navigationPrepareCursor >= m_mainTabWidget->count();
-    return m_navigationPagesPrepared;
+    const bool complete = m_navigationPrepareCursor >= m_mainTabWidget->count();
+    m_navigationPagesPrepared = complete && !m_navigationSkippedColdBodies;
+    return complete;
 }
 
 MinidumpDock* MiscDock::activateMinidumpTab()
@@ -721,6 +734,7 @@ void MiscDock::initializeMinidumpPage()
     QVBoxLayout* const hostLayout = buildHostLayout(m_minidumpHostWidget);
     m_minidumpPage = new MinidumpDock(m_minidumpHostWidget);
     hostLayout->addWidget(m_minidumpPage, 1);
+    m_minidumpHostWidget->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializePluginPage()
@@ -746,6 +760,8 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
+    if (index == 17)
+        host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
 QWidget* MiscDock::navigationHost(const int index) const
@@ -806,6 +822,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (!existing || !existing->m_minidumpPage)
+    {
+        main[17].coldBodyTexts = MinidumpDock::coldSearchBody();
+        main[17].coldBodyComplete = true;
+    }
     main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
     if (existing) main = existing->m_navigationTabs.describe(std::move(main));
     else main[4].visible = false; // MainWindow以相同配置/会话状态修正尚未构造的入口。

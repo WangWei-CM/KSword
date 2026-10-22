@@ -688,10 +688,14 @@ namespace ks::ui
     // one no-hit table can no longer block the complete dock callback.
     struct GlobalUiSearchController::DockSearchCursor final : QObject
     {
-        DockSearchCursor(ads::CDockWidget* dock, QString query, bool visibleOnly)
+        DockSearchCursor(ads::CDockWidget* dock, QString query, bool visibleOnly,
+            const QVector<ResolvedPageNavigationDescriptor>& bodyCatalog = {})
             : m_dock(dock), m_content(dock ? dock->widget() : nullptr),
               m_query(std::move(query)), m_visibleOnly(visibleOnly)
         {
+            for (const auto& page : bodyCatalog)
+                if (page.page.coldBodyComplete && !page.page.coldBodyTexts.isEmpty())
+                    m_coldBodies.insert(page.page.id, page);
             rebuild();
         }
         ads::CDockWidget* dock() const { return m_dock.data(); }
@@ -742,6 +746,13 @@ namespace ks::ui
                 QWidget* candidate = qobject_cast<QWidget*>(discovered.data());
                 if (!candidate || candidate->isWindow()) continue;
                 if (m_visibleOnly && !candidate->isVisibleTo(m_content.data())) continue;
+
+                if (!m_coldBodies.isEmpty())
+                {
+                    const auto body = m_coldBodies.constFind(candidate->property("ksword_search_body_page_id").toString());
+                    if (body != m_coldBodies.cend() && body->page.visible && isWidgetChainRevealable(candidate))
+                        appendColdBody(*body);
+                }
 
                 if (auto* label = qobject_cast<QLabel*>(candidate)) appendHit(label, label->text());
                 else if (auto* button = qobject_cast<QAbstractButton*>(candidate))
@@ -794,6 +805,33 @@ namespace ks::ui
             return false;
         }
     private:
+        void appendColdBody(const ResolvedPageNavigationDescriptor& page)
+        {
+            for (const auto& entry : page.page.coldBodyTexts)
+            {
+                if (m_hits.size() >= kMaxHitsPerDock) return;
+                if (entry.targetObjectName.isEmpty()) continue;
+                const QString text = normalizeUiText(entry.mnemonic ? stripMnemonicMarkers(entry.text) : entry.text);
+                const int matchIndex = text.indexOf(m_query, 0, Qt::CaseInsensitive);
+                if (text.isEmpty() || matchIndex < 0) continue;
+                const QString key = page.page.id + QLatin1Char('\x1f')
+                    + entry.targetObjectName + QLatin1Char('\x1f') + text;
+                if (m_dedup.contains(key)) continue;
+                m_dedup.insert(key);
+                UiSearchHit hit;
+                hit.pageDockWidget = m_dock;
+                hit.navigationDescriptorId = page.page.id;
+                hit.navigationBodyTargetName = entry.targetObjectName;
+                hit.navigationEnabled = page.page.enabled;
+                hit.matchedText = text;
+                QStringList path = page.path;
+                for (const auto& group : entry.groupTitles)
+                    if (const QString title = normalizeUiText(group); !title.isEmpty()) path.append(title);
+                hit.pagePathText = path.join(QStringLiteral(" › "));
+                hit.matchRank = resolveMatchRank(text, m_query, matchIndex);
+                m_hits.append(std::move(hit));
+            }
+        }
         void rebuild()
         {
             m_restart = false;
@@ -858,6 +896,7 @@ namespace ks::ui
         QPointer<ads::CDockWidget> m_dock;
         QPointer<QWidget> m_content;
         QString m_query, m_title;
+        QHash<QString, ResolvedPageNavigationDescriptor> m_coldBodies;
         bool m_visibleOnly = false, m_restart = false;
         ScopedObjectDiscoveryCursor m_discovery;
         QSet<QString> m_dedup;
@@ -1007,6 +1046,7 @@ namespace ks::ui
             m_dockSearchCursor.reset();
             m_preparingSearchDock.clear();
             m_preparingSearchContent.clear();
+            m_preparingHasBodyCatalog = false;
             m_searchInProgress = false;
         }
         if (!m_searchModeActive)
@@ -1089,6 +1129,7 @@ namespace ks::ui
         m_dockSearchCursor.reset();
         m_preparingSearchDock.clear();
         m_preparingSearchContent.clear();
+        m_preparingHasBodyCatalog = false;
         m_searchInProgress = false;
         if (m_searchDebounceTimer != nullptr)
         {
@@ -1506,6 +1547,7 @@ namespace ks::ui
         m_dockSearchCursor.reset();
         m_preparingSearchDock.clear();
         m_preparingSearchContent.clear();
+        m_preparingHasBodyCatalog = false;
         if (m_activeSearchScope == UiSearchScope::CurrentTable)
         {
             m_pendingDirectTableView = resolveCurrentTable();
@@ -1642,6 +1684,8 @@ namespace ks::ui
                             searchComplete = completeness(dock);
                             if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
                         }
+                        m_preparingHasBodyCatalog = descriptors.has_value() && m_pageCatalogNavigator
+                            && m_activeSearchScope == UiSearchScope::Global;
                         if (!searchComplete)
                         {
                             if (dock && m_dockPreparer) m_dockPreparer(dock.data());
@@ -1654,7 +1698,7 @@ namespace ks::ui
                     {
                         // 纯导航目录不代表冷页正文完整；未证明全文覆盖时保留原factory正文搜索。
                         const bool prepared = !dock || !m_nestedDockPreparer
-                            || m_nestedDockPreparer(dock.data(), m_activeSearchScope, true);
+                            || m_nestedDockPreparer(dock.data(), m_activeSearchScope, true, m_preparingHasBodyCatalog);
                         if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
                         if (!prepared)
                         {
@@ -1662,10 +1706,29 @@ namespace ks::ui
                             return;
                         }
                     }
+                    std::optional<QVector<ResolvedPageNavigationDescriptor>> bodyCatalog;
+                    if (dock && m_pageCatalogProvider)
+                    {
+                        const auto provider = m_pageCatalogProvider;
+                        const auto catalog = provider(dock);
+                        if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
+                        if (dock && catalog) bodyCatalog = ResolvePageNavigationCatalog(*catalog, dock->windowTitle());
+                    }
+                    if (!bodyCatalog && m_preparingHasBodyCatalog)
+                    {
+                        // A provider lost its schema while factories yielded.
+                        // Retry original preparation without skipping any cold UI.
+                        m_preparingHasBodyCatalog = false;
+                        QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                        return;
+                    }
                     m_preparingSearchDock.clear();
                     m_preparingSearchContent.clear();
+                    m_preparingHasBodyCatalog = false;
+                    const QVector<ResolvedPageNavigationDescriptor> emptyCatalog;
                     if (dock) m_dockSearchCursor = std::make_shared<DockSearchCursor>(dock.data(),
-                        m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage);
+                        m_activeQueryText, m_activeSearchScope == UiSearchScope::CurrentPage,
+                        bodyCatalog ? *bodyCatalog : emptyCatalog);
                 }
                 if (m_dockSearchCursor && !m_dockSearchCursor->advance())
                 {
@@ -2009,7 +2072,7 @@ namespace ks::ui
                 if (!lifetime) return;
                 catalogAvailable = dockWidget && catalog && ResolvePageNavigationCatalog(*catalog, dockWidget->windowTitle()).has_value();
             }
-            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global, false);
+            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global, false, false);
         }
         if (!lifetime) return;
         if (dockWidget != nullptr && m_dockActivator)
@@ -2037,6 +2100,9 @@ namespace ks::ui
             const auto navigator = m_pageCatalogNavigator;
             targetWidget = navigator(hitEntry.pageDockWidget, hitEntry.navigationDescriptorId);
             if (!lifetime) return;
+            if (targetWidget && !hitEntry.navigationBodyTargetName.isEmpty()
+                && targetWidget->objectName() != hitEntry.navigationBodyTargetName)
+                targetWidget = targetWidget->findChild<QWidget*>(hitEntry.navigationBodyTargetName);
         }
         dismissPopup();
         if (targetWidget == nullptr)

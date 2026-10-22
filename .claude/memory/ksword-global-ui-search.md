@@ -59,3 +59,5 @@
 - 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。
 
 - 2026-10-21 冷搜索的嵌套准备只在每个查询/同一实际内容根首次读取目录、检查正文覆盖及准备Dock根；后续singleStep只推进原嵌套工厂。取消、换范围、新查询清空临时身份，内容根替换重新准备；扫描完成仍读取最新目录，未缓存动态可见/禁用结果。3099项QtCore实际准备块检查及真实GlobalUiSearch TU通过；单页构造/冷正文实例化仍未消除，不能关闭B03。
+
+- 2026-10-21 B03冷正文首个完整生产者为MinidumpDock初始9条。PageSearchBodyText与真实UI共用文案/稳定objectName，挂于真实导航descriptor的coldBodyTexts/coldBodyComplete，不生成伪页面；完整性仅指冷初始状态，已有实例不挂冷值。Misc仅在搜索具备有效schema+真实navigator时跳过该factory，显式完整准备仍补齐；值遍历完成不能置全部UIprepared。DockSearchCursor在原host遍历位置投影正文，保留每Dock24命中预算和原顺序；实际构造清除host标记，结构失效后重扫真实控件。激活走原目标页路由，再按稳定objectName定位真实控件及原高亮。schema中途失效先撤销跳过资格，再按原分片补工厂，防漏正文。其余冷页仍需逐源迁移，不能将整个B03或全DocksearchComplete置true。

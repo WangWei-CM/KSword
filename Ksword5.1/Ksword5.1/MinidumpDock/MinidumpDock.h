@@ -53,6 +53,8 @@ class MinidumpDock final : public QWidget
 {
 public:
     static ks::ui::PageNavigationCatalog navigationCatalog(const MinidumpDock* existing = nullptr);
+    // Complete initial searchable body; pure translated values, no page or dump creation.
+    static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
     QWidget* activateNavigationDescriptor(const QString& id);
 
     // 构造函数作用：建立界面并进入“等待选择转储文件”状态。

@@ -15,6 +15,15 @@ namespace ads { class CDockWidget; }
 
 namespace ks::ui
 {
+    // A cold factory's actual searchable text, with the real target's stable
+    // object name. These are body records, never extra navigation pages.
+    struct PageSearchBodyText
+    {
+        QString text;
+        QString targetObjectName;
+        QStringList groupTitles;
+        bool mnemonic = false;
+    };
     // 工厂与目录共同持有的纯值记录；provider只读同源元数据/能力快照，不创建业务UI。
     // id必须在同一个Dock内稳定且唯一，parentId为空表示Dock直属入口。
     struct PageNavigationDescriptor
@@ -26,6 +35,8 @@ namespace ks::ui
         bool visible = true;
         bool enabled = true;
         bool current = false;
+        QVector<PageSearchBodyText> coldBodyTexts;
+        bool coldBodyComplete = false;
     };
     using PageNavigationCatalog = QVector<PageNavigationDescriptor>;
     using PageNavigationCatalogProvider = std::function<std::optional<PageNavigationCatalog>(ads::CDockWidget*)>;
@@ -126,6 +137,9 @@ namespace ks::ui
         {
             const auto& page = catalog[index];
             if (page.id.isEmpty() || ids.contains(page.id) || page.title.isEmpty()) return std::nullopt;
+            if (page.coldBodyComplete)
+                for (const auto& text : page.coldBodyTexts)
+                    if (text.targetObjectName.isEmpty()) return std::nullopt;
             ids.insert(page.id, index);
         }
         QVector<ResolvedPageNavigationDescriptor> result;

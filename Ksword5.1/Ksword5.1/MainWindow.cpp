@@ -7385,9 +7385,9 @@ void MainWindow::initGlobalUiSearchController()
     m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget) {
         if (navigationAdmission()) ensureDockContentInitialized(dockWidget);
     });
-    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, ks::ui::UiSearchScope scope, const bool singleStep) {
+    m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, ks::ui::UiSearchScope scope, const bool singleStep, const bool useColdBodies) {
         return !navigationAdmission() || prepareNestedDockContentForNavigation(dockWidget,
-            scope == ks::ui::UiSearchScope::CurrentPage, singleStep);
+            scope == ks::ui::UiSearchScope::CurrentPage, singleStep, useColdBodies);
     });
     m_globalUiSearchController->setDockActivator([this, navigationAdmission](ads::CDockWidget* dockWidget) {
         if (navigationAdmission()) activateDockForSearchNavigation(dockWidget);
@@ -11144,7 +11144,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
 }
 
-bool MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, const bool currentPageOnly, const bool singleStep)
+bool MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget, const bool currentPageOnly, const bool singleStep, const bool useColdBodies)
 {
     if (dockWidget == nullptr)
     {
@@ -11155,7 +11155,7 @@ bool MainWindow::prepareNestedDockContentForNavigation(ads::CDockWidget* dockWid
     // 全局搜索与 Taskbar 目录只在显式请求时准备嵌套懒页；普通启动和切页仍保持原有懒加载。
     if (dockKey == QStringLiteral("misc") && m_miscWidget != nullptr)
     {
-        return m_miscWidget->prepareNavigationPages(currentPageOnly, singleStep);
+        return m_miscWidget->prepareNavigationPages(currentPageOnly, singleStep, useColdBodies);
     }
     else if (dockKey == QStringLiteral("memory") && m_memoryWidget != nullptr)
     {

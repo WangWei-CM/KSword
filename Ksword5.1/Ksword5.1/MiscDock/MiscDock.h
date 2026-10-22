@@ -66,7 +66,9 @@ public:
     // prepareNavigationPages：按需构造可见的嵌套页，供全局搜索/Taskbar 目录建立真实路由。
     // 只执行一次，不改变当前页签；不调用“首次激活”回调，避免目录请求启动轮询。
     // singleStep limits full search preparation to one existing page factory.
-    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false);
+    // useColdBodies skips only factories with complete initial body values;
+    // this does not mark their widgets materialized for compatibility callers.
+    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
 
 private:
     int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
@@ -190,4 +192,5 @@ private:
     int m_navigationPrepareCursor = 0;
     bool m_navigationPagePreparing = false;
     bool m_navigationPagesPrepared = false; // m_navigationPagesPrepared：导航索引已完成一次嵌套页准备。
+    bool m_navigationSkippedColdBodies = false;
 };

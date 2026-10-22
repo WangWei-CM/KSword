@@ -68,6 +68,7 @@ namespace ks::ui
         QString matchedText;                       // matchedText：命中控件的完整原始文本（单行化处理后）。
         QString pagePathText;                      // pagePathText：形如“内核 › 回调审计”的页面路径文本。
         QString navigationDescriptorId;
+        QString navigationBodyTargetName;
         bool navigationEnabled = true;
         bool navigationRoot = false;
         int matchRank = 2;                         // matchRank：排序权重（0=整串相等，1=前缀，2=包含）。
@@ -93,7 +94,9 @@ namespace ks::ui
         // CurrentPage prepares the selected branch; Global retains complete
         // discovery until a source proves searchable body coverage.
         // Returns false while one nested preparation slice remains; activation requests full preparation.
-        using NestedDockPreparer = std::function<bool(ads::CDockWidget*, UiSearchScope, bool)>;
+        // The final bool permits proven cold body substitutions only while a
+        // valid catalog and the real descriptor navigator are both available.
+        using NestedDockPreparer = std::function<bool(ads::CDockWidget*, UiSearchScope, bool, bool)>;
         // DockActivator：把 Dock 置前并设为当前页签（含关闭态恢复）。
         using DockActivator = std::function<void(ads::CDockWidget*)>;
 
@@ -319,6 +322,7 @@ namespace ks::ui
         // Query-local preparation identity; a changed content root must be prepared again.
         QPointer<ads::CDockWidget> m_preparingSearchDock;
         QPointer<QWidget> m_preparingSearchContent;
+        bool m_preparingHasBodyCatalog = false;
         QPointer<QTableView> m_pendingDirectTableView; // m_pendingDirectTableView：当前表格范围待扫描对象。
         QList<QPointer<QTableView>> m_filteredTableViewList; // m_filteredTableViewList：当前由通用搜索附加过滤的表格。
     };
