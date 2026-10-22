@@ -48,6 +48,7 @@ class QLineEdit;
 class CodeEditorWidget;
 class QPushButton;
 class QSpinBox;
+class QShowEvent;
 class QTableWidget;
 class QTimer;
 
@@ -127,6 +128,7 @@ namespace ksword::memory_dock
         void refreshChannelAvailability();
 
     private:
+        void showEvent(QShowEvent* event) override;
         struct ChannelQueryJob;
         void requestHvmAvailability();
         void pollHvmAvailability();

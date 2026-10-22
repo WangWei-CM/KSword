@@ -28,6 +28,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRunnable>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidgetItem>
@@ -394,6 +395,18 @@ namespace ksword::memory_dock
         if(m_channelQueryJob)m_channelQueryJob->cancel.store(true,std::memory_order_relaxed);
     }
 
+    void TamperDetectionPage::showEvent(QShowEvent* event)
+    {
+        QWidget::showEvent(event);
+        // A hidden DDMA consumer only invalidates its previous result. Query
+        // when this page is actually shown, before enabling the HVM path.
+        if (m_channelQueryPoll && m_channelPublishedVersion != m_channelQueryVersion)
+        {
+            m_channelQueryDebounce->start();
+            m_channelQueryPoll->start();
+        }
+    }
+
     void TamperDetectionPage::buildUi()
     {
         // 页面自带内部滚动壳：七个读取路径复选框排成一行时最小宽度接近一千像素，
@@ -592,8 +605,9 @@ namespace ksword::memory_dock
         m_useDmaCheck->setEnabled(ddmaUsable);
 
         // A DDMA broadcast never performs HVM IO on the GUI thread. Merge its
-        // latest request with any in-flight read; every actual probe remains an
-        // authoritative QUERY_WINDOW, with no capability TTL/cache conclusion.
+        // latest request with any in-flight read; hidden pages remain pending
+        // until shown. Every actual probe remains an authoritative QUERY_WINDOW,
+        // with no capability TTL/cache conclusion.
         requestHvmAvailability();
         if (ddmaUsable)
         {
@@ -623,7 +637,16 @@ namespace ksword::memory_dock
         // disabled path is excluded from new requests until its own IO returns.
         m_useHvmCheck->setEnabled(false);
         m_useHvmCheck->setToolTip(ks::i18n::packedSourceText(QStringLiteral("正在查询 HVM 私有页表窗口。")));
-        m_channelQueryDebounce->start();m_channelQueryPoll->start();
+        if (isVisible())
+        {
+            m_channelQueryDebounce->start();
+            m_channelQueryPoll->start();
+        }
+        else
+        {
+            m_channelQueryDebounce->stop();
+            if (!m_channelQueryJob) { m_channelQueryPoll->stop(); }
+        }
     }
 
     void TamperDetectionPage::pollHvmAvailability()
@@ -645,7 +668,7 @@ namespace ksword::memory_dock
                 updateRunButtonState();if(!guard)return;
             }
         }
-        if(!m_channelQueryJob&&m_channelPublishedVersion!=m_channelQueryVersion&&!m_channelQueryDebounce->isActive())
+        if(isVisible()&&!m_channelQueryJob&&m_channelPublishedVersion!=m_channelQueryVersion&&!m_channelQueryDebounce->isActive())
         {
             auto job=std::make_shared<ChannelQueryJob>();job->version=m_channelQueryVersion;job->targetEpoch=m_channelTargetEpoch;m_channelQueryJob=job;
             try
@@ -659,7 +682,7 @@ namespace ksword::memory_dock
             }
             catch (...) {job->reason=QStringLiteral("查询 HVM 私有页表窗口失败。");job->done.store(true,std::memory_order_release);}
         }
-        if(!m_channelQueryJob&&m_channelPublishedVersion==m_channelQueryVersion)m_channelQueryPoll->stop();
+        if(!m_channelQueryJob&&(!isVisible()||m_channelPublishedVersion==m_channelQueryVersion))m_channelQueryPoll->stop();
     }
 
     void TamperDetectionPage::updateRunButtonState()
