@@ -112,6 +112,7 @@ MiscDock::MiscDock(QWidget* parent)
 MiscDock::~MiscDock()
 {
     if (m_disableDseSearchOperation) m_disableDseSearchOperation->close();
+    if (m_desktopDrawingSearchOperation) m_desktopDrawingSearchOperation->close();
 }
 
 void MiscDock::initializeUi()
@@ -485,6 +486,44 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
         m_navigationPagePreparing = true;
         try
         {
+            if (useColdBodies && m_navigationPrepareCursor == m_desktopDrawingTabIndex
+                && !m_desktopDrawingPage && !m_desktopDrawingSearchDisplays
+                && !m_desktopDrawingSearchFailed && resume)
+            {
+                m_desktopDrawingSearchReady = std::move(resume);
+                if (!m_desktopDrawingSearchOperation)
+                    m_desktopDrawingSearchOperation = new ks::ui::AsyncOperation(this);
+                if (!m_desktopDrawingSearchOperation->isBusy())
+                {
+                    using Displays = std::vector<ks::misc::desktop_drawing::Display>;
+                    const auto ticket = m_desktopDrawingSearchOperation->submit<int, Displays>(0,
+                        [](const int&, const ks::ui::AsyncOperationToken&) {
+                            // Same read-only physical-pixel query as the original
+                            // hidden constructor; no native filter or renderer.
+                            return ks::misc::desktop_drawing::enumerateDisplays();
+                        },
+                        [this](const Displays& displays, std::uint64_t) {
+                            m_desktopDrawingSearchDisplays = displays;
+                            auto ready = std::exchange(m_desktopDrawingSearchReady, {});
+                            if (ready) ready();
+                            return true;
+                        },
+                        [this](std::exception_ptr) {
+                            m_desktopDrawingSearchFailed = true;
+                            auto ready = std::exchange(m_desktopDrawingSearchReady, {});
+                            if (ready) ready();
+                        });
+                    if (ticket == 0)
+                    {
+                        m_desktopDrawingSearchFailed = true;
+                        m_desktopDrawingSearchReady = {};
+                        m_navigationPagePreparing = false;
+                        return Preparation::MorePages;
+                    }
+                }
+                m_navigationPagePreparing = false;
+                return Preparation::Waiting;
+            }
             if (useColdBodies && m_navigationPrepareCursor == m_disableDseTabIndex
                 && !m_disableDsePage && !m_disableDseSearchReason && !m_disableDseSearchFailed && resume)
             {
@@ -529,6 +568,7 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
                 || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
                 || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)
+                || (m_navigationPrepareCursor == m_desktopDrawingTabIndex && !m_desktopDrawingPage && m_desktopDrawingSearchDisplays)
                 || (m_navigationPrepareCursor == m_clipboardGuardTabIndex && !m_clipboardGuardPage)))
                 m_navigationSkippedColdBodies = true;
             else ensureTabInitialized(m_navigationPrepareCursor, false);
@@ -745,8 +785,15 @@ void MiscDock::initializeDesktopDrawingPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_desktopDrawingHostWidget);
+    if (m_desktopDrawingSearchOperation) m_desktopDrawingSearchOperation->cancel();
+    auto ready = std::exchange(m_desktopDrawingSearchReady, {});
+    m_desktopDrawingSearchDisplays.reset();
+    const QPointer<QWidget> host(m_desktopDrawingHostWidget);
+    // Real activation keeps its original fresh query, never an old search snapshot.
     m_desktopDrawingPage = new ks::misc::DesktopDrawingPage(m_desktopDrawingHostWidget);
     hostLayout->addWidget(m_desktopDrawingPage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
+    if (ready) ready();
 }
 
 void MiscDock::initializeScannerPage()
@@ -830,7 +877,7 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
-    if (index == 1 || index == 2 || index == 3 || index == 10 || index == 17 || index == 19)
+    if (index == 1 || index == 2 || index == 3 || index == 10 || index == 12 || index == 17 || index == 19)
         host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
@@ -911,6 +958,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
     {
         main[10].coldBodyTexts = ks::misc::ClipboardGuardPage::coldSearchBody();
         main[10].coldBodyComplete = true;
+    }
+    if (existing && !existing->m_desktopDrawingPage && existing->m_desktopDrawingSearchDisplays)
+    {
+        main[12].coldBodyTexts = ks::misc::DesktopDrawingPage::coldSearchBody(*existing->m_desktopDrawingSearchDisplays);
+        main[12].coldBodyComplete = true;
     }
     if (!existing || !existing->m_minidumpPage)
     {

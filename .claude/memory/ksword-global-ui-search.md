@@ -77,3 +77,5 @@
 - 2026-10-22 CodeEditorWidget仅保留原空的更多菜单，23个QAction和语法子菜单延至首次aboutToShow；顺序/动作/只读导出/当前语言及原按钮状态保持。父菜单本轮新连接不会接到当前发射，工具动作创建后显式执行原首次show状态更新；语法子菜单仍用自己首次show更新。空白显示QAction仍提前存在，State.cpp保存/恢复不需展开菜单。17521项实际方法/冻结旧动作代码+真实QtCore QObject信号对照通过，真实TU通过；没有运行QWidget/菜单GUI，实际首开位置/主题/键盘仍交用户。此步减少冷页构造开销，不等于已完成CodeEditor冷正文或整个B03。
 
 - 2026-10-22 ClipboardGuard未激活初态28条/12真实目标：策略控件5条、规则表7表头、事件标题/A/B3条、事件11表头及Compact2动作。规则表None、事件表Compact不变，隐藏列照原完整索引；无初始数据行。Misc完整冷正文5→6/20，冷搜索不创建Runtime/UI；激活沿原notifyPageActivated加载/扫描，已存在页仍真实扫描。构造、规则/注入/监控/会话/管道/驱动/列组/布局主题源码不变；345实际值、173实际prepare/AsyncOperation、42静态保持及2真实TU通过，未执行剪贴板/GUI/native业务。
+
+- 2026-10-22 DesktopDrawing冷正文使用原PhysicalPixels/EnumDisplayMonitors只读枚举的实际值，经既有AsyncOperation一次完成回调续作；无空转轮询、UI/native过滤器/绘制器创建。20+N条、17目标（空或超60项按原combo规则），空结果沿原DisplayChanged，失败/拒绝沿原工厂。真实激活取消晚到发布、清cold标记并保留原新鲜refreshDisplays；兼容完整准备仍构造页面。Misc完整源6→7/20。225项实际prepare/activation+真实AsyncOperation受控QtCore及882项实际值与冻结旧双语来源对照通过；显示器原生查询和GUI未运行，后续由用户手测。
