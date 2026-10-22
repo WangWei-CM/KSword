@@ -93,10 +93,12 @@ namespace ks::ui
         using DockPreparer = std::function<void(ads::CDockWidget*)>;
         // CurrentPage prepares the selected branch; Global retains complete
         // discovery until a source proves searchable body coverage.
-        // Returns false while one nested preparation slice remains; activation requests full preparation.
+        // MorePages schedules the next factory; Waiting is resumed once by the
+        // supplied callback. Activation requests full synchronous preparation.
         // The final bool permits proven cold body substitutions only while a
         // valid catalog and the real descriptor navigator are both available.
-        using NestedDockPreparer = std::function<bool(ads::CDockWidget*, UiSearchScope, bool, bool)>;
+        using NestedDockPreparer = std::function<PageSearchPreparation(ads::CDockWidget*, UiSearchScope,
+            bool, bool, std::function<void()>)>;
         // DockActivator：把 Dock 置前并设为当前页签（含关闭态恢复）。
         using DockActivator = std::function<void(ads::CDockWidget*)>;
 

@@ -19,8 +19,10 @@ class QVBoxLayout;
 class BootEditorTab;
 class MinidumpDock;
 class ScannerDock;
+namespace ks::ui { class AsyncOperation; }
 namespace ks::misc
 {
+    namespace disable_dse { enum class BlockReason; }
     class DiskEditorTab;
     class ContextMenuCleanerTab;
     class ApplicationControlPage;
@@ -49,7 +51,7 @@ public:
     // - 作用：创建“杂项”根布局与内部 Tab。
     // - 参数 parent：Qt 父控件。
     explicit MiscDock(QWidget* parent = nullptr);
-    ~MiscDock() override = default;
+    ~MiscDock() override;
 
     // activateMinidumpTab 作用：
     // - 切换到“转储分析”子页并返回其控件；该页原为顶层 Dock，现已并入本页；
@@ -68,7 +70,8 @@ public:
     // singleStep limits full search preparation to one existing page factory.
     // useColdBodies skips only factories with complete initial body values;
     // this does not mark their widgets materialized for compatibility callers.
-    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
+    ks::ui::PageSearchPreparation prepareNavigationPages(bool currentPageOnly = false,
+        bool singleStep = false, bool useColdBodies = false, std::function<void()> resume = {});
 
 private:
     int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
@@ -193,4 +196,8 @@ private:
     bool m_navigationPagePreparing = false;
     bool m_navigationPagesPrepared = false; // m_navigationPagesPrepared：导航索引已完成一次嵌套页准备。
     bool m_navigationSkippedColdBodies = false;
+    ks::ui::AsyncOperation* m_disableDseSearchOperation = nullptr;
+    std::optional<ks::misc::disable_dse::BlockReason> m_disableDseSearchReason;
+    std::function<void()> m_disableDseSearchReady;
+    bool m_disableDseSearchFailed = false;
 };

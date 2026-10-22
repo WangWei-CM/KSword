@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <thread>
+#include <optional>
 
 class QLabel;
 class QPushButton;
@@ -41,8 +42,9 @@ namespace ks::misc
     class DisableDsePage final : public QWidget
     {
     public:
-        // 构造函数：只建界面，不访问驱动，避免打开"杂项"就触发一次内核查询。
-        explicit DisableDsePage(QWidget* parent = nullptr);
+        // 初始状态可复用冷搜索的实际查询值；直接打开保持原始状态查询。
+        explicit DisableDsePage(QWidget* parent = nullptr,
+            std::optional<disable_dse::BlockReason> initialReason = std::nullopt);
         // 析构函数：若本页关闭过 DSE 且尚未恢复，在这里做最后一次写回，
         // 避免用户忘记恢复后被 PatchGuard 判定为内核数据被篡改。
         ~DisableDsePage() override;
@@ -108,6 +110,7 @@ namespace ks::misc
         void updateButtons();
         // updateStateDisplay：刷新姿态摘要、阻断原因与当前值显示。
         void updateStateDisplay();
+        void applyStateDisplay(disable_dse::BlockReason reason);
 
     private:
         QLabel* m_warningLabel = nullptr;       // m_warningLabel：PatchGuard 风险横幅。

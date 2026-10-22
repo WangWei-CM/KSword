@@ -2,6 +2,7 @@
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ThemeBinding.h"
+#include "../UI/AsyncOperation.h"
 
 #include "BootEditor/BootEditorTab.h"
 #include "ApplicationControlPage.h"
@@ -106,6 +107,11 @@ MiscDock::MiscDock(QWidget* parent)
 
     kLogEvent initEvent;
     info << initEvent << "[MiscDock] 杂项页面初始化完成。" << eol;
+}
+
+MiscDock::~MiscDock()
+{
+    if (m_disableDseSearchOperation) m_disableDseSearchOperation->close();
 }
 
 void MiscDock::initializeUi()
@@ -453,15 +459,17 @@ void MiscDock::activateTabByIndex(const int tabIndex)
     m_mainTabWidget->setCurrentIndex(tabIndex);
 }
 
-bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep, const bool useColdBodies)
+ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool currentPageOnly,
+    const bool singleStep, const bool useColdBodies, std::function<void()> resume)
 {
+    using Preparation = ks::ui::PageSearchPreparation;
     if (currentPageOnly)
     {
         if (m_mainTabWidget) { ensureTabInitialized(m_mainTabWidget->currentIndex(), false); }
-        return true;
+        return Preparation::Complete;
     }
-    if (m_navigationPagesPrepared || !m_mainTabWidget) { return true; }
-    if (m_navigationPagePreparing) { return false; }
+    if (m_navigationPagesPrepared || !m_mainTabWidget) { return Preparation::Complete; }
+    if (m_navigationPagePreparing) { return Preparation::MorePages; }
     if (!useColdBodies && m_navigationSkippedColdBodies)
     {
         // A compatibility caller still requests actual widgets, even after a
@@ -477,6 +485,45 @@ bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool sin
         m_navigationPagePreparing = true;
         try
         {
+            if (useColdBodies && m_navigationPrepareCursor == m_disableDseTabIndex
+                && !m_disableDsePage && !m_disableDseSearchReason && !m_disableDseSearchFailed && resume)
+            {
+                // The old hidden constructor reads this exact initial state.
+                // Keep one value query per cold page; a new search replaces
+                // only its ready continuation, never the native query.
+                m_disableDseSearchReady = std::move(resume);
+                if (!m_disableDseSearchOperation)
+                    m_disableDseSearchOperation = new ks::ui::AsyncOperation(this);
+                if (!m_disableDseSearchOperation->isBusy())
+                {
+                    const auto ticket = m_disableDseSearchOperation->submit<int, ks::misc::disable_dse::BlockReason>(0,
+                        [](const int&, const ks::ui::AsyncOperationToken&) {
+                            return ks::misc::disable_dse::evaluateBlockReason({}, {});
+                        },
+                        [this](const ks::misc::disable_dse::BlockReason reason, std::uint64_t) {
+                            m_disableDseSearchReason = reason;
+                            auto ready = std::exchange(m_disableDseSearchReady, {});
+                            if (ready) ready();
+                            return true;
+                        },
+                        [this](std::exception_ptr) {
+                            // Fall back to the original factory on failure;
+                            // a missing result is never an empty complete body.
+                            m_disableDseSearchFailed = true;
+                            auto ready = std::exchange(m_disableDseSearchReady, {});
+                            if (ready) ready();
+                        });
+                    if (ticket == 0)
+                    {
+                        m_disableDseSearchFailed = true;
+                        m_disableDseSearchReady = {};
+                        m_navigationPagePreparing = false;
+                        return Preparation::MorePages;
+                    }
+                }
+                m_navigationPagePreparing = false;
+                return Preparation::Waiting;
+            }
             if (useColdBodies && ((m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
                 || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)))
                 m_navigationSkippedColdBodies = true;
@@ -487,14 +534,14 @@ bool MiscDock::prepareNavigationPages(const bool currentPageOnly, const bool sin
             if (owner) { m_navigationPagePreparing = false; }
             throw;
         }
-        if (!owner) { return true; }
+        if (!owner) { return Preparation::Complete; }
         m_navigationPagePreparing = false;
         ++m_navigationPrepareCursor;
         if (singleStep) { break; }
     }
     const bool complete = m_navigationPrepareCursor >= m_mainTabWidget->count();
     m_navigationPagesPrepared = complete && !m_navigationSkippedColdBodies;
-    return complete;
+    return complete ? Preparation::Complete : Preparation::MorePages;
 }
 
 MinidumpDock* MiscDock::activateMinidumpTab()
@@ -595,8 +642,15 @@ void MiscDock::initializeDisableDsePage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_disableDseHostWidget);
-    m_disableDsePage = new ks::misc::DisableDsePage(m_disableDseHostWidget);
+    // Direct activation during the read uses the original constructor query;
+    // cancel its pending publication so it cannot overwrite a live page.
+    if (m_disableDseSearchOperation) m_disableDseSearchOperation->cancel();
+    auto ready = std::exchange(m_disableDseSearchReady, {});
+    const auto initialReason = m_disableDseSearchReason;
+    m_disableDseSearchReason.reset();
+    m_disableDsePage = new ks::misc::DisableDsePage(m_disableDseHostWidget, initialReason);
     hostLayout->addWidget(m_disableDsePage, 1);
+    if (ready) ready();
 }
 
 void MiscDock::initializeCksPage()

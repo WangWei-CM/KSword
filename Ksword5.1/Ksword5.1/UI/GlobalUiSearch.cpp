@@ -1680,12 +1680,18 @@ namespace ks::ui
                     if (!searchComplete)
                     {
                         // 纯导航目录不代表冷页正文完整；未证明全文覆盖时保留原factory正文搜索。
-                        const bool prepared = !dock || !m_nestedDockPreparer
-                            || m_nestedDockPreparer(dock.data(), m_activeSearchScope, true, m_preparingHasBodyCatalog);
+                        const auto resume = [alive, searchGeneration]() {
+                            if (alive) QTimer::singleShot(0, alive.data(), [alive, searchGeneration]() {
+                                if (alive) alive->processNextSearchChunk(searchGeneration);
+                            });
+                        };
+                        const auto prepared = !dock || !m_nestedDockPreparer ? PageSearchPreparation::Complete
+                            : m_nestedDockPreparer(dock.data(), m_activeSearchScope, true,
+                                m_preparingHasBodyCatalog, resume);
                         if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
-                        if (!prepared)
+                        if (prepared != PageSearchPreparation::Complete)
                         {
-                            QTimer::singleShot(0, this, [this, searchGeneration]() { processNextSearchChunk(searchGeneration); });
+                            if (prepared == PageSearchPreparation::MorePages) resume();
                             return;
                         }
                     }
@@ -2057,7 +2063,7 @@ namespace ks::ui
                 if (!lifetime) return;
                 catalogAvailable = dockWidget && catalog && ResolvePageNavigationCatalog(*catalog, dockWidget->windowTitle()).has_value();
             }
-            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global, false, false);
+            if (!catalogAvailable && dockWidget) m_nestedDockPreparer(dockWidget, UiSearchScope::Global, false, false, {});
         }
         if (!lifetime) return;
         if (dockWidget != nullptr && m_dockActivator)

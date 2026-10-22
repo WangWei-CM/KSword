@@ -15,6 +15,9 @@ namespace ads { class CDockWidget; }
 
 namespace ks::ui
 {
+    // Waiting resumes from the value producer's completion, without timer polling.
+    enum class PageSearchPreparation { Complete, MorePages, Waiting };
+
     // Identical normalization for real controls and their cold search values.
     inline QString StripUiSearchMnemonicMarkers(const QString& sourceText)
     {
