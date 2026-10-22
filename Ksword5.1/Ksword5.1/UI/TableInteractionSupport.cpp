@@ -1,5 +1,6 @@
 #include "TableInteractionSupport.h"
 #include "TableCompleteExport.h"
+#include "PageNavigationCatalog.h"
 #include "./ToolbarMetrics.h"
 #include "./FlatButtonTheme.h"
 
@@ -86,6 +87,11 @@ namespace
     constexpr char kActionBarProperty[] = "KSWORD_TABLE_INTERACTION_ACTION_BAR";
     constexpr char kStandardContextMenuProperty[] = "KSWORD_TABLE_INTERACTION_STANDARD_CONTEXT_MENU";
     constexpr char kComparisonActiveProperty[] = "KSWORD_TABLE_INTERACTION_COMPARISON_ACTIVE";
+    constexpr char kSearchTargetPrefixProperty[] = "ksword_compact_search_target_prefix";
+    constexpr char kCopyAllSource[] = "复制全表";
+    constexpr char kExportSource[] = "导出";
+    constexpr char kCopyAllTargetSuffix[] = "_copy_all";
+    constexpr char kExportTargetSuffix[] = "_export";
     constexpr int kActionBarHeight = 32;
     constexpr quint64 kBytesPerMiB = 1024ULL * 1024ULL;
     constexpr TableSnapshotCaptureLimits kSnapshotCaptureLimits{};
@@ -358,8 +364,9 @@ namespace
             layout->setContentsMargins(4, 2, 4, 2);
             layout->setSpacing(4);
 
-            m_copyAllButton = createButton("复制全表", QStringLiteral(":/Icon/log_copy.svg"));
-            m_exportButton = createButton("导出", QStringLiteral(":/Icon/log_export.svg"));
+            m_copyAllButton = createButton(kCopyAllSource, QStringLiteral(":/Icon/log_copy.svg"));
+            m_exportButton = createButton(kExportSource, QStringLiteral(":/Icon/log_export.svg"));
+            setSearchTargetPrefix(tableView->property(kSearchTargetPrefixProperty).toString());
             m_freezePaneButton = createButton("冻结");
             m_freezePaneButton->setObjectName(QStringLiteral("ksword_table_freeze_button"));
             m_freezePaneButton->setMinimumSize(68, 28);
@@ -641,8 +648,8 @@ namespace
                 return;
             }
 
-            m_copyAllButton->setText(localizedSourceText("复制全表"));
-            m_exportButton->setText(localizedSourceText("导出"));
+            m_copyAllButton->setText(localizedSourceText(kCopyAllSource));
+            m_exportButton->setText(localizedSourceText(kExportSource));
             m_freezeRowsLabel->setText(localizedSourceText("前面的行"));
             m_freezeColumnsLabel->setText(localizedSourceText("前面的列"));
             m_applyFreezeCountsButton->setText(localizedSourceText("应用冻结"));
@@ -670,6 +677,13 @@ namespace
         }
 
     public:
+        void setSearchTargetPrefix(const QString& prefix)
+        {
+            if (prefix.isEmpty()) return;
+            m_copyAllButton->setObjectName(prefix + QLatin1String(kCopyAllTargetSuffix));
+            m_exportButton->setObjectName(prefix + QLatin1String(kExportTargetSuffix));
+        }
+
         void setMode(const TableActionBarMode mode)
         {
             if (m_mode == mode)
@@ -2713,6 +2727,24 @@ namespace
 
 namespace ks::ui
 {
+    QVector<PageSearchBodyText> ColdCompactTableActionBody(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return {};
+        return {
+            {localizedSourceText(kCopyAllSource), targetPrefix + QLatin1String(kCopyAllTargetSuffix), {}, true},
+            {localizedSourceText(kExportSource), targetPrefix + QLatin1String(kExportTargetSuffix), {}, true}
+        };
+    }
+
+    void SetCompactTableSearchTargetPrefix(QTableView* tableView, const QString& targetPrefix)
+    {
+        if (!tableView || targetPrefix.isEmpty()) return;
+        const QPointer<QTableView> owner(tableView);
+        tableView->setProperty(kSearchTargetPrefixProperty, targetPrefix);
+        if (owner)
+            if (auto* bar = actionBarForTable(owner.data())) bar->setSearchTargetPrefix(targetPrefix);
+    }
+
     // 宿主复用原有功能实现，避免迁移时丢失冻结、暂停、快照比较或搜索能力。
     bool IsTablePresentationPreparing(const QTableView* tableView)
     {

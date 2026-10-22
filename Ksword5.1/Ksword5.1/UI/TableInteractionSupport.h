@@ -14,6 +14,7 @@ class QTableView;
 #include <QTableWidgetItem>
 #include <QTreeWidget>
 #include <QVariant>
+#include <QVector>
 #include <QtGlobal>
 
 #include <functional>
@@ -21,6 +22,11 @@ class QTableView;
 namespace ks::ui
 {
     struct ResultTableCapabilities;
+    struct PageSearchBodyText;
+    // Initial Compact mode has exactly two visible action texts. Opt-in
+    // prefixes name the existing buttons; no action bar is created by this API.
+    QVector<PageSearchBodyText> ColdCompactTableActionBody(const QString& targetPrefix);
+    void SetCompactTableSearchTargetPrefix(QTableView* tableView, const QString& targetPrefix);
 
     // Explicit producer preparation state, independent of QWidget enabled state.
     // Only producers doing a cooperative partial presentation opt in. Controls
