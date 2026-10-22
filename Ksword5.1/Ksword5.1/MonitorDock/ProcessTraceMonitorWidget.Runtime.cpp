@@ -183,6 +183,7 @@ void ProcessTraceMonitorWidget::startMonitoring()
     m_capture = state;
     m_captureCleanup = cleanup;
     m_captureCompletionApplied = false;
+    m_captureStartupProgressApplied = false;
     m_appliedTargetVersion = 0;
     clearCanonicalEvents();
     m_captureStartTime100ns = currentSystemTime100ns();
@@ -359,6 +360,11 @@ void ProcessTraceMonitorWidget::stopMonitoringInternal(const bool ownerClosing)
 void ProcessTraceMonitorWidget::pollCaptureState()
 {
     const auto state = m_capture;
+    if (!m_captureStartupProgressApplied && state->processStarted.load() && !state->finished.load())
+    {
+        m_captureStartupProgressApplied = true;
+        kPro.set(m_captureProgressPid, "监控启动完成，正在监听目标进程", 0, 100.0f);
+    }
     if (state->finished.load() && m_captureCleanup && !m_captureCleanup->isCleanupRequested()) m_captureCleanup->requestCleanup();
     std::vector<TargetProcessEntry> targets;
     bool changed = false;

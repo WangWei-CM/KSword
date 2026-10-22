@@ -456,6 +456,7 @@ private:
     QTimer* m_eventFilterDebounceTimer = nullptr;                   // m_eventFilterDebounceTimer：事件筛选节流定时器。
     QTimer* m_runtimeRefreshTimer = nullptr;                        // m_runtimeRefreshTimer：运行期快照辅助定时器。
     int m_captureProgressPid = 0;                                   // m_captureProgressPid：进度条任务 ID。
+    bool m_captureStartupProgressApplied = false;
     std::uint64_t m_captureStartTime100ns = 0;                      // m_captureStartTime100ns：本轮监控起点时间。
     std::uint64_t m_captureStopTime100ns = 0;                       // m_captureStopTime100ns：本轮监控停止时间。
     std::uint64_t m_timelineSelectionStart100ns = 0;                // m_timelineSelectionStart100ns：时间轴框选起点。
