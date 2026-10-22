@@ -3,6 +3,8 @@
 #include "../../UI/VisibleTableWidget.h"
 #include "../../UI/FlatButtonTheme.h"
 #include "../../UI/PrimaryPageStyle.h"
+#include "../../UI/TableInteractionSupport.h"
+#include "../../Internationalization/LanguageManager.h"
 
 #include "../../theme.h"
 
@@ -44,6 +46,43 @@ namespace
     constexpr int kAutoRefreshIntervalMs = 1500;
     constexpr int kSoundSourceIdentityRole = Qt::UserRole + 73;
     constexpr std::int64_t kRecentAudibleRetentionMs = 5000;
+
+    enum class SoundSourceBodyText
+    {
+        Title, AutoRefresh, ShowSilent, OverviewPreset, AudioPreset, KernelPreset,
+        Summary, Status
+    };
+    struct SoundSourceBodyEntry
+    {
+        const char* target;
+        const char* source;
+        bool mnemonic;
+    };
+    // Controls keep their original source text; cold search translates these
+    // same definitions through the existing compatibility translation path.
+    constexpr SoundSourceBodyEntry kSoundSourceBody[] = {
+        {"ks_sound_source_title", "声音来源", false},
+        {"ks_sound_source_auto_refresh", "自动刷新", true},
+        {"ks_sound_source_show_silent", "显示静默会话", true},
+        {"ks_sound_source_overview_preset", "A", true},
+        {"ks_sound_source_audio_preset", "B", true},
+        {"ks_sound_source_kernel_preset", "C", true},
+        {"ks_sound_source_summary", "尚未采样声音来源。", false},
+        {"ks_sound_source_status", "等待刷新", false}
+    };
+    constexpr char kSoundSourceTableTarget[] = "ks_sound_source_table";
+    const SoundSourceBodyEntry& soundSourceBodyEntry(SoundSourceBodyText id)
+    {
+        return kSoundSourceBody[static_cast<int>(id)];
+    }
+    QString soundSourceBodySource(SoundSourceBodyText id)
+    {
+        return QString::fromUtf8(soundSourceBodyEntry(id).source);
+    }
+    QString soundSourceBodyTarget(SoundSourceBodyText id)
+    {
+        return QString::fromLatin1(soundSourceBodyEntry(id).target);
+    }
 
     enum SoundSourceColumn
     {
@@ -140,6 +179,28 @@ namespace
 
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> SoundSourcePage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(31);
+        // Layout reparenting leaves the overview controls first, then the
+        // root-owned status label before the table, despite its footer position.
+        for (const auto& entry : kSoundSourceBody)
+        {
+            body.append({ks::i18n::sourceText(QString::fromUtf8(entry.source)),
+                QString::fromLatin1(entry.target), {}, entry.mnemonic});
+        }
+        // GlobalUiSearch reads every horizontal header before table descendants,
+        // including columns hidden by the initial A preset. No rows exist yet.
+        for (const auto& header : tableHeaders())
+        {
+            body.append({ks::i18n::sourceText(header),
+                QString::fromLatin1(kSoundSourceTableTarget), {}, false});
+        }
+        body += ks::ui::ColdCompactTableActionBody(QStringLiteral("ks_sound_source_actions"));
+        return body;
+    }
+
     SoundSourcePage::SoundSourcePage(
         const std::uint32_t processIdFilter,
         const std::uint64_t expectedCreationTime100ns,
@@ -218,9 +279,10 @@ namespace ks::misc
 
         m_titleLabel = new QLabel(
             m_processIdFilter == 0U
-                ? QStringLiteral("声音来源")
+                ? soundSourceBodySource(SoundSourceBodyText::Title)
                 : QStringLiteral("当前进程的声音来源"),
             this);
+        m_titleLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Title));
         m_titleLabel->setToolTip(
             QStringLiteral("R3 采样 Core Audio 会话峰值、状态、音量与端点；R0 多源交叉核验会话 PID，只佐证进程身份，不读取或修改音频流。"));
         overviewLayout->addWidget(m_titleLabel);
@@ -232,13 +294,15 @@ namespace ks::misc
         m_refreshButton->setToolTip(QStringLiteral("立即重新采样声音来源，并重试 R0 证据"));
         toolbarLayout->addWidget(m_refreshButton);
 
-        m_autoRefreshCheck = new QCheckBox(QStringLiteral("自动刷新"), this);
+        m_autoRefreshCheck = new QCheckBox(soundSourceBodySource(SoundSourceBodyText::AutoRefresh), this);
+        m_autoRefreshCheck->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::AutoRefresh));
         m_autoRefreshCheck->setChecked(true);
         m_autoRefreshCheck->setToolTip(
             QStringLiteral("页面可见时每 1.5 秒执行一次短时峰值采样"));
         toolbarLayout->addWidget(m_autoRefreshCheck);
 
-        m_showSilentCheck = new QCheckBox(QStringLiteral("显示静默会话"), this);
+        m_showSilentCheck = new QCheckBox(soundSourceBodySource(SoundSourceBodyText::ShowSilent), this);
+        m_showSilentCheck->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::ShowSilent));
         m_showSilentCheck->setChecked(false);
         m_showSilentCheck->setToolTip(
             QStringLiteral("显示当前未检测到波形的全部输出音频会话"));
@@ -253,15 +317,18 @@ namespace ks::misc
         m_overviewPresetButton = new QToolButton(this);
         m_audioPresetButton = new QToolButton(this);
         m_kernelPresetButton = new QToolButton(this);
+        m_overviewPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::OverviewPreset));
+        m_audioPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::AudioPreset));
+        m_kernelPresetButton->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::KernelPreset));
         const QList<QToolButton*> presetButtons = {
             m_overviewPresetButton,
             m_audioPresetButton,
             m_kernelPresetButton
         };
         const QStringList presetNames = {
-            QStringLiteral("A"),
-            QStringLiteral("B"),
-            QStringLiteral("C")
+            soundSourceBodySource(SoundSourceBodyText::OverviewPreset),
+            soundSourceBodySource(SoundSourceBodyText::AudioPreset),
+            soundSourceBodySource(SoundSourceBodyText::KernelPreset)
         };
         const QStringList presetTooltips = {
             QStringLiteral("A：发声进程概览"),
@@ -286,17 +353,21 @@ namespace ks::misc
         overviewLayout->addLayout(toolbarLayout);
 
         m_summaryLabel = new QLabel(
-            QStringLiteral("尚未采样声音来源。"),
+            soundSourceBodySource(SoundSourceBodyText::Summary),
             this);
+        m_summaryLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Summary));
         m_summaryLabel->setWordWrap(true);
         overviewLayout->addWidget(m_summaryLabel);
 
-        m_statusLabel = new QLabel(QStringLiteral("等待刷新"), this);
+        m_statusLabel = new QLabel(soundSourceBodySource(SoundSourceBodyText::Status), this);
+        m_statusLabel->setObjectName(soundSourceBodyTarget(SoundSourceBodyText::Status));
         m_statusLabel->setWordWrap(true);
 
         m_table = new QTableWidget(this);
+        m_table->setObjectName(QString::fromLatin1(kSoundSourceTableTarget));
         // 音频会话短周期峰值已有专用列视图，保留复制导出，收拢快照条。
         ks::ui::SetTableActionBarMode(m_table, ks::ui::TableActionBarMode::Compact);
+        ks::ui::SetCompactTableSearchTargetPrefix(m_table, QStringLiteral("ks_sound_source_actions"));
         m_table->setColumnCount(ColumnCount);
         m_table->setHorizontalHeaderLabels(tableHeaders());
         m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);

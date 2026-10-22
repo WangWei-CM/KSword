@@ -71,3 +71,5 @@
 - 2026-10-22 SystemTime/VirtualLocation冷初态分别25/42条、25/26目标接入真实Misc host。两页UI与冷源共用原文案/键/预设/纯格式化，Virtual复用StructuredFieldView六条；warm页仍扫描实时控件，激活原工厂后清host标记，完整兼容准备仍补齐。系统时间是目录读取时的新鲜墙钟快照，沿原默认1x格式；它不承诺等于独立稍后构造/250ms刷新的时间，且不回填旧搜索时钟到实际页，不缓存/改变系统或R0计时。原构造/show/query/风险确认/修改动作与布局保持。717项实际纯值/原坐标数学/冻结旧格式对照、181项实际prepare/AsyncOperation受控QtCore及60项原业务源码边界通过；真实GUI另验，不据两个新源关闭整个B03。
 
 - 2026-10-22 Compact表格冷正文复用原TableActionBar的复制全表/导出两条文案。显式SetCompactTableSearchTargetPrefix只给已有或后续创建的原按钮命名，不创建操作条；未opt-in表格不改名。Full/Compact/None、原动作、列/快照/导出/主题逻辑保持。69项实际方法QtCore与真实TableInteractionSupport TU通过，GUI仍由用户验收。
+
+- 2026-10-22 SoundSource全局初始页冷正文31条/11真实目标：原8控件文案、21全部表头和共享Compact两动作，顺序与原QObject遍历一致；表头包括初始A组隐藏列。Misc完整冷正文生产者4→5/20，搜索才跳过未构造声音页；已有实例、当前页、真正激活及完整兼容准备仍走原工厂，构造清host标记。原Core Audio/R0采样、历史、列预设/自定义、复制导出、状态/主题/布局与show触发完全保持。381值检查、175实际准备检查、30源码保持及两实际TU通过；未执行GUI/音频/驱动，未关闭整批B03。

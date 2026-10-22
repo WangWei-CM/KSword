@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 #include "SoundSourceDetector.h"
 
 #include <QHash>
@@ -35,6 +36,9 @@ namespace ks::misc
         Q_OBJECT
 
     public:
+        // Cold initial body for the global (processIdFilter=0) navigation page.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
         // 构造函数：
         // - processIdFilter=0 时显示系统全部输出音频会话；
         // - processIdFilter!=0 时只显示进程详情页对应 PID；

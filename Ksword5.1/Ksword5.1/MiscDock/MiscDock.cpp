@@ -1,4 +1,4 @@
-#include "MiscDock.h"
+﻿#include "MiscDock.h"
 #include "../UI/PageControlStyle.h"
 #include "../UI/PrimaryPageStyle.h"
 #include "../UI/ThemeBinding.h"
@@ -527,7 +527,8 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
             if (useColdBodies && ((m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
                 || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)
                 || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
-                || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)))
+                || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
+                || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)))
                 m_navigationSkippedColdBodies = true;
             else ensureTabInitialized(m_navigationPrepareCursor, false);
         }
@@ -596,8 +597,10 @@ void MiscDock::initializeSoundSourcePage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_soundSourceHostWidget);
+    const QPointer<QWidget> host(m_soundSourceHostWidget);
     m_soundSourcePage = new ks::misc::SoundSourcePage(0U, 0U, m_soundSourceHostWidget);
     hostLayout->addWidget(m_soundSourcePage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeSystemTimePage()
@@ -824,7 +827,7 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
-    if (index == 2 || index == 3 || index == 17 || index == 19)
+    if (index == 1 || index == 2 || index == 3 || index == 17 || index == 19)
         host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
@@ -886,6 +889,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (!existing || !existing->m_soundSourcePage)
+    {
+        main[1].coldBodyTexts = ks::misc::SoundSourcePage::coldSearchBody();
+        main[1].coldBodyComplete = true;
+    }
     if (!existing || !existing->m_systemTimePage)
     {
         main[2].coldBodyTexts = ks::misc::SystemTimePage::coldSearchBody();
