@@ -6,6 +6,7 @@
 class QObject;
 class QEvent;
 class QJsonObject;
+class QWidget;
 
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
@@ -20,17 +21,44 @@ namespace ks::ui
 {
 #if KSWORD_PERF_TRACE_ENABLED
 
+    enum class PerfTraceOrigin : quint8 { Unproven, SpontaneousInput, SyntheticInput, ProgrammaticNavigation };
+
     // Values only: an input action can have many independent asynchronous
     // requests. Zero means no proven input/request parent, never "latest".
     struct PerfTraceContext
     {
         quint64 actionId = 0;
         quint64 requestId = 0;
+        PerfTraceOrigin origin = PerfTraceOrigin::Unproven;
     };
     PerfTraceContext CapturePerfTraceContext() noexcept;
     PerfTraceContext BeginPerfAsyncTrace() noexcept;
     void RecordPerfAsyncTrace(const char* stage, PerfTraceContext context,
         qint64 count = -1, qint64 beganAtNs = -1) noexcept;
+
+    // Selection/preparation evidence only. Structural fallback IDs are stable for
+    // an unchanged widget hierarchy; index and identity scope remain explicit.
+    struct PerfNavigationTarget
+    {
+        QString id, path, label, identityScope;
+        int index = -1;
+        bool pathComplete = false;
+    };
+    struct PerfNavigationTrace
+    {
+        quint64 id = 0;
+        PerfTraceContext context;
+        PerfNavigationTarget target;
+        QString kind, origin;
+        qint64 beganAtNs = -1;
+    };
+    PerfNavigationTarget CapturePerfNavigationTarget(QWidget* container, QWidget* target, int index) noexcept;
+    PerfNavigationTrace BeginPerfNavigationTrace(const char* kind, PerfNavigationTarget target,
+        const char* stage = "begin", const char* origin = nullptr) noexcept;
+    // ready is always qualified by a real preparation boundary, never business
+    // readiness or presentation. No callback, timer or receiver is retained.
+    void RecordPerfNavigationStage(const PerfNavigationTrace& navigation, const char* stage,
+        const char* boundary, const char* outcome) noexcept;
 
     // Restore the submitting action around an existing worker/UI callback;
     // does not retain a receiver, schedule work, or change request admission.

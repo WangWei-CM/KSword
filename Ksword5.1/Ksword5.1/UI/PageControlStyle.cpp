@@ -5,6 +5,7 @@
 #include "./PageTabFocusStyle.h"
 #include "./AdaptivePageScroll.h"
 #include "./PrimaryPageStyle.h"
+#include "./PerfTrace.h"
 
 #include <QBoxLayout>
 #include <QEvent>
@@ -493,13 +494,28 @@ namespace
             {
                 stack->installEventFilter(this); // 原生 pane 布局更新后同步局部连接，不争抢几何。
             }
-            connect(tabs, &QTabWidget::currentChanged, this, [this]()
+            connect(tabs, &QTabWidget::currentChanged, this, [this](int index)
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                if (m_tabs && index == m_tabs->currentIndex()) beginNavigation(index);
+#else
+                Q_UNUSED(index);
+#endif
                 if (canPreparePage()) prepareNow(); // 首次页或真实dirty才整理结构，热切只同步现存外壳。
                 else schedule();
             });
+#if KSWORD_PERF_TRACE_ENABLED
+            beginNavigation(tabs->currentIndex(), "initial_state");
+#endif
             schedule();
         }
+
+#if KSWORD_PERF_TRACE_ENABLED
+        ~PageTabEnvelope() override
+        {
+            finishNavigation("owner_destroyed");
+        }
+#endif
 
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
@@ -590,6 +606,38 @@ namespace
         }
 
     private:
+#if KSWORD_PERF_TRACE_ENABLED
+        void finishNavigation(const char* outcome)
+        {
+            if (!m_navigation.id) return;
+            ks::ui::RecordPerfNavigationStage(m_navigation, "end", "tab_envelope", outcome);
+            m_navigation = {};
+            m_navigationPage.clear();
+        }
+
+        void beginNavigation(int index, const char* origin = nullptr)
+        {
+            finishNavigation("superseded_before_shell_ready");
+            if (!m_tabs || index < 0 || !m_tabs->widget(index)) return;
+            m_navigationPage = m_tabs->widget(index);
+            m_navigation = ks::ui::BeginPerfNavigationTrace("page_tab",
+                ks::ui::CapturePerfNavigationTarget(m_tabs, m_navigationPage, index), "selected", origin);
+        }
+
+        void recordNavigationPreparation()
+        {
+            if (!m_navigation.id || !m_navigationPage || !hasVisibleFramePage()
+                || m_tabs->currentWidget() != m_navigationPage
+                || m_tabs->currentIndex() != m_navigation.target.index
+                || m_preparing || needsLayoutPreparation()) return;
+            // Actual existing layout/pane/surface work has returned for this
+            // same target. This says nothing about its business data or paint.
+            ks::ui::RecordPerfNavigationStage(m_navigation, "ready",
+                "tab_envelope_layout_and_surfaces", "shell_prepared");
+            finishNavigation("shell_prepared");
+        }
+#endif
+
         struct PreparedPage
         {
             QPointer<QWidget> owner;
@@ -746,6 +794,9 @@ namespace
             {
                 return;
             }
+#if KSWORD_PERF_TRACE_ENABLED
+            const QPointer<PageTabEnvelope> navigationLifetime(this);
+#endif
             const bool visiblePage = hasVisibleFramePage();
             if ((canPreparePage() || (fromQueue && visiblePage)) && needsLayoutPreparation())
             {
@@ -789,6 +840,9 @@ namespace
                 observeContent(m_tabs->currentWidget(), pageLayoutOwner(m_tabs->currentWidget()));
             }
             synchronizeSurfaces();
+#if KSWORD_PERF_TRACE_ENABLED
+            if (navigationLifetime) recordNavigationPreparation();
+#endif
         }
 
         // 只摆放既有导航底面及四角，可在firstPaint兜底；绝不写layout、pane或创建覆盖层。
@@ -904,6 +958,10 @@ namespace
         int m_preparedInset = -1; // pane属于整个Tab，切到不同留白关系仍须更新一次。
         bool m_preparedDelegation = false; // 纯子Tab转交与普通页的pane接缝不同。
         quint64 m_scheduleGeneration = 0; // 同步已消费的旧回调自动失效。
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::PerfNavigationTrace m_navigation;
+        QPointer<QWidget> m_navigationPage;
+#endif
     };
 }
 

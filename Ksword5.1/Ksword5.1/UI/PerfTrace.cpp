@@ -14,6 +14,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QStringList>
+#include <QTabWidget>
+#include <QWidget>
 #include <QMetaObject>
 #include <QObject>
 #include <QThread>
@@ -97,6 +100,8 @@ namespace
         quint64 actionId = 0, requestId = 0, parentRequestId = 0;
         quintptr threadId = 0;
         QString origin;
+        ks::ui::PerfNavigationTrace navigation;
+        QString navigationStage, readinessBoundary, outcome;
         QJsonObject conditions;
         quintptr moduleExportAddress = 0;
         int eventType = -1;
@@ -342,6 +347,23 @@ namespace
                 if (value.parentRequestId)
                     record.insert(QStringLiteral("parent_request_id"), QString::number(value.parentRequestId));
                 if (!value.origin.isEmpty()) record.insert(QStringLiteral("origin"), value.origin);
+                if (value.navigation.id)
+                {
+                    const auto& navigation = value.navigation;
+                    record.insert(QStringLiteral("navigation_id"), QString::number(navigation.id));
+                    record.insert(QStringLiteral("navigation_kind"), navigation.kind);
+                    record.insert(QStringLiteral("navigation_stage"), value.navigationStage);
+                    record.insert(QStringLiteral("target_id"), navigation.target.id);
+                    record.insert(QStringLiteral("target_path"), navigation.target.path);
+                    record.insert(QStringLiteral("target_index"), navigation.target.index);
+                    record.insert(QStringLiteral("target_identity_scope"), navigation.target.identityScope);
+                    record.insert(QStringLiteral("target_path_complete"), navigation.target.pathComplete);
+                    record.insert(QStringLiteral("readiness_boundary"), value.readinessBoundary);
+                    record.insert(QStringLiteral("outcome"), value.outcome);
+                    record.insert(QStringLiteral("operation_scope"), QStringLiteral("navigation_shell_only"));
+                    record.insert(QStringLiteral("business_ready_proven"), false);
+                    record.insert(QStringLiteral("present_proven"), false);
+                }
                 if (!value.conditions.isEmpty()) record.insert(QStringLiteral("conditions"), value.conditions);
                 if (value.event == QStringLiteral("loaded_module"))
                     record.insert(QStringLiteral("module"), readLoadedModuleIdentity(value.moduleExportAddress));
@@ -481,6 +503,22 @@ namespace ks::ui
         }
 
         quint64 nextNotifyId() { return m_nextScopeId.fetch_add(1, std::memory_order_relaxed); }
+
+        void recordNavigation(const PerfNavigationTrace& navigation, const char* stage,
+            const char* boundary, const char* outcome)
+        {
+            auto record = makeRecord("navigation_stage", "perf_navigation", navigation.target.label);
+            record.actionId = navigation.context.actionId;
+            record.requestId = navigation.context.requestId;
+            record.origin = navigation.origin;
+            record.navigation = navigation;
+            record.navigationStage = QString::fromLatin1(stage);
+            record.readinessBoundary = QString::fromLatin1(boundary);
+            record.outcome = QString::fromLatin1(outcome);
+            record.beginNs = navigation.beganAtNs;
+            record.endNs = record.atNs;
+            enqueue(std::move(record));
+        }
 
         void recordAsync(const char* stage, PerfTraceContext context, qint64 count,
             qint64 beganAtNs, quint64 parentRequestId = 0)
@@ -748,6 +786,96 @@ namespace ks::ui
 
     PerfTraceContext CapturePerfTraceContext() noexcept { return currentTraceContext; }
 
+    PerfNavigationTarget CapturePerfNavigationTarget(QWidget* container, QWidget* target, int index) noexcept
+    {
+        PerfNavigationTarget result;
+        try
+        {
+            result.index = index;
+            if (!target) { result.identityScope = QStringLiteral("unavailable"); return result; }
+            result.label = target->windowTitle();
+            if (auto* tabs = qobject_cast<QTabWidget*>(container); tabs && tabs->widget(index) == target)
+                result.label = tabs->tabText(index);
+            QStringList parts;
+            bool structural = false;
+            // Only this target's ancestry and bounded direct siblings, never a
+            // descendant/tree walk or construction of hidden navigation pages.
+            for (QWidget* widget = target; widget && parts.size() < 32; widget = widget->parentWidget())
+            {
+                QString key = widget->property("ks_lazy_key").toString();
+                const bool dockKey = !key.isEmpty();
+                if (!dockKey) key = widget->objectName();
+                QString component = QString::fromUtf8(widget->metaObject()->className());
+                if (!key.isEmpty())
+                {
+                    key.replace(QLatin1Char('%'), QStringLiteral("%25"));
+                    key.replace(QLatin1Char('/'), QStringLiteral("%2F"));
+                    component += QLatin1Char(':') + key;
+                }
+                else
+                {
+                    structural = true;
+                    int ordinal = 0, visited = 0;
+                    bool found = !widget->parent();
+                    if (QObject* parent = widget->parent())
+                        for (QObject* sibling : parent->children())
+                        {
+                            if (++visited > 256) break;
+                            if (sibling == widget) { found = true; break; }
+                            if (sibling->metaObject() == widget->metaObject()) ++ordinal;
+                        }
+                    component += QLatin1Char('#') + QString::number(ordinal);
+                    if (!found) { parts.prepend(component); break; }
+                }
+                parts.prepend(component);
+                if (dockKey || widget->isWindow()) { result.pathComplete = true; break; }
+            }
+            result.path = parts.join(QLatin1Char('/'));
+            result.id = result.path;
+            result.identityScope = structural ? QStringLiteral("structural_path_same_hierarchy")
+                : QStringLiteral("named_object_path");
+        }
+        catch (...) { result.pathComplete = false; }
+        return result;
+    }
+
+    PerfNavigationTrace BeginPerfNavigationTrace(const char* kind, PerfNavigationTarget target,
+        const char* stage, const char* origin) noexcept
+    {
+        PerfNavigationTrace navigation;
+        try
+        {
+            if (!notifyTraceReady.load(std::memory_order_relaxed)) return navigation;
+            navigation.context = currentTraceContext;
+            navigation.id = PerfTrace::instance().nextNotifyId();
+            navigation.target = std::move(target);
+            navigation.kind = QString::fromLatin1(kind);
+            if (origin) navigation.origin = QString::fromLatin1(origin);
+            else switch (navigation.context.origin)
+            {
+            case PerfTraceOrigin::SpontaneousInput: navigation.origin = QStringLiteral("qt_spontaneous_input_context"); break;
+            case PerfTraceOrigin::SyntheticInput: navigation.origin = QStringLiteral("qt_synthetic_input_context"); break;
+            case PerfTraceOrigin::ProgrammaticNavigation: navigation.origin = QStringLiteral("programmatic_navigation"); break;
+            default: navigation.origin = QStringLiteral("unproven"); break;
+            }
+            navigation.beganAtNs = referenceClock().nsecsElapsed();
+            PerfTrace::instance().recordNavigation(navigation, stage, "selection_or_preparation_entry", "observed");
+        }
+        catch (...) { navigation.id = 0; }
+        return navigation;
+    }
+
+    void RecordPerfNavigationStage(const PerfNavigationTrace& navigation, const char* stage,
+        const char* boundary, const char* outcome) noexcept
+    {
+        try
+        {
+            if (navigation.id && notifyTraceReady.load(std::memory_order_relaxed))
+                PerfTrace::instance().recordNavigation(navigation, stage, boundary, outcome);
+        }
+        catch (...) {}
+    }
+
     PerfTraceContext BeginPerfAsyncTrace() noexcept
     {
         try
@@ -808,6 +936,7 @@ namespace ks::ui
                 {
                     m_context = {PerfTrace::instance().nextNotifyId(), 0};
                     m_inputSpontaneous = event && event->spontaneous();
+                    m_context.origin = m_inputSpontaneous ? PerfTraceOrigin::SpontaneousInput : PerfTraceOrigin::SyntheticInput;
                     PerfTrace::instance().recordInput(true, m_context, m_target, eventType, m_inputSpontaneous);
                 }
             }

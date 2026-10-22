@@ -163,6 +163,25 @@
 namespace
 {
 #if KSWORD_PERF_TRACE_ENABLED
+    ks::ui::PerfNavigationTarget CaptureDockNavigationTarget(ads::CDockWidget* dock)
+    {
+        auto* area = dock ? dock->dockAreaWidget() : nullptr;
+        const int current = area ? area->currentIndex() : -1;
+        const int index = area && current >= 0 && area->dockWidget(current) == dock ? current : -1;
+        return ks::ui::CapturePerfNavigationTarget(area, dock, index);
+    }
+
+    void RecordDockNavigationObservation(ads::CDockWidget* dock, const char* stage,
+        const char* origin = nullptr)
+    {
+        if (!dock) return;
+        const auto navigation = ks::ui::BeginPerfNavigationTrace("dock_selection",
+            CaptureDockNavigationTarget(dock), stage, origin);
+        // This signal proves selection/focus only. Warm readiness, worker data
+        // and subsequent presentation must not be inferred from its return.
+        ks::ui::RecordPerfNavigationStage(navigation, "end", "ads_selection_observer", "ready_unproven");
+    }
+
     void RecordPerformanceConditions(const QWidget* window,
         const ks::settings::AppearanceSettings& settings, const bool backgroundReady)
     {
@@ -7588,6 +7607,11 @@ void MainWindow::activateDockForSearchNavigation(ads::CDockWidget* dockWidget)
         return;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    auto navigationContext = ks::ui::CapturePerfTraceContext();
+    navigationContext.origin = ks::ui::PerfTraceOrigin::ProgrammaticNavigation;
+    const ks::ui::PerfTraceContextScope navigationOrigin(navigationContext);
+#endif
     // 采集：激活已有 Dock（可能触发惰性挂载）整体作为一个操作边界。
     ks::ui::PerfScope activatePerf("perf_dock_activate", dockWidget->windowTitle());
     ensureDockContentInitialized(dockWidget);
@@ -10974,6 +10998,10 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         : dockWidget->windowTitle().trimmed();
     // 采集：整个惰性挂载（构造真实内容 + 首帧主题准备 + 刷新）作为一个操作边界。
     ks::ui::PerfScope lazyMountPerf("perf_dock_mount", dockKey);
+#if KSWORD_PERF_TRACE_ENABLED
+    const auto mountNavigation = ks::ui::BeginPerfNavigationTrace("dock_mount",
+        CaptureDockNavigationTarget(dockWidget));
+#endif
     dockWidget->setProperty("ks_lazy_initializing", true);
     const int progressPid = kPro.add(this, "页面", QStringLiteral("打开%1页").arg(dockTitleText).toStdString());
     kPro.set(progressPid, QStringLiteral("准备加载%1页").arg(dockTitleText).toStdString(), 0, 8.0f);
@@ -11123,6 +11151,9 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
         // 进度条必须归零并清空阶段文案，否则会永久停在 30%，看起来像卡死。
         updateLazyDockPlaceholderProgress(dockWidget, QString(), 0);
         dockWidget->setProperty("ks_lazy_initializing", false);
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_content_factory", "no_content");
+#endif
         return;
     }
 
@@ -11212,6 +11243,9 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
     if (!windowLifetime || !contentLifetime || !dockLifetime)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_theme_preparation", "owner_destroyed");
+#endif
         return;
     }
     // 采集：首帧布局整理与局部刷新单独计时。
@@ -11222,9 +11256,18 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     }
     if (!windowLifetime || !contentLifetime || !dockLifetime)
     {
+#if KSWORD_PERF_TRACE_ENABLED
+        ks::ui::RecordPerfNavigationStage(mountNavigation, "end", "dock_layout_preparation", "owner_destroyed");
+#endif
         return;
     }
 
+#if KSWORD_PERF_TRACE_ENABLED
+    ks::ui::RecordPerfNavigationStage(mountNavigation, "ready",
+        "dock_content_mounted_theme_layout", "shell_prepared");
+    ks::ui::RecordPerfNavigationStage(mountNavigation, "end",
+        "dock_content_mounted_theme_layout", "shell_prepared");
+#endif
     // 真实内容挂载后继续继承 Dock 控件树的调色板：
     // - 主窗口背景改由根容器 paintEvent 绘制后，MainWindow 的 Window/Base 画刷只含主题纯色；
     // - 若在这里把该调色板显式复制给新内容，QAbstractScrollArea 等子控件会在首次挂载时刷出黑/白实底；
@@ -12010,14 +12053,17 @@ void MainWindow::setupDockLayout()
         }
         area->setProperty("ksword_perf_trace_connected", true);
         QObject::connect(area, &ads::CDockAreaWidget::currentChanged, this,
-            [area, describePerfDock, recordEnvironment](int)
+            [area, describePerfDock, recordEnvironment](int index)
             {
+                if (index == area->currentIndex())
+                    RecordDockNavigationObservation(area->currentDockWidget(), "selected");
                 ks::ui::RecordPerfMark("perf_dock_focus",
                     describePerfDock(area->currentDockWidget()));
                 recordEnvironment();
             });
         if (area->currentDockWidget() != nullptr)
         {
+            RecordDockNavigationObservation(area->currentDockWidget(), "initial_state", "initial_state");
             ks::ui::RecordPerfMark("perf_dock_initial_state",
                 describePerfDock(area->currentDockWidget()));
         }
@@ -12036,6 +12082,7 @@ void MainWindow::setupDockLayout()
         {
             if (currentDock != nullptr)
             {
+                RecordDockNavigationObservation(currentDock, "focus_observed");
                 ks::ui::RecordPerfMark("perf_dock_focus", describePerfDock(currentDock));
                 recordEnvironment();
             }

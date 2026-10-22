@@ -521,3 +521,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 ThemeBinding首帧准备的dirty收集只在本次无回调阶段缓存共享祖先深度/不可达结论，不缓存叶绑定；缓存收集结束即释放。跨宿主公共链只检查一次，原可见/stack当前页/窗口边界、父先子后排序、回调前真实父链复核与弱寿命/新请求消费保持。不得把此临时结果带过回调、重挂或下一轮；仍逐个读取已有dirty身份，无新观察器/永久索引/全控件树扫描。53770项QtCore与冻结旧方法对照及真实TU通过；10000叶/12祖先夹具祖先读取130000→10012，非实际GUI耗时/FPS结论。
 
 - 2026-10-22 主程序QApplication创建/应用身份确定后调用MainWindow::prepareStartupAppearance，先安装标准绘制/度量/过滤器并显式跳过临时应用基线，再复用原15项正式palette和5段全局QSS；同配置业务首帧直接继承最终配方。InstallStandardWidgetTheme的其它调用默认仍下发完整旧基线。原热换/窗口背景/字体基线/预览取消链保持；标记块内容相同时忽略外围换行，避免无变化全局重写。1751项真实QPalette/QString值检查证明去掉中间基线后完整角色与原两阶段最终值相同，原运行期方法展开等价；不等于真实GUI/首帧/性能验收。
+
+- 2026-10-22 诊断宏1在既有Tab/ADS selected与实际冷挂载/页壳准备入口记录有界target路径/index、origin和navigation_id；ready限定shell_prepared，business_ready_proven/present_proven均false，warm Dock明确ready_unproven。宏0无新观察器/成员或业务分支。33项QtCore实际值API与3实际TU宏1检查通过，未运行GUI/采样。T00原要求包括真实受验操作链/可观测present/WPR栈与实测；不应扩张为所有无关后台任务接入或光学设备验收，也不能以外壳ready关闭T00。
