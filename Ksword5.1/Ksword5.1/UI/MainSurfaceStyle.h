@@ -23,6 +23,7 @@ namespace ks::ui
     bool UsesMainSurfaceHierarchy(const QWidget* widget);
     // 透明主宿主使用独立的数据衬底；只看所属顶层标记，不传染独立对话框或Popup。
     bool UsesTransparentMainSurface(const QWidget* widget);
+    inline constexpr int TransparentMainDataSurfaceAlpha = 192;
     QString MainDataSurfaceStyleColor(const QColor& color, bool transparent);
     // 返回主窗口 ADS 工作区的底板/列表/文本规则；透明背景模式由原背景策略负责。
     QString BuildMainSurfaceStyle(bool transparentContent);

@@ -272,9 +272,14 @@ namespace ks::ui
         const bool mainSurface = UsesMainSurfaceHierarchy(view) || transparentSurface;
         const MainSurfaceColors surfaces = MainWindowSurfaceColors();
         const QColor headerColor = mainSurface ? surfaces.header : KswordTheme::SurfaceMutedColor();
-        const QString headerSurface = headerColor.name();
-        const QString headerText = KswordTheme::EnsureTextContrast(
-            KswordTheme::TextPrimaryColor(), headerColor, 4.5).name();
+        const QString headerSurface = MainDataSurfaceStyleColor(headerColor, transparentSurface);
+        const QString headerCanvas = transparentSurface ? QStringLiteral("transparent") : headerSurface;
+        const int backdropWeight = transparentSurface ? 255 - TransparentMainDataSurfaceAlpha : 0;
+        const QColor headerBackgrounds[] = {
+            KswordTheme::BlendColors(headerColor, QColor(Qt::black), backdropWeight),
+            KswordTheme::BlendColors(headerColor, QColor(Qt::white), backdropWeight)};
+        const QString headerText = KswordTheme::EnsureTextContrastForBackgrounds(
+            KswordTheme::TextPrimaryColor(), headerBackgrounds, 2, 4.5).name();
         const QString headerBorder = mainSurface ? surfaces.border.name() : KswordTheme::BorderColor().name();
         // 外围轻描边区分并排表格；冻结辅助窗格是同一表格内容，不重复加圆角边界。
         const bool auxiliaryPane = view->property("KSWORD_TABLE_INTERACTION_FROZEN_PANE_AUXILIARY").toBool();
@@ -283,7 +288,6 @@ namespace ks::ui
                 mainSurface ? surfaces.border.name()
                     : KswordTheme::BlendColors(KswordTheme::SurfaceColor(), KswordTheme::BorderColor(), 150).name());
         // 透明数据面同时按最暗/最亮背板估算前景，不能把带alpha底色直接当作纯色校准。
-        const int backdropWeight = transparentSurface ? 31 : 0;
         const QColor rowBackgrounds[] = {
             KswordTheme::BlendColors(surfaces.content, QColor(Qt::black), backdropWeight),
             KswordTheme::BlendColors(surfaces.content, QColor(Qt::white), backdropWeight),
@@ -317,20 +321,20 @@ namespace ks::ui
             return;
         }
         const QString headerBlock = QStringLiteral(
-            "QHeaderView{background:%2;border:0;}"
+            "QHeaderView{background:%6;border:0;}"
             "QHeaderView::section{background-color:%2;color:%3;"
             "border:0;border-bottom:1px solid %4;padding:%1;font-weight:600;}"
             "QHeaderView::section:hover{background-color:%5;}")
             .arg(headerPadding, headerSurface, headerText, headerBorder,
-                KswordTheme::ControlInputHoverColor(headerColor).name());
+                MainDataSurfaceStyleColor(KswordTheme::ControlInputHoverColor(headerColor), transparentSurface), headerCanvas);
         replacePresentationBlock(columnHeader(view), headerBlock);
         if (table != nullptr)
         {
             replacePresentationBlock(table->verticalHeader(), QStringLiteral(
-                "QHeaderView{background:%2;border:0;}"
+                "QHeaderView{background:%5;border:0;}"
                 "QHeaderView::section{background:%2;color:%3;border:0;"
                 "border-right:1px solid %4;padding:%1;font-weight:400;}")
-                .arg(headerPadding, headerSurface, headerText, headerBorder));
+                .arg(headerPadding, headerSurface, headerText, headerBorder, headerCanvas));
         }
     }
 

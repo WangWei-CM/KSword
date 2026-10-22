@@ -223,7 +223,8 @@ namespace ks::ui
         {
             if (target)
             {
-                const bool mainSurface = UsesMainSurfaceHierarchy(target);
+                const bool transparentSurface = UsesTransparentMainSurface(target);
+                const bool mainSurface = UsesMainSurfaceHierarchy(target) || transparentSurface;
                 const MainSurfaceColors surfaces = MainWindowSurfaceColors();
                 // 独立工具带与内容板统一圆角，以底色差表达层级，不再拼接一块方形底面。
                 const int bottomRadius = target->property("ksword_primary_toolbar_joined_tabs").toBool() ? 0 : 8;
@@ -231,7 +232,8 @@ namespace ks::ui
                     "QWidget[ksword_primary_toolbar=\"true\"]{"
                     "background:%1;border:0;border-radius:8px;"
                     "border-bottom-left-radius:%2px;border-bottom-right-radius:%2px;}")
-                    .arg(mainSurface ? surfaces.toolbar.name() : KswordTheme::SurfaceColor().name()).arg(bottomRadius));
+                    .arg(mainSurface ? MainDataSurfaceStyleColor(surfaces.toolbar, transparentSurface)
+                        : KswordTheme::SurfaceColor().name()).arg(bottomRadius));
             }
         });
     }
@@ -259,10 +261,12 @@ namespace ks::ui
             {
                 return;
             }
-            const bool mainSurface = UsesMainSurfaceHierarchy(target);
+            const bool transparentSurface = UsesTransparentMainSurface(target);
+            const bool mainSurface = UsesMainSurfaceHierarchy(target) || transparentSurface;
             const MainSurfaceColors surfaces = MainWindowSurfaceColors();
             const bool outlined = target->property("ksword_primary_content_panel_outlined").toBool();
-            const QString background = mainSurface ? surfaces.content.name()
+            const QString background = transparentSurface && outlined ? QStringLiteral("transparent")
+                : mainSurface ? MainDataSurfaceStyleColor(surfaces.content, transparentSurface)
                 : outlined ? QStringLiteral("transparent") : KswordTheme::SurfaceColor().name();
             const QString rules = outlined ? QStringLiteral(
                 "QWidget[ksword_primary_content_panel=\"true\"]{background:%1;border:1px solid %2;border-radius:8px;}")

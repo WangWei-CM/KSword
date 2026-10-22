@@ -56,7 +56,7 @@ namespace ks::ui
     {
         // 主底板继续透出背景；数据区保留轻透衬底，避免文字直接压在任意壁纸/桌面上。
         QColor surface = color;
-        if (transparent) surface.setAlpha(224);
+        if (transparent) surface.setAlpha(TransparentMainDataSurfaceAlpha);
         return surface.name(transparent ? QColor::HexArgb : QColor::HexRgb);
     }
 
@@ -66,8 +66,8 @@ namespace ks::ui
         if (transparentContent)
         {
             // 只为数据面补可读性，不给普通QWidget/Stack/页根铺底，不改变窗口透明度。
-            const QColor backgrounds[] = {KswordTheme::BlendColors(colors.content, QColor(Qt::black), 31),
-                KswordTheme::BlendColors(colors.content, QColor(Qt::white), 31)};
+            const QColor backgrounds[] = {KswordTheme::BlendColors(colors.content, QColor(Qt::black), 255 - TransparentMainDataSurfaceAlpha),
+                KswordTheme::BlendColors(colors.content, QColor(Qt::white), 255 - TransparentMainDataSurfaceAlpha)};
             const QColor text = KswordTheme::EnsureTextContrastForBackgrounds(
                 KswordTheme::TextPrimaryColor(), backgrounds, 2, 4.5);
             return QStringLiteral(R"qss(
