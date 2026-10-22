@@ -1893,8 +1893,19 @@ void DriverDock::refreshLoadedKernelModuleRecords()
     const quint64 requestTicket =
         allocateDriverDockRefreshTicket(this, kLoadedModuleRefreshTicketProperty);
 
+    const std::string progressCompleted = driverText(
+        "driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块列表已刷新。")).toStdString();
+    const std::string progressFailed = driverText(
+        "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")).toStdString();
+    // The same value owner travels through worker and delivery. A stale/dropped
+    // result retires its finite task even when the UI callback never executes.
+    const auto progress = std::shared_ptr<int>(new int(kPro.add(this,
+        driverText("driver.tab.kernel_modules", QStringLiteral("内核模块")).toStdString(),
+        driverText("driver.toolbar.refresh_modules.tooltip", QStringLiteral("刷新已加载内核模块")).toStdString())),
+        [](int* pid) { kPro.finish(*pid, kProgressState::Canceled, {}); delete pid; });
+
     QRunnable* collectModuleTask = QRunnable::create(
-        [guardThis, requestTicket, refreshEvent]()
+        [guardThis, requestTicket, refreshEvent, progress, progressCompleted, progressFailed]()
         {
             // 后台线程只做纯数据采集：queryLoadedKernelModuleRecords 是静态成员函数，
             // 只访问 psapi 并产出值类型记录，不触碰任何 QWidget。
@@ -1914,6 +1925,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                 [guardThis,
                  requestTicket,
                  refreshEvent,
+                 progress, progressCompleted, progressFailed,
                  collectSucceeded,
                  collectedModuleRecords = std::move(collectedModuleRecords),
                  collectErrorText]() mutable
@@ -1948,6 +1960,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
 
                     if (!collectSucceeded)
                     {
+                        kPro.finish(*progress, kProgressState::Failure, progressFailed);
                         guardThis->cancelLoadedModuleEvidenceQuery();
                         guardThis->m_moduleEnumerationFailed = true;
                         guardThis->m_loadedModuleCache.clear();
@@ -2032,6 +2045,7 @@ void DriverDock::refreshLoadedKernelModuleRecords()
                             "driver.log.refresh_modules_completed",
                             QStringLiteral("[DriverDock] 刷新模块完成, count="))
                         << guardThis->m_loadedModuleCache.size() << eol;
+                    kPro.finish(*progress, kProgressState::Success, progressCompleted);
                 },
                 Qt::QueuedConnection);
         });

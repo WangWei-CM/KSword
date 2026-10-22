@@ -1372,11 +1372,20 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
     const QPointer<DriverDock> guardThis(this);
     using EvidenceRecords = std::vector<LoadedModuleEvidenceRecord>;
     using EvidencePayload = std::shared_ptr<EvidenceRecords>;
+    const std::string progressStep = driverText(
+        "driver.evidence.status.aggregating", QStringLiteral("证据：正在刷新...")).toStdString();
+    const std::string progressCompleted = driverText(
+        "driver.evidence.status.modules_refreshed", QStringLiteral("证据：模块列表已刷新。")).toStdString();
+    const std::string progressFailed = driverText(
+        "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")).toStdString();
+    const int progressPid = kPro.add(this,
+        driverText("driver.tab.kernel_modules", QStringLiteral("内核模块")).toStdString(), progressStep);
     m_moduleEvidenceOperation->submit<std::vector<LoadedKernelModuleRecord>, EvidencePayload>(
         m_loadedModuleCache,
-        [](const std::vector<LoadedKernelModuleRecord>& moduleSnapshot,
+        [progressPid, progressStep](const std::vector<LoadedKernelModuleRecord>& moduleSnapshot,
             const ks::ui::AsyncOperationToken& token)
         {
+            kPro.set(progressPid, progressStep, 0, 0.1f);
             // 结果只含独立值；过期或延期 payload 的最后释放同样不在 GUI 销毁整份字段文档。
             return EvidencePayload(new EvidenceRecords(
                 DriverDock::collectEvidenceForLoadedModules(moduleSnapshot, token)),
@@ -1439,7 +1448,17 @@ void DriverDock::refreshLoadedModuleEvidenceAsync()
                 guardThis->m_moduleEvidenceStatusLabel->setText(driverText(
                     "driver.evidence.status.scan_failed", QStringLiteral("扫描失败")));
             }
-        }, {}, -1);
+        }, [progressPid, progressCompleted, progressFailed](const ks::ui::AsyncOperationOutcome outcome)
+        {
+            // AsyncOperation owns this one terminal callback, including menu-deferred
+            // apply, superseding refreshes, owner close and discarded delivery.
+            kPro.finish(progressPid,
+                outcome == ks::ui::AsyncOperationOutcome::Applied ? kProgressState::Success
+                    : outcome == ks::ui::AsyncOperationOutcome::Failed ? kProgressState::Failure
+                    : kProgressState::Canceled,
+                outcome == ks::ui::AsyncOperationOutcome::Applied ? progressCompleted
+                    : outcome == ks::ui::AsyncOperationOutcome::Failed ? progressFailed : std::string());
+        }, -1);
 }
 
 void DriverDock::updateLoadedModuleEvidenceStatusText()
