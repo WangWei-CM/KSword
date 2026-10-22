@@ -1401,7 +1401,10 @@ namespace ks::windowlist
         for (const auto& request : requests)
         {
             if (token.isCanceled()) break;
-            const auto* path = reinterpret_cast<const wchar_t*>(request.path.utf16());
+            // Projection paths are normalized by QDir::cleanPath (forward slashes).
+            // Shell parsing requires the native path, while the cache key stays canonical.
+            const QString nativePath = QDir::toNativeSeparators(request.path);
+            const auto* path = reinterpret_cast<const wchar_t*>(nativePath.utf16());
             const QString identity = fileIconIdentity(request.path);
             QImage image;
             { std::lock_guard<std::mutex> lock(cacheMutex); image = cache.value(identity); }
