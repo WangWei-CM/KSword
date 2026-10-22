@@ -13051,6 +13051,18 @@ void MainWindow::initAppearanceSettings()
     }
     else
     {
+        // ADS retains each XML area's saved selection in this property. Startup
+        // mounting and appearance work happen after restoreState; finish them by
+        // restoring that selection once, before the first business window Show.
+        for (auto* container : m_pDockManager->dockContainers())
+            for (int index = 0; index < container->dockAreaCount(); ++index)
+            {
+                auto* area = container->dockArea(index);
+                auto* savedDock = m_pDockManager->findDockWidget(area->property("currentDockWidget").toString());
+                if (savedDock && !savedDock->isClosed() && savedDock->dockAreaWidget() == area
+                    && area->currentDockWidget() != savedDock)
+                    area->setCurrentDockWidget(savedDock);
+            }
         reportStartupProgress(
             92,
             QStringLiteral("main.startup.progress.reuse_dock_layout"),
