@@ -73,3 +73,5 @@
 - 2026-10-22 Compact表格冷正文复用原TableActionBar的复制全表/导出两条文案。显式SetCompactTableSearchTargetPrefix只给已有或后续创建的原按钮命名，不创建操作条；未opt-in表格不改名。Full/Compact/None、原动作、列/快照/导出/主题逻辑保持。69项实际方法QtCore与真实TableInteractionSupport TU通过，GUI仍由用户验收。
 
 - 2026-10-22 SoundSource全局初始页冷正文31条/11真实目标：原8控件文案、21全部表头和共享Compact两动作，顺序与原QObject遍历一致；表头包括初始A组隐藏列。Misc完整冷正文生产者4→5/20，搜索才跳过未构造声音页；已有实例、当前页、真正激活及完整兼容准备仍走原工厂，构造清host标记。原Core Audio/R0采样、历史、列预设/自定义、复制导出、状态/主题/布局与show触发完全保持。381值检查、175实际准备检查、30源码保持及两实际TU通过；未执行GUI/音频/驱动，未关闭整批B03。
+
+- 2026-10-22 CodeEditorWidget仅保留原空的更多菜单，23个QAction和语法子菜单延至首次aboutToShow；顺序/动作/只读导出/当前语言及原按钮状态保持。父菜单本轮新连接不会接到当前发射，工具动作创建后显式执行原首次show状态更新；语法子菜单仍用自己首次show更新。空白显示QAction仍提前存在，State.cpp保存/恢复不需展开菜单。17521项实际方法/冻结旧动作代码+真实QtCore QObject信号对照通过，真实TU通过；没有运行QWidget/菜单GUI，实际首开位置/主题/键盘仍交用户。此步减少冷页构造开销，不等于已完成CodeEditor冷正文或整个B03。

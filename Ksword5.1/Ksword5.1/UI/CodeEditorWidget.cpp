@@ -507,7 +507,6 @@ CodeEditorWidget::CodeEditorWidget(QWidget* parent)
     // text core owns its native context menu and never translates raw content.
     ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(this);
     ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(m_moreButton->menu());
-    ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(m_syntaxMenu);
 }
 
 CodeEditorWidget::~CodeEditorWidget()
@@ -778,42 +777,10 @@ void CodeEditorWidget::initializeUi()
     KswordTheme::ApplyCompactIconButtonMetrics(m_moreButton);
     m_moreButton->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(m_moreButton);
-    for (auto* button : {m_newButton, m_openButton, m_saveButton, m_saveAsButton, m_undoButton, m_redoButton,
-        m_cutButton, m_copyButton, m_pasteButton, m_findButton, m_replaceButton, m_gotoButton, m_wrapButton}) {
-        auto* action = menu->addAction(button->toolTip());
-        m_toolActions.append(qMakePair(QPointer<QAction>(action), QPointer<QToolButton>(button)));
-        action->setCheckable(button->isCheckable());
-        connect(action, &QAction::triggered, button, &QToolButton::click);
-        connect(menu, &QMenu::aboutToShow, action, [this, action, button]() {
-            action->setText(button->toolTip());
-            action->setIcon(button->icon());
-            action->setEnabled(button->isEnabled());
-            action->setChecked(button->isChecked());
-            action->setVisible(!m_readOnlyMode || button == m_copyButton || button == m_findButton
-                || button == m_gotoButton || button == m_wrapButton
-                || (button == m_saveAsButton && m_readOnlyExportEnabled));
-        });
-    }
-    menu->addSeparator();
-    m_syntaxMenu = menu->addMenu(ks::i18n::sourceText(QStringLiteral("语法高亮")));
-    auto* syntaxMenu = m_syntaxMenu;
-    for (int index = 0; index < m_languageCombo->count(); ++index)
-    {
-        auto* action = syntaxMenu->addAction(m_languageCombo->itemText(index));
-        m_syntaxActions.append(QPointer<QAction>(action));
-        action->setCheckable(true);
-        connect(action, &QAction::triggered, this, [this, index]() { m_languageCombo->setCurrentIndex(index); });
-        connect(syntaxMenu, &QMenu::aboutToShow, action, [this, action, index]() {
-            action->setText(m_languageCombo->itemText(index));
-            action->setChecked(m_languageCombo->currentIndex() == index);
-        });
-    }
-    m_formatAction = menu->addAction(QStringLiteral("格式化 JSON / XML"));
-    connect(menu, &QMenu::aboutToShow, m_formatAction, [this]() { m_formatAction->setVisible(!m_readOnlyMode); });
-    connect(m_formatAction, &QAction::triggered, this, &CodeEditorWidget::formatDocument);
-    m_whitespaceAction = menu->addAction(QStringLiteral("显示空白字符"));
+    m_whitespaceAction = new QAction(QStringLiteral("显示空白字符"), menu);
     m_whitespaceAction->setCheckable(true);
     connect(m_whitespaceAction, &QAction::toggled, this, [this](bool visible) { m_editor->setWhitespaceVisible(visible); });
+    connect(menu, &QMenu::aboutToShow, this, &CodeEditorWidget::populateMoreMenu);
     m_moreButton->setMenu(menu);
     m_toolbarLayout->addWidget(m_moreButton);
     ks::ui::NormalizeToolbarRow(m_toolbarLayout);
@@ -936,6 +903,54 @@ void CodeEditorWidget::initializeUi()
     m_rootLayout->addWidget(m_statusWidget);
 }
 
+// 保留一个空的原菜单；仅首次展开才创建动作/语法子菜单。
+// 空白显示动作仍提前存在，原视图状态保存/恢复不依赖菜单是否打开。
+void CodeEditorWidget::populateMoreMenu()
+{
+    if (m_destroying || !m_moreButton || !m_toolActions.isEmpty()) return;
+    auto* menu = m_moreButton->menu();
+    if (!menu) return;
+    for (auto* button : {m_newButton, m_openButton, m_saveButton, m_saveAsButton, m_undoButton, m_redoButton,
+        m_cutButton, m_copyButton, m_pasteButton, m_findButton, m_replaceButton, m_gotoButton, m_wrapButton}) {
+        auto* action = menu->addAction(button->toolTip());
+        m_toolActions.append(qMakePair(QPointer<QAction>(action), QPointer<QToolButton>(button)));
+        action->setCheckable(button->isCheckable());
+        connect(action, &QAction::triggered, button, &QToolButton::click);
+        const auto updateAction = [this, action, button]() {
+            action->setText(button->toolTip());
+            action->setIcon(button->icon());
+            action->setEnabled(button->isEnabled());
+            action->setChecked(button->isChecked());
+            action->setVisible(!m_readOnlyMode || button == m_copyButton || button == m_findButton
+                || button == m_gotoButton || button == m_wrapButton
+                || (button == m_saveAsButton && m_readOnlyExportEnabled));
+        };
+        updateAction();
+        connect(menu, &QMenu::aboutToShow, action, updateAction);
+    }
+    menu->addSeparator();
+    m_syntaxMenu = menu->addMenu(ks::i18n::sourceText(QStringLiteral("语法高亮")));
+    ks::i18n::LanguageManager::instance().setRuntimeTranslationManaged(m_syntaxMenu);
+    auto* syntaxMenu = m_syntaxMenu;
+    for (int index = 0; index < m_languageCombo->count(); ++index)
+    {
+        auto* action = syntaxMenu->addAction(m_languageCombo->itemText(index));
+        m_syntaxActions.append(QPointer<QAction>(action));
+        action->setCheckable(true);
+        connect(action, &QAction::triggered, this, [this, index]() { m_languageCombo->setCurrentIndex(index); });
+        connect(syntaxMenu, &QMenu::aboutToShow, action, [this, action, index]() {
+            action->setText(m_languageCombo->itemText(index));
+            action->setChecked(m_languageCombo->currentIndex() == index);
+        });
+    }
+    m_formatAction = menu->addAction(ks::i18n::sourceText(QStringLiteral("格式化 JSON / XML")));
+    m_formatAction->setEnabled(!m_readOnlyMode);
+    m_formatAction->setVisible(!m_readOnlyMode);
+    connect(menu, &QMenu::aboutToShow, m_formatAction, [this]() { m_formatAction->setVisible(!m_readOnlyMode); });
+    connect(m_formatAction, &QAction::triggered, this, &CodeEditorWidget::formatDocument);
+    menu->addAction(m_whitespaceAction);
+}
+
 void CodeEditorWidget::bindUiToolTip(QWidget* widget, const QString& source)
 {
     m_uiToolTips.append(qMakePair(QPointer<QWidget>(widget), source));
@@ -950,8 +965,8 @@ void CodeEditorWidget::refreshUiText()
         QStringLiteral("XML"), QStringLiteral("C/C++"), QStringLiteral("INI"), QStringLiteral("Shell")};
     for (int index = 0; index != languages.size(); ++index)
         m_languageCombo->setItemText(index, ks::i18n::sourceText(languages[index]));
-    m_syntaxMenu->setTitle(ks::i18n::sourceText(QStringLiteral("语法高亮")));
-    m_formatAction->setText(ks::i18n::sourceText(QStringLiteral("格式化 JSON / XML")));
+    if (m_syntaxMenu) m_syntaxMenu->setTitle(ks::i18n::sourceText(QStringLiteral("语法高亮")));
+    if (m_formatAction) m_formatAction->setText(ks::i18n::sourceText(QStringLiteral("格式化 JSON / XML")));
     m_whitespaceAction->setText(ks::i18n::sourceText(QStringLiteral("显示空白字符")));
     m_findEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("查找")));
     m_replaceEdit->setPlaceholderText(ks::i18n::sourceText(QStringLiteral("替换为")));
@@ -1308,7 +1323,7 @@ void CodeEditorWidget::refreshReadOnlyUiState()
     // 只读页仍保留查找、选区复制和换行控制。
 
     updateToolbarLayout();
-    m_formatAction->setEnabled(!m_readOnlyMode);
+    if (m_formatAction) m_formatAction->setEnabled(!m_readOnlyMode);
     refreshActionButtonState();
 }
 

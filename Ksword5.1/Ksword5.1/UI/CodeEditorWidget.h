@@ -159,6 +159,7 @@ private:
     // initializeUi：
     // - 创建工具栏、查找替换面板、跳转面板、编辑区与状态栏。
     void initializeUi();
+    void populateMoreMenu();
 
     // initializeConnections：
     // - 连接按钮、快捷键与编辑器状态回调。
