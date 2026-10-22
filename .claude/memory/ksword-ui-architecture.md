@@ -542,3 +542,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 用户诊断日志确认持续出现七个复选框一组的StyleChange及双倍PaletteChange。`NormalizeToolbarControl`原来向所有QAbstractButton追加只匹配QPushButton/QToolButton的几何QSS；日志面板七个复选框的独立主题绑定又恢复纯颜色QSS，两者经原队列反复覆盖。几何追加现只对真实QPushButton/QToolButton执行，复选框/单选框原高度、图标尺寸、标记和业务状态保持。不得靠停掉主题绑定、忽略真实换肤或单纯节流掩盖此循环；复用工具行时须检查其QSS选择器实际覆盖的控件类型。诊断记录存在丢失，不能据此计算完整帧率或推定普通版耗时；修复后GUI/实际性能由用户验收。
 
 - 2026-10-22 构建35反馈的线程/模块等崩溃，匹配旧EXE/PDB的dump落在`ImmutableValueTable::startPending`完成回调读取零结果的QFuture。`watcher->setFuture({})`切到默认的已完成空Future，可在`deleteLater`前再投递finished；必须先断开该watcher到接收者的完成连接，并在读取结果前检查resultCount。空/空指针结果沿既有失败通道恢复旧表可用性，不能当作空成功覆盖数据；旧代结果继续受revision门禁。分析旧dump须匹配其实际模块路径/PE-PDB身份，反馈文件引用一个发行目录不代表所有dump都来自同一构建。
+
+- 同轮关闭dump的真实事件为`ChildRemoved(71)`，旧EXE反汇编在事件类型分派前调用QTabWidget::currentWidget，进入已经拆除子布局的QStackedLayout崩溃。PageTabEnvelope对ChildAdded/Removed只记布局失效并合并排队，不同步读取当前页；QPointer非空不代表Qt内部布局仍可访问。既有布局/几何/动画准备实现保持，真实GUI关闭仍须用户回归。

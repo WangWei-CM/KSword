@@ -522,6 +522,16 @@ namespace
         {
             const QPointer<QObject> source(watched); // 同步样式/布局可能销毁当前宿主。
             if (m_preparing) return source.isNull(); // 本次pane/边距准备引起的通知由末尾同步统一消费。
+            if (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildRemoved)
+            {
+                // ChildRemoved also arrives while Qt tears down a page/layout.
+                // QPointer can still be live then; currentWidget() may already
+                // reach a partially destroyed QStackedLayout. Defer the lookup.
+                invalidateLayout(watched);
+                m_surfaceDirty = true;
+                if (m_tabs && m_tabs->isVisible()) schedule();
+                return source.isNull();
+            }
             QWidget* contentPage = m_contentPages.value(qobject_cast<QWidget*>(watched)).data();
             const bool hiddenContent = contentPage && (!m_tabs || contentPage != m_tabs->currentWidget());
             // 只观察已访问页及其明确外层宿主；隐藏页结构失效保留，几何通知不安排后台工作。
@@ -574,8 +584,6 @@ namespace
             case QEvent::PaletteChange:
             case QEvent::ApplicationPaletteChange:
             case QEvent::ParentChange:
-            case QEvent::ChildAdded:
-            case QEvent::ChildRemoved:
                 invalidateLayout(watched);
                 if (!hiddenContent)
                 {
