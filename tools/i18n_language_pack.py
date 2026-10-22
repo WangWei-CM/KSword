@@ -192,6 +192,21 @@ def scan_cpp_string_tokens(source_text: str) -> Iterable[CppStringToken]:
                 continue
         directive_start = False
         if character == "'":
+            # C++ digit separators belong to a number, not a character literal.
+            # Otherwise 10'000 can consume later strings/comments up to a quote.
+            number_start = index - 1
+            while number_start >= 0 and (
+                source_text[number_start].isalnum() or source_text[number_start] in "_.'"
+            ):
+                number_start -= 1
+            number_prefix = source_text[number_start + 1 : index]
+            numeric_prefix = number_prefix and (
+                number_prefix[0].isdigit()
+                or (number_prefix.startswith(".") and len(number_prefix) > 1 and number_prefix[1].isdigit())
+            )
+            if numeric_prefix and index + 1 < length and source_text[index + 1].isalnum():
+                index += 1
+                continue
             index += 1
             while index < length:
                 if source_text[index] == "\\":
