@@ -484,8 +484,8 @@ namespace
             Row row;
             auto* value = new QLabel(card.widget);
             row.value = value;
-            value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             value->setTextFormat(Qt::PlainText); value->setWordWrap(true); value->setMinimumWidth(0);
+            value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             value->setProperty("ksword_card_focus_policy", static_cast<int>(value->focusPolicy()));
             value->setProperty("ks_i18n_preserve_data_text", true);
@@ -559,15 +559,21 @@ namespace
                 const qint64 sectionTop = m_snapshot->sectionsHeight.prefix(section);
                 const qint64 requestedFirst = qMax<qint64>(0, firstPixel - sectionTop);
                 qint64 clipFirst = requestedFirst;
-                const qint64 clipLast = qMin(geometry.height(), lastPixel - sectionTop);
+                const qint64 requestedLast = qMin(geometry.height(), lastPixel - sectionTop);
+                qint64 clipLast = requestedLast;
                 if (clipFirst < geometry.header) clipFirst = 0;
                 for (int column = 0; column < 3; ++column)
                 {
                     const auto& heights = geometry.columns[column];
                     const qint64 start = geometry.columnStart(column);
-                    const auto position = heights.containing(qMax<qint64>(0, requestedFirst - start));
-                    if (position < heights.size() && start + heights.prefix(position) < clipLast)
-                        clipFirst = qMin(clipFirst, start + heights.prefix(position));
+                    const auto window = ks::ui::detail_cards::rowWindow(heights, start, requestedFirst, requestedLast);
+                    if (window.begin < window.end)
+                    {
+                        clipFirst = qMin(clipFirst, start + heights.prefix(window.begin));
+                        // QFormLayout must receive the whole last realized row;
+                        // clipping its host inside a long field compresses the text.
+                        clipLast = qMax(clipLast, start + heights.prefix(window.end) - 6);
+                    }
                 }
                 const qint64 contentTop = qMax(geometry.header, clipFirst);
                 QSet<int> wanted;
@@ -576,7 +582,7 @@ namespace
                 {
                     const auto& heights = geometry.columns[column];
                     const qint64 start = geometry.columnStart(column);
-                    const auto window = ks::ui::detail_cards::rowWindow(heights, start, requestedFirst, clipLast);
+                    const auto window = ks::ui::detail_cards::rowWindow(heights, start, requestedFirst, requestedLast);
                     for (qsizetype row = window.begin; row < window.end; ++row)
                     {
                         const int index = data.accepted[column].at(row);
