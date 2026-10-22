@@ -85,3 +85,5 @@
 - 2026-10-22 ContextMenuCleaner冷页的原IE查询结果在隐藏时只存pendingSnapshot，不会填表；此前把它视作冷正文必须等待真实行的阻塞不准确。现将只读首查移至真实首显一次（已有query/hasLoaded保护），随后保留原分类切换、查询/投影、备份/删除/恢复/测量链。七类确定空初态从同源文案提供123条，Right详情方案165条；其它三方案的显式隐藏字段仍不入索引。Misc冷源8→9/20，真实激活原查询，兼容准备和warm页仍扫描真实内容。4343项纯值/首显QObject替身、269项实际prepare/AsyncOperation受控检查及完整业务尾部保持通过，GUI/native未运行；不关闭整个B03。
 
 - 2026-10-22 DWM/Win32k注入页冷初态15+N条正文复用原EnumWindows/Capture真实快照（>60项按旧Combo扫描规则跳过，枚举失败沿原三段状态）。只读取Win32窗口/进程身份，未触发DWM、R0或输入控制；原Refresh worker复用相同枚举，Control、AgentPanel Start、Injection Select保持。Misc既有AsyncOperation后台读一次/完成续作，不轮询；共享不可变值回GUI无整表复制，激活取消晚到发布并走原新鲜工厂查询，不给动作回填旧HWND身份。Misc冷源9→10/20。4343纯值/首显与269实际prepare/AsyncOperation受控检查通过；native及GUI未运行，业务/性能仍待用户验收。
+
+- 2026-10-22 Memory首个完整冷正文接入PTE / VA翻译：原7控件文案与12表头同源，Compact两动作；默认/Embedded/Floating共21条10目标，Right加共享字段6条为27条14目标。全范围useColdBodies仅跳过未建PTE，真正激活、当前页及默认完整兼容仍用原工厂；冷遍历完成不冒充所有UI已建，兼容请求重置游标补齐。原refresh至文件尾逐字相同，无原生查询/附加/数据语义变化。1109项实际prepare与冻结旧方法QtCore对照、574项实际纯值双语/四详情方案检查通过；没有运行产品GUI/native，不据单页关闭整个B03。

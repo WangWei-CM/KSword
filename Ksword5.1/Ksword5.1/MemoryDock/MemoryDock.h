@@ -155,7 +155,9 @@ public:
     bool openAddressInWorkbench(std::uint64_t address, bool kernelAddress = false);
     // prepareNavigationPages：按需准备工作台与内存调试页的真实控件树，供全局导航索引。
     // singleStep limits full search preparation to one existing page factory.
-    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false);
+    // Complete cold bodies can skip an unvisited factory; compatibility callers
+    // keep the original default that prepares actual controls.
+    bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
     static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr);
     QWidget* activateNavigationDescriptor(const QString& id);
     std::function<void(const QString&)> openPoolModuleDetails;
@@ -377,6 +379,7 @@ private:
     // - 作用：构建 Tab9（PTE / VA 翻译）界面。
     // - 处理逻辑：只读取当前附加进程的工作集 / 虚拟内存属性，不提供任何写入动作。
     // - 返回：无。
+    static QVector<ks::ui::PageSearchBodyText> coldProcessPteSearchBody();
     void initializeProcessPteTranslateTab();
 
     // initializeProcessMemoryEvidenceTab：
@@ -1194,6 +1197,7 @@ private:
     bool m_workbenchEmbedded = false;                     // 是否是进程详情窗口里的内嵌实例（视图以内嵌模式创建）。
     int m_navigationPrepareCursor = 0;
     bool m_navigationPagePreparing = false;
+    bool m_navigationSkippedColdBodies = false;
     bool m_navigationPagesPrepared = false;               // 导航索引已完成一次嵌套懒页准备。
     bool m_workbenchQuitPrepared = false;                 // 普通工作台退出许可通过后保持冻结。
     bool m_workbenchEnabledBeforeQuit = true;             // 取消退出时恢复该视图自己的原启用状态。

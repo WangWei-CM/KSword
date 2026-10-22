@@ -75,7 +75,7 @@ void MemoryDock::initializeWorkbenchTab()
     });
 }
 
-bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep)
+bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool singleStep, const bool useColdBodies)
 {
     if (currentPageOnly)
     {
@@ -90,19 +90,31 @@ bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool s
     }
     if (m_navigationPagesPrepared || !m_tabWidget) { return true; }
     if (m_navigationPagePreparing) { return false; }
+    if (!useColdBodies && m_navigationSkippedColdBodies)
+    {
+        m_navigationPrepareCursor = 0;
+        m_navigationSkippedColdBodies = false;
+    }
 
     const QPointer<MemoryDock> owner(this);
     // The registered roots, workbench and debug view keep their original order.
     // The cursor survives a cancelled query; no factory is discarded or selected.
     const int lazyCount = static_cast<int>(m_lazyPages.size());
     const int total = lazyCount + 2;
+    if (m_navigationPrepareCursor >= total) { return true; }
     do
     {
         const int index = m_navigationPrepareCursor;
         m_navigationPagePreparing = true;
         try
         {
-            if (index < lazyCount) { const QString id = m_lazyPages[index].id; ensureLazyPage(id); }
+            if (index < lazyCount)
+            {
+                const auto& page = m_lazyPages[index];
+                if (useColdBodies && !page.ready && page.id == QLatin1String("process_pte"))
+                    m_navigationSkippedColdBodies = true;
+                else { const QString id = page.id; ensureLazyPage(id); }
+            }
             else if (index == lazyCount) { ensureWorkbenchView(); }
             else if (m_memoryDebugPage) { m_memoryDebugPage->prepareForNavigation(); }
         }
@@ -115,8 +127,9 @@ bool MemoryDock::prepareNavigationPages(const bool currentPageOnly, const bool s
         m_navigationPagePreparing = false;
         ++m_navigationPrepareCursor;
     } while (!singleStep && m_navigationPrepareCursor < total);
-    m_navigationPagesPrepared = m_navigationPrepareCursor >= total;
-    return m_navigationPagesPrepared;
+    const bool complete = m_navigationPrepareCursor >= total;
+    m_navigationPagesPrepared = complete && !m_navigationSkippedColdBodies;
+    return complete;
 }
 
 // ensureWorkbenchView：幂等地创建视图并完成全部接线。

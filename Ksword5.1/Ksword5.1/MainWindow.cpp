@@ -11308,7 +11308,7 @@ ks::ui::PageSearchPreparation MainWindow::prepareNestedDockContentForNavigation(
     }
     else if (dockKey == QStringLiteral("memory") && m_memoryWidget != nullptr)
     {
-        return m_memoryWidget->prepareNavigationPages(currentPageOnly, singleStep)
+        return m_memoryWidget->prepareNavigationPages(currentPageOnly, singleStep, useColdBodies)
             ? ks::ui::PageSearchPreparation::Complete : ks::ui::PageSearchPreparation::MorePages;
     }
     return ks::ui::PageSearchPreparation::Complete;

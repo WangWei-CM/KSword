@@ -8,6 +8,7 @@
 #include "../UI/VisibleTableWidget.h"
 #include "../UI/DetailLayoutRegistry.h"
 #include "../UI/TableColumnAutoFit.h"
+#include "../Internationalization/LanguageManager.h"
 
 // 分层工具条用到的 Qt 控件在这里显式补齐：Internal.h 虽然已经聚合了同名头，
 // 但那份聚合头是多人共用的，本页面不依赖它的收录清单，避免它增删条目时被连累。
@@ -24,6 +25,59 @@ using namespace ksword::memory_dock_internal;
 
 namespace
 {
+    enum class PteSearchText
+    {
+        Parameters, Address, AddressPlaceholder, PageCount, RiskOnly, Refresh, Status
+    };
+    struct PteSearchEntry
+    {
+        const char* target;
+        const char* source;
+        bool mnemonic;
+    };
+    constexpr PteSearchEntry kPteSearchTexts[] = {
+        {"ks_memory_process_pte_parameters", "翻译参数", false},
+        {"ks_memory_process_pte_address_label", "起始虚拟地址", false},
+        {"ks_memory_process_pte_address", "输入 VA，例如 0x7FF6...", false},
+        {"ks_memory_process_pte_page_count_label", "采样页数", false},
+        {"ks_memory_process_pte_risk_only", "仅风险项", true},
+        {"ks_memory_process_pte_refresh", "刷新", true},
+        {"ks_memory_process_pte_status", "状态：等待刷新", false}
+    };
+    constexpr char kPteTableSearchTarget[] = "ks_memory_process_pte_table";
+    constexpr char kPteActionsSearchPrefix[] = "ks_memory_process_pte_actions";
+    constexpr char kPteFieldsSearchPrefix[] = "ks_memory_process_pte_fields";
+
+    const PteSearchEntry& pteSearchEntry(PteSearchText id)
+    {
+        return kPteSearchTexts[static_cast<int>(id)];
+    }
+    QString pteSearchSource(PteSearchText id)
+    {
+        return QString::fromUtf8(pteSearchEntry(id).source);
+    }
+    QString pteSearchTarget(PteSearchText id)
+    {
+        return QString::fromLatin1(pteSearchEntry(id).target);
+    }
+    QStringList pteTranslateHeaders()
+    {
+        return {
+            QStringLiteral("VA"),
+            QStringLiteral("区域基址"),
+            QStringLiteral("有效"),
+            QStringLiteral("共享"),
+            QStringLiteral("锁定"),
+            QStringLiteral("大页"),
+            QStringLiteral("坏页"),
+            QStringLiteral("ShareCount"),
+            QStringLiteral("Win32Prot"),
+            QStringLiteral("Node"),
+            QStringLiteral("映射文件"),
+            QStringLiteral("风险")
+        };
+    }
+
     // PTE / VA 翻译页列定义：保持排序、过滤和详情反查使用稳定列号。
     enum class PteTranslateColumn : int
     {
@@ -205,6 +259,33 @@ namespace
     }
 }
 
+QVector<ks::ui::PageSearchBodyText> MemoryDock::coldProcessPteSearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    body.reserve(27);
+    const auto append = [&body](PteSearchText id, const QStringList& groups = {})
+    {
+        body.append({ks::i18n::sourceText(pteSearchSource(id)), pteSearchTarget(id), groups,
+            pteSearchEntry(id).mnemonic});
+    };
+    // The workspace reparents the parameter group, fixed action and results
+    // into separate panels. Preserve their original QObject traversal order.
+    append(PteSearchText::Parameters);
+    const QStringList parameters{ks::i18n::sourceText(pteSearchSource(PteSearchText::Parameters))};
+    for (const auto id : {PteSearchText::Address, PteSearchText::AddressPlaceholder,
+        PteSearchText::PageCount, PteSearchText::RiskOnly}) append(id, parameters);
+    append(PteSearchText::Refresh);
+    append(PteSearchText::Status);
+    for (const auto& header : pteTranslateHeaders())
+        body.append({ks::i18n::sourceText(header), QString::fromLatin1(kPteTableSearchTarget), {}, false});
+    body += ks::ui::ColdCompactTableActionBody(QString::fromLatin1(kPteActionsSearchPrefix));
+    // The original FieldDocument note is a tree item, not searchable QWidget
+    // text. Only Right reveals the original field view in the empty initial state.
+    if (ks::ui::DetailLayoutRegistry::globalScheme() == ks::settings::DetailDisplayScheme::Right)
+        body += ks::ui::StructuredFieldView::coldSearchBody(QString::fromLatin1(kPteFieldsSearchPrefix));
+    return body;
+}
+
 void MemoryDock::initializeProcessPteTranslateTab()
 {
     // 输入：无，由 initializeTabs 调用。
@@ -225,18 +306,21 @@ void MemoryDock::initializeProcessPteTranslateTab()
     tabLayout->addWidget(workspace);
 
     // 执行动作由工作区固定承载，本地筛选仍只改变当前结果视图。
-    m_processPteTranslateRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), QStringLiteral("刷新"), m_tabProcessPteTranslate);
+    m_processPteTranslateRefreshButton = new QPushButton(QIcon(QStringLiteral(":/Icon/process_refresh.svg")), pteSearchSource(PteSearchText::Refresh), m_tabProcessPteTranslate);
+    m_processPteTranslateRefreshButton->setObjectName(pteSearchTarget(PteSearchText::Refresh));
     m_processPteTranslateRefreshButton->setToolTip(QStringLiteral("基于当前附加进程采集 PTE / VA 翻译证据"));
     m_processPteTranslateRefreshButton->setStyleSheet(buildBlueButtonStyle());
 
-    m_processPteTranslateRiskOnlyCheck = new QCheckBox(QStringLiteral("仅风险项"), m_tabProcessPteTranslate);
+    m_processPteTranslateRiskOnlyCheck = new QCheckBox(pteSearchSource(PteSearchText::RiskOnly), m_tabProcessPteTranslate);
+    m_processPteTranslateRiskOnlyCheck->setObjectName(pteSearchTarget(PteSearchText::RiskOnly));
     m_processPteTranslateRiskOnlyCheck->setChecked(true);
     m_processPteTranslateRiskOnlyCheck->setToolTip(QStringLiteral("只保留风险判定不为正常的页记录"));
     m_processPteTranslateRiskOnlyCheck->setStyleSheet(QStringLiteral(
         "QCheckBox { color:%1; font-weight:600; }")
         .arg(KswordTheme::TextPrimaryHex()));
 
-    m_processPteTranslateStatusLabel = new QLabel(QStringLiteral("状态：等待刷新"), m_tabProcessPteTranslate);
+    m_processPteTranslateStatusLabel = new QLabel(pteSearchSource(PteSearchText::Status), m_tabProcessPteTranslate);
+    m_processPteTranslateStatusLabel->setObjectName(pteSearchTarget(PteSearchText::Status));
     m_processPteTranslateStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_processPteTranslateStatusLabel->setStyleSheet(QStringLiteral("color:%1; font-weight:600;").arg(KswordTheme::TextSecondaryHex()));
 
@@ -247,7 +331,8 @@ void MemoryDock::initializeProcessPteTranslateTab()
 
     // 第二层：采样参数分组，起点 VA 与采样页数各配一个文字标签，
     // 避免用户对着一个孤零零的“VA”缩写猜它到底要填什么。
-    QGroupBox* translateParameterGroup = new QGroupBox(QStringLiteral("翻译参数"), m_tabProcessPteTranslate);
+    QGroupBox* translateParameterGroup = new QGroupBox(pteSearchSource(PteSearchText::Parameters), m_tabProcessPteTranslate);
+    translateParameterGroup->setObjectName(pteSearchTarget(PteSearchText::Parameters));
     ks::ui::StyleParameterSection(translateParameterGroup);
     QGridLayout* translateParameterLayout = new QGridLayout(translateParameterGroup);
     translateParameterLayout->setContentsMargins(10, 8, 10, 8);
@@ -258,16 +343,19 @@ void MemoryDock::initializeProcessPteTranslateTab()
     const QString parameterCaptionStyle =
         QStringLiteral("color:%1;").arg(KswordTheme::TextSecondaryHex());
 
-    QLabel* addressCaption = new QLabel(QStringLiteral("起始虚拟地址"), translateParameterGroup);
+    QLabel* addressCaption = new QLabel(pteSearchSource(PteSearchText::Address), translateParameterGroup);
+    addressCaption->setObjectName(pteSearchTarget(PteSearchText::Address));
     addressCaption->setStyleSheet(parameterCaptionStyle);
 
     m_processPteTranslateAddressEdit = new QLineEdit(translateParameterGroup);
+    m_processPteTranslateAddressEdit->setObjectName(pteSearchTarget(PteSearchText::AddressPlaceholder));
     m_processPteTranslateAddressEdit->setClearButtonEnabled(true);
-    m_processPteTranslateAddressEdit->setPlaceholderText(QStringLiteral("输入 VA，例如 0x7FF6..."));
+    m_processPteTranslateAddressEdit->setPlaceholderText(pteSearchSource(PteSearchText::AddressPlaceholder));
     m_processPteTranslateAddressEdit->setToolTip(QStringLiteral("采样起点虚拟地址，留空则沿用查看器当前地址"));
     m_processPteTranslateAddressEdit->setStyleSheet(buildBlueInputStyle());
 
-    QLabel* pageCountCaption = new QLabel(QStringLiteral("采样页数"), translateParameterGroup);
+    QLabel* pageCountCaption = new QLabel(pteSearchSource(PteSearchText::PageCount), translateParameterGroup);
+    pageCountCaption->setObjectName(pteSearchTarget(PteSearchText::PageCount));
     pageCountCaption->setStyleSheet(parameterCaptionStyle);
 
     m_processPteTranslatePageCountSpin = new QSpinBox(translateParameterGroup);
@@ -288,22 +376,11 @@ void MemoryDock::initializeProcessPteTranslateTab()
     workspace->results()->addWidget(splitter, 1);
 
     m_processPteTranslateTable = new MemoryTableView(splitter);
+    m_processPteTranslateTable->setObjectName(QString::fromLatin1(kPteTableSearchTarget));
     // 小范围地址翻译是参数查询的结果，紧凑复制/导出即可。
     ks::ui::SetTableActionBarMode(m_processPteTranslateTable, ks::ui::TableActionBarMode::Compact);
-    m_processPteTranslateTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("VA"),
-        QStringLiteral("区域基址"),
-        QStringLiteral("有效"),
-        QStringLiteral("共享"),
-        QStringLiteral("锁定"),
-        QStringLiteral("大页"),
-        QStringLiteral("坏页"),
-        QStringLiteral("ShareCount"),
-        QStringLiteral("Win32Prot"),
-        QStringLiteral("Node"),
-        QStringLiteral("映射文件"),
-        QStringLiteral("风险")
-    });
+    ks::ui::SetCompactTableSearchTargetPrefix(m_processPteTranslateTable, QString::fromLatin1(kPteActionsSearchPrefix));
+    m_processPteTranslateTable->setHorizontalHeaderLabels(pteTranslateHeaders());
     m_processPteTranslateTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_processPteTranslateTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_processPteTranslateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -319,6 +396,7 @@ void MemoryDock::initializeProcessPteTranslateTab()
     initializeCoreProjection(CoreKind::PteEvidence);
 
     m_processPteTranslateDetailEditor = new ks::ui::StructuredFieldView(splitter);
+    m_processPteTranslateDetailEditor->setSearchTargetPrefix(QString::fromLatin1(kPteFieldsSearchPrefix));
     m_processPteTranslateDetailEditor->setDocument(ks::ui::FieldDocument{}.note(QStringLiteral("请选择一条 PTE / VA 翻译记录查看详情。")));
     splitter->addWidget(m_processPteTranslateDetailEditor);
 

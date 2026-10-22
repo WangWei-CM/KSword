@@ -455,6 +455,11 @@ ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* ex
             page.current = existing->m_tabWidget->currentWidget() == state->widget;
             if (state->ready) { actual = state->widget; }
         } else { page.current = page.id == QLatin1String("process_module"); }
+        if (!actual && page.id == QLatin1String("process_pte"))
+        {
+            page.coldBodyTexts = coldProcessPteSearchBody();
+            page.coldBodyComplete = true;
+        }
         catalog.append(page);
         appendMemoryNavigationChildren(catalog, page.id, factory.children, actual);
     }
@@ -563,6 +568,8 @@ void MemoryDock::initializeTabs()
         } else {
             state.widget = new QWidget(m_tabWidget);
             state.widget->setProperty("ksword_memory_lazy_page", state.id);
+            if (state.id == QLatin1String("process_pte"))
+                state.widget->setProperty("ksword_search_body_page_id", state.id);
             m_tabWidget->addTab(state.widget, QString::fromUtf8(factory.title));
             if (factory.assignShell) { factory.assignShell(*this, state.widget); }
         }
@@ -629,7 +636,12 @@ QWidget* MemoryDock::ensureLazyPage(const QString& id)
         if (!owner || !tabs || !page) { return nullptr; }
         if (selected || !previous) { tabs->setCurrentWidget(page); }
         else { tabs->setCurrentWidget(previous); }
-        if (shell) { shell->deleteLater(); }
+        if (shell)
+        {
+            shell->setProperty("ksword_search_body_page_id", QVariant());
+            if (!owner || !tabs || !page) { return nullptr; }
+            if (shell) shell->deleteLater();
+        }
     }
     // The final theme preparation can synchronously close or reselect its host.
     if (!owner || !tabs || !page || owner->m_tabWidget != tabs) { return nullptr; }
