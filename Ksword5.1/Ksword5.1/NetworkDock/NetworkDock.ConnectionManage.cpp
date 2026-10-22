@@ -21,10 +21,15 @@ void NetworkDock::focusConnectionsByPids(const QVector<quint32>& processIds)
     if (m_sideTabWidget != nullptr && m_networkAuditTabPage != nullptr)
     {
         if (!ensureNetworkToolPage(m_networkAuditTabPage) || !owner) return;
+        if (m_networkAuditPage != nullptr)
+        {
+            m_networkAuditPage->focusProcessIds(processFilterSet);
+            if (!owner) return;
+        }
         m_sideTabWidget->setCurrentWidget(m_networkAuditTabPage);
         if (!owner) return;
     }
-    if (m_networkAuditPage != nullptr)
+    else if (m_networkAuditPage != nullptr)
     {
         m_networkAuditPage->focusProcessIds(processFilterSet);
     }
@@ -41,6 +46,8 @@ void NetworkDock::setProcessDetailConnectionScope()
 
     const QPointer<NetworkDock> owner(this);
     if (!ensureNetworkToolPage(m_networkAuditTabPage) || !owner) return;
+    if (m_networkAuditPage != nullptr)
+        m_networkAuditPage->deferInitialRefreshUntilProcessScope();
     for (int tabIndex = 0; tabIndex < m_sideTabWidget->count(); ++tabIndex)
     {
         m_sideTabWidget->setTabVisible(

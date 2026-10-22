@@ -887,6 +887,7 @@ void NetworkAuditPage::changeEvent(QEvent* event)
 
 void NetworkAuditPage::requestInitialRefresh()
 {
+    if (m_initialProcessScopePending) return;
     bool expected = false;
     if (m_initialRefreshRequested.compare_exchange_strong(expected, true))
     {
@@ -894,10 +895,21 @@ void NetworkAuditPage::requestInitialRefresh()
     }
 }
 
+void NetworkAuditPage::deferInitialRefreshUntilProcessScope()
+{
+    if (!m_latestAuditSnapshot && m_processFilterSet.isEmpty())
+        m_initialProcessScopePending = true;
+}
+
 void NetworkAuditPage::focusProcessIds(const QSet<quint32>& processIds)
 {
     m_processFilterSet = processIds;
+    m_initialProcessScopePending = false;
     m_crossFilterDirty = true;
+    m_dirtyAuditTables.insert(m_tcpTable);
+    m_dirtyAuditTables.insert(m_udpTable);
+    m_dirtyAuditTables.insert(m_crossSummaryTable);
+    requestCrossViewPreparation();
     activateCrossView();
     updateProcessFilterLabel();
     applyCrossViewSearchFilter();
@@ -1405,6 +1417,7 @@ void NetworkAuditPage::initializeCrossViewConnections()
 
 void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
 {
+    if (m_initialProcessScopePending) return;
     bool expected = false;
     if (!m_refreshInProgress.compare_exchange_strong(expected, true))
     {
@@ -1428,10 +1441,11 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
     const auto language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     const auto sourceGeneration = m_crossSourceGeneration + 1;
     const auto languageGeneration = m_crossLanguageGeneration;
+    const QSet<quint32> processIds = m_processFilterSet;
     const QString previousTcpStatus = m_r0TcpStatusText;
     const QString previousUdpStatus = m_r0UdpStatusText;
 
-    std::thread([asyncState, language, sourceGeneration, languageGeneration, previousTcpStatus, previousUdpStatus]()
+    std::thread([asyncState, language, sourceGeneration, languageGeneration, processIds, previousTcpStatus, previousUdpStatus]()
     {
         AuditSnapshot snapshot;
         QString failureText;
@@ -1461,7 +1475,7 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
                 if (accepted) prepared = prepareCrossViewValues(accepted, language, sourceGeneration, languageGeneration,
                     accepted->r0TcpStatusText.isEmpty() ? previousTcpStatus : accepted->r0TcpStatusText,
                     accepted->r0UdpStatusText.isEmpty() ? previousUdpStatus : accepted->r0UdpStatusText,
-                    [asyncState]() { return asyncState->closing.load(); });
+                    processIds, [asyncState]() { return asyncState->closing.load(); });
             }
             catch (const std::exception& exception) { preparationFailureText = QString::fromUtf8(exception.what()); }
             catch (...) { preparationFailureText = QStringLiteral("刷新失败"); }
@@ -1521,6 +1535,7 @@ void NetworkAuditPage::refreshAllSnapshotsAsync(const bool forceRefresh)
 
 void NetworkAuditPage::refreshCrossViewAsync()
 {
+    if (m_initialProcessScopePending) return;
     bool expected = false;
     if (!m_refreshInProgress.compare_exchange_strong(expected, true))
     {
@@ -1531,11 +1546,12 @@ void NetworkAuditPage::refreshCrossViewAsync()
     const auto language = ks::i18n::LanguageManager::instance().sourceTextSnapshot();
     const auto sourceGeneration = m_crossSourceGeneration + 1;
     const auto languageGeneration = m_crossLanguageGeneration;
+    const QSet<quint32> processIds = m_processFilterSet;
     const QString previousTcpStatus = m_r0TcpStatusText;
     const QString previousUdpStatus = m_r0UdpStatusText;
 
     const std::shared_ptr<const AuditSnapshot> previous = m_latestAuditSnapshot;
-    std::thread([asyncState, previous, language, sourceGeneration, languageGeneration, previousTcpStatus, previousUdpStatus]()
+    std::thread([asyncState, previous, language, sourceGeneration, languageGeneration, processIds, previousTcpStatus, previousUdpStatus]()
     {
         AuditSnapshot snapshot;
         QString failureText;
@@ -1578,7 +1594,7 @@ void NetworkAuditPage::refreshCrossViewAsync()
                 if (accepted) prepared = prepareCrossViewValues(accepted, language, sourceGeneration, languageGeneration,
                     accepted->r0TcpStatusText.isEmpty() ? previousTcpStatus : accepted->r0TcpStatusText,
                     accepted->r0UdpStatusText.isEmpty() ? previousUdpStatus : accepted->r0UdpStatusText,
-                    [asyncState]() { return asyncState->closing.load(); });
+                    processIds, [asyncState]() { return asyncState->closing.load(); });
             }
             catch (const std::exception& exception) { preparationFailureText = QString::fromUtf8(exception.what()); }
             catch (...) { preparationFailureText = QStringLiteral("刷新失败"); }
@@ -2374,11 +2390,13 @@ void NetworkAuditPage::applySnapshot(std::shared_ptr<AuditSnapshot> snapshot,
     ++m_crossSourceGeneration;
     if (prepared && prepared->source == m_latestAuditSnapshot
         && prepared->sourceGeneration == m_crossSourceGeneration
-        && prepared->languageGeneration == m_crossLanguageGeneration)
+        && prepared->languageGeneration == m_crossLanguageGeneration
+        && prepared->processIds == m_processFilterSet)
     {
         m_preparedCrossView = std::move(prepared);
         m_crossPrepareRequestedSource = m_latestAuditSnapshot;
         m_crossPrepareRequestedLanguage = m_crossLanguageGeneration;
+        m_crossPrepareRequestedProcessIds = m_preparedCrossView->processIds;
         m_crossPreparation->cancel(); // Retire any obsolete language-only preparation.
     }
     else requestCrossViewPreparation(); // Language changed in flight, or preparation threw.
@@ -2415,11 +2433,13 @@ void NetworkAuditPage::applyCrossViewSnapshot(std::shared_ptr<AuditSnapshot> sna
     ++m_crossSourceGeneration;
     if (prepared && prepared->source == m_latestAuditSnapshot
         && prepared->sourceGeneration == m_crossSourceGeneration
-        && prepared->languageGeneration == m_crossLanguageGeneration)
+        && prepared->languageGeneration == m_crossLanguageGeneration
+        && prepared->processIds == m_processFilterSet)
     {
         m_preparedCrossView = std::move(prepared);
         m_crossPrepareRequestedSource = m_latestAuditSnapshot;
         m_crossPrepareRequestedLanguage = m_crossLanguageGeneration;
+        m_crossPrepareRequestedProcessIds = m_preparedCrossView->processIds;
         m_crossPreparation->cancel(); // Retire any obsolete language-only preparation.
     }
     else requestCrossViewPreparation(); // Language changed in flight, or preparation threw.
@@ -2490,7 +2510,8 @@ void NetworkAuditPage::presentVisibleSnapshot()
     if (section == m_crossViewPage
         && (!m_preparedCrossView || m_preparedCrossView->source != m_latestAuditSnapshot
             || m_preparedCrossView->sourceGeneration != m_crossSourceGeneration
-            || m_preparedCrossView->languageGeneration != m_crossLanguageGeneration))
+            || m_preparedCrossView->languageGeneration != m_crossLanguageGeneration
+            || m_preparedCrossView->processIds != m_processFilterSet))
     {
         requestCrossViewPreparation();
         return; // Keep the complete displayed generation until the current value is ready.
@@ -2567,7 +2588,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     const ks::i18n::SourceTextSnapshot& language,
     const std::uint64_t sourceGeneration, const std::uint64_t languageGeneration,
     const QString& r0TcpStatusText, const QString& r0UdpStatusText,
-    const std::function<bool()>& isCanceled)
+    const QSet<quint32>& processIds, const std::function<bool()>& isCanceled)
 {
     if (!source || isCanceled()) return {};
     const auto& tcpEndpointRows = source->tcpEndpointRows;
@@ -2667,6 +2688,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     {
         if (isCanceled()) return {};
         const auto& row = tcpEndpointRows[index];
+        if (!processIds.isEmpty() && !processIds.contains(row.processId)) continue;
         CrossViewValueRow value;
         value.processId = row.processId;
         value.sourceIndex = static_cast<qulonglong>(index);
@@ -2683,6 +2705,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     for (const auto& row : udpEndpointRows)
     {
         if (isCanceled()) return {};
+        if (!processIds.isEmpty() && !processIds.contains(row.processId)) continue;
         CrossViewValueRow value;
         value.processId = row.processId;
         value.fields = {QString::number(row.processId), row.processName, row.localEndpointText,
@@ -2711,6 +2734,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     {
         if (isCanceled()) return {};
         const auto& row = aggregate.row;
+        if (!processIds.isEmpty() && !processIds.contains(row.processId)) continue;
         CrossViewValueRow value;
         value.processId = row.processId;
         value.identity = crossViewIdentity('S', {QString::number(row.processId)});
@@ -2729,6 +2753,7 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     prepared->source = source;
     prepared->sourceGeneration = sourceGeneration;
     prepared->languageGeneration = languageGeneration;
+    prepared->processIds = processIds;
     prepared->r0TcpStatusText = r0TcpStatusText;
     prepared->r0UdpStatusText = r0UdpStatusText;
     prepared->tcpRows = std::move(tcpRows);
@@ -2741,7 +2766,8 @@ void NetworkAuditPage::requestCrossViewPreparation()
 {
     if (!m_latestAuditSnapshot || !m_crossPreparation) return;
     if (m_crossPrepareRequestedSource == m_latestAuditSnapshot
-        && m_crossPrepareRequestedLanguage == m_crossLanguageGeneration) return;
+        && m_crossPrepareRequestedLanguage == m_crossLanguageGeneration
+        && m_crossPrepareRequestedProcessIds == m_processFilterSet) return;
     struct Request
     {
         std::shared_ptr<const AuditSnapshot> source;
@@ -2750,26 +2776,30 @@ void NetworkAuditPage::requestCrossViewPreparation()
         std::uint64_t languageGeneration;
         QString tcpStatus;
         QString udpStatus;
+        QSet<quint32> processIds;
     };
     Request request{m_latestAuditSnapshot,
         ks::i18n::LanguageManager::instance().sourceTextSnapshot(),
         m_crossSourceGeneration, m_crossLanguageGeneration,
         m_latestAuditSnapshot->r0TcpStatusText.isEmpty() ? m_r0TcpStatusText : m_latestAuditSnapshot->r0TcpStatusText,
-        m_latestAuditSnapshot->r0UdpStatusText.isEmpty() ? m_r0UdpStatusText : m_latestAuditSnapshot->r0UdpStatusText};
+        m_latestAuditSnapshot->r0UdpStatusText.isEmpty() ? m_r0UdpStatusText : m_latestAuditSnapshot->r0UdpStatusText,
+        m_processFilterSet};
     m_crossPrepareRequestedSource = request.source;
     m_crossPrepareRequestedLanguage = request.languageGeneration;
+    m_crossPrepareRequestedProcessIds = request.processIds;
     m_crossPreparation->submit<Request, std::shared_ptr<const CrossViewPresentation>>(
         std::move(request),
         [](const Request& value, const ks::ui::AsyncOperationToken& token) {
             return prepareCrossViewValues(value.source, value.language, value.sourceGeneration,
-                value.languageGeneration, value.tcpStatus, value.udpStatus,
+                value.languageGeneration, value.tcpStatus, value.udpStatus, value.processIds,
                 [&token]() { return token.isCanceled(); });
         },
         [this](const std::shared_ptr<const CrossViewPresentation>& prepared, const std::uint64_t ticket) {
             if (!prepared || !m_crossPreparation->isCurrent(ticket)
                 || prepared->source != m_latestAuditSnapshot
                 || prepared->sourceGeneration != m_crossSourceGeneration
-                || prepared->languageGeneration != m_crossLanguageGeneration) return true;
+                || prepared->languageGeneration != m_crossLanguageGeneration
+                || prepared->processIds != m_processFilterSet) return true;
             m_preparedCrossView = prepared; // Accept complete immutable values even when hidden/capture-blocked.
             m_dirtyAuditTables.insert(m_tcpTable);
             m_dirtyAuditTables.insert(m_udpTable);
@@ -2849,7 +2879,8 @@ void NetworkAuditPage::refreshCrossViewTable(std::shared_ptr<const CrossViewPres
                 return owner && owner->m_preparedCrossView == prepared
                     && owner->m_latestAuditSnapshot == prepared->source
                     && owner->m_crossSourceGeneration == prepared->sourceGeneration
-                    && owner->m_crossLanguageGeneration == prepared->languageGeneration;
+                    && owner->m_crossLanguageGeneration == prepared->languageGeneration
+                    && owner->m_processFilterSet == prepared->processIds;
             };
             if (!current() || !owner->m_crossViewPage->isVisible()) { retry(); return true; }
             if (owner->m_projectionInProgress) { retry(); return true; }
@@ -2901,7 +2932,8 @@ void NetworkAuditPage::applyCrossViewSearchFilter()
 {
     m_crossFilterDirty = true;
     if (!m_crossViewPage || !m_crossViewPage->isVisible()) return;
-    if (!m_displayedCrossView || m_displayedCrossView->languageGeneration != m_crossLanguageGeneration)
+    if (!m_displayedCrossView || m_displayedCrossView->languageGeneration != m_crossLanguageGeneration
+        || m_displayedCrossView->processIds != m_processFilterSet)
     {
         requestCrossViewPreparation();
         return;

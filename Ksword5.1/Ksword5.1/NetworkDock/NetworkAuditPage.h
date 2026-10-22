@@ -72,6 +72,9 @@ public:
     // - 无返回值。
     void requestInitialRefresh();
 
+    // 详情页先挂载、后传入 PID；首次查询须等目标范围确定。
+    void deferInitialRefreshUntilProcessScope();
+
     // focusProcessIds 作用：
     // - 合并原连接管理页的“按进程跳转”能力；
     // - 传入空集合表示清除过滤，并切换到 TCP/UDP Cross-View；
@@ -311,6 +314,7 @@ private:
         std::shared_ptr<const AuditSnapshot> source;
         std::uint64_t sourceGeneration = 0;
         std::uint64_t languageGeneration = 0;
+        QSet<quint32> processIds;
         QString r0TcpStatusText;
         QString r0UdpStatusText;
         std::vector<CrossViewValue> tcpRows;
@@ -323,6 +327,7 @@ private:
         const ks::i18n::SourceTextSnapshot& language,
         std::uint64_t sourceGeneration, std::uint64_t languageGeneration,
         const QString& r0TcpStatusText, const QString& r0UdpStatusText,
+        const QSet<quint32>& processIds,
         const std::function<bool()>& isCanceled);
     const std::vector<TcpEndpointRow>& tcpEndpointCache() const;
 
@@ -499,6 +504,7 @@ private:
     QHBoxLayout* m_crossControlLayout = nullptr;
     QTimer* m_crossSearchTimer = nullptr;
     bool m_crossFilterDirty = false;
+    bool m_initialProcessScopePending = false;
     QLineEdit* m_crossSearchEdit = nullptr;        // m_crossSearchEdit：Cross-View 三张表的实时文本筛选。
     QPushButton* m_crossAutoRefreshButton = nullptr;
     QPushButton* m_crossTerminateButton = nullptr;
@@ -548,6 +554,7 @@ private:
     std::uint64_t m_crossSourceGeneration = 0;
     std::uint64_t m_crossLanguageGeneration = 0;
     std::uint64_t m_crossPrepareRequestedLanguage = 0;
+    QSet<quint32> m_crossPrepareRequestedProcessIds;
     std::shared_ptr<const CrossViewPresentation> m_preparedCrossView;
     std::shared_ptr<const CrossViewPresentation> m_displayedCrossView; // TCP索引与已显示完整源同代。
     QString m_r0TcpStatusText; // 最近一次完整 R0 TCP 查询的协议状态，不把零行误报为成功。
