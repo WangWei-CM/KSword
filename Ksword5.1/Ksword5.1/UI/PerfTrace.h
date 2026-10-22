@@ -9,7 +9,8 @@ class QJsonObject;
 class QWidget;
 
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
-// 需要再次采集时把下面的 0 改为 1（或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1），
+// 需要再次采集时用 tools/Invoke-KSwordBuildCheck.ps1 -EnablePerfTrace 构建，
+// 或在工程预处理器定义里加 KSWORD_PERF_TRACE_ENABLED=1；不必修改本文件的默认值。
 // 重新构建后在 exe 同目录读取 ksword_perf_trace.jsonl；也可用 KSWORD_PERF_TRACE 指定路径。
 // 关闭时 PerfScope 与各 Record 接口都退化为内联空实现，调用点无需改动；
 // 少数带副作用的位置（信号连接、逐帧簿记）用同一个宏单独隔离。

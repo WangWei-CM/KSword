@@ -7,6 +7,8 @@ param(
 
     [switch]$VerifyArtifactOnly,
     [switch]$DisableWholeProgramOptimization,
+    # Diagnostic build only; the ordinary Release configuration stays probe-free.
+    [switch]$EnablePerfTrace,
     [switch]$SkipAutoTestSign,
 
     [ValidateRange(1, 120)]
@@ -162,21 +164,31 @@ try {
         $arguments += '/p:KswordArkSkipAutoTestSign=true'
     }
 
-    if ($DisableWholeProgramOptimization) {
+    if ($DisableWholeProgramOptimization -or $EnablePerfTrace) {
         $temporaryPropsPath = Join-Path $logDirectory (
             'ksword-build-check-' + [guid]::NewGuid().ToString('N') + '.props')
+        $compilerSettings = ''
+        $linkSettings = ''
+        if ($DisableWholeProgramOptimization) {
+            $compilerSettings = '<WholeProgramOptimization>false</WholeProgramOptimization>'
+            $linkSettings = '<Link><LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration></Link>'
+        }
+        if ($EnablePerfTrace) {
+            $compilerSettings += @'
+<PreprocessorDefinitions Condition="'$(MSBuildProjectName)' == 'Ksword5.1'">KSWORD_PERF_TRACE_ENABLED=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+'@
+        }
         $propsText = @'
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <ClCompile>
-      <WholeProgramOptimization>false</WholeProgramOptimization>
+      __COMPILER_SETTINGS__
     </ClCompile>
-    <Link>
-      <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
-    </Link>
+    __LINK_SETTINGS__
   </ItemDefinitionGroup>
 </Project>
 '@
+        $propsText = $propsText.Replace('__COMPILER_SETTINGS__', $compilerSettings).Replace('__LINK_SETTINGS__', $linkSettings)
         [System.IO.File]::WriteAllText($temporaryPropsPath, $propsText, [System.Text.UTF8Encoding]::new($false))
         $arguments += Quote-ProcessArgument "/p:ForceImportAfterCppTargets=$temporaryPropsPath"
     }
@@ -193,6 +205,7 @@ try {
     }
 
     Write-Output "BUILD_START action=$Action wpo_disabled=$([bool]$DisableWholeProgramOptimization) timeout_minutes=$TimeoutMinutes"
+    Write-Output "BUILD_PERF_TRACE_ENABLED=$([bool]$EnablePerfTrace)"
     Write-Output "BUILD_MSBUILD_X64=$msbuildPath"
     Write-Output 'BUILD_TOOL_ARCHITECTURE=x64'
     Write-Output "BUILD_HOST_TOOLS=$($toolProperties.VC_ExecutablePath_x64)"
