@@ -83,3 +83,5 @@
 - 2026-10-22 BugcheckGuard未显示初态11条/11目标共享原key/source：风险说明、控制分组/选项、固定动作、状态标题及原waiting文案。原构造不查询R0，Show查询、所有开关/截图/驱动函数保持。Misc未构造页冷源7→8/20，目录仍服从原实验入口visible；真正激活清标记并执行原Show。51项静态检查证明10条既有bind文本/两语言key和14个非布局方法保持；未运行GUI或危险业务，不能关闭整个B03。
 
 - 2026-10-22 ContextMenuCleaner冷页的原IE查询结果在隐藏时只存pendingSnapshot，不会填表；此前把它视作冷正文必须等待真实行的阻塞不准确。现将只读首查移至真实首显一次（已有query/hasLoaded保护），随后保留原分类切换、查询/投影、备份/删除/恢复/测量链。七类确定空初态从同源文案提供123条，Right详情方案165条；其它三方案的显式隐藏字段仍不入索引。Misc冷源8→9/20，真实激活原查询，兼容准备和warm页仍扫描真实内容。4343项纯值/首显QObject替身、269项实际prepare/AsyncOperation受控检查及完整业务尾部保持通过，GUI/native未运行；不关闭整个B03。
+
+- 2026-10-22 DWM/Win32k注入页冷初态15+N条正文复用原EnumWindows/Capture真实快照（>60项按旧Combo扫描规则跳过，枚举失败沿原三段状态）。只读取Win32窗口/进程身份，未触发DWM、R0或输入控制；原Refresh worker复用相同枚举，Control、AgentPanel Start、Injection Select保持。Misc既有AsyncOperation后台读一次/完成续作，不轮询；共享不可变值回GUI无整表复制，激活取消晚到发布并走原新鲜工厂查询，不给动作回填旧HWND身份。Misc冷源9→10/20。4343纯值/首显与269实际prepare/AsyncOperation受控检查通过；native及GUI未运行，业务/性能仍待用户验收。

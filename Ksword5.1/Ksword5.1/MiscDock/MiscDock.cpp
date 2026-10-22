@@ -113,6 +113,7 @@ MiscDock::~MiscDock()
 {
     if (m_disableDseSearchOperation) m_disableDseSearchOperation->close();
     if (m_desktopDrawingSearchOperation) m_desktopDrawingSearchOperation->close();
+    if (m_windowInjectionSearchOperation) m_windowInjectionSearchOperation->close();
 }
 
 void MiscDock::initializeUi()
@@ -486,6 +487,43 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
         m_navigationPagePreparing = true;
         try
         {
+            if (useColdBodies && m_navigationPrepareCursor == m_windowInjectionTabIndex
+                && !m_windowInjectionPage && !m_windowInjectionSearchSnapshot
+                && !m_windowInjectionSearchFailed && resume)
+            {
+                m_windowInjectionSearchReady = std::move(resume);
+                if (!m_windowInjectionSearchOperation)
+                    m_windowInjectionSearchOperation = new ks::ui::AsyncOperation(this);
+                if (!m_windowInjectionSearchOperation->isBusy())
+                {
+                    using Snapshot = std::shared_ptr<const ks::window_input::InjectionInitialSnapshot>;
+                    const auto ticket = m_windowInjectionSearchOperation->submit<int, Snapshot>(0,
+                        [](const int&, const ks::ui::AsyncOperationToken&) {
+                            return std::make_shared<const ks::window_input::InjectionInitialSnapshot>(
+                                ks::window_input::ReadInitialInjectionSnapshot());
+                        },
+                        [this](const Snapshot& snapshot, std::uint64_t) {
+                            m_windowInjectionSearchSnapshot = snapshot;
+                            auto ready = std::exchange(m_windowInjectionSearchReady, {});
+                            if (ready) ready();
+                            return true;
+                        },
+                        [this](std::exception_ptr) {
+                            m_windowInjectionSearchFailed = true;
+                            auto ready = std::exchange(m_windowInjectionSearchReady, {});
+                            if (ready) ready();
+                        });
+                    if (ticket == 0)
+                    {
+                        m_windowInjectionSearchFailed = true;
+                        m_windowInjectionSearchReady = {};
+                        m_navigationPagePreparing = false;
+                        return Preparation::MorePages;
+                    }
+                }
+                m_navigationPagePreparing = false;
+                return Preparation::Waiting;
+            }
             if (useColdBodies && m_navigationPrepareCursor == m_desktopDrawingTabIndex
                 && !m_desktopDrawingPage && !m_desktopDrawingSearchDisplays
                 && !m_desktopDrawingSearchFailed && resume)
@@ -570,6 +608,7 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)
                 || (m_navigationPrepareCursor == m_bugcheckGuardTabIndex && !m_bugcheckGuardPage)
                 || (m_navigationPrepareCursor == m_contextMenuCleanerTabIndex && !m_contextMenuCleanerTab)
+                || (m_navigationPrepareCursor == m_windowInjectionTabIndex && !m_windowInjectionPage && m_windowInjectionSearchSnapshot)
                 || (m_navigationPrepareCursor == m_desktopDrawingTabIndex && !m_desktopDrawingPage && m_desktopDrawingSearchDisplays)
                 || (m_navigationPrepareCursor == m_clipboardGuardTabIndex && !m_clipboardGuardPage)))
                 m_navigationSkippedColdBodies = true;
@@ -818,8 +857,16 @@ void MiscDock::initializeWindowInjectionPage()
 {
     if (!m_windowInjectionHostWidget || m_windowInjectionPage) return;
     auto* layout = buildHostLayout(m_windowInjectionHostWidget);
+    if (m_windowInjectionSearchOperation) m_windowInjectionSearchOperation->cancel();
+    auto ready = std::exchange(m_windowInjectionSearchReady, {});
+    m_windowInjectionSearchSnapshot.reset();
+    const QPointer<QWidget> host(m_windowInjectionHostWidget);
+    // A real activation retains the original fresh list query and no cached
+    // search identity is ever fed into an input/DWM operation.
     m_windowInjectionPage = ks::window_input::CreateInjectionPage(m_windowInjectionHostWidget);
     layout->addWidget(m_windowInjectionPage);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
+    if (ready) ready();
 }
 
 void MiscDock::initializeHvciBypassPage()
@@ -979,6 +1026,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
     {
         main[12].coldBodyTexts = ks::misc::DesktopDrawingPage::coldSearchBody(*existing->m_desktopDrawingSearchDisplays);
         main[12].coldBodyComplete = true;
+    }
+    if (existing && !existing->m_windowInjectionPage && existing->m_windowInjectionSearchSnapshot)
+    {
+        main[13].coldBodyTexts = ks::window_input::coldSearchBody(*existing->m_windowInjectionSearchSnapshot);
+        main[13].coldBodyComplete = true;
     }
     if (!existing || !existing->m_minidumpPage)
     {

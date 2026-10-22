@@ -12,8 +12,11 @@
 #include "../Framework.h"
 
 #include <QWidget>
+#include <memory>
 #include "../UI/PageNavigationTabCatalog.h"
 #include "DesktopDrawing/DesktopDrawingRenderer.h"
+
+namespace ks::window_input { struct InjectionInitialSnapshot; }
 
 class QTabWidget;
 class QVBoxLayout;
@@ -201,6 +204,10 @@ private:
     std::optional<ks::misc::disable_dse::BlockReason> m_disableDseSearchReason;
     std::function<void()> m_disableDseSearchReady;
     bool m_disableDseSearchFailed = false;
+    ks::ui::AsyncOperation* m_windowInjectionSearchOperation = nullptr;
+    std::shared_ptr<const ks::window_input::InjectionInitialSnapshot> m_windowInjectionSearchSnapshot;
+    std::function<void()> m_windowInjectionSearchReady;
+    bool m_windowInjectionSearchFailed = false;
     ks::ui::AsyncOperation* m_desktopDrawingSearchOperation = nullptr;
     std::optional<std::vector<ks::misc::desktop_drawing::Display>> m_desktopDrawingSearchDisplays;
     std::function<void()> m_desktopDrawingSearchReady;

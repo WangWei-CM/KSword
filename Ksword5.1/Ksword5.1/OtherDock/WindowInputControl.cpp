@@ -119,6 +119,86 @@ namespace ks::window_input
             return label;
         }
 
+        enum class InjectionBodyText
+        {
+            TargetDescription, Targets, TargetPlaceholder, Open, Refresh, TargetStatus,
+            DwmGroup, DwmDescription, LoadDwm, CheckDwm, RestoreAll, DwmStatus,
+            Win32kGroup, Win32kDescription, CheckWin32k, Win32kStatus
+        };
+        struct InjectionBodyEntry
+        {
+            const char* targetSuffix;
+            const char* source;
+            bool mnemonic;
+        };
+        // Initial UI and cold search use the same sources and real targets.
+        constexpr InjectionBodyEntry kInjectionBody[] = {
+            {"_target_description", "在这里选择目标窗口，即可使用与窗口页相同的输入、跨 UIAccess 和 DWM 排序功能。", false},
+            {"_targets", "", false},
+            {"_target_handle", "十六进制 0x1234 或十进制句柄", false},
+            {"_open", "打开目标窗口设置", true},
+            {"_refresh", "刷新窗口列表", true},
+            {"_target_status", "尚未选择目标窗口。", false},
+            {"_dwm_group", "DWM 排序代理", false},
+            {"_dwm_description", "加载当前会话的 DWM 代理后，可直接在本页调整画面顺序。加载代理本身不会改变任何窗口顺序。", false},
+            {"_load_dwm", "加载 DWM 代理", true},
+            {"_check_dwm", "检查 DWM 状态", true},
+            {"_restore_all", "停止保持并恢复全部输入设置", true},
+            {"_dwm_status", "尚未检查 DWM 状态。", false},
+            {"_win32k_group", "Win32k 输入控制", false},
+            {"_win32k_description", "可直接应用跨 UIAccess 模式，每次操作都会检查兼容性。此按钮仅查询支持状态，无需预先开启。当前适配 26100.9022。", false},
+            {"_check_win32k", "检查 Win32k 兼容性", true},
+            {"_win32k_status", "尚未检查 Win32k 状态。", false}
+        };
+        const InjectionBodyEntry& InjectionEntry(InjectionBodyText id)
+        { return kInjectionBody[static_cast<int>(id)]; }
+
+        QString InjectionSearchPrefix()
+        { return QStringLiteral("ks_window_injection"); }
+
+        QString InjectionTargetName(InjectionBodyText id, const QString& prefix)
+        { return prefix + QString::fromLatin1(InjectionEntry(id).targetSuffix); }
+
+        void NameInjectionTarget(QObject* object, InjectionBodyText id, const QString& prefix)
+        {
+            // Other Control hosts keep their original identities.
+            if (!prefix.isEmpty()) object->setObjectName(InjectionTargetName(id, prefix));
+        }
+
+        void BindInjectionBody(QObject* object, InjectionBodyText id, const QString& prefix)
+        {
+            NameInjectionTarget(object, id, prefix);
+            Bind(object, InjectionEntry(id).source);
+        }
+
+        QLabel* InjectionLabel(QWidget* parent, InjectionBodyText id, QVBoxLayout* layout,
+            const QString& prefix, bool bind = true)
+        {
+            auto* label = Label(parent, InjectionEntry(id).source, layout, bind);
+            NameInjectionTarget(label, id, prefix);
+            return label;
+        }
+
+        QString InjectionChoiceText(const InjectionWindowChoice& choice)
+        {
+            const auto& id = choice.identity;
+            return Text("窗口 0x%1（PID %2）：%3").arg(id.hwnd, 0, 16).arg(id.processId)
+                .arg(choice.title.empty() ? Text("无标题窗口") : QString::fromStdWString(choice.title));
+        }
+
+        const char* InjectionEnumerationFailure()
+        { return "无法读取窗口列表。"; }
+
+        QString InjectionStatusText(const dwm_order::WindowIdentity& selected,
+            const char* message, std::uint32_t error)
+        {
+            QString text = selected.hwnd ? Text("当前目标：0x%1（PID %2）。").arg(selected.hwnd, 0, 16).arg(selected.processId)
+                : Text(InjectionEntry(InjectionBodyText::TargetStatus).source);
+            if (message) text += QLatin1Char('\n') + Text(message);
+            if (error) text += QLatin1Char('\n') + Text("Windows 错误码：%1。").arg(error);
+            return text;
+        }
+
         QString Failure(const Result& result)
         {
             QString message;
@@ -302,7 +382,7 @@ namespace ks::window_input
         class AgentPanel final : public QWidget
         {
         public:
-            explicit AgentPanel(QWidget* parent) : QWidget(parent)
+            explicit AgentPanel(QWidget* parent, const QString& searchTargetPrefix = {}) : QWidget(parent)
             {
                 auto* layout = new QVBoxLayout(this);
                 layout->setContentsMargins(0, 0, 0, 0);
@@ -310,31 +390,31 @@ namespace ks::window_input
                 // 代理状态与版本兼容性分别占一块，避免所有说明沿整页拉成长行。
                 auto* sections = new SectionRow(this);
                 auto* dwm = new QGroupBox(this);
-                Bind(dwm, "DWM 排序代理");
+                BindInjectionBody(dwm, InjectionBodyText::DwmGroup, searchTargetPrefix);
                 auto* dwmLayout = new QVBoxLayout(dwm);
-                Label(dwm, "加载当前会话的 DWM 代理后，可直接在本页调整画面顺序。加载代理本身不会改变任何窗口顺序。", dwmLayout);
+                InjectionLabel(dwm, InjectionBodyText::DwmDescription, dwmLayout, searchTargetPrefix);
                 auto* actions = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
                 load_ = new QPushButton(dwm);
                 check_ = new QPushButton(dwm);
                 stop_ = new QPushButton(dwm);
-                Bind(load_, "加载 DWM 代理");
-                Bind(check_, "检查 DWM 状态");
-                Bind(stop_, "停止保持并恢复全部输入设置");
+                BindInjectionBody(load_, InjectionBodyText::LoadDwm, searchTargetPrefix);
+                BindInjectionBody(check_, InjectionBodyText::CheckDwm, searchTargetPrefix);
+                BindInjectionBody(stop_, InjectionBodyText::RestoreAll, searchTargetPrefix);
                 ks::ui::ApplyFlatButtonTheme(load_, ks::ui::FlatButtonTone::Accent,
                     ks::ui::FlatButtonAppearance::Solid);
                 for (auto* button : {load_, check_, stop_}) actions->addWidget(button);
                 dwmLayout->addLayout(actions);
-                dwmStatus_ = Label(dwm, "尚未检查 DWM 状态。", dwmLayout, false);
+                dwmStatus_ = InjectionLabel(dwm, InjectionBodyText::DwmStatus, dwmLayout, searchTargetPrefix, false);
                 dwmStatus_->setContentsMargins(0, 8, 0, 0);
                 sections->Add(SectionPanel(dwm, sections));
                 auto* win32k = new QGroupBox(this);
-                Bind(win32k, "Win32k 输入控制");
+                BindInjectionBody(win32k, InjectionBodyText::Win32kGroup, searchTargetPrefix);
                 auto* win32kLayout = new QVBoxLayout(win32k);
-                Label(win32k, "可直接应用跨 UIAccess 模式，每次操作都会检查兼容性。此按钮仅查询支持状态，无需预先开启。当前适配 26100.9022。", win32kLayout);
+                InjectionLabel(win32k, InjectionBodyText::Win32kDescription, win32kLayout, searchTargetPrefix);
                 kernel_ = new QPushButton(win32k);
-                Bind(kernel_, "检查 Win32k 兼容性");
+                BindInjectionBody(kernel_, InjectionBodyText::CheckWin32k, searchTargetPrefix);
                 win32kLayout->addWidget(kernel_, 0, Qt::AlignLeft);
-                kernelStatus_ = Label(win32k, "尚未检查 Win32k 状态。", win32kLayout, false);
+                kernelStatus_ = InjectionLabel(win32k, InjectionBodyText::Win32kStatus, win32kLayout, searchTargetPrefix, false);
                 kernelStatus_->setContentsMargins(0, 8, 0, 0);
                 sections->Add(SectionPanel(win32k, sections));
                 layout->addWidget(sections);
@@ -399,8 +479,8 @@ namespace ks::window_input
 
             void Render()
             {
-                if (!hasDwm_) dwmStatus_->setText(Text("尚未检查 DWM 状态。"));
-                if (!hasKernel_) kernelStatus_->setText(Text("尚未检查 Win32k 状态。"));
+                if (!hasDwm_) dwmStatus_->setText(Text(InjectionEntry(InjectionBodyText::DwmStatus).source));
+                if (!hasKernel_) kernelStatus_->setText(Text(InjectionEntry(InjectionBodyText::Win32kStatus).source));
                 if (hasDwm_)
                 {
                     const auto& reply = result_.dwm;
@@ -445,12 +525,6 @@ namespace ks::window_input
 
         QWidget* CreateAgentPanel(QWidget* parent) { return new AgentPanel(parent); }
 
-        struct WindowChoice
-        {
-            dwm_order::WindowIdentity identity;
-            std::wstring title;
-        };
-
         class InjectionPage final : public QWidget
         {
         public:
@@ -472,29 +546,33 @@ namespace ks::window_input
                 targetLayout->setContentsMargins(16, 16, 16, 16);
                 targetLayout->setSpacing(12);
                 ks::ui::StylePrimaryContentPanel(targetPanel, false);
-                Label(targetPanel, "在这里选择目标窗口，即可使用与窗口页相同的输入、跨 UIAccess 和 DWM 排序功能。", targetLayout);
+                const auto searchTargetPrefix = InjectionSearchPrefix();
+                InjectionLabel(targetPanel, InjectionBodyText::TargetDescription, targetLayout, searchTargetPrefix);
                 auto* row = new ks::ui::FlowLayout(nullptr, 0, 8, 8);
                 targets_ = new QComboBox(targetPanel);
+                NameInjectionTarget(targets_, InjectionBodyText::Targets, searchTargetPrefix);
                 targets_->setEditable(true);
                 targets_->setInsertPolicy(QComboBox::NoInsert);
                 targets_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
                 targets_->setMinimumContentsLength(24);
+                NameInjectionTarget(targets_->lineEdit(), InjectionBodyText::TargetPlaceholder, searchTargetPrefix);
                 ks::i18n::LanguageManager::instance().bindPlaceholder(targets_->lineEdit(),
-                    QStringLiteral("window.dwm_order.reference_hint"), QStringLiteral("十六进制 0x1234 或十进制句柄"));
+                    QStringLiteral("window.dwm_order.reference_hint"),
+                    QString::fromUtf8(InjectionEntry(InjectionBodyText::TargetPlaceholder).source));
                 auto* open = new QPushButton(targetPanel);
-                Bind(open, "打开目标窗口设置");
+                BindInjectionBody(open, InjectionBodyText::Open, searchTargetPrefix);
                 ks::ui::ApplyFlatButtonTheme(open, ks::ui::FlatButtonTone::Accent,
                     ks::ui::FlatButtonAppearance::Solid);
                 refresh_ = new QPushButton(targetPanel);
-                Bind(refresh_, "刷新窗口列表");
+                BindInjectionBody(refresh_, InjectionBodyText::Refresh, searchTargetPrefix);
                 targetLayout->addWidget(targets_);
                 row->addWidget(refresh_);
                 row->addWidget(open);
                 targetLayout->addLayout(row);
-                status_ = Label(targetPanel, "尚未选择目标窗口。", targetLayout, false);
+                status_ = InjectionLabel(targetPanel, InjectionBodyText::TargetStatus, targetLayout, searchTargetPrefix, false);
                 ks::ui::StyleParameterFields(targetPanel);
                 layout_->addWidget(targetPanel);
-                agents_ = new AgentPanel(content);
+                agents_ = new AgentPanel(content, searchTargetPrefix);
                 layout_->addWidget(agents_);
                 layout_->addStretch();
                 scroll->setWidget(content);
@@ -536,8 +614,7 @@ namespace ks::window_input
                     if (id.hwnd == preferred.hwnd && id.processId == preferred.processId &&
                         id.threadId == preferred.threadId && id.processCreated == preferred.processCreated)
                         selected = targets_->count();
-                    targets_->addItem(Text("窗口 0x%1（PID %2）：%3").arg(id.hwnd, 0, 16).arg(id.processId)
-                        .arg(choice.title.empty() ? Text("无标题窗口") : QString::fromStdWString(choice.title)));
+                    targets_->addItem(InjectionChoiceText(choice));
                 }
                 targets_->setCurrentIndex(selected);
                 if (selected < 0 && !preferred.hwnd) targets_->setEditText(edit);
@@ -550,42 +627,22 @@ namespace ks::window_input
                 refresh_->setEnabled(false);
                 // Only the UI thread touches the combo; enumeration stores a
                 // complete identity so an old item cannot silently retarget a reused HWND.
-                auto choices = std::make_shared<std::vector<WindowChoice>>();
-                auto error = std::make_shared<DWORD>(0);
-                auto* worker = QThread::create([choices, error]
+                auto snapshot = std::make_shared<InjectionInitialSnapshot>();
+                auto* worker = QThread::create([snapshot]
                 {
-                    SetLastError(ERROR_SUCCESS);
-                    if (!EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL
-                    {
-                        DWORD pid = 0;
-                        GetWindowThreadProcessId(hwnd, &pid);
-                        if (!IsWindowVisible(hwnd) || pid == GetCurrentProcessId()) return TRUE;
-                        try
-                        {
-                            WindowChoice choice;
-                            std::uint32_t captureError = 0;
-                            if (!Capture(reinterpret_cast<std::uint64_t>(hwnd), choice.identity, captureError)) return TRUE;
-                            wchar_t title[512]{};
-                            GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
-                            choice.title = title;
-                            reinterpret_cast<std::vector<WindowChoice>*>(parameter)->push_back(std::move(choice));
-                            return TRUE;
-                        }
-                        catch (...) { SetLastError(ERROR_OUTOFMEMORY); return FALSE; }
-                    }, reinterpret_cast<LPARAM>(choices.get())))
-                        *error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+                    *snapshot = ReadInitialInjectionSnapshot();
                 });
-                connect(worker, &QThread::finished, this, [this, choices, error]
+                connect(worker, &QThread::finished, this, [this, snapshot]
                 {
                     refreshing_ = false;
                     refresh_->setEnabled(true);
-                    error_ = *error;
-                    message_ = error_ ? "无法读取窗口列表。" : nullptr;
+                    error_ = snapshot->error;
+                    message_ = error_ ? InjectionEnumerationFailure() : nullptr;
                     if (!error_)
                     {
                         const auto preferred = CurrentChoice();
                         const auto edit = targets_->currentText();
-                        choices_ = std::move(*choices);
+                        choices_ = std::move(snapshot->choices);
                         Populate(preferred, edit);
                     }
                     Render();
@@ -621,14 +678,10 @@ namespace ks::window_input
 
             void Render()
             {
-                QString text = selected_.hwnd ? Text("当前目标：0x%1（PID %2）。").arg(selected_.hwnd, 0, 16).arg(selected_.processId)
-                    : Text("尚未选择目标窗口。");
-                if (message_) text += QLatin1Char('\n') + Text(message_);
-                if (error_) text += QLatin1Char('\n') + Text("Windows 错误码：%1。").arg(error_);
-                status_->setText(text);
+                status_->setText(InjectionStatusText(selected_, message_, error_));
             }
 
-            std::vector<WindowChoice> choices_;
+            std::vector<InjectionWindowChoice> choices_;
             dwm_order::WindowIdentity selected_;
             bool refreshing_ = false;
             DWORD error_ = 0;
@@ -640,6 +693,70 @@ namespace ks::window_input
             AgentPanel* agents_ = nullptr;
             Control* control_ = nullptr;
         };
+    }
+
+    InjectionInitialSnapshot ReadInitialInjectionSnapshot()
+    {
+        InjectionInitialSnapshot snapshot;
+        SetLastError(ERROR_SUCCESS);
+        if (!EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL
+        {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (!IsWindowVisible(hwnd) || pid == GetCurrentProcessId()) return TRUE;
+            try
+            {
+                InjectionWindowChoice choice;
+                std::uint32_t captureError = 0;
+                if (!Capture(reinterpret_cast<std::uint64_t>(hwnd), choice.identity, captureError)) return TRUE;
+                wchar_t title[512]{};
+                GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+                choice.title = title;
+                reinterpret_cast<std::vector<InjectionWindowChoice>*>(parameter)->push_back(std::move(choice));
+                return TRUE;
+            }
+            catch (...) { SetLastError(ERROR_OUTOFMEMORY); return FALSE; }
+        }, reinterpret_cast<LPARAM>(&snapshot.choices)))
+            snapshot.error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+        return snapshot;
+    }
+
+    QVector<ks::ui::PageSearchBodyText> coldSearchBody(const InjectionInitialSnapshot& initial)
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        const auto prefix = InjectionSearchPrefix();
+        const auto append = [&body, &prefix](InjectionBodyText id, const QStringList& groups = {})
+        {
+            const auto& entry = InjectionEntry(id);
+            body.append({Text(entry.source), InjectionTargetName(id, prefix), groups, entry.mnemonic});
+        };
+        // Match the real QObject traversal: combo items and its editable
+        // placeholder precede the two buttons, including their creation order.
+        append(InjectionBodyText::TargetDescription);
+        if (!initial.error && initial.choices.size() <= 60)
+            for (const auto& choice : initial.choices)
+                body.append({ks::i18n::sourceText(InjectionChoiceText(choice)),
+                    InjectionTargetName(InjectionBodyText::Targets, prefix), {}, false});
+        body.append({ks::i18n::text(QStringLiteral("window.dwm_order.reference_hint"),
+            QString::fromUtf8(InjectionEntry(InjectionBodyText::TargetPlaceholder).source)),
+            InjectionTargetName(InjectionBodyText::TargetPlaceholder, prefix), {}, false});
+        append(InjectionBodyText::Open);
+        append(InjectionBodyText::Refresh);
+        body.append({ks::i18n::sourceText(InjectionStatusText({},
+            initial.error ? InjectionEnumerationFailure() : nullptr, initial.error)),
+            InjectionTargetName(InjectionBodyText::TargetStatus, prefix), {}, false});
+        append(InjectionBodyText::DwmGroup);
+        const QStringList dwmGroup{Text(InjectionEntry(InjectionBodyText::DwmGroup).source)};
+        for (const auto id : {InjectionBodyText::DwmDescription, InjectionBodyText::LoadDwm,
+            InjectionBodyText::CheckDwm, InjectionBodyText::RestoreAll, InjectionBodyText::DwmStatus})
+            append(id, dwmGroup);
+        append(InjectionBodyText::Win32kGroup);
+        const QStringList win32kGroup{Text(InjectionEntry(InjectionBodyText::Win32kGroup).source)};
+        for (const auto id : {InjectionBodyText::Win32kDescription, InjectionBodyText::CheckWin32k,
+            InjectionBodyText::Win32kStatus}) append(id, win32kGroup);
+        // The initial AgentPanel has never started a query. Control is created
+        // only by Select(), so none of its future text belongs to this body.
+        return body;
     }
 
     QWidget* CreateControl(const dwm_order::WindowIdentity& identity, QWidget* parent)
