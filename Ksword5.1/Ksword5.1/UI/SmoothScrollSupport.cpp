@@ -509,6 +509,9 @@ namespace
             if (eventObject->type() == QEvent::Show ||
                 eventObject->type() == QEvent::Polish)
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                ks::ui::ObservePerfScrollArea(scrollAreaForEventObject(watchedObject));
+#endif
                 if (auto* tabBar = qobject_cast<QTabBar*>(watchedObject))
                     configureTabBar(tabBar);
                 if (QAbstractScrollArea* scrollArea =
@@ -572,6 +575,11 @@ namespace
             }
 
             QAbstractScrollArea* scrollArea = scrollAreaForEventObject(watchedObject, true);
+#if KSWORD_PERF_TRACE_ENABLED
+            // Also observe native scrolling when animations/custom smoothing are
+            // disabled. Registration never consumes or forwards the wheel event.
+            ks::ui::ObservePerfScrollArea(scrollArea);
+#endif
             if (scrollArea == nullptr ||
                 scrollArea->property(kFrozenPaneAuxiliaryProperty).toBool() ||
                 isSmoothScrollDisabled(qobject_cast<QWidget*>(watchedObject)))

@@ -531,3 +531,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 表格冻结菜单只保留原QMenu/按钮/控制器在构造期，原数量控件、六动作及七连接延至首次aboutToShow；已有updateControls不提前创建，未创建的语言/状态刷新有空检查。首次打开在原barrier和状态刷新前完成原内容，文案按当时语言、主题按原入口；冻结后端、快照、模型、主操作条布局和完整closeFreezeMenuBarrier后业务尾部保持。静态逐字搬移核对及累计构建分别记录；首次菜单尺寸/主题/键盘和冻结业务由用户手测，不声明GUI已通过。
 
 - 2026-10-22 DDMA原串行transaction以诊断宏1值上下文关联worker/UI回投：探测完整磁盘缓存、表格/选区、标签及原会话回调完成后才记ddma_probe_business_data_ready；候选扫描只记候选规范快照ready并由原自动重探子request提供最终探测ready。队列拒绝/异常/业务失败/接收者销毁分别记录，不改变原无取消/替换准入。宏0预处理去诊断块后业务token与原文件一致；不能将此边界当paint/present，也不据源码与构建声明DDMA硬件或GUI已验收。
+
+- 2026-10-22 诊断宏1仅为明确ScrollArea的现有viewport/两bar注册观测，4096宿主上限，无新timer/布局/paint请求。valueChanged回调保存实际双轴值和回调上下文；Qt早先slot可重入，因此它明确不是输入因果证明。实际notify Paint入口复核真实bar值，早于回调时上下文置未知，分派退出只在同viewport身份/观测revision仍相符时接纳稳定观察；GPU swap仅关联最近完整Paint scope且不重复。换viewport/换bar/重挂/销毁有弱身份和失效保护，动画关时同样观察。离线仅统计Paint分派/值观察到Paint/同Paint到GL swap的间隔，不称呈现FPS或input-to-present；缺失/重复/变化/销毁显式分开。67项实际纯值/序列化QtCore和21项离线分析通过，宏0三文件原执行tokens保持；真实QtWidgets/GL/呈现/WPR由用户验收。

@@ -7,6 +7,7 @@ class QObject;
 class QEvent;
 class QJsonObject;
 class QWidget;
+class QAbstractScrollArea;
 
 // 性能采集是排查期工具，默认关闭，避免把埋点带进日常构建与运行。
 // 需要再次采集时用 tools/Invoke-KSwordBuildCheck.ps1 -EnablePerfTrace 构建，
@@ -16,6 +17,10 @@ class QWidget;
 // 少数带副作用的位置（信号连接、逐帧簿记）用同一个宏单独隔离。
 #ifndef KSWORD_PERF_TRACE_ENABLED
 #define KSWORD_PERF_TRACE_ENABLED 0
+#endif
+
+#if KSWORD_PERF_TRACE_ENABLED
+#include <QPointer>
 #endif
 
 namespace ks::ui
@@ -32,6 +37,18 @@ namespace ks::ui
         quint64 requestId = 0;
         PerfTraceOrigin origin = PerfTraceOrigin::Unproven;
     };
+    // Actual scrollbar values and the context of the observing signal callback.
+    // Reentrant Qt handlers may run before our callback: it is not a causal
+    // action-to-pixel claim, nor proof that pixels reached a display.
+    struct PerfScrollStateTrace
+    {
+        quint64 viewportId = 0, revision = 0, paintScopeId = 0;
+        PerfTraceContext callbackContext;
+        qint64 observedAtNs = -1;
+        int horizontalValue = 0, verticalValue = 0;
+    };
+    // Only existing explicit viewports/bars; no timer, tree scan or forced paint.
+    void ObservePerfScrollArea(QAbstractScrollArea* area) noexcept;
     PerfTraceContext CapturePerfTraceContext() noexcept;
     PerfTraceContext BeginPerfAsyncTrace() noexcept;
     void RecordPerfAsyncTrace(const char* stage, PerfTraceContext context,
@@ -132,6 +149,8 @@ namespace ks::ui
         PerfTraceContext m_context, m_previousContext;
         const QEvent* m_inputEvent = nullptr; // identity only; never read after dispatch
         bool m_inputAction = false, m_inputSpontaneous = false;
+        QPointer<QObject> m_scrollViewport;
+        PerfScrollStateTrace m_scrollState;
     };
 
     // 作用域计时器：构造时开始计时，析构时自动记录，允许提前结束或补充计数。

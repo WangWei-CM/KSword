@@ -380,6 +380,78 @@ def read_trace(data, manifest, session_id, frequency, gaps):
     return report, calibration, regular
 
 
+def scroll_paint_observations(events, gaps):
+    """Qt value/Paint/swap observations, never input-to-present causality or FPS."""
+    streams = {}
+    invalid = 0
+    for record in events:
+        observation = record.get("scroll_observation")
+        if observation is None:
+            continue
+        try:
+            if not isinstance(observation, dict) or observation.get("attribution") != "signal_callback_context_only":
+                raise EvidenceError("scroll observation attribution unavailable")
+            if observation.get("input_causality_proven") is not False or observation.get("content_presented_proven") is not False:
+                raise EvidenceError("scroll observation makes an unsupported input/presentation claim")
+            viewport = integer(observation.get("viewport_id"), "viewport_id", positive=True, string=True)
+            integer(observation.get("observation_revision"), "observation_revision", string=True)
+            callback = integer(observation.get("callback_action_id"), "callback_action_id", string=True)
+            at = integer(record.get("t_ns"), "scroll t_ns")
+            stream = streams.get(viewport, {"paints": {}, "swaps": [], "boundaries": Counter(), "callbacks": set()})
+            boundary = observation.get("boundary")
+            if not isinstance(boundary, str):
+                raise EvidenceError("scroll boundary unavailable")
+            if boundary == "qt_paint_dispatch":
+                scope = integer(observation.get("paint_scope_id"), "paint_scope_id", positive=True, string=True)
+                if record.get("event") != "notify_dispatch" or record.get("render_boundary") != boundary:
+                    raise EvidenceError("scroll Paint lacks actual notify/render boundary")
+                if scope != integer(record.get("scope_id"), "scope_id", positive=True, string=True) or scope in stream["paints"]:
+                    raise EvidenceError("scroll Paint scope mismatch/duplicate")
+                begin = integer(record.get("begin_ns"), "scroll begin_ns")
+                end = integer(record.get("end_ns"), "scroll end_ns")
+                if not begin <= end <= at or type(observation.get("state_stable_at_dispatch_end")) is not bool:
+                    raise EvidenceError("scroll Paint interval/stability unavailable")
+                observed = observation.get("value_observed_ns")
+                observed = None if observed == -1 else integer(observed, "value_observed_ns")
+                if observed is not None and observed > begin:
+                    raise EvidenceError("scroll value observation follows Paint entry")
+                stream["paints"][scope] = (begin, end, observed, observation["state_stable_at_dispatch_end"])
+            elif boundary == "qt_gl_frame_swapped_after_observed_paint":
+                scope = integer(observation.get("paint_scope_id"), "swap paint_scope_id", positive=True, string=True)
+                stream["swaps"].append((scope, at))
+            stream["boundaries"][boundary] += 1
+            if callback:
+                stream["callbacks"].add(callback)
+            streams[viewport] = stream
+        except EvidenceError:
+            invalid += 1
+    result = {"available": bool(streams), "input_causality_proven": False, "content_presented_proven": False,
+              "measurement": "Qt value observations, actual Paint dispatch intervals, and GL swap callbacks; not display FPS",
+              "invalid_observations": invalid, "streams": []}
+    if invalid:
+        gaps.append(f"{invalid} scroll observations rejected for invalid/unsupported evidence")
+    for viewport, stream in sorted(streams.items()):
+        paints = sorted(stream["paints"].values())
+        intervals = [Decimal(right[0] - left[0]) / 1000000 for left, right in zip(paints, paints[1:])]
+        observed_to_paint = [Decimal(begin - observed) / 1000000 for begin, _, observed, stable in paints if stable and observed is not None]
+        swaps, unmatched, used = [], 0, set()
+        for scope, at in stream["swaps"]:
+            paint = stream["paints"].get(scope)
+            if paint is None or not paint[3] or at < paint[1] or scope in used:
+                unmatched += 1
+            else:
+                used.add(scope)
+                swaps.append(Decimal(at - paint[1]) / 1000000)
+        result["streams"].append({"viewport_id": str(viewport), "boundary_counts": dict(stream["boundaries"]),
+                                  "observing_callback_action_ids": [str(value) for value in sorted(stream["callbacks"])],
+                                  "paint_dispatch_intervals_ms": stats(intervals),
+                                  "value_observation_to_stable_paint_entry_ms": stats(observed_to_paint),
+                                  "stable_paint_end_to_gl_swap_callback_ms": stats(swaps),
+                                  "paint_changed_or_destroyed_during_dispatch": sum(not paint[3] for paint in paints),
+                                  "unmatched_or_duplicate_swap_observations": unmatched})
+    return result
+
+
 def action_candidates(events, calibration, timelines, swapchain, frequency, start, stop, gaps):
     begins, ends, diagnostics = defaultdict(list), defaultdict(list), defaultdict(list)
     stage_counts, stage_durations = Counter(), defaultdict(list)
@@ -515,6 +587,7 @@ def analyze(manifest_path, *, session_id=None, swapchain=None):
             else:
                 trace_report, calibration, events = read_trace(trace_data, manifest, session_id, frequency, gaps)
                 report["trace"] = {"available": True, **trace_report}
+                report["scroll_paint_observations"] = scroll_paint_observations(events, gaps)
                 if calibration is not None:
                     report["action_display_candidates"] = action_candidates(events, calibration, timelines, swapchain, frequency, start, stop, gaps)
     except (EvidenceError, OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:

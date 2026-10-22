@@ -34,6 +34,8 @@ python tools/ui_perf/analyze_presentations.py --manifest '<本次目录>/capture
 
 `analysis.json` 不解码 ETL 栈，需另用 WPA 打开 `system.etl` 查看 CPU Sampled/CPU Precise、线程等待和符号。配置栈采样成功不证明实际每个样本均有完整栈，实际覆盖须检查。PresentMon 的 ETW 显示事件不是相机测得的物理发光；Qt 操作后的下一条显示记录只作时间候选，不证明该操作已显示完成。没有记录、诊断关闭、未覆盖的异步路径和不完整采集会列为缺口，工具不会据此将 T00 标为完成。
 
+新诊断日志另有 `scroll_paint_observations`：按真实 viewport 身份统计 Paint 分派间隔、值观测至稳定 Paint 入口，以及同一 Paint 至 GL swap 回调的间隔，动画关闭时也可观察。被替换的值、绘制期间变化/销毁、未知观测时刻和缺失/重复 swap 单列。信号回调的 action 上下文只表示该回调现场；Qt 重入可能先执行其它处理，因此这些数值不作为输入到显示的因果延迟或实际 FPS。
+
 ## 接口依据
 
 - [PresentMon 控制台参数与 CSV 指标](https://github.com/GameTechDev/PresentMon/blob/main/README-ConsoleApplication.md)：使用 v2/QPC、独立会话名及定时退出；未显示的 `NA` 不作为零延迟。

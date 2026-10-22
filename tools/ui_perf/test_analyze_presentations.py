@@ -80,6 +80,53 @@ class AnalysisTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.manifest), encoding="utf-8")
         return analyzer.analyze(self.path, **options)
 
+    def scroll_event(self, boundary="qt_paint_dispatch", *, scope="44", at=8000, begin=6000,
+                     observed=4500, stable=True):
+        observation = {"viewport_id": "7", "observation_revision": "1", "paint_scope_id": scope,
+                       "callback_action_id": "1", "callback_request_id": "0", "value_observed_ns": observed,
+                       "boundary": boundary, "attribution": "signal_callback_context_only",
+                       "input_causality_proven": False, "content_presented_proven": False}
+        record = self.event("scroll_observation", at, action="0", scroll_observation=observation)
+        if boundary == "qt_paint_dispatch":
+            observation["state_stable_at_dispatch_end"] = stable
+            record.update(event="notify_dispatch", render_boundary=boundary, scope_id=scope,
+                          begin_ns=begin, end_ns=at)
+        return record
+
+    def test_scroll_paint_intervals_are_separate_from_input_and_display(self):
+        records = [self.scroll_event(), self.scroll_event(scope="45", begin=10000, at=12000, observed=6500),
+                   self.scroll_event("qt_gl_frame_swapped_after_observed_paint", at=8500)]
+        gaps = []
+        report = analyzer.scroll_paint_observations(records, gaps)
+        self.assertEqual(gaps, [])
+        stream = report["streams"][0]
+        self.assertEqual(stream["paint_dispatch_intervals_ms"]["p50"], "0.004")
+        self.assertEqual(stream["value_observation_to_stable_paint_entry_ms"]["p95"], "0.0035")
+        self.assertEqual(stream["stable_paint_end_to_gl_swap_callback_ms"]["p50"], "0.0005")
+        self.assertFalse(report["input_causality_proven"])
+        self.assertFalse(report["content_presented_proven"])
+
+    def test_scroll_changed_state_unknown_value_and_orphan_swap_are_not_latency_samples(self):
+        records = [self.scroll_event(stable=False), self.scroll_event(scope="45", at=10000, begin=9000, observed=-1),
+                   self.scroll_event("qt_gl_frame_swapped_after_observed_paint", at=11000)]
+        report = analyzer.scroll_paint_observations(records, [])
+        stream = report["streams"][0]
+        self.assertEqual(stream["value_observation_to_stable_paint_entry_ms"]["samples"], 0)
+        self.assertEqual(stream["stable_paint_end_to_gl_swap_callback_ms"]["samples"], 0)
+        self.assertEqual(stream["paint_changed_or_destroyed_during_dispatch"], 1)
+        self.assertEqual(stream["unmatched_or_duplicate_swap_observations"], 1)
+        self.assertFalse(analyzer.scroll_paint_observations([self.event("input_begin")], [])["available"])
+
+    def test_scroll_duplicate_scope_or_unsupported_claim_is_rejected(self):
+        bad = self.scroll_event()
+        bad["scroll_observation"]["input_causality_proven"] = True
+        gaps = []
+        self.assertFalse(analyzer.scroll_paint_observations([bad], gaps)["available"])
+        self.assertTrue(gaps)
+        report = analyzer.scroll_paint_observations([self.scroll_event(), self.scroll_event()], [])
+        self.assertEqual(report["invalid_observations"], 1)
+        self.assertEqual(report["streams"][0]["paint_dispatch_intervals_ms"]["samples"], 0)
+
     def test_qpc_above_double_precision_retains_one_tick_intervals(self):
         self.csv([self.row(0), self.row(1), self.row(2, AllInputToPhotonLatency="3.25", ClickToPhotonLatency="1.75")])
         report = self.run_analysis()

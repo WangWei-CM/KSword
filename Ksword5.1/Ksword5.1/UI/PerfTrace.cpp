@@ -3,6 +3,7 @@
 #if KSWORD_PERF_TRACE_ENABLED
 
 #include <QByteArray>
+#include <QAbstractScrollArea>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -13,6 +14,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHash>
+#include <QScrollBar>
+#include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QSaveFile>
 #include <QStringList>
 #include <QTabWidget>
@@ -108,7 +112,25 @@ namespace
         qint64 selfWallNs = -1, threadCycles = -1, selfThreadCycles = -1;
         qint64 threadCpu100ns = -1, selfThreadCpu100ns = -1;
         qint64 probeSetupNs = -1, probeUntilEnqueueNs = -1;
+        ks::ui::PerfScrollStateTrace scroll;
+        QString scrollBoundary;
+        bool scrollStateStable = false;
     };
+
+    // GUI-thread-only state for explicitly registered scroll viewports. A newer
+    // value replaces an unobserved value; callback context remains explicitly
+    // observational and is never replaced with a "latest input" tag.
+    struct ScrollViewportState
+    {
+        ks::ui::PerfScrollStateTrace latest, painted;
+        QString target;
+        QPointer<QObject> area;
+        QPointer<QObject> horizontalBar, verticalBar;
+        QMetaObject::Connection horizontalConnection, verticalConnection, swapConnection;
+        quint64 swappedPaintScopeId = 0;
+    };
+    QHash<QObject*, ScrollViewportState> scrollViewports;
+    constexpr qsizetype kScrollViewportLimit = 4096;
 
     struct TraceWriterState
     {
@@ -347,6 +369,26 @@ namespace
                 if (value.parentRequestId)
                     record.insert(QStringLiteral("parent_request_id"), QString::number(value.parentRequestId));
                 if (!value.origin.isEmpty()) record.insert(QStringLiteral("origin"), value.origin);
+                if (value.scroll.viewportId)
+                {
+                    const auto& scroll = value.scroll;
+                    QJsonObject observation{
+                        {QStringLiteral("viewport_id"), QString::number(scroll.viewportId)},
+                        {QStringLiteral("observation_revision"), QString::number(scroll.revision)},
+                        {QStringLiteral("paint_scope_id"), QString::number(scroll.paintScopeId)},
+                        {QStringLiteral("callback_action_id"), QString::number(scroll.callbackContext.actionId)},
+                        {QStringLiteral("callback_request_id"), QString::number(scroll.callbackContext.requestId)},
+                        {QStringLiteral("value_observed_ns"), static_cast<double>(scroll.observedAtNs)},
+                        {QStringLiteral("horizontal_value"), scroll.horizontalValue},
+                        {QStringLiteral("vertical_value"), scroll.verticalValue},
+                        {QStringLiteral("boundary"), value.scrollBoundary},
+                        {QStringLiteral("attribution"), QStringLiteral("signal_callback_context_only")},
+                        {QStringLiteral("input_causality_proven"), false},
+                        {QStringLiteral("content_presented_proven"), false}};
+                    if (value.event == QStringLiteral("notify_dispatch"))
+                        observation.insert(QStringLiteral("state_stable_at_dispatch_end"), value.scrollStateStable);
+                    record.insert(QStringLiteral("scroll_observation"), observation);
+                }
                 if (value.navigation.id)
                 {
                     const auto& navigation = value.navigation;
@@ -394,6 +436,12 @@ namespace
                 if (value.eventType >= 0) record.insert(QStringLiteral("event_type"), value.eventType);
                 if (value.event == QStringLiteral("notify_dispatch"))
                 {
+                    if (value.eventType == QEvent::Paint)
+                        record.insert(QStringLiteral("render_boundary"), QStringLiteral("qt_paint_dispatch"));
+                    else if (value.eventType == QEvent::UpdateRequest)
+                        record.insert(QStringLiteral("render_boundary"), QStringLiteral("qt_update_request_dispatch"));
+                    else if (value.eventType == QEvent::Expose)
+                        record.insert(QStringLiteral("render_boundary"), QStringLiteral("qt_expose_dispatch"));
                     record.insert(QStringLiteral("measurement"), QStringLiteral("qt_notify_dispatch"));
                     record.insert(QStringLiteral("event_type"), value.eventType);
                     record.insert(QStringLiteral("parent_scope_id"), QString::number(value.parentScopeId));
@@ -534,6 +582,18 @@ namespace ks::ui
                 record.endNs = record.atNs;
                 record.durationNs = std::max<qint64>(0, record.endNs - beganAtNs);
             }
+            enqueue(std::move(record));
+        }
+
+        void recordScroll(const PerfScrollStateTrace& state, const QString& target,
+            const char* boundary)
+        {
+            auto record = makeRecord("scroll_observation", "perf_scroll_state", target);
+            // The nested callback context describes the value observation, not ownership of a whole
+            // paint/composition or of other controls in that window.
+            record.actionId = record.requestId = 0;
+            record.scroll = state;
+            record.scrollBoundary = QString::fromLatin1(boundary);
             enqueue(std::move(record));
         }
 
@@ -905,6 +965,154 @@ namespace ks::ui
         : m_previous(currentTraceContext) { currentTraceContext = context; }
     PerfTraceContextScope::~PerfTraceContextScope() noexcept { currentTraceContext = m_previous; }
 
+    namespace
+    {
+        void recordViewportScrollValue(QObject* viewport, int horizontal, int vertical,
+            bool signalCallback = true)
+        {
+            if (!notifyTraceReady.load(std::memory_order_relaxed)) return;
+            auto state = scrollViewports.find(viewport);
+            if (state == scrollViewports.end()) return;
+            auto& value = state->latest;
+            const bool changed = value.horizontalValue != horizontal || value.verticalValue != vertical;
+            if (!changed && !signalCallback) return;
+            if (changed && value.revision != state->painted.revision)
+                PerfTrace::instance().recordScroll(value, state->target, "value_replaced_before_observed_paint");
+            if (changed) ++value.revision;
+            value.callbackContext = signalCallback ? CapturePerfTraceContext() : PerfTraceContext{};
+            value.observedAtNs = referenceClock().nsecsElapsed();
+            value.horizontalValue = horizontal;
+            value.verticalValue = vertical;
+            PerfTrace::instance().recordScroll(value, state->target,
+                signalCallback ? "scrollbar_value_signal" : "scrollbar_values_observed_at_paint_entry");
+        }
+
+        bool completeViewportScrollPaint(QObject* viewport, const PerfScrollStateTrace& observed,
+            quint64 paintScopeId)
+        {
+            auto state = scrollViewports.find(viewport);
+            if (state == scrollViewports.end() || state->latest.viewportId != observed.viewportId
+                || state->latest.revision != observed.revision) return false;
+            state->painted = observed;
+            state->painted.paintScopeId = paintScopeId;
+            return true;
+        }
+    }
+
+    void ObservePerfScrollArea(QAbstractScrollArea* area) noexcept
+    {
+        try
+        {
+            auto* app = QCoreApplication::instance();
+            if (!notifyTraceReady.load(std::memory_order_relaxed) || !app || !area
+                || QThread::currentThread() != app->thread() || !area->viewport()) return;
+            const QPointer<QAbstractScrollArea> owner(area);
+            const QPointer<QWidget> viewport(area->viewport());
+            if (!area->horizontalScrollBar() || !area->verticalScrollBar()) return;
+            auto state = scrollViewports.find(viewport.data());
+            if (state == scrollViewports.end())
+            {
+                if (scrollViewports.size() >= kScrollViewportLimit)
+                {
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        RecordPerfMark("perf_scroll_viewport_coverage_limit", QString::number(kScrollViewportLimit));
+                    }
+                    return;
+                }
+                ScrollViewportState initial;
+                initial.area = area;
+                initial.latest.viewportId = PerfTrace::instance().nextNotifyId();
+                initial.latest.horizontalValue = area->horizontalScrollBar()->value();
+                initial.latest.verticalValue = area->verticalScrollBar()->value();
+                initial.target = QString::fromUtf8(area->metaObject()->className());
+                if (!area->objectName().isEmpty()) initial.target += QLatin1Char('/') + area->objectName();
+                state = scrollViewports.insert(viewport.data(), std::move(initial));
+                QObject::connect(viewport.data(), &QObject::destroyed, [key = viewport.data()]()
+                {
+                    // Only the copied key is used after destruction; no widget read.
+                    scrollViewports.remove(key);
+                });
+                if (!owner || !viewport) return;
+                if (auto* gpu = qobject_cast<QOpenGLWidget*>(viewport.data()))
+                {
+                    const auto connection = QObject::connect(gpu, &QOpenGLWidget::frameSwapped,
+                        viewport.data(), [viewport]()
+                    {
+                        try
+                        {
+                            if (!notifyTraceReady.load(std::memory_order_relaxed) || !viewport) return;
+                            auto current = scrollViewports.find(viewport.data());
+                            if (current == scrollViewports.end() || !current->painted.paintScopeId
+                                || current->swappedPaintScopeId == current->painted.paintScopeId) return;
+                            current->swappedPaintScopeId = current->painted.paintScopeId;
+                            PerfTrace::instance().recordScroll(current->painted, current->target,
+                                "qt_gl_frame_swapped_after_observed_paint");
+                        }
+                        catch (...) {}
+                    }, Qt::DirectConnection);
+                    state = scrollViewports.find(viewport.data());
+                    if (state == scrollViewports.end()) { QObject::disconnect(connection); return; }
+                    state->swapConnection = connection;
+                }
+            }
+            state = scrollViewports.find(viewport.data());
+            if (!owner || !viewport || state == scrollViewports.end()) return;
+            if (state->area != area)
+            {
+                state->area = area;
+                ++state->latest.revision;
+                state->latest.callbackContext = {};
+                state->latest.observedAtNs = -1;
+                state->painted = {};
+                state->swappedPaintScopeId = 0;
+                state->target = QString::fromUtf8(area->metaObject()->className());
+                if (!area->objectName().isEmpty()) state->target += QLatin1Char('/') + area->objectName();
+                PerfTrace::instance().recordScroll(state->latest, state->target, "viewport_owner_replaced");
+            }
+            const auto bind = [owner, viewport](QScrollBar* bar, bool horizontal)
+            {
+                if (!owner || !viewport || !bar) return;
+                auto current = scrollViewports.find(viewport.data());
+                if (current == scrollViewports.end()) return;
+                auto& previousBar = horizontal ? current->horizontalBar : current->verticalBar;
+                auto& previousConnection = horizontal ? current->horizontalConnection : current->verticalConnection;
+                if (previousBar == bar) return;
+                const auto oldConnection = previousConnection;
+                const QPointer<QScrollBar> source(bar);
+                previousBar = bar;
+                QObject::disconnect(oldConnection);
+                if (!owner || !viewport || !source) return;
+                const auto connection = QObject::connect(source.data(), &QScrollBar::valueChanged, viewport.data(),
+                    [owner, viewport, source, horizontal](int emittedValue)
+                {
+                    try
+                    {
+                        if (!owner || !viewport || !source || owner->viewport() != viewport
+                            || (horizontal ? owner->horizontalScrollBar() : owner->verticalScrollBar()) != source) return;
+                        // An earlier Qt slot may synchronously change the value
+                        // again before this callback. Do not record a stale value.
+                        if (source->value() != emittedValue) return;
+                        auto* horizontalBar = owner->horizontalScrollBar();
+                        auto* verticalBar = owner->verticalScrollBar();
+                        if (horizontalBar && verticalBar)
+                            recordViewportScrollValue(viewport.data(), horizontalBar->value(), verticalBar->value());
+                    }
+                    catch (...) {}
+                });
+                current = scrollViewports.find(viewport.data());
+                if (current != scrollViewports.end())
+                    (horizontal ? current->horizontalConnection : current->verticalConnection) = connection;
+                else QObject::disconnect(connection);
+            };
+            bind(area->horizontalScrollBar(), true);
+            if (owner && viewport) bind(owner->verticalScrollBar(), false);
+        }
+        catch (...) {} // A failed observer must not change scrolling.
+    }
+
     PerfNotifyScope::PerfNotifyScope(QObject* receiver, const int eventType, const QEvent* event) noexcept
     {
         try
@@ -920,6 +1128,24 @@ namespace ks::ui
             m_parent = currentNotifyScope;
             m_eventType = eventType;
             m_previousContext = m_context = currentTraceContext;
+            if (eventType == QEvent::Paint)
+            {
+                auto state = scrollViewports.constFind(receiver);
+                auto* area = state == scrollViewports.cend() ? nullptr
+                    : qobject_cast<QAbstractScrollArea*>(state->area.data());
+                if (area && area->viewport() == receiver
+                    && area->horizontalScrollBar() && area->verticalScrollBar())
+                {
+                    // Qt's own earlier valueChanged slot can paint before our
+                    // signal callback. Read real values here without inventing
+                    // an input parent for this observational fallback.
+                    recordViewportScrollValue(receiver, area->horizontalScrollBar()->value(),
+                        area->verticalScrollBar()->value(), false);
+                    state = scrollViewports.constFind(receiver);
+                    m_scrollViewport = receiver;
+                    m_scrollState = state->latest;
+                }
+            }
             const bool input = eventType == QEvent::MouseButtonPress || eventType == QEvent::MouseMove || eventType == QEvent::MouseButtonRelease
                 || eventType == QEvent::MouseButtonDblClick || eventType == QEvent::KeyPress
                 || eventType == QEvent::KeyRelease || eventType == QEvent::Wheel
@@ -990,6 +1216,14 @@ namespace ks::ui
             record.eventType = m_eventType;
             record.actionId = m_context.actionId;
             record.requestId = m_context.requestId;
+            if (m_scrollState.viewportId)
+            {
+                record.scroll = m_scrollState;
+                record.scroll.paintScopeId = m_scopeId;
+                record.scrollBoundary = QStringLiteral("qt_paint_dispatch");
+                record.scrollStateStable = completeViewportScrollPaint(m_scrollViewport.data(),
+                    m_scrollState, m_scopeId);
+            }
             if (m_inputAction)
                 PerfTrace::instance().recordInput(false, m_context, m_target, m_eventType, m_inputSpontaneous);
             record.target = std::move(m_target);
