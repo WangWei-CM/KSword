@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QLineEdit>
 #include <QLabel>
+#include <QPushButton>
 #include <QToolButton>
 #include <QPointer>
 #include <QTimer>
@@ -63,6 +64,9 @@ namespace ks::ui
                 // 图标按钮保持方形，不能被文字按钮的横向留白压缩可见图标。
                 button->setProperty("ksword_toolbar_icon_only", true);
             }
+            // 几何QSS只匹配这两类按钮。给复选框/单选框追加无效规则会与
+            // 它们的独立主题绑定互相覆盖，并经StyleChange/PaletteChange循环排队。
+            if (!toolButton && !qobject_cast<QPushButton*>(button)) return;
             // 保留当前业务/主题配色，按原顺序一次补齐最终几何，避免首次图标按钮两次 polish。
             const QString currentStyle = button->styleSheet();
             QString finalStyle = currentStyle;

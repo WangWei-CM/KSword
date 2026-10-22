@@ -538,3 +538,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 同次按原MR-001条目复核：现有QApplication notify真实包围、inclusive/self与ns、queue指标更名、宏0探针移除及外部栈工具已实现；当前生产PerfTrace.cpp在QCoreApplication+QObject夹具重跑2ms事件/16ms外部工作，45项及宏0无日志1项通过。无QApplication/QWidget/业务/ETW采集。MR-001源码实施可以关闭，真实GUI/栈采集验收仍待用户；MR-003预热Dock的真实ready与MR-004实测不随之关闭，不要求新增全库业务封装。
 
 - 2026-10-22 诊断宏1按实际ADS currentChanging→当前widget同步show返回→currentChanged记录同一dock_switch的begin/selected/限定ready/end。ready仅对进入前已初始化、同一Dock/同一内容实例、仍可见且未closed/initializing成立，边界名ads_current_widget_show_returned；不声称queued布局、业务数据或present已完成。嵌套替换/目标改变/内容替换/销毁不伪造ready，初始/焦点观察仍单列。原visibilityChanged的0ms挂载回调仅宏1保存/恢复输入context，原可见/寿命/构造准入保持。61项实际闭包QtCore/QObject替身检查和宏0全MainWindow token恒等通过；真实ADS/GUI/50次循环另由用户验收。没有新增主题准备、系统查询、业务等待或通用接管框架。
+
+- 2026-10-22 用户诊断日志确认持续出现七个复选框一组的StyleChange及双倍PaletteChange。`NormalizeToolbarControl`原来向所有QAbstractButton追加只匹配QPushButton/QToolButton的几何QSS；日志面板七个复选框的独立主题绑定又恢复纯颜色QSS，两者经原队列反复覆盖。几何追加现只对真实QPushButton/QToolButton执行，复选框/单选框原高度、图标尺寸、标记和业务状态保持。不得靠停掉主题绑定、忽略真实换肤或单纯节流掩盖此循环；复用工具行时须检查其QSS选择器实际覆盖的控件类型。诊断记录存在丢失，不能据此计算完整帧率或推定普通版耗时；修复后GUI/实际性能由用户验收。
