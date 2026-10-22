@@ -12,6 +12,7 @@
 #include "VirtualLocationBackend.h"
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 
 #include <QWidget>
 #include <functional>
@@ -35,6 +36,8 @@ namespace ks::misc
         // 构造函数：只建界面，不访问注册表，避免打开“杂项”就触发一次系统查询。
         explicit VirtualLocationPage(QWidget* parent = nullptr);
         ~VirtualLocationPage() override;
+        // Initial searchable values; creates no page or native backend.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
 
     protected:
         // 页面第一次真正可见时才读一次系统状态。

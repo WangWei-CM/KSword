@@ -525,7 +525,9 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 return Preparation::Waiting;
             }
             if (useColdBodies && ((m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
-                || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)))
+                || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)
+                || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
+                || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)))
                 m_navigationSkippedColdBodies = true;
             else ensureTabInitialized(m_navigationPrepareCursor, false);
         }
@@ -606,8 +608,10 @@ void MiscDock::initializeSystemTimePage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_systemTimeHostWidget);
+    const QPointer<QWidget> host(m_systemTimeHostWidget);
     m_systemTimePage = new ks::misc::SystemTimePage(m_systemTimeHostWidget);
     hostLayout->addWidget(m_systemTimePage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeVirtualLocationPage()
@@ -618,8 +622,10 @@ void MiscDock::initializeVirtualLocationPage()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_virtualLocationHostWidget);
+    const QPointer<QWidget> host(m_virtualLocationHostWidget);
     m_virtualLocationPage = new ks::misc::VirtualLocationPage(m_virtualLocationHostWidget);
     hostLayout->addWidget(m_virtualLocationPage, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeBugcheckGuardPage()
@@ -818,7 +824,7 @@ int MiscDock::addNavigationTab(const int index, QWidget* host, const QIcon& icon
 {
     const int tabIndex = m_mainTabWidget->count();
     m_navigationTabs.add(kMiscNavigation[index], m_mainTabWidget, host, icon);
-    if (index == 17 || index == 19)
+    if (index == 2 || index == 3 || index == 17 || index == 19)
         host->setProperty("ksword_search_body_page_id", QString::fromLatin1(kMiscNavigation[index].id));
     return tabIndex;
 }
@@ -880,6 +886,16 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (!existing || !existing->m_systemTimePage)
+    {
+        main[2].coldBodyTexts = ks::misc::SystemTimePage::coldSearchBody();
+        main[2].coldBodyComplete = true;
+    }
+    if (!existing || !existing->m_virtualLocationPage)
+    {
+        main[3].coldBodyTexts = ks::misc::VirtualLocationPage::coldSearchBody();
+        main[3].coldBodyComplete = true;
+    }
     if (!existing || !existing->m_minidumpPage)
     {
         main[17].coldBodyTexts = MinidumpDock::coldSearchBody();

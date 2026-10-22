@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "../../Framework.h"
+#include "../../UI/PageNavigationCatalog.h"
 #include "../../ArkDriverClient/ArkDriverTypes.h"
 #include <functional>
 
@@ -34,6 +35,8 @@ namespace ks::misc
         // 构造函数：创建页面但不主动访问 R0，避免打开“杂项”时弹出驱动提示。
         explicit SystemTimePage(QWidget* parent = nullptr);
         ~SystemTimePage() override;
+        // Initial searchable values; creates no page or native backend.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
 
     protected:
         // 页面真正可见时才查询并轮询状态，隐藏后停止周期 IOCTL。

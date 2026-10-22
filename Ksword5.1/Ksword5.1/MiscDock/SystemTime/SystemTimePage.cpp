@@ -35,6 +35,80 @@
 
 namespace
 {
+    enum class SystemTimeBodyText
+    {
+        Warning, Persistence, Backend, Hyperv, HypervDescription, Hal, HalDescription,
+        Scheme, Compat, CompatDescription, Guarded, GuardedDescription, Control,
+        SpeedUp, SlowDown, Factor, Acknowledge, Refresh, TimeSync, Apply, Reset,
+        Status, Clock, CurrentMode, Operation
+    };
+    struct SystemTimeBodyEntry
+    {
+        const char* target;
+        const char* source;
+        bool mnemonic;
+    };
+    // Keep the original source text on controls; the cold projection uses the
+    // same definitions through the existing compatibility translation path.
+    constexpr SystemTimeBodyEntry kSystemTimeBody[] = {
+        {"ks_system_time_warning", "⚠ 系统全局变速会接管内核性能计数器；Hyper-V 后端还会改写"
+                "当前 Windows 分区的共享 QPC 倍率与偏置。它可能导致动画、超时、"
+                "音视频、网络协议、游戏和安全软件异常，"
+                "严重时会造成冻结或蓝屏。请先保存工作，强烈建议仅在虚拟机中使用。", false},
+        {"ks_system_time_persistence", "关闭页面不会自动恢复速度；请使用“恢复 1x”。"
+                "恢复 1x 会保留连续计数接管以避免回跳；驱动卸载时才恢复原始路径。", false},
+        {"ks_system_time_backend", "计时后端", false},
+        {"ks_system_time_hyperv", "Hyper-V 共享 QPC（推荐）", true},
+        {"ks_system_time_hyperv_description", "要求 Microsoft Hyper-V 与共享 QPC 页均可用。用户态通过共享页变速，"
+                "内核态通过 HAL 计数器钩子同步；任一校验失败都不会静默切到其它后端。", false},
+        {"ks_system_time_hal", "HAL 兼容后端（显式回退）", true},
+        {"ks_system_time_hal_description", "保留原有实现：关闭用户态快速旁路，使用户态和内核态都进入 HAL 计数器钩子。"
+                "仅在你明确选择后启用，不会由 Hyper-V 后端自动降级。", false},
+        {"ks_system_time_scheme", "实现模式", false},
+        {"ks_system_time_compat", "兼容模式（默认）", true},
+        {"ks_system_time_compat_description", "使用基于系统版本特征的 HAL 计数器函数指针接管路径，"
+                "兼容性最高；仍保留 KSword 的恢复与冲突监控。", false},
+        {"ks_system_time_guarded", "安全模式（即使安全一些但是仍然可能导致严重后果）", true},
+        {"ks_system_time_guarded_description", "使用相同接管原理，但在写入前额外验证描述符、函数槽和处理器表；"
+                "校验不通过时拒绝启用。该模式只能降低部分风险，仍可能冻结或蓝屏。", false},
+        {"ks_system_time_control", "计时倍率", false},
+        {"ks_system_time_speed_up", "加速 N 倍", true},
+        {"ks_system_time_slow_down", "减速到 1/N", true},
+        {"ks_system_time_factor_label", "倍率：", false},
+        {"ks_system_time_acknowledge", "我已保存工作，并理解该功能可能使系统不稳定", true},
+        {"ks_system_time_refresh", "刷新状态", true},
+        {"ks_system_time_time_sync", "从时间服务器更新时间", true},
+        {"ks_system_time_apply", "应用变速", true},
+        {"ks_system_time_reset", "恢复 1x", true},
+        {"ks_system_time_status", "当前状态", false},
+        {"ks_system_time_clock", "校准后时间：等待倍率状态", false},
+        {"ks_system_time_current_mode", "当前：等待查询", false},
+        {"ks_system_time_operation", "尚未查询 R0 状态", false}
+    };
+    const SystemTimeBodyEntry& systemTimeBodyEntry(SystemTimeBodyText id)
+    {
+        return kSystemTimeBody[static_cast<int>(id)];
+    }
+    QString systemTimeBodySource(SystemTimeBodyText id)
+    {
+        return QString::fromUtf8(systemTimeBodyEntry(id).source);
+    }
+    QString systemTimeBodyTarget(SystemTimeBodyText id)
+    {
+        return QString::fromLatin1(systemTimeBodyEntry(id).target);
+    }
+    QString originalSpeedText()
+    {
+        return ks::i18n::sourceText(QStringLiteral("原始速度 1x"));
+    }
+    QString calibratedClockText(qint64 epochMs, const QString& calibrationMode)
+    {
+        const QString time = QDateTime::fromMSecsSinceEpoch(epochMs)
+            .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+        return ks::i18n::sourceText(QStringLiteral("校准后时间：%1（按当前 %2 校准）"))
+            .arg(time, calibrationMode);
+    }
+
     constexpr int kStatusRefreshIntervalMs = 2000;
     constexpr int kClockRefreshIntervalMs = 250;
     constexpr int kTimeSyncTimeoutMs = 15000;
@@ -135,6 +209,50 @@ namespace
 
 namespace ks::misc
 {
+    QVector<ks::ui::PageSearchBodyText> SystemTimePage::coldSearchBody()
+    {
+        QVector<ks::ui::PageSearchBodyText> body;
+        body.reserve(25);
+        const auto text = [](SystemTimeBodyText id)
+        {
+            return ks::i18n::sourceText(systemTimeBodySource(id));
+        };
+        const auto append = [&body, &text](SystemTimeBodyText id, const QStringList& groups = {})
+        {
+            body.append({text(id), systemTimeBodyTarget(id), groups, systemTimeBodyEntry(id).mnemonic});
+        };
+        append(SystemTimeBodyText::Warning);
+        append(SystemTimeBodyText::Persistence);
+        // ParameterColumns reparents the original three sections, then the
+        // fixed actions and result-side controls follow in QObject order.
+        append(SystemTimeBodyText::Backend);
+        const QStringList backend{text(SystemTimeBodyText::Backend)};
+        for (const auto id : {SystemTimeBodyText::Hyperv, SystemTimeBodyText::HypervDescription,
+            SystemTimeBodyText::Hal, SystemTimeBodyText::HalDescription}) append(id, backend);
+        append(SystemTimeBodyText::Scheme);
+        const QStringList scheme{text(SystemTimeBodyText::Scheme)};
+        for (const auto id : {SystemTimeBodyText::Compat, SystemTimeBodyText::CompatDescription,
+            SystemTimeBodyText::Guarded, SystemTimeBodyText::GuardedDescription}) append(id, scheme);
+        append(SystemTimeBodyText::Control);
+        const QStringList control{text(SystemTimeBodyText::Control)};
+        for (const auto id : {SystemTimeBodyText::SpeedUp, SystemTimeBodyText::SlowDown,
+            SystemTimeBodyText::Factor, SystemTimeBodyText::Acknowledge}) append(id, control);
+        append(SystemTimeBodyText::Apply);
+        append(SystemTimeBodyText::Reset);
+        append(SystemTimeBodyText::Refresh);
+        append(SystemTimeBodyText::TimeSync);
+        append(SystemTimeBodyText::Status);
+        const QStringList status{text(SystemTimeBodyText::Status)};
+        // The real constructor replaces the waiting caption via its original
+        // resetCalibratedClock path. Capture a fresh wall-clock value here;
+        // an independently later constructor has its own original clock anchor.
+        body.append({calibratedClockText(QDateTime::currentMSecsSinceEpoch(), originalSpeedText()),
+            systemTimeBodyTarget(SystemTimeBodyText::Clock), status, false});
+        append(SystemTimeBodyText::CurrentMode, status);
+        append(SystemTimeBodyText::Operation, status);
+        return body;
+    }
+
     SystemTimePage::SystemTimePage(QWidget* parent)
         : QWidget(parent)
     {
@@ -231,21 +349,17 @@ namespace ks::misc
 
         // 永久警告不随确认消失，确保活动状态下始终能看到风险边界。
         m_warningLabel = new QLabel(
-            QStringLiteral(
-                "⚠ 系统全局变速会接管内核性能计数器；Hyper-V 后端还会改写"
-                "当前 Windows 分区的共享 QPC 倍率与偏置。它可能导致动画、超时、"
-                "音视频、网络协议、游戏和安全软件异常，"
-                "严重时会造成冻结或蓝屏。请先保存工作，强烈建议仅在虚拟机中使用。"),
+            systemTimeBodySource(SystemTimeBodyText::Warning),
             this);
+        m_warningLabel->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Warning));
         m_warningLabel->setWordWrap(true);
         applyWarningBannerStyle();
         introductionLayout->addWidget(m_warningLabel);
 
         m_persistenceLabel = new QLabel(
-            QStringLiteral(
-                "关闭页面不会自动恢复速度；请使用“恢复 1x”。"
-                "恢复 1x 会保留连续计数接管以避免回跳；驱动卸载时才恢复原始路径。"),
+            systemTimeBodySource(SystemTimeBodyText::Persistence),
             this);
+        m_persistenceLabel->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Persistence));
         m_persistenceLabel->setWordWrap(true);
         m_persistenceLabel->setStyleSheet(
             QStringLiteral("color:%1;")
@@ -259,38 +373,39 @@ namespace ks::misc
 
         // 后端组要求用户明确选择 Hyper-V 共享页或原 HAL 兼容路径。
         auto* backendGroup = new QGroupBox(
-            QStringLiteral("计时后端"),
+            systemTimeBodySource(SystemTimeBodyText::Backend),
             this);
+        backendGroup->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Backend));
         auto* backendLayout = new QVBoxLayout(backendGroup);
         // 后端、实现模式和倍率保留原分区，标题使用中性层次而非整块强调。
         ks::ui::StylePrimaryGroup(backendGroup);
         m_hypervBackendRadio = new QRadioButton(
-            QStringLiteral("Hyper-V 共享 QPC（推荐）"),
+            systemTimeBodySource(SystemTimeBodyText::Hyperv),
             backendGroup);
+        m_hypervBackendRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Hyperv));
         m_hypervBackendRadio->setToolTip(
             QStringLiteral(
                 "保留用户态 QPC 快速路径，接管 Hyper-V 共享倍率与偏置，并同步内核 HAL 计数器"));
         auto* hypervDescription = new QLabel(
-            QStringLiteral(
-                "要求 Microsoft Hyper-V 与共享 QPC 页均可用。用户态通过共享页变速，"
-                "内核态通过 HAL 计数器钩子同步；任一校验失败都不会静默切到其它后端。"),
+            systemTimeBodySource(SystemTimeBodyText::HypervDescription),
             backendGroup);
+        hypervDescription->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::HypervDescription));
         hypervDescription->setWordWrap(true);
         hypervDescription->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(KswordTheme::TextSecondaryHex()));
 
         m_halBackendRadio = new QRadioButton(
-            QStringLiteral("HAL 兼容后端（显式回退）"),
+            systemTimeBodySource(SystemTimeBodyText::Hal),
             backendGroup);
+        m_halBackendRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Hal));
         m_halBackendRadio->setToolTip(
             QStringLiteral(
                 "关闭用户态 QPC 快速旁路，并使用原有 HAL 计数器接管路径"));
         auto* halDescription = new QLabel(
-            QStringLiteral(
-                "保留原有实现：关闭用户态快速旁路，使用户态和内核态都进入 HAL 计数器钩子。"
-                "仅在你明确选择后启用，不会由 Hyper-V 后端自动降级。"),
+            systemTimeBodySource(SystemTimeBodyText::HalDescription),
             backendGroup);
+        halDescription->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::HalDescription));
         halDescription->setWordWrap(true);
         halDescription->setStyleSheet(
             QStringLiteral("color:%1;")
@@ -304,37 +419,38 @@ namespace ks::misc
         workspace->parameters()->addWidget(backendGroup);
         // 模式组明确区分兼容定位和写入前增强校验定位。
         auto* schemeGroup = new QGroupBox(
-            QStringLiteral("实现模式"),
+            systemTimeBodySource(SystemTimeBodyText::Scheme),
             this);
+        schemeGroup->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Scheme));
         auto* schemeLayout = new QVBoxLayout(schemeGroup);
         ks::ui::StylePrimaryGroup(schemeGroup);
         m_compatRadio = new QRadioButton(
-            QStringLiteral("兼容模式（默认）"),
+            systemTimeBodySource(SystemTimeBodyText::Compat),
             schemeGroup);
+        m_compatRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Compat));
         m_compatRadio->setToolTip(
             QStringLiteral(
                 "按当前系统版本特征定位并接管 HAL 计数器函数指针"));
         auto* compatDescription = new QLabel(
-            QStringLiteral(
-                "使用基于系统版本特征的 HAL 计数器函数指针接管路径，"
-                "兼容性最高；仍保留 KSword 的恢复与冲突监控。"),
+            systemTimeBodySource(SystemTimeBodyText::CompatDescription),
             schemeGroup);
+        compatDescription->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::CompatDescription));
         compatDescription->setWordWrap(true);
         compatDescription->setStyleSheet(
             QStringLiteral("color:%1;")
                 .arg(KswordTheme::TextSecondaryHex()));
 
         m_guardedResolutionRadio = new QRadioButton(
-            QStringLiteral("安全模式（即使安全一些但是仍然可能导致严重后果）"),
+            systemTimeBodySource(SystemTimeBodyText::Guarded),
             schemeGroup);
+        m_guardedResolutionRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Guarded));
         m_guardedResolutionRadio->setToolTip(
             QStringLiteral(
                 "使用相同接管原理，但在写入前验证描述符、函数槽和处理器表"));
         auto* guardedDescription = new QLabel(
-            QStringLiteral(
-                "使用相同接管原理，但在写入前额外验证描述符、函数槽和处理器表；"
-                "校验不通过时拒绝启用。该模式只能降低部分风险，仍可能冻结或蓝屏。"),
+            systemTimeBodySource(SystemTimeBodyText::GuardedDescription),
             schemeGroup);
+        guardedDescription->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::GuardedDescription));
         guardedDescription->setWordWrap(true);
         guardedDescription->setStyleSheet(
             QStringLiteral("color:%1;")
@@ -349,18 +465,21 @@ namespace ks::misc
 
         // 倍率组只提供同一原理下的 N 倍加速和 1/N 减速。
         auto* controlGroup = new QGroupBox(
-            QStringLiteral("计时倍率"),
+            systemTimeBodySource(SystemTimeBodyText::Control),
             this);
+        controlGroup->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Control));
         auto* controlLayout = new QVBoxLayout(controlGroup);
         ks::ui::StylePrimaryGroup(controlGroup);
         auto* modeLayout = new QFormLayout();
         modeLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         m_speedUpRadio = new QRadioButton(
-            QStringLiteral("加速 N 倍"),
+            systemTimeBodySource(SystemTimeBodyText::SpeedUp),
             controlGroup);
+        m_speedUpRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::SpeedUp));
         m_slowDownRadio = new QRadioButton(
-            QStringLiteral("减速到 1/N"),
+            systemTimeBodySource(SystemTimeBodyText::SlowDown),
             controlGroup);
+        m_slowDownRadio->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::SlowDown));
         m_speedUpRadio->setChecked(true);
         m_factorSpin = new QSpinBox(controlGroup);
         m_factorSpin->setRange(
@@ -372,32 +491,38 @@ namespace ks::misc
             QStringLiteral("设置 2 到 64 的整数倍率"));
         modeLayout->addRow(m_speedUpRadio);
         modeLayout->addRow(m_slowDownRadio);
-        modeLayout->addRow(QStringLiteral("倍率："), m_factorSpin);
+        modeLayout->addRow(systemTimeBodySource(SystemTimeBodyText::Factor), m_factorSpin);
+        modeLayout->labelForField(m_factorSpin)->setObjectName(
+            systemTimeBodyTarget(SystemTimeBodyText::Factor));
         controlLayout->addLayout(modeLayout);
 
         m_acknowledgeCheck = new QCheckBox(
-            QStringLiteral(
-                "我已保存工作，并理解该功能可能使系统不稳定"),
+            systemTimeBodySource(SystemTimeBodyText::Acknowledge),
             controlGroup);
+        m_acknowledgeCheck->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Acknowledge));
         controlLayout->addWidget(m_acknowledgeCheck);
 
         auto* buttonLayout = new QHBoxLayout();
         m_refreshButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/process_refresh.svg")),
-            QStringLiteral("刷新状态"),
+            systemTimeBodySource(SystemTimeBodyText::Refresh),
             controlGroup);
+        m_refreshButton->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Refresh));
         m_timeSyncButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/process_refresh.svg")),
-            QStringLiteral("从时间服务器更新时间"),
+            systemTimeBodySource(SystemTimeBodyText::TimeSync),
             controlGroup);
+        m_timeSyncButton->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::TimeSync));
         m_applyButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/process_start.svg")),
-            QStringLiteral("应用变速"),
+            systemTimeBodySource(SystemTimeBodyText::Apply),
             controlGroup);
+        m_applyButton->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Apply));
         m_resetButton = new QPushButton(
             QIcon(QStringLiteral(":/Icon/codeeditor_replace.svg")),
-            QStringLiteral("恢复 1x"),
+            systemTimeBodySource(SystemTimeBodyText::Reset),
             controlGroup);
+        m_resetButton->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Reset));
         m_refreshButton->setToolTip(
             QStringLiteral("重新查询 R0 计时器接管状态"));
         m_timeSyncButton->setToolTip(
@@ -425,19 +550,22 @@ namespace ks::misc
 
         // 状态组同时显示用户结论与可核对的解析证据。
         auto* statusGroup = new QGroupBox(
-            QStringLiteral("当前状态"),
+            systemTimeBodySource(SystemTimeBodyText::Status),
             this);
+        statusGroup->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Status));
         auto* statusLayout = new QVBoxLayout(statusGroup);
         ks::ui::StylePrimaryGroup(statusGroup);
         m_calibratedTimeLabel = new QLabel(
-            QStringLiteral("校准后时间：等待倍率状态"),
+            systemTimeBodySource(SystemTimeBodyText::Clock),
             statusGroup);
+        m_calibratedTimeLabel->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Clock));
         m_calibratedTimeLabel->setStyleSheet(
             QStringLiteral("font-size:15px;font-weight:650;color:%1;")
                 .arg(KswordTheme::PrimaryBlueHex));
         m_currentModeLabel = new QLabel(
-            QStringLiteral("当前：等待查询"),
+            systemTimeBodySource(SystemTimeBodyText::CurrentMode),
             statusGroup);
+        m_currentModeLabel->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::CurrentMode));
         m_currentModeLabel->setStyleSheet(
             QStringLiteral("font-size:16px;font-weight:700;color:%1;")
                 .arg(KswordTheme::TextPrimaryHex()));
@@ -448,8 +576,9 @@ namespace ks::misc
         m_diagnosticLabel->setTextInteractionFlags(
             Qt::TextSelectableByMouse);
         m_operationLabel = new QLabel(
-            QStringLiteral("尚未查询 R0 状态"),
+            systemTimeBodySource(SystemTimeBodyText::Operation),
             statusGroup);
+        m_operationLabel->setObjectName(systemTimeBodyTarget(SystemTimeBodyText::Operation));
         m_operationLabel->setWordWrap(true);
         statusLayout->addWidget(m_calibratedTimeLabel);
         statusLayout->addWidget(m_currentModeLabel);
@@ -938,8 +1067,7 @@ namespace ks::misc
         const qint64 measuredElapsedMs =
             std::max<qint64>(0, m_calibratedElapsedTimer.elapsed());
         qint64 calibratedElapsedMs = measuredElapsedMs;
-        QString calibrationMode = ks::i18n::sourceText(
-            QStringLiteral("原始速度 1x"));
+        QString calibrationMode = originalSpeedText();
         if (m_active &&
             m_currentCommand ==
                 KSWORD_ARK_SYSTEM_TIME_COMMAND_SPEED_UP &&
@@ -973,13 +1101,8 @@ namespace ks::misc
         const qint64 calibratedEpochMs =
             m_calibratedAnchorEpochMs +
             std::min(calibratedElapsedMs, maximumAddition);
-        const QString calibratedTimeText =
-            QDateTime::fromMSecsSinceEpoch(calibratedEpochMs)
-                .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
         m_calibratedTimeLabel->setText(
-            ks::i18n::sourceText(
-                QStringLiteral("校准后时间：%1（按当前 %2 校准）"))
-                .arg(calibratedTimeText, calibrationMode));
+            calibratedClockText(calibratedEpochMs, calibrationMode));
     }
 
     bool SystemTimePage::confirmHighRisk(

@@ -67,3 +67,5 @@
 - 2026-10-22 DSE冷搜索的原始evaluateBlockReason({}, {})通过既有AsyncOperation读取，默认姿态/定位和DriverClient::open的权限/通知保持。PageSearchPreparation以Complete/MorePages/Waiting区分工厂续片与实际值等待；Waiting仅由一次ready回调续作，不用0ms轮询。新搜索只替换弱控制器/generation回调，已完成初态供真实构造消费一次；直接激活在途时取消旧值发布并走原构造查询，允许已有只读open完成，不能覆盖活页。失败/拒绝回退原工厂，Misc析构先close门禁。DSE共享编辑器的标题省略/子项显隐仍依赖实际宽度和字体，所以整页正文保持真实控件扫描；未把17条不完整草稿投入产品，也未标coldBodyComplete。后续真实refresh/show/动作/主题更新继续原权威查询，未改DSE/KSec业务。
 
 - 2026-10-22 StructuredFieldView空初态的搜索占位、两格式项、复制按钮与两表头由coldSearchBody(targetPrefix)复用updateTranslations的同一六条定义；页面显式setSearchTargetPrefix才命名已有四个目标，未接入的实例不改objectName。此接口只代表空初态，不替代非空规范文档/已有真实控件扫描；无新模型、控件、定时器或主题观察器。真实方法与冻结旧翻译方法在原文、实际英文及助记符扰动下162项QtCore/QObject替身对照通过，真实GUI/布局/polish由用户验收。
+
+- 2026-10-22 SystemTime/VirtualLocation冷初态分别25/42条、25/26目标接入真实Misc host。两页UI与冷源共用原文案/键/预设/纯格式化，Virtual复用StructuredFieldView六条；warm页仍扫描实时控件，激活原工厂后清host标记，完整兼容准备仍补齐。系统时间是目录读取时的新鲜墙钟快照，沿原默认1x格式；它不承诺等于独立稍后构造/250ms刷新的时间，且不回填旧搜索时钟到实际页，不缓存/改变系统或R0计时。原构造/show/query/风险确认/修改动作与布局保持。717项实际纯值/原坐标数学/冻结旧格式对照、181项实际prepare/AsyncOperation受控QtCore及60项原业务源码边界通过；真实GUI另验，不据两个新源关闭整个B03。
