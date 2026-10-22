@@ -1077,8 +1077,7 @@ void NetworkAuditPage::initializeUi()
         QStringLiteral("进程"),
         QStringLiteral("本地端点"),
         QStringLiteral("远端端点"),
-        QStringLiteral("状态"),
-        QStringLiteral("来源/明细")
+        QStringLiteral("状态")
     }, true);
     m_tcpTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tcpTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -1094,8 +1093,7 @@ void NetworkAuditPage::initializeUi()
         QStringLiteral("PID"),
         QStringLiteral("进程"),
         QStringLiteral("本地端点"),
-        QStringLiteral("来源"),
-        QStringLiteral("明细")
+        QStringLiteral("来源")
     }, false);
     m_udpTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_udpTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -1108,7 +1106,7 @@ void NetworkAuditPage::initializeUi()
     m_crossSummaryTable = new ks::ui::TableActionTableView(m_crossViewPage);
     // 汇总由上方端点数据派生，自有复制菜单足够，无需独立快照栏。
     ks::ui::SetTableActionBarMode(m_crossSummaryTable, ks::ui::TableActionBarMode::None);
-    configureCrossViewValueTable(m_crossSummaryTable, { QStringLiteral("PID"), QStringLiteral("进程"), QStringLiteral("TCP"), QStringLiteral("UDP"), QStringLiteral("摘要") }, false);
+    configureCrossViewValueTable(m_crossSummaryTable, { QStringLiteral("PID"), QStringLiteral("进程"), QStringLiteral("TCP"), QStringLiteral("UDP") }, false);
     m_crossSummaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_crossSummaryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_crossSummaryTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2574,9 +2572,12 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
     if (!source || isCanceled()) return {};
     const auto& tcpEndpointRows = source->tcpEndpointRows;
     const auto& udpEndpointRows = source->udpEndpointRows;
-    const auto prepareRow = [&language](CrossViewValueRow value) -> CrossViewValue {
-        value.searchFields.reserve(value.fields.size());
+    const auto prepareRow = [&language](CrossViewValueRow value, const QStringList& searchDetails) -> CrossViewValue {
+        value.searchFields.reserve(value.fields.size() + searchDetails.size());
         for (const auto& field : value.fields)
+            value.searchFields.push_back(language.sourceText(field).toCaseFolded());
+        // 删除冗余展示列后，原明细/摘要仍可由现有搜索入口检索。
+        for (const auto& field : searchDetails)
             value.searchFields.push_back(language.sourceText(field).toCaseFolded());
         return std::make_shared<const CrossViewValueRow>(std::move(value));
     };
@@ -2670,12 +2671,12 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
         value.processId = row.processId;
         value.sourceIndex = static_cast<qulonglong>(index);
         value.fields = {QString::number(row.processId), row.processName, row.localEndpointText,
-            row.remoteEndpointText, row.stateText, row.detailText};
+            row.remoteEndpointText, row.stateText};
         QStringList keyFields{QString::number(row.processId), QString::number(row.isR0Snapshot),
             row.localEndpointText, row.remoteEndpointText};
         if (row.isR0Snapshot) keyFields.push_back(row.detailText);
         value.identity = crossViewIdentity('T', keyFields);
-        tcpRows.push_back(prepareRow(std::move(value)));
+        tcpRows.push_back(prepareRow(std::move(value), {row.detailText}));
     }
     std::vector<CrossViewValue> udpRows;
     udpRows.reserve(udpEndpointRows.size());
@@ -2685,10 +2686,10 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
         CrossViewValueRow value;
         value.processId = row.processId;
         value.fields = {QString::number(row.processId), row.processName, row.localEndpointText,
-            row.sourceText, row.detailText};
+            row.sourceText};
         value.identity = crossViewIdentity('U', {QString::number(row.processId), row.localEndpointText,
             row.sourceText, row.detailText});
-        udpRows.push_back(prepareRow(std::move(value)));
+        udpRows.push_back(prepareRow(std::move(value), {row.detailText}));
     }
     std::vector<CrossViewValue> summaryRows;
     summaryRows.reserve(effectiveCrossRows.size());
@@ -2698,6 +2699,14 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
             .arg(statusText.isEmpty() ? QStringLiteral("?") : statusText).arg(static_cast<qulonglong>(count));
         return statusText.isEmpty() ? QStringLiteral("?") : statusText;
     };
+    const auto countText = [&r0CountText](const std::size_t r3Count,
+        const std::size_t r0Count, const QString& statusText) {
+        // 只有完整 R0 快照的数值可与 R3 合并，不能把未知/截断状态伪装成相等。
+        if (statusText == QStringLiteral("ok") && r3Count == r0Count)
+            return QString::number(static_cast<qulonglong>(r3Count));
+        return QStringLiteral("R3:%1 / R0:%2").arg(static_cast<qulonglong>(r3Count))
+            .arg(r0CountText(r0Count, statusText));
+    };
     for (const auto& aggregate : effectiveCrossRows)
     {
         if (isCanceled()) return {};
@@ -2706,16 +2715,14 @@ std::shared_ptr<const NetworkAuditPage::CrossViewPresentation> NetworkAuditPage:
         value.processId = row.processId;
         value.identity = crossViewIdentity('S', {QString::number(row.processId)});
         value.fields = {QString::number(row.processId), row.processName,
-            QStringLiteral("R3:%1 / R0:%2").arg(static_cast<qulonglong>(row.tcpCount))
-                .arg(r0CountText(aggregate.tcpR0Count, r0TcpStatusText)),
-            QStringLiteral("R3:%1 / R0:%2").arg(static_cast<qulonglong>(row.udpCount))
-                .arg(r0CountText(aggregate.udpR0Count, r0UdpStatusText)),
+            countText(row.tcpCount, aggregate.tcpR0Count, r0TcpStatusText),
+            countText(row.udpCount, aggregate.udpR0Count, r0UdpStatusText)};
+        summaryRows.push_back(prepareRow(std::move(value), {
             QStringLiteral("R3 TCP: %1 | R0 TCP: %2 | R3 UDP: %3 | R0 UDP: %4")
                 .arg(row.tcpSummary.isEmpty() ? QStringLiteral("<无>") : row.tcpSummary)
                 .arg(aggregate.tcpR0Summary.isEmpty() ? QStringLiteral("<无>") : aggregate.tcpR0Summary)
                 .arg(row.udpSummary.isEmpty() ? QStringLiteral("<无>") : row.udpSummary)
-                .arg(aggregate.udpR0Summary.isEmpty() ? QStringLiteral("<无>") : aggregate.udpR0Summary)};
-        summaryRows.push_back(prepareRow(std::move(value)));
+                .arg(aggregate.udpR0Summary.isEmpty() ? QStringLiteral("<无>") : aggregate.udpR0Summary)}));
     }
     if (isCanceled()) return {};
     auto prepared = std::make_shared<CrossViewPresentation>();
