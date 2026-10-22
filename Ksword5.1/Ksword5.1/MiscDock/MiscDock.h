@@ -48,7 +48,8 @@ class MiscDock final : public QWidget
     Q_OBJECT
 
 public:
-    static ks::ui::PageNavigationCatalog navigationCatalog(const MiscDock* existing = nullptr);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MiscDock* existing = nullptr,
+        bool includeColdSearchBody = true);
     QWidget* activateNavigationDescriptor(const QString& id);
 
     // 构造函数：

@@ -523,7 +523,8 @@ void appendMemoryNavigationChildren(ks::ui::PageNavigationCatalog& catalog, cons
 }
 }
 
-ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* existing)
+ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* existing,
+    const bool includeColdSearchBody)
 {
     ks::ui::PageNavigationCatalog catalog;
     for (const auto& factory : pageFactories()) {
@@ -544,12 +545,12 @@ ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* ex
             page.current = existing->m_tabWidget->currentWidget() == state->widget;
             if (state->ready) { actual = state->widget; }
         } else { page.current = page.id == QLatin1String("process_module"); }
-        if (!actual && page.id == QLatin1String("process_pte"))
+        if (includeColdSearchBody && !actual && page.id == QLatin1String("process_pte"))
         {
             page.coldBodyTexts = coldProcessPteSearchBody();
             page.coldBodyComplete = true;
         }
-        else if (!actual && page.id == QLatin1String("search"))
+        else if (includeColdSearchBody && !actual && page.id == QLatin1String("search"))
         {
             page.coldBodyTexts = coldMemorySearchBody();
             page.coldBodyComplete = true;
@@ -563,7 +564,7 @@ ks::ui::PageNavigationCatalog MemoryDock::navigationCatalog(const MemoryDock* ex
 QWidget* MemoryDock::activateNavigationDescriptor(const QString& id)
 {
     const QPointer<MemoryDock> owner(this);
-    const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this), QString());
+    const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(this, false), QString());
     if (!resolved) { return nullptr; }
     const auto desired = std::find_if(resolved->cbegin(), resolved->cend(), [&](const auto& page) { return page.page.id == id; });
     if (desired == resolved->cend() || !desired->page.visible || !desired->page.enabled) { return nullptr; }

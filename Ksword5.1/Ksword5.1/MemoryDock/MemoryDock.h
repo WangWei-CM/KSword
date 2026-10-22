@@ -158,7 +158,8 @@ public:
     // Complete cold bodies can skip an unvisited factory; compatibility callers
     // keep the original default that prepares actual controls.
     bool prepareNavigationPages(bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false);
-    static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr);
+    static ks::ui::PageNavigationCatalog navigationCatalog(const MemoryDock* existing = nullptr,
+        bool includeColdSearchBody = true);
     QWidget* activateNavigationDescriptor(const QString& id);
     std::function<void(const QString&)> openPoolModuleDetails;
 

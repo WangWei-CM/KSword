@@ -7531,14 +7531,20 @@ void MainWindow::initGlobalUiSearchController()
         if (dock == m_dockMisc) return m_miscWidget;
         return nullptr;
     };
-    const auto catalogProvider = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
-        (ads::CDockWidget* dock) -> std::optional<ks::ui::PageNavigationCatalog>
+    const auto readCatalog = [navigationOwner, navigationManager, navigationLifetime, existingNavigationContent]
+        (ads::CDockWidget* dock, const bool includeColdSearchBody) -> std::optional<ks::ui::PageNavigationCatalog>
     {
         const auto live = navigationLifetime.lock();
         if (!dock || !navigationOwner || !navigationManager || !live || !live->load(std::memory_order_acquire)) return std::nullopt;
         const QString key = dock->property("ks_dock_layout_key").toString();
         QWidget* const existing = existingNavigationContent(dock);
-        auto catalog = ks::ui::RegisteredPageNavigationCatalog(key, existing);
+        // Taskbar目录只读导航值；全文搜索仍使用同一完整正文生产者。
+        std::optional<ks::ui::PageNavigationCatalog> catalog;
+        if (!includeColdSearchBody && key == QStringLiteral("memory"))
+            catalog = MemoryDock::navigationCatalog(dynamic_cast<MemoryDock*>(existing), false);
+        else if (!includeColdSearchBody && key == QStringLiteral("misc"))
+            catalog = MiscDock::navigationCatalog(dynamic_cast<MiscDock*>(existing), false);
+        else catalog = ks::ui::RegisteredPageNavigationCatalog(key, existing);
         if (catalog && !existing && key == QStringLiteral("misc"))
             for (auto& page : *catalog)
                 if (page.id == QStringLiteral("misc.bugcheck")) page.visible =
@@ -7558,8 +7564,12 @@ void MainWindow::initGlobalUiSearchController()
         return navigationAdmission() && dock && ks::ui::RegisteredPageNavigationCatalogSearchComplete(
             dock->property("ks_dock_layout_key").toString());
     };
-    m_globalUiSearchController->setPageCatalog(catalogProvider, catalogNavigator, searchCompleteness);
-    m_pageNavigationBridge->setPageCatalog(catalogProvider, catalogNavigator);
+    m_globalUiSearchController->setPageCatalog([readCatalog](ads::CDockWidget* dock) {
+        return readCatalog(dock, true);
+    }, catalogNavigator, searchCompleteness);
+    m_pageNavigationBridge->setPageCatalog([readCatalog](ads::CDockWidget* dock) {
+        return readCatalog(dock, false);
+    }, catalogNavigator);
 
     connect(
         m_customTitleBar,

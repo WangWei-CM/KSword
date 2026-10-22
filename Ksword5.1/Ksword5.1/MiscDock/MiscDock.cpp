@@ -988,61 +988,63 @@ QWidget* MiscDock::navigationChild(const int index) const
     default: return nullptr;
     }
 }
-ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existing)
+ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existing,
+    const bool includeColdSearchBody)
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
-    if (!existing || !existing->m_soundSourcePage)
+    if (includeColdSearchBody && (!existing || !existing->m_soundSourcePage))
     {
         main[1].coldBodyTexts = ks::misc::SoundSourcePage::coldSearchBody();
         main[1].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_systemTimePage)
+    if (includeColdSearchBody && (!existing || !existing->m_systemTimePage))
     {
         main[2].coldBodyTexts = ks::misc::SystemTimePage::coldSearchBody();
         main[2].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_virtualLocationPage)
+    if (includeColdSearchBody && (!existing || !existing->m_virtualLocationPage))
     {
         main[3].coldBodyTexts = ks::misc::VirtualLocationPage::coldSearchBody();
         main[3].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_bugcheckGuardPage)
+    if (includeColdSearchBody && (!existing || !existing->m_bugcheckGuardPage))
     {
         main[4].coldBodyTexts = ks::misc::BugcheckGuardPage::coldSearchBody();
         main[4].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_contextMenuCleanerTab)
+    if (includeColdSearchBody && (!existing || !existing->m_contextMenuCleanerTab))
     {
         main[7].coldBodyTexts = ks::misc::ContextMenuCleanerTab::coldSearchBody();
         main[7].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_clipboardGuardPage)
+    if (includeColdSearchBody && (!existing || !existing->m_clipboardGuardPage))
     {
         main[10].coldBodyTexts = ks::misc::ClipboardGuardPage::coldSearchBody();
         main[10].coldBodyComplete = true;
     }
-    if (existing && !existing->m_desktopDrawingPage && existing->m_desktopDrawingSearchDisplays)
+    if (includeColdSearchBody && existing && !existing->m_desktopDrawingPage && existing->m_desktopDrawingSearchDisplays)
     {
         main[12].coldBodyTexts = ks::misc::DesktopDrawingPage::coldSearchBody(*existing->m_desktopDrawingSearchDisplays);
         main[12].coldBodyComplete = true;
     }
-    if (existing && !existing->m_windowInjectionPage && existing->m_windowInjectionSearchSnapshot)
+    if (includeColdSearchBody && existing && !existing->m_windowInjectionPage && existing->m_windowInjectionSearchSnapshot)
     {
         main[13].coldBodyTexts = ks::window_input::coldSearchBody(*existing->m_windowInjectionSearchSnapshot);
         main[13].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_minidumpPage)
+    if (includeColdSearchBody && (!existing || !existing->m_minidumpPage))
     {
         main[17].coldBodyTexts = MinidumpDock::coldSearchBody();
         main[17].coldBodyComplete = true;
     }
-    if (!existing || !existing->m_themeCheckPage)
+    if (includeColdSearchBody && (!existing || !existing->m_themeCheckPage))
     {
         main[19].coldBodyTexts = ks::misc::ThemeCheckPage::coldSearchBody();
         main[19].coldBodyComplete = true;
     }
-    else main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
+    else if (existing && existing->m_themeCheckPage)
+        main[19].searchTexts = ks::misc::ThemeCheckPage::navigationRootSearchTexts();
     if (existing) main = existing->m_navigationTabs.describe(std::move(main));
     else main[4].visible = false; // MainWindow以相同配置/会话状态修正尚未构造的入口。
     ks::ui::PageNavigationCatalog schema;
@@ -1074,7 +1076,7 @@ QWidget* MiscDock::activateNavigationDescriptor(const QString& id)
     if (index < 0) return nullptr;
     const auto permitted = [self, &id](bool current) {
         if (!self) return false;
-        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self), QString());
+        const auto resolved = ks::ui::ResolvePageNavigationCatalog(navigationCatalog(self, false), QString());
         if (!resolved) return false;
         for (const auto& page : *resolved)
             if (page.page.id == id) return page.page.visible && page.page.enabled && (!current || page.page.current);
@@ -1086,7 +1088,7 @@ QWidget* MiscDock::activateNavigationDescriptor(const QString& id)
     ensureTabInitialized(tabs ? tabs->indexOf(host) : -1, false);
     if (!self || !tabs || !host || self->m_mainTabWidget != tabs || self->navigationHost(index) != host || !permitted(false)) return nullptr;
     const QPointer<QWidget> child(self->navigationChild(index));
-    if (!self->m_navigationTabs.activate(parentId, navigationCatalog(self))) return nullptr;
+    if (!self->m_navigationTabs.activate(parentId, navigationCatalog(self, false))) return nullptr;
     if (!self || !tabs || !host || self->m_mainTabWidget != tabs || self->navigationHost(index) != host
         || self->navigationChild(index) != child || tabs->currentWidget() != host || !permitted(false)) return nullptr;
     if (id == parentId) return permitted(true) ? host.data() : nullptr;
