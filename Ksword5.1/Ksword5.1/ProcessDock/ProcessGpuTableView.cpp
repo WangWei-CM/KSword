@@ -1,4 +1,5 @@
 #include "./ProcessGpuTableView.h"
+#include "../UI/PerfTrace.h"
 
 #include <QAbstractItemDelegate>
 #include <QElapsedTimer>
@@ -8,9 +9,75 @@
 #include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QSurfaceFormat>
 #include <QTimer>
+#if KSWORD_PERF_TRACE_ENABLED
+#include <QJsonObject>
+#endif
 
 namespace
 {
+#if KSWORD_PERF_TRACE_ENABLED
+    // Observe the existing transition; never make a context current, scan other
+    // views, start a sampler, or rebuild the table to collect its conditions.
+    void RecordProcessGpuConditions(const ks::process_ui::ProcessGpuTableView* table,
+        const char* reason, QOpenGLContext* gl = nullptr) noexcept
+    {
+        try
+        {
+            QElapsedTimer capture; capture.start();
+            QJsonObject conditions{
+                {QStringLiteral("schema"), 1},
+                {QStringLiteral("source"), QStringLiteral("process_render_backend_transition")},
+                {QStringLiteral("reason"), QString::fromLatin1(reason)},
+                {QStringLiteral("gpu_requested"), table->gpuAccelerationEnabled()},
+                {QStringLiteral("backend"), table->property("ksword_process_render_backend").toString()},
+                {QStringLiteral("renderer"), table->property("ksword_process_gpu_renderer").toString()},
+                {QStringLiteral("renderer_scope"), gl ? QStringLiteral("current_initializing_context") : QStringLiteral("last_initialized_context")},
+                {QStringLiteral("fallback"), table->property("ksword_process_gpu_fallback").toString()},
+                {QStringLiteral("viewport_width"), table->viewport()->width()},
+                {QStringLiteral("viewport_height"), table->viewport()->height()},
+                {QStringLiteral("viewport_dpr"), table->viewport()->devicePixelRatioF()},
+                {QStringLiteral("data_quantity_coverage"), QStringLiteral("process_view_at_backend_transition")}
+            };
+            if (const QAbstractItemModel* model = table->model())
+            {
+                conditions.insert(QStringLiteral("model_rows"), model->rowCount(table->rootIndex()));
+                conditions.insert(QStringLiteral("model_columns"), model->columnCount(table->rootIndex()));
+                conditions.insert(QStringLiteral("model_class"), QString::fromUtf8(model->metaObject()->className()));
+            }
+            if (gl)
+            {
+                const bool current = QOpenGLContext::currentContext() == gl;
+                const QSurfaceFormat format = gl->format();
+                conditions.insert(QStringLiteral("context_current"), current);
+                conditions.insert(QStringLiteral("context_valid"), gl->isValid());
+                conditions.insert(QStringLiteral("is_opengl_es"), gl->isOpenGLES());
+                conditions.insert(QStringLiteral("context_major"), format.majorVersion());
+                conditions.insert(QStringLiteral("context_minor"), format.minorVersion());
+                conditions.insert(QStringLiteral("context_profile"), static_cast<int>(format.profile()));
+                conditions.insert(QStringLiteral("context_samples"), format.samples());
+                conditions.insert(QStringLiteral("context_swap_interval"), format.swapInterval());
+                conditions.insert(QStringLiteral("opengl_module_type"), static_cast<int>(QOpenGLContext::openGLModuleType()));
+                QOpenGLContext* shared = QOpenGLContext::globalShareContext();
+                conditions.insert(QStringLiteral("global_share_context_exists"), shared != nullptr);
+                conditions.insert(QStringLiteral("shares_global_context"), shared && QOpenGLContext::areSharing(gl, shared));
+                if (current)
+                {
+                    QOpenGLFunctions* functions = gl->functions();
+                    const auto text = [functions](GLenum name) {
+                        const auto* bytes = functions->glGetString(name);
+                        return QString::fromLatin1(bytes ? reinterpret_cast<const char*>(bytes) : "");
+                    };
+                    conditions.insert(QStringLiteral("gl_vendor"), text(GL_VENDOR));
+                    conditions.insert(QStringLiteral("gl_version"), text(GL_VERSION));
+                }
+            }
+            conditions.insert(QStringLiteral("probe_capture_ns"), static_cast<double>(capture.nsecsElapsed()));
+            ks::ui::RecordPerfRuntimeConditions(conditions);
+        }
+        catch (...) {}
+    }
+#endif
+
     // GL 控件负责上下文与 FBO 生命周期；表格只负责既有委托/样式绘制。
     class ProcessGlViewport final : public QOpenGLWidget
     {
@@ -46,10 +113,16 @@ namespace
                 || normalized.contains("softpipe") || normalized.contains("software")
                 || normalized.contains("gdi_generic") || normalized.contains("swiftshader"))
             {
+#if KSWORD_PERF_TRACE_ENABLED
+                RecordProcessGpuConditions(m_table, "renderer_rejected", context());
+#endif
                 m_table->scheduleRasterFallback("software_or_unknown_renderer");
                 return;
             }
             m_table->setProperty("ksword_process_render_backend", "opengl");
+#if KSWORD_PERF_TRACE_ENABLED
+            RecordProcessGpuConditions(m_table, "gl_initialized", context());
+#endif
         }
 
         // 此处上下文已 current，且 Qt 的离屏 framebuffer 已绑定。
@@ -126,23 +199,35 @@ namespace ks::process_ui
                 replaceRenderViewport(new QWidget(this));
             }
             setProperty("ksword_process_render_backend", "raster");
+#if KSWORD_PERF_TRACE_ENABLED
+            RecordProcessGpuConditions(this, "gpu_disabled");
+#endif
             return;
         }
         // 已启用的有效视口不重建；失败后再次明确开启则允许重新尝试。
         if (m_gpuViewport != nullptr)
         {
+#if KSWORD_PERF_TRACE_ENABLED
+            RecordProcessGpuConditions(this, "gpu_request_reused");
+#endif
             return;
         }
         const QString platform = QGuiApplication::platformName(); // 当前 Qt 平台插件。
         if (platform == QStringLiteral("offscreen") || platform == QStringLiteral("minimal"))
         {
             setProperty("ksword_process_gpu_fallback", "unsupported_platform");
+#if KSWORD_PERF_TRACE_ENABLED
+            RecordProcessGpuConditions(this, "unsupported_platform");
+#endif
             return;
         }
 
         m_gpuViewport = new ProcessGlViewport(this);
         setProperty("ksword_process_render_backend", "opengl_pending");
         replaceRenderViewport(m_gpuViewport);
+#if KSWORD_PERF_TRACE_ENABLED
+        RecordProcessGpuConditions(this, "gpu_requested");
+#endif
     }
 
     bool ProcessGpuTableView::viewportEvent(QEvent* eventObject)
@@ -320,6 +405,9 @@ namespace ks::process_ui
             replaceRenderViewport(new QWidget(this));
             m_fallbackQueued = false;
             setProperty("ksword_process_render_backend", "raster");
+#if KSWORD_PERF_TRACE_ENABLED
+            RecordProcessGpuConditions(this, "raster_fallback_applied");
+#endif
         });
     }
 }

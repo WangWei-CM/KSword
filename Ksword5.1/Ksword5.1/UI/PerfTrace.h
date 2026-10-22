@@ -59,6 +59,10 @@ namespace ks::ui
     // the writer never calls back into widgets or samples business services.
     void RecordPerfRuntimeConditions(const QJsonObject& conditions) noexcept;
 
+    // An already imported export address identifies the actual loaded module.
+    // Only the writer resolves its path and hashes the file at observation time.
+    void RecordPerfLoadedModule(const char* role, quintptr exportAddress) noexcept;
+
     // 获取全局单调时钟经过的毫秒数；分片计时需要与日志时间轴对齐时使用。
     qint64 PerfTraceNowMs();
 
@@ -133,6 +137,7 @@ namespace ks::ui
     inline void RecordPerfSpanWithCount(const char*, const QString&, qint64, qint64) {}
     inline void RecordPerfMark(const char*, const QString&) {}
     inline void RecordPerfRuntimeConditions(const QJsonObject&) noexcept {}
+    inline void RecordPerfLoadedModule(const char*, quintptr) noexcept {}
     inline qint64 PerfTraceNowMs() { return 0; }
     inline qint64 PerfTraceNowNs() { return 0; }
     inline void RecordPerfSpanNs(const char*, const QString&, qint64, qint64 = -1) {}

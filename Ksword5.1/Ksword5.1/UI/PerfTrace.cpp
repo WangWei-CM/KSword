@@ -98,6 +98,7 @@ namespace
         quintptr threadId = 0;
         QString origin;
         QJsonObject conditions;
+        quintptr moduleExportAddress = 0;
         int eventType = -1;
         qint64 selfWallNs = -1, threadCycles = -1, selfThreadCycles = -1;
         qint64 threadCpu100ns = -1, selfThreadCpu100ns = -1;
@@ -161,6 +162,57 @@ namespace
             return identity;
         }
         return {{QStringLiteral("status"), QStringLiteral("matching_manifest_unavailable")}};
+    }
+
+    QJsonObject readLoadedModuleIdentity(quintptr exportAddress)
+    {
+        if (!exportAddress)
+            return {{QStringLiteral("status"), QStringLiteral("export_address_unavailable")}};
+        struct ModuleReference
+        {
+            HMODULE value = nullptr;
+            ~ModuleReference() { if (value) ::FreeLibrary(value); }
+        } module;
+        // Hold the module through path resolution and file observation. Never
+        // load another DLL, guess a basename, or call the captured export.
+        if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<LPCWSTR>(exportAddress), &module.value))
+            return {{QStringLiteral("status"), QStringLiteral("module_lookup_failed")},
+                {QStringLiteral("win32_error"), static_cast<double>(::GetLastError())}};
+        QString path;
+        for (int capacity = 512; capacity <= 32768; capacity *= 2)
+        {
+            path.resize(capacity);
+            const DWORD length = ::GetModuleFileNameW(module.value,
+                reinterpret_cast<LPWSTR>(path.data()), static_cast<DWORD>(capacity));
+            if (!length)
+                return {{QStringLiteral("status"), QStringLiteral("module_path_failed")},
+                    {QStringLiteral("win32_error"), static_cast<double>(::GetLastError())}};
+            if (length < static_cast<DWORD>(capacity)) { path.resize(length); break; }
+            if (capacity == 32768)
+                return {{QStringLiteral("status"), QStringLiteral("module_path_too_long")}};
+        }
+        QJsonObject identity{{QStringLiteral("status"), QStringLiteral("loaded_module_path_resolved")},
+            {QStringLiteral("lookup"), QStringLiteral("imported_export_address")},
+            {QStringLiteral("path"), path},
+            {QStringLiteral("hash_scope"), QStringLiteral("file_at_observation_time")},
+            {QStringLiteral("mapped_image_hash_measured"), false}};
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly))
+        {
+            identity.insert(QStringLiteral("file_status"), QStringLiteral("open_failed"));
+            return identity;
+        }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!hash.addData(&file))
+            identity.insert(QStringLiteral("file_status"), QStringLiteral("read_failed"));
+        else
+        {
+            identity.insert(QStringLiteral("file_status"), QStringLiteral("hashed"));
+            identity.insert(QStringLiteral("sha256"), QString::fromLatin1(hash.result().toHex()));
+            identity.insert(QStringLiteral("bytes"), static_cast<double>(file.size()));
+        }
+        return identity;
     }
 
     // The existing trace gets one value-owned writer, not a second UI service.
@@ -242,6 +294,9 @@ namespace
             QCryptographicHash hash(QCryptographicHash::Sha256);
             if (hash.addData(&ads)) session.insert(QStringLiteral("ads_runtime_sha256"), QString::fromLatin1(hash.result().toHex()));
         }
+        // Retain the old field for existing readers, with its limited scope
+        // explicit. The loaded_module record below is the module-path witness.
+        session.insert(QStringLiteral("ads_runtime_sha256_scope"), QStringLiteral("exe_directory_file_only"));
         session.insert(QStringLiteral("physical_present_measured"), false);
         if (!writeRecord(session)) return false;
 
@@ -288,6 +343,8 @@ namespace
                     record.insert(QStringLiteral("parent_request_id"), QString::number(value.parentRequestId));
                 if (!value.origin.isEmpty()) record.insert(QStringLiteral("origin"), value.origin);
                 if (!value.conditions.isEmpty()) record.insert(QStringLiteral("conditions"), value.conditions);
+                if (value.event == QStringLiteral("loaded_module"))
+                    record.insert(QStringLiteral("module"), readLoadedModuleIdentity(value.moduleExportAddress));
                 if (!value.target.isEmpty())
                     record.insert(QStringLiteral("target"), value.target);
                 if (!value.context.isEmpty())
@@ -413,6 +470,13 @@ namespace ks::ui
         {
             auto record = makeRecord("runtime_conditions", "perf_runtime_conditions", QString());
             record.conditions = conditions;
+            enqueue(std::move(record));
+        }
+
+        void recordModule(const char* role, quintptr exportAddress)
+        {
+            auto record = makeRecord("loaded_module", "perf_loaded_module", QString::fromLatin1(role));
+            record.moduleExportAddress = exportAddress;
             enqueue(std::move(record));
         }
 
@@ -659,6 +723,12 @@ namespace ks::ui
     {
         try { PerfTrace::instance().recordConditions(conditions); }
         catch (...) {} // Observability must not alter the original UI action.
+    }
+
+    void RecordPerfLoadedModule(const char* role, quintptr exportAddress) noexcept
+    {
+        try { PerfTrace::instance().recordModule(role ? role : "", exportAddress); }
+        catch (...) {}
     }
 
     qint64 PerfTraceNowMs() { return referenceClock().elapsed(); }

@@ -217,6 +217,14 @@ namespace
                 conditions.insert(QStringLiteral("focused_model_rows"), view->model()->rowCount(view->rootIndex()));
                 conditions.insert(QStringLiteral("focused_model_columns"), view->model()->columnCount(view->rootIndex()));
                 conditions.insert(QStringLiteral("focused_model_class"), QString::fromUtf8(view->model()->metaObject()->className()));
+                const QVariant backend = view->property("ksword_process_render_backend");
+                if (backend.isValid())
+                {
+                    conditions.insert(QStringLiteral("focused_render_backend"), backend.toString());
+                    conditions.insert(QStringLiteral("focused_gl_renderer"), view->property("ksword_process_gpu_renderer").toString());
+                    conditions.insert(QStringLiteral("focused_gl_renderer_scope"), QStringLiteral("last_initialized_context"));
+                    conditions.insert(QStringLiteral("focused_gpu_fallback"), view->property("ksword_process_gpu_fallback").toString());
+                }
                 break;
             }
             conditions.insert(QStringLiteral("probe_capture_ns"), static_cast<double>(captureTimer.nsecsElapsed()));
@@ -11882,6 +11890,7 @@ void MainWindow::setupDockLayout()
         return description;
     };
     ks::ui::InitializePerfTrace();
+    ks::ui::RecordPerfLoadedModule("ads", reinterpret_cast<quintptr>(&ads::CDockManager::configFlags));
 
     const auto recordEnvironment = [this]() { RecordPerformanceConditions(this, m_currentAppearanceSettings, m_backgroundImageReady); };
     recordEnvironment();
