@@ -569,6 +569,7 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
                 || (m_navigationPrepareCursor == m_soundSourceTabIndex && !m_soundSourcePage)
                 || (m_navigationPrepareCursor == m_bugcheckGuardTabIndex && !m_bugcheckGuardPage)
+                || (m_navigationPrepareCursor == m_contextMenuCleanerTabIndex && !m_contextMenuCleanerTab)
                 || (m_navigationPrepareCursor == m_desktopDrawingTabIndex && !m_desktopDrawingPage && m_desktopDrawingSearchDisplays)
                 || (m_navigationPrepareCursor == m_clipboardGuardTabIndex && !m_clipboardGuardPage)))
                 m_navigationSkippedColdBodies = true;
@@ -726,8 +727,10 @@ void MiscDock::initializeContextMenuCleanerTab()
     }
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_contextMenuCleanerHostWidget);
+    const QPointer<QWidget> host(m_contextMenuCleanerHostWidget);
     m_contextMenuCleanerTab = new ks::misc::ContextMenuCleanerTab(m_contextMenuCleanerHostWidget);
     hostLayout->addWidget(m_contextMenuCleanerTab, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeDiskEditorTab()
@@ -961,6 +964,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
     {
         main[4].coldBodyTexts = ks::misc::BugcheckGuardPage::coldSearchBody();
         main[4].coldBodyComplete = true;
+    }
+    if (!existing || !existing->m_contextMenuCleanerTab)
+    {
+        main[7].coldBodyTexts = ks::misc::ContextMenuCleanerTab::coldSearchBody();
+        main[7].coldBodyComplete = true;
     }
     if (!existing || !existing->m_clipboardGuardPage)
     {

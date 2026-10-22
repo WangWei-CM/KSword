@@ -81,3 +81,5 @@
 - 2026-10-22 DesktopDrawing冷正文使用原PhysicalPixels/EnumDisplayMonitors只读枚举的实际值，经既有AsyncOperation一次完成回调续作；无空转轮询、UI/native过滤器/绘制器创建。20+N条、17目标（空或超60项按原combo规则），空结果沿原DisplayChanged，失败/拒绝沿原工厂。真实激活取消晚到发布、清cold标记并保留原新鲜refreshDisplays；兼容完整准备仍构造页面。Misc完整源6→7/20。225项实际prepare/activation+真实AsyncOperation受控QtCore及882项实际值与冻结旧双语来源对照通过；显示器原生查询和GUI未运行，后续由用户手测。
 
 - 2026-10-22 BugcheckGuard未显示初态11条/11目标共享原key/source：风险说明、控制分组/选项、固定动作、状态标题及原waiting文案。原构造不查询R0，Show查询、所有开关/截图/驱动函数保持。Misc未构造页冷源7→8/20，目录仍服从原实验入口visible；真正激活清标记并执行原Show。51项静态检查证明10条既有bind文本/两语言key和14个非布局方法保持；未运行GUI或危险业务，不能关闭整个B03。
+
+- 2026-10-22 ContextMenuCleaner冷页的原IE查询结果在隐藏时只存pendingSnapshot，不会填表；此前把它视作冷正文必须等待真实行的阻塞不准确。现将只读首查移至真实首显一次（已有query/hasLoaded保护），随后保留原分类切换、查询/投影、备份/删除/恢复/测量链。七类确定空初态从同源文案提供123条，Right详情方案165条；其它三方案的显式隐藏字段仍不入索引。Misc冷源8→9/20，真实激活原查询，兼容准备和warm页仍扫描真实内容。4343项纯值/首显QObject替身、269项实际prepare/AsyncOperation受控检查及完整业务尾部保持通过，GUI/native未运行；不关闭整个B03。

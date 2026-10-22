@@ -51,12 +51,14 @@ namespace ks::misc
     class ContextMenuCleanerTab final : public QWidget
     {
     public:
+        // Complete hidden initial body; registry data remains a first-show read.
+        static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
         static ks::ui::PageNavigationCatalog navigationCatalog(const ContextMenuCleanerTab* existing = nullptr);
         QWidget* activateNavigationDescriptor(const QString& id);
 
         // 构造函数：
         // - 参数 parent：Qt 父控件，可为空；
-        // - 处理逻辑：创建七类子 Tab，并立即执行一次注册表枚举；
+        // - 处理逻辑：创建七类子 Tab，真实首显时执行当前分类的首次枚举；
         // - 返回值：无。
         explicit ContextMenuCleanerTab(QWidget* parent = nullptr);
         ~ContextMenuCleanerTab() override;
@@ -452,6 +454,7 @@ namespace ks::misc
         std::shared_ptr<ShellTransactionReceipt> m_shellReceipt;
         std::function<void(const ShellTransactionResult&)> m_shellCompletion;
         ks::ui::PageNavigationTabCatalog m_navigationTabs;
+        bool m_initialRefreshDeferred = true;
 
         QVBoxLayout* m_rootLayout = nullptr;   // m_rootLayout：本页根布局。
         QTabWidget* m_areaTabWidget = nullptr; // m_areaTabWidget：七类 Shell 关联子 Tab 容器。
