@@ -519,3 +519,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 T00外部证据工具位于`tools/ui_perf`，独立HostX64控制台编译，不进入主程序。默认Plan只读身份/列计划，用户显式Capture才启动独立UUID的PresentMon与私有GUID system logger，采CPU SampledProfile/CSwitch栈；仅停止成功创建的句柄，保留状态/丢失计数和SHA清单。正常有界等待是WAIT_TIMEOUT=258，取消0/父进程退出1不能算完成。离线分析用整数/Decimal保留QPC精度，交换链/输出/层分别统计，JSONL仅在实际PID/EXE SHA/会话/时钟匹配时给非因果的下一显示候选；不能把候选、配置栈成功或ETL存在称为实际操作完成/完整栈/物理发光测量。普通宏0发行版没有JSONL操作链，运行日志快照不代表writer完成回执。受控控制台夹具不含ETW/GUI/产品调用；真正采集与WPA栈覆盖和同条件A/B仍由用户执行，T00残留不得据工具交付直接关闭。
 
 - 2026-10-22 ThemeBinding首帧准备的dirty收集只在本次无回调阶段缓存共享祖先深度/不可达结论，不缓存叶绑定；缓存收集结束即释放。跨宿主公共链只检查一次，原可见/stack当前页/窗口边界、父先子后排序、回调前真实父链复核与弱寿命/新请求消费保持。不得把此临时结果带过回调、重挂或下一轮；仍逐个读取已有dirty身份，无新观察器/永久索引/全控件树扫描。53770项QtCore与冻结旧方法对照及真实TU通过；10000叶/12祖先夹具祖先读取130000→10012，非实际GUI耗时/FPS结论。
+
+- 2026-10-22 主程序QApplication创建/应用身份确定后调用MainWindow::prepareStartupAppearance，先安装标准绘制/度量/过滤器并显式跳过临时应用基线，再复用原15项正式palette和5段全局QSS；同配置业务首帧直接继承最终配方。InstallStandardWidgetTheme的其它调用默认仍下发完整旧基线。原热换/窗口背景/字体基线/预览取消链保持；标记块内容相同时忽略外围换行，避免无变化全局重写。1751项真实QPalette/QString值检查证明去掉中间基线后完整角色与原两阶段最终值相同，原运行期方法展开等价；不等于真实GUI/首帧/性能验收。

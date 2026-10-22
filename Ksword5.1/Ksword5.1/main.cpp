@@ -1,9 +1,7 @@
 #include "UI/FlatButtonTheme.h"
-#include "UI/StandardWidgetTheme.h"
 #include "UI/PerfTrace.h"
 #include "UI/FloatingScrollbars.h"
 #include "MainWindow.h"
-#include "theme.h"
 
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
@@ -12,7 +10,6 @@
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtGui/QFont>
-#include <QtGui/QStyleHints>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
@@ -1619,26 +1616,6 @@ int main(int argc, char* argv[])
 #else
     QApplication app(argc, argv);
 #endif
-    // Match MainWindow::isDarkModeEffective before the first themed palette/QSS.
-    bool startupDarkModeEnabled = false;
-    if (startupSettings.themeMode == ks::settings::ThemeMode::Dark)
-    {
-        startupDarkModeEnabled = true;
-    }
-    else if (startupSettings.themeMode != ks::settings::ThemeMode::Light)
-    {
-        QStyleHints* styleHints = QGuiApplication::styleHints();
-        startupDarkModeEnabled = styleHints != nullptr
-            && styleHints->colorScheme() == Qt::ColorScheme::Dark;
-    }
-    KswordTheme::SetDarkModeEnabled(startupDarkModeEnabled);
-    KswordTheme::SetPrimaryAccentColor(startupSettings.customThemeColor);
-    KswordTheme::SetMainBackgroundColor(startupSettings.customMainBackgroundColor);
-    ks::ui::InstallStandardWidgetTheme(&app); // 新控件在首个业务窗口创建前就采用标准外观与度量。
-    rescueSession.install(app);
-    startupTraceRaw("QApplication constructed");
-    disableQtPopupScrollEffects();
-
     // 组织名/应用名必须在任何 QSettings 之前设置：默认构造的 QSettings 会取这两个值定位
     // HKCU\Software\<组织>\<应用>。组织名为空时 Qt 的 Windows 注册表后端直接置 AccessError，
     // 读永远拿默认值、写被静默丢弃——本程序此前正是这种状态，导致
@@ -1646,6 +1623,12 @@ int main(int argc, char* argv[])
     // 这里补上后，上述三条链路才真正可用；键名沿用各调用点已有的分组前缀，不做迁移。
     QCoreApplication::setOrganizationName(QStringLiteral("Ksword"));
     QCoreApplication::setApplicationName(QStringLiteral("Ksword5.1"));
+    // 复用 MainWindow 的正式 palette/QSS 配方，首个业务控件直接继承最终主题。
+    MainWindow::prepareStartupAppearance(startupSettings);
+    rescueSession.install(app);
+    startupTraceRaw("QApplication constructed");
+    disableQtPopupScrollEffects();
+
 #if KSWORD_PERF_TRACE_ENABLED
     ks::ui::InitializePerfTrace(); // Cover cold widgets too, after QApplication is fully constructed.
 #endif

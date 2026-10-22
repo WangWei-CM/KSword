@@ -96,6 +96,10 @@ public:
     // - 主函数可传入 lambda，同步百分比、翻译后的文字和稳定阶段键。
     using StartupProgressCallback = std::function<void(int, const QString&, const QString&)>;
 
+    // QApplication 创建后、首个业务控件创建前，复用正式外观配方准备应用级主题。
+    // 字体基线仍由 main 保存；窗口背景、预览和热换保持原生命周期。
+    static void prepareStartupAppearance(const ks::settings::AppearanceSettings& settings);
+
     // 构造函数作用：
     // - 初始化主窗口菜单、Dock、布局与外观；
     // - 可选地持续回传启动阶段进度给 splash。
@@ -667,7 +671,7 @@ private:
     // 调用方式：应用样式或重建背景时调用。
     // 入参 settings：外观配置结构体。
     // 返回：true=深色；false=浅色。
-    bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const;
+    static bool isDarkModeEffective(const ks::settings::AppearanceSettings& settings);
 
     // rebuildWindowBackgroundBrush 作用：
     // - 把当前纯色、背景图与透明度交给主窗口背景宿主；

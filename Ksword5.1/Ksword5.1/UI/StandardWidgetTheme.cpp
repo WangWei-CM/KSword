@@ -526,7 +526,7 @@ namespace
     };
 }
 
-void ks::ui::InstallStandardWidgetTheme(QApplication* application)
+void ks::ui::InstallStandardWidgetTheme(QApplication* application, const bool applyAppearanceBaseline)
 {
     if (!application || application->property("ksword_standard_widget_theme_installed").toBool()) return;
     application->setProperty("ksword_standard_widget_theme_installed", true);
@@ -538,23 +538,26 @@ void ks::ui::InstallStandardWidgetTheme(QApplication* application)
         standard->setObjectName(QStringLiteral("fusion")); // 保留依赖QStyleFactory重建基础style的兼容路径。
         application->setStyle(standard);
     }
-    // 启动期尚未构建MainWindow，原生标签/复选框也必须与默认控件底色成对可读。
-    QPalette colors = application->palette();
-    colors.setColor(QPalette::Window, KswordTheme::MainBackgroundColor());
-    colors.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
-    colors.setColor(QPalette::Base, KswordTheme::SurfaceColor());
-    colors.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
-    colors.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
-    colors.setColor(QPalette::Button, KswordTheme::SurfaceAltColor());
-    colors.setColor(QPalette::ButtonText, KswordTheme::TextPrimaryColor());
-    colors.setColor(QPalette::Highlight, KswordTheme::ControlAccentColor());
-    colors.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
-    colors.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
-    colors.setColor(QPalette::Disabled, QPalette::WindowText, KswordTheme::TextDisabledColor());
-    colors.setColor(QPalette::Disabled, QPalette::Text, KswordTheme::TextDisabledColor());
-    colors.setColor(QPalette::Disabled, QPalette::ButtonText, KswordTheme::TextDisabledColor());
-    application->setPalette(colors);
-    // 首个业务窗口创建前已有基线；外观设置刷新仍由原标记替换链统一接管。
-    application->setStyleSheet(application->styleSheet() + BuildGlobalBaseControlStyleBlock());
+    if (applyAppearanceBaseline)
+    {
+        // 启动期尚未构建MainWindow，原生标签/复选框也必须与默认控件底色成对可读。
+        QPalette colors = application->palette();
+        colors.setColor(QPalette::Window, KswordTheme::MainBackgroundColor());
+        colors.setColor(QPalette::WindowText, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::Base, KswordTheme::SurfaceColor());
+        colors.setColor(QPalette::AlternateBase, KswordTheme::SurfaceAltColor());
+        colors.setColor(QPalette::Text, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::Button, KswordTheme::SurfaceAltColor());
+        colors.setColor(QPalette::ButtonText, KswordTheme::TextPrimaryColor());
+        colors.setColor(QPalette::Highlight, KswordTheme::ControlAccentColor());
+        colors.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        colors.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
+        colors.setColor(QPalette::Disabled, QPalette::WindowText, KswordTheme::TextDisabledColor());
+        colors.setColor(QPalette::Disabled, QPalette::Text, KswordTheme::TextDisabledColor());
+        colors.setColor(QPalette::Disabled, QPalette::ButtonText, KswordTheme::TextDisabledColor());
+        application->setPalette(colors);
+        // 首个业务窗口创建前已有基线；外观设置刷新仍由原标记替换链统一接管。
+        application->setStyleSheet(application->styleSheet() + BuildGlobalBaseControlStyleBlock());
+    }
     application->installEventFilter(new DefaultControlBindings(application, standard));
 }

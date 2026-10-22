@@ -117,6 +117,7 @@
 #include "UI/DockTabInteraction.h"
 #include "UI/GlobalDialogTheme.h"
 #include "UI/GlobalUiBaseStyle.h"
+#include "UI/StandardWidgetTheme.h"
 #include "UI/ThemedSlider.h"
 #include "UI/GlobalUiSearch.h"
 #include "UI/CommandExecutionPopup.h"
@@ -5099,7 +5100,8 @@ namespace
             {
                 const int removeLength = (endMarkerIndex - beginMarkerIndex) + endMarkerText.length();
                 const QString oldBlock = styleSheetText.mid(beginMarkerIndex, removeLength);
-                if (oldBlock == replacementBlock)
+                // 截取范围不含片段外围换行；同内容不能因包装空白再次触发全局 repolish。
+                if (oldBlock == replacementBlock.trimmed())
                 {
                     return false;
                 }
@@ -5116,23 +5118,56 @@ namespace
         return true;
     }
 
+    // 启动与热换共用原外观配方；保留未显式接管的系统 palette 角色。
+    QPalette buildApplicationAppearancePalette(const QPalette& sourcePalette)
+    {
+        const QColor windowBackgroundColor = KswordTheme::MainBackgroundColor();
+        const QColor windowTextColor = KswordTheme::MainBackgroundTextColor();
+        const QColor textColor = KswordTheme::TextPrimaryColor();
+        const QColor baseColor = KswordTheme::SurfaceColor();
+        const QColor alternateBaseColor = KswordTheme::SurfaceAltColor();
+        const QColor midColor = KswordTheme::BorderColor();
+
+        // Windows 11 背景控制要求：
+        // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
+        QPalette mainPalette = sourcePalette;
+        mainPalette.setColor(QPalette::Window, windowBackgroundColor);
+        mainPalette.setColor(QPalette::WindowText, windowTextColor);
+        mainPalette.setColor(QPalette::Base, baseColor);
+        mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
+        mainPalette.setColor(QPalette::Mid, midColor);
+        mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
+        mainPalette.setColor(QPalette::Dark, KswordTheme::PaletteDarkColor());
+        mainPalette.setColor(QPalette::Text, textColor);
+        mainPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
+        mainPalette.setColor(QPalette::Button, alternateBaseColor);
+        mainPalette.setColor(QPalette::ButtonText, textColor);
+        mainPalette.setColor(QPalette::ToolTipBase, baseColor);
+        mainPalette.setColor(QPalette::ToolTipText, textColor);
+        mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
+        mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        return mainPalette;
+    }
+
     // applyGlobalApplicationStyleBlocks 作用：
     // - 合并更新 QApplication 级别 Tooltip/QMenu/交互控件/组合框样式块；
     // - 只在最终样式表内容确实变化时调用一次 QApplication::setStyleSheet；
     // - 避免原先 Tooltip 与 QMenu 分别 setStyleSheet 导致启动阶段全局 repolish 两次。
-    // 调用方式：applyAppearanceSettings 内部调用。
-    // 入参 tooltipStyleBlock/contextMenuStyleBlock/controlContrastStyleBlock/comboBoxStyleBlock：已带标记的 QSS 片段。
+    // 调用方式：启动准备与 applyAppearanceSettings 共用同一组带标记的样式块。
+    // 入参 darkModeEnabled：当前最终生效的深色模式状态。
     // 返回：实际触发 QApplication::setStyleSheet 时返回 true。
     bool applyGlobalApplicationStyleBlocks(
-        const QString& baseControlStyleBlock,
-        const QString& tooltipStyleBlock,
-        const QString& contextMenuStyleBlock,
-        const QString& controlContrastStyleBlock,
-        const QString& comboBoxStyleBlock,
+        const bool darkModeEnabled,
         qint64* elapsedMsOut = nullptr,
         int* widgetCountOut = nullptr,
         int* styleLengthOut = nullptr)
     {
+        const QString baseControlStyleBlock = ks::ui::BuildGlobalBaseControlStyleBlock();
+        const QString tooltipStyleBlock = buildGlobalTooltipStyleBlock(darkModeEnabled);
+        const QString contextMenuStyleBlock = buildGlobalContextMenuStyleBlock(darkModeEnabled);
+        const QString controlContrastStyleBlock = buildGlobalControlContrastStyleBlock(darkModeEnabled);
+        const QString comboBoxStyleBlock = buildGlobalComboBoxStyleBlock(darkModeEnabled);
+
         QApplication* appInstance = qobject_cast<QApplication*>(QCoreApplication::instance());
         if (appInstance == nullptr)
         {
@@ -5261,6 +5296,28 @@ struct MainWindowShutdownServiceState
     std::atomic_bool finished{ false };
 };
 
+void MainWindow::prepareStartupAppearance(const ks::settings::AppearanceSettings& settings)
+{
+    const bool darkModeEnabled = isDarkModeEffective(settings);
+    KswordTheme::SetDarkModeEnabled(darkModeEnabled);
+    KswordTheme::SetPrimaryAccentColor(settings.customThemeColor);
+    KswordTheme::SetMainBackgroundColor(settings.customMainBackgroundColor);
+
+    // 先安装原标准绘制/度量/过滤器，跳过中间基线；正式 palette/QSS 各写一次。
+    // 此时尚未创建业务控件，不访问窗口背景、布局、预览或设置持久化。
+    ks::ui::InstallStandardWidgetTheme(qobject_cast<QApplication*>(QCoreApplication::instance()), false);
+    const QPalette startupPalette = buildApplicationAppearancePalette(QApplication::palette());
+    if (QApplication::palette() != startupPalette)
+    {
+        QApplication::setPalette(startupPalette);
+    }
+    if (QToolTip::palette() != startupPalette)
+    {
+        QToolTip::setPalette(startupPalette);
+    }
+    applyGlobalApplicationStyleBlocks(darkModeEnabled);
+}
+
 MainWindow::MainWindow(
     QWidget* parent,
     StartupProgressCallback startupProgressCallback,
@@ -5297,7 +5354,7 @@ MainWindow::MainWindow(
     // 大量页面在构造期就把 KswordTheme::*ColorHex() 求值成固定色串进自己的 QSS，
     // 而控件自身的 setStyleSheet 压得过之后重建的全局 QSS。种子设晚了，
     // 启动即预加载的页面（如启动默认页所在的 Dock）会永久停在浅色/默认强调色上。
-    // 这里只写种子，palette 与全局样式块仍由 initAppearanceSettings 统一下发。
+    // 启动入口已提前下发正式 palette/QSS；这里继续同步本次读取的设置种子。
     KswordTheme::SetDarkModeEnabled(isDarkModeEffective(m_currentAppearanceSettings));
     KswordTheme::SetPrimaryAccentColor(m_currentAppearanceSettings.customThemeColor);
     KswordTheme::SetMainBackgroundColor(m_currentAppearanceSettings.customMainBackgroundColor);
@@ -13017,27 +13074,7 @@ void MainWindow::applyAppearanceSettings(
         const QColor windowTextColor = KswordTheme::MainBackgroundTextColor();
         const QColor textColor = KswordTheme::TextPrimaryColor();
         const QColor baseColor = KswordTheme::SurfaceColor();
-        const QColor alternateBaseColor = KswordTheme::SurfaceAltColor();
-        const QColor midColor = KswordTheme::BorderColor();
-
-        // Windows 11 背景控制要求：
-        // 即使是纯黑/纯白，也必须显式设置 Window 颜色，避免系统接管背景。
-        QPalette mainPalette = palette();
-        mainPalette.setColor(QPalette::Window, windowBackgroundColor);
-        mainPalette.setColor(QPalette::WindowText, windowTextColor);
-        mainPalette.setColor(QPalette::Base, baseColor);
-        mainPalette.setColor(QPalette::AlternateBase, alternateBaseColor);
-        mainPalette.setColor(QPalette::Mid, midColor);
-        mainPalette.setColor(QPalette::Midlight, KswordTheme::BorderStrongColor());
-        mainPalette.setColor(QPalette::Dark, KswordTheme::PaletteDarkColor());
-        mainPalette.setColor(QPalette::Text, textColor);
-        mainPalette.setColor(QPalette::PlaceholderText, KswordTheme::TextSecondaryColor());
-        mainPalette.setColor(QPalette::Button, alternateBaseColor);
-        mainPalette.setColor(QPalette::ButtonText, textColor);
-        mainPalette.setColor(QPalette::ToolTipBase, baseColor);
-        mainPalette.setColor(QPalette::ToolTipText, textColor);
-        mainPalette.setColor(QPalette::Highlight, KswordTheme::PrimaryBlueColor);
-        mainPalette.setColor(QPalette::HighlightedText, KswordTheme::OnAccentColor());
+        const QPalette mainPalette = buildApplicationAppearancePalette(palette());
         if (QApplication::palette() != mainPalette)
         {
             QApplication::setPalette(mainPalette);
@@ -13058,11 +13095,7 @@ void MainWindow::applyAppearanceSettings(
         }
 
         globalAppStyleChanged = applyGlobalApplicationStyleBlocks(
-            ks::ui::BuildGlobalBaseControlStyleBlock(),
-            buildGlobalTooltipStyleBlock(darkModeEnabled),
-            buildGlobalContextMenuStyleBlock(darkModeEnabled),
-            buildGlobalControlContrastStyleBlock(darkModeEnabled),
-            buildGlobalComboBoxStyleBlock(darkModeEnabled),
+            darkModeEnabled,
             &globalAppStyleApplyMs,
             &globalAppStyleWidgetCount,
             &globalAppStyleLength);
@@ -13418,7 +13451,7 @@ void MainWindow::refreshThemeDependentVisuals(const bool darkModeEnabled)
     }
 }
 
-bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& settings) const
+bool MainWindow::isDarkModeEffective(const ks::settings::AppearanceSettings& settings)
 {
     if (settings.themeMode == ks::settings::ThemeMode::Dark)
     {
