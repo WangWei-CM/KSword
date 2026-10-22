@@ -1,5 +1,6 @@
 #include "StructuredFieldView.h"
 #include "FieldTreeModel.h"
+#include "PageNavigationCatalog.h"
 #include "./PageControlStyle.h"
 #include "./ToolbarMetrics.h"
 #include "../Internationalization/LanguageManager.h"
@@ -83,6 +84,30 @@ namespace ks::ui
         QString translated(const QString& source)
         {
             return ks::i18n::sourceText(source);
+        }
+
+        enum class InitialSearchText { Search, Sections, Tree, Copy, Name, Value };
+        struct InitialSearchEntry
+        {
+            const char* source;
+            const char* suffix;
+            bool mnemonic;
+        };
+        constexpr InitialSearchEntry kInitialSearchTexts[] = {
+            {"搜索属性", "_search", false},
+            {"分区", "_style", false},
+            {"树形", "_style", false},
+            {"复制全部", "_copy", true},
+            {"属性", "_tree", false},
+            {"值", "_tree", false}
+        };
+        QString initialSearchText(InitialSearchText text)
+        {
+            return translated(QString::fromUtf8(kInitialSearchTexts[static_cast<int>(text)].source));
+        }
+        QString initialSearchTarget(const QString& prefix, InitialSearchText text)
+        {
+            return prefix + QLatin1String(kInitialSearchTexts[static_cast<int>(text)].suffix);
         }
 
         void walkItems(QTreeWidgetItem* parent,
@@ -228,6 +253,30 @@ namespace ks::ui
         private:
             QTreeView* m_tree;
         };
+    }
+
+    QVector<PageSearchBodyText> StructuredFieldView::coldSearchBody(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return {};
+        QVector<PageSearchBodyText> body;
+        body.reserve(6);
+        for (int index = 0; index < 6; ++index)
+        {
+            const auto text = static_cast<InitialSearchText>(index);
+            body.append({initialSearchText(text), initialSearchTarget(targetPrefix, text), {},
+                kInitialSearchTexts[index].mnemonic});
+        }
+        return body;
+    }
+
+    void StructuredFieldView::setSearchTargetPrefix(const QString& targetPrefix)
+    {
+        if (targetPrefix.isEmpty()) return;
+        m_search->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Search));
+        if (m_style) m_style->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Sections));
+        m_copy->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Copy));
+        if (m_tree) m_tree->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Name));
+        if (m_valueTree) m_valueTree->setObjectName(initialSearchTarget(targetPrefix, InitialSearchText::Name));
     }
 
     StructuredFieldView::StructuredFieldView(QWidget* parent) : QWidget(parent)
@@ -1078,18 +1127,18 @@ namespace ks::ui
         }
         m_export->setToolTip(translated(QStringLiteral("导出文本")));
         m_export->setAccessibleName(translated(QStringLiteral("导出文本")));
-        m_search->setPlaceholderText(translated(QStringLiteral("搜索属性")));
-        m_search->setAccessibleName(translated(QStringLiteral("搜索属性")));
+        m_search->setPlaceholderText(initialSearchText(InitialSearchText::Search));
+        m_search->setAccessibleName(initialSearchText(InitialSearchText::Search));
         if (m_style)
         {
-            m_style->setItemText(0, translated(QStringLiteral("分区")));
-            m_style->setItemText(1, translated(QStringLiteral("树形")));
+            m_style->setItemText(0, initialSearchText(InitialSearchText::Sections));
+            m_style->setItemText(1, initialSearchText(InitialSearchText::Tree));
             m_style->setAccessibleName(translated(QStringLiteral("显示样式")));
         }
-        m_copy->setText(translated(QStringLiteral("复制全部")));
+        m_copy->setText(initialSearchText(InitialSearchText::Copy));
         if (m_tree)
         {
-            m_tree->setHeaderLabels({translated(QStringLiteral("属性")), translated(QStringLiteral("值"))});
+            m_tree->setHeaderLabels({initialSearchText(InitialSearchText::Name), initialSearchText(InitialSearchText::Value)});
         }
     }
 

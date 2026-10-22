@@ -25,6 +25,7 @@ namespace ks::ui
     class FieldTreeSelection;
     struct FieldTreeProjection;
     struct StructuredFieldViewState;
+    struct PageSearchBodyText;
     // Values come from the actual metadata/PE/driver result. They are never
     // reconstructed by parsing a generated report or interpreted as HTML.
     struct FieldNode
@@ -95,6 +96,10 @@ namespace ks::ui
 
         explicit StructuredFieldView(QWidget* parent = nullptr);
         ~StructuredFieldView() override;
+        // Empty initial view only: the same six toolbar/header values used by
+        // the real controls. Pages opt into unique targets before installation.
+        static QVector<PageSearchBodyText> coldSearchBody(const QString& targetPrefix);
+        void setSearchTargetPrefix(const QString& targetPrefix);
         // 普通只读字段页显式选择后台值投影和按需行模型；单向切换后 tree() 返回 nullptr。
         // 专业工作台不调用此入口，保留原生 QTreeWidget 对象及同步访问契约。
         void setValueModelProjection();

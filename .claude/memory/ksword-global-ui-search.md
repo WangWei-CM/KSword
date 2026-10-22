@@ -65,3 +65,5 @@
 - 2026-10-21 ThemeCheck冷源24条（22原文案+2Tab标题）也按真实host位置参与正文扫描；20个实际target复用旧objectName，其余仅增加无视觉身份。已有实例、动态样本、状态及表格仍真实扫描。正文命中属于真实目标，去重时应压掉相同Dock/path/text的目录别名，但保留不同真实目标的同文命中。StripUiSearchMnemonicMarkers从原私有算法移到已有catalog值头，控件与冷值共用；Dock路径归一但不剥助记符，其后真实Tab祖先剥助记符，分组保留原语义；内部Tab的冷path段同样剥助记符。不得为索引改变UI原文字/助记符。禁用签名页冷构造updateStateDisplay→evaluateBlockReason→driverAvailable实际open设备，影响阻断原因和方案摘要；尚无同身份值输入，不能以默认离线/两个互斥文本同时入索引冒充coldBodyComplete。
 
 - 2026-10-22 DSE冷搜索的原始evaluateBlockReason({}, {})通过既有AsyncOperation读取，默认姿态/定位和DriverClient::open的权限/通知保持。PageSearchPreparation以Complete/MorePages/Waiting区分工厂续片与实际值等待；Waiting仅由一次ready回调续作，不用0ms轮询。新搜索只替换弱控制器/generation回调，已完成初态供真实构造消费一次；直接激活在途时取消旧值发布并走原构造查询，允许已有只读open完成，不能覆盖活页。失败/拒绝回退原工厂，Misc析构先close门禁。DSE共享编辑器的标题省略/子项显隐仍依赖实际宽度和字体，所以整页正文保持真实控件扫描；未把17条不完整草稿投入产品，也未标coldBodyComplete。后续真实refresh/show/动作/主题更新继续原权威查询，未改DSE/KSec业务。
+
+- 2026-10-22 StructuredFieldView空初态的搜索占位、两格式项、复制按钮与两表头由coldSearchBody(targetPrefix)复用updateTranslations的同一六条定义；页面显式setSearchTargetPrefix才命名已有四个目标，未接入的实例不改objectName。此接口只代表空初态，不替代非空规范文档/已有真实控件扫描；无新模型、控件、定时器或主题观察器。真实方法与冻结旧翻译方法在原文、实际英文及助记符扰动下162项QtCore/QObject替身对照通过，真实GUI/布局/polish由用户验收。
