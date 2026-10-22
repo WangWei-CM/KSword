@@ -1,6 +1,9 @@
 #include "TextSearchReplaceSupport.h"
 #include "./PageControlStyle.h"
 #include "./ToolbarMetrics.h"
+#include "./AsyncLogTextView.h"
+#include "./AsyncOperation.h"
+#include <memory>
 
 // ============================================================
 // TextSearchReplaceSupport.cpp
@@ -27,6 +30,7 @@
 #include <QTextEdit>
 #include <QToolButton>
 #include <QWidget>
+#include <algorithm>
 
 namespace
 {
@@ -38,6 +42,64 @@ namespace
     // - 超过该上限就停止精确计数，改为显示带“+”的近似值。
     constexpr int kMaxCountedMatches = 5000;
 
+    struct LogTextSearchRequest
+    {
+        QString text;
+        QRegularExpression expression;
+        bool caseSensitive = false;
+        int direction = 0; // 0=count, 1=next, -1=previous
+        int anchor = 0, position = 0;
+        quint64 revision = 0;
+    };
+    struct LogTextSearchResult
+    {
+        int anchor = -1, position = -1, matches = 0;
+        quint64 revision = 0;
+    };
+
+    // Keep the existing QTextDocument matching and paragraph/zero-length rules.
+    // This document is worker-local and never lays out or reaches a GUI view.
+    LogTextSearchResult SearchLogText(const LogTextSearchRequest& request)
+    {
+        QTextDocument document;
+        document.setLayoutEnabled(false);
+        document.setPlainText(request.text);
+        LogTextSearchResult result;
+        result.revision = request.revision;
+        QTextDocument::FindFlags flags;
+        if (request.caseSensitive) flags |= QTextDocument::FindCaseSensitively;
+        if (request.direction)
+        {
+            if (request.direction < 0) flags |= QTextDocument::FindBackward;
+            QTextCursor cursor(&document);
+            const int end = std::max(0, document.characterCount() - 1);
+            cursor.setPosition(std::clamp(request.anchor, 0, end));
+            cursor.setPosition(std::clamp(request.position, 0, end), QTextCursor::KeepAnchor);
+            QTextCursor found = document.find(request.expression, cursor, flags);
+            if (found.isNull())
+            {
+                QTextCursor wrap(&document);
+                if (request.direction < 0) wrap.movePosition(QTextCursor::End);
+                found = document.find(request.expression, wrap, flags);
+            }
+            if (!found.isNull()) { result.anchor = found.anchor(); result.position = found.position(); }
+        }
+        flags &= ~QTextDocument::FindBackward;
+        QTextCursor scan(&document);
+        while (result.matches < kMaxCountedMatches)
+        {
+            scan = document.find(request.expression, scan, flags);
+            if (scan.isNull()) break;
+            ++result.matches;
+            if (scan.selectionStart() == scan.selectionEnd())
+            {
+                if (scan.atEnd()) break;
+                scan.movePosition(QTextCursor::NextCharacter);
+            }
+        }
+        return result;
+    }
+
     // EditorAccess 作用：
     // - QPlainTextEdit 与 QTextEdit 没有共同的文本操作基类，
     //   这里做一层薄适配，让查找替换逻辑只写一份。
@@ -45,14 +107,16 @@ namespace
     {
         QPlainTextEdit* plainEditor = nullptr;
         QTextEdit* richEditor = nullptr;
+        ks::ui::AsyncLogTextView* logEditor = nullptr;
 
         bool isValid() const
         {
-            return plainEditor != nullptr || richEditor != nullptr;
+            return plainEditor != nullptr || richEditor != nullptr || logEditor != nullptr;
         }
 
         QWidget* widget() const
         {
+            if (logEditor) return logEditor;
             return plainEditor != nullptr
                 ? static_cast<QWidget*>(plainEditor)
                 : static_cast<QWidget*>(richEditor);
@@ -93,6 +157,7 @@ namespace
 
         bool isReadOnly() const
         {
+            if (logEditor) return true;
             if (plainEditor != nullptr)
             {
                 return plainEditor->isReadOnly();
@@ -102,6 +167,7 @@ namespace
 
         QWidget* viewport() const
         {
+            if (logEditor) return logEditor->viewport();
             if (plainEditor != nullptr)
             {
                 return plainEditor->viewport();
@@ -128,6 +194,8 @@ namespace
             candidate = parentWidget;
         }
 
+        accessValue.logEditor = dynamic_cast<ks::ui::AsyncLogTextView*>(candidate);
+        if (accessValue.logEditor) return accessValue;
         accessValue.plainEditor = qobject_cast<QPlainTextEdit*>(candidate);
         if (accessValue.plainEditor == nullptr)
         {
@@ -317,7 +385,20 @@ namespace
                 hostWidget->installEventFilter(this);
             }
 
+            if (m_access.logEditor)
+            {
+                m_logSearchOperation = std::make_unique<ks::ui::AsyncOperation>(this);
+                connect(m_access.logEditor, &ks::ui::AsyncLogTextView::textChanged, this, [this]() {
+                    if (isVisible()) requestLogSearch(m_logSearchDirection, true);
+                });
+            }
             updateGeometryToHost();
+        }
+
+        ~TextSearchBar() override
+        {
+            ++m_logSearchGeneration;
+            if (m_logSearchOperation) m_logSearchOperation->close();
         }
 
         // activate 作用：显示查找栏并把焦点交给对应输入框。
@@ -325,9 +406,9 @@ namespace
         {
             // 选中文本时直接作为查找词，省去手工复制。
             const QTextCursor cursorValue = m_access.textCursor();
-            if (cursorValue.hasSelection())
+            if (m_access.logEditor ? m_access.logEditor->anchorPosition() != m_access.logEditor->cursorPosition() : cursorValue.hasSelection())
             {
-                const QString selectedText = cursorValue.selectedText();
+                const QString selectedText = m_access.logEditor ? m_access.logEditor->selectedText() : cursorValue.selectedText();
                 if (!selectedText.isEmpty() && !selectedText.contains(QChar(0x2029)))
                 {
                     m_findEdit->setText(selectedText);
@@ -347,6 +428,7 @@ namespace
             }
             m_findEdit->setFocus(Qt::ShortcutFocusReason);
             m_findEdit->selectAll();
+
         }
 
     protected:
@@ -392,6 +474,8 @@ namespace
         // closeBar 作用：隐藏查找栏并把焦点还给文本框。
         void closeBar()
         {
+            ++m_logSearchGeneration;
+            if (m_logSearchOperation) m_logSearchOperation->cancel();
             hide();
             if (QWidget* hostWidget = m_access.widget(); hostWidget != nullptr)
             {
@@ -444,6 +528,7 @@ namespace
         // - 到头后回绕一次，仍找不到则保持原位。
         bool findStep(const bool forward, const bool reportStatus)
         {
+            if (m_access.logEditor) return requestLogSearch(forward ? 1 : -1, reportStatus);
             QTextDocument* documentValue = m_access.document();
             if (documentValue == nullptr || m_findEdit->text().isEmpty())
             {
@@ -504,6 +589,7 @@ namespace
         // refreshMatchStatus 作用：统计匹配总数并回显，超过上限只给近似值。
         void refreshMatchStatus()
         {
+            if (m_access.logEditor) { requestLogSearch(0, true); return; }
             QTextDocument* documentValue = m_access.document();
             if (documentValue == nullptr || m_findEdit->text().isEmpty())
             {
@@ -550,6 +636,57 @@ namespace
                 matchCount >= kMaxCountedMatches
                 ? QStringLiteral("%1+ 项").arg(kMaxCountedMatches)
                 : QStringLiteral("%1 项").arg(matchCount));
+        }
+
+        bool requestLogSearch(const int direction, const bool reportStatus)
+        {
+            const quint64 generation = ++m_logSearchGeneration;
+            m_logSearchDirection = direction;
+            if (!m_logSearchOperation || m_findEdit->text().isEmpty())
+            {
+                if (m_logSearchOperation) m_logSearchOperation->cancel();
+                m_statusLabel->clear();
+                return false;
+            }
+            bool valid = false;
+            const QRegularExpression expression = buildRegex(valid);
+            if (!valid)
+            {
+                m_logSearchOperation->cancel();
+                m_statusLabel->setText(QStringLiteral("正则无效"));
+                return false;
+            }
+            const QPointer<TextSearchBar> alive(this);
+            const QPointer<ks::ui::AsyncLogTextView> log(m_access.logEditor);
+            const bool caseSensitive = m_caseButton->isChecked();
+            log->withTextSnapshot([alive, log, generation, direction, reportStatus, expression, caseSensitive](QString text, const quint64 revision) {
+                if (!alive || !log || generation != alive->m_logSearchGeneration || !alive->isVisible()) return;
+                LogTextSearchRequest request{std::move(text), expression, caseSensitive, direction, log->anchorPosition(), log->cursorPosition(), revision};
+                const auto accepted = alive->m_logSearchOperation->submit<LogTextSearchRequest, LogTextSearchResult>(std::move(request), [](const LogTextSearchRequest& value, const ks::ui::AsyncOperationToken&) { return SearchLogText(value); },
+                    [alive, log, generation, direction, reportStatus](const LogTextSearchResult& result, std::uint64_t) {
+                        if (!alive || !log || generation != alive->m_logSearchGeneration || !alive->isVisible()) return true;
+                        if (direction && result.anchor >= 0 && !log->selectRange(result.anchor, result.position, result.revision))
+                        {
+                            if (alive) alive->requestLogSearch(direction, reportStatus);
+                            return true;
+                        }
+                        if (direction && result.anchor >= 0 && log) log->ensureCursorVisible();
+                        if (!alive) return true;
+                        alive->m_logSearchDirection = 0;
+                        if (reportStatus)
+                            alive->m_statusLabel->setText(direction && result.anchor < 0 ? QStringLiteral("无匹配")
+                                : result.matches >= kMaxCountedMatches ? QStringLiteral("%1+ 项").arg(kMaxCountedMatches)
+                                : QStringLiteral("%1 项").arg(result.matches));
+                        return true;
+                    },
+                    [alive, generation](std::exception_ptr) {
+                        if (alive && generation == alive->m_logSearchGeneration)
+                            alive->m_statusLabel->setText(QStringLiteral("后台任务发生异常。"));
+                    });
+                if (!accepted && alive && generation == alive->m_logSearchGeneration)
+                    alive->m_statusLabel->setText(QStringLiteral("后台任务发生异常。"));
+            });
+            return true;
         }
 
         // replaceCurrent 作用：
@@ -656,6 +793,9 @@ namespace
             m_statusLabel->setText(QStringLiteral("已替换 %1 处").arg(replacedCount));
         }
 
+        std::unique_ptr<ks::ui::AsyncOperation> m_logSearchOperation;
+        quint64 m_logSearchGeneration = 0;
+        int m_logSearchDirection = 0;
         EditorAccess m_access{};              // 目标文本框适配器。
         QLineEdit* m_findEdit = nullptr;      // 查找输入框。
         QLineEdit* m_replaceEdit = nullptr;   // 替换输入框。

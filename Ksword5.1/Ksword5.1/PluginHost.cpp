@@ -6,6 +6,7 @@
 #include "../../GhidraRuntimePlugin/RuntimeProfile.h"
 #include "UI/CodeTextEdit.h"
 #include "UI/CodeEditorWidget.h"
+#include "UI/AsyncLogTextView.h"
 #include "UI/VisibleTableWidget.h"
 #include "UI/PageControlStyle.h"
 #include "UI/ToolbarMetrics.h"
@@ -1487,24 +1488,6 @@ namespace
         }
     }
 
-    QString takePluginTextProjectionBatch(std::deque<QString>& pending, bool emptyDocument, int& units)
-    {
-        QString text = std::move(pending.front());
-        pending.pop_front();
-        ++units;
-        // Qt discards an empty append to a genuinely empty document. Do not
-        // turn such leading empty appends into newly visible blank paragraphs.
-        if (emptyDocument && text.isEmpty()) return text;
-        for (int count = 1; count < 8 && units < 32 && !pending.empty(); ++count) {
-            if (text.size() + 1 + pending.front().size() > 8192) break;
-            text += QLatin1Char('\n');
-            text += pending.front();
-            pending.pop_front();
-            ++units;
-        }
-        return text;
-    }
-
     constexpr int kPluginResultBlockRows = 256;
     struct PluginResultValues
     {
@@ -1956,16 +1939,12 @@ namespace
             }
             else
             {
-                m_plainOutput = new CodeTextEdit(m_tabs);
-                static_cast<CodeTextEdit*>(m_plainOutput)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-                m_plainOutput->setReadOnly(true);
+                m_plainOutput = new ks::ui::AsyncLogTextView(m_tabs);
                 m_plainOutput->setMaximumBlockCount(2000);
                 m_tabs->addTab(m_plainOutput, QStringLiteral("插件输出"));
             }
 
-            m_diagnostics = new CodeTextEdit(m_tabs);
-            static_cast<CodeTextEdit*>(m_diagnostics)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-            m_diagnostics->setReadOnly(true);
+            m_diagnostics = new ks::ui::AsyncLogTextView(m_tabs);
             m_diagnostics->setMaximumBlockCount(2000);
             m_diagnostics->setPlaceholderText(QStringLiteral("插件错误和协议诊断会显示在这里。"));
             m_tabs->addTab(m_diagnostics, QStringLiteral("诊断"));
@@ -2145,10 +2124,12 @@ namespace
             QElapsedTimer budget;
             budget.start();
             int units = 0;
-            const auto project = [&](QPlainTextEdit* editor, std::deque<QString>& pending) {
+            const auto project = [&](ks::ui::AsyncLogTextView* editor, std::deque<QString>& pending) {
                 if (!editor || !editor->isVisible()) return;
                 while (!pending.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
-                    const QString text = takePluginTextProjectionBatch(pending, editor->document()->isEmpty(), units);
+                    const QString text = std::move(pending.front());
+                    pending.pop_front();
+                    ++units;
                     editor->appendPlainText(text);
                     if (!guard) return;
                 }
@@ -2348,8 +2329,8 @@ namespace
         QProcess::ExitStatus m_exitStatus = QProcess::NormalExit;
         bool m_processExited = false, m_parsePending = false, m_outputFlushed = false, m_outputUnavailable = false;
         bool m_presentationScheduled = false, m_progressDirty = false, m_summaryDirty = false, m_sortingActivated = false;
-        QPlainTextEdit* m_plainOutput = nullptr;
-        QPlainTextEdit* m_diagnostics = nullptr;
+        ks::ui::AsyncLogTextView* m_plainOutput = nullptr;
+        ks::ui::AsyncLogTextView* m_diagnostics = nullptr;
         QLabel* m_status = nullptr;
         QPushButton* m_closeButton = nullptr;
         QHash<QString, QLabel*> m_summaryLabels;
@@ -2428,11 +2409,9 @@ namespace
             m_surface->installEventFilter(this);
             rootLayout->addWidget(m_surface, 1);
 
-            m_diagnostics = new CodeTextEdit(this);
-            static_cast<CodeTextEdit*>(m_diagnostics)->setSyntaxLanguage(CodeTextEdit::SyntaxLanguage::PlainText);
-            m_diagnostics->setReadOnly(true);
+            m_diagnostics = new ks::ui::AsyncLogTextView(this);
             m_diagnostics->setMaximumHeight(180);
-            m_diagnostics->document()->setMaximumBlockCount(2000);
+            m_diagnostics->setMaximumBlockCount(2000);
             m_diagnostics->setVisible(false);
             rootLayout->addWidget(m_diagnostics);
 
@@ -2615,7 +2594,9 @@ namespace
                 const QPointer<PluginTabPage> guard(this);
                 int units = 0;
                 while (!m_pendingDiagnostics.empty() && units < 32 && (units == 0 || budget.elapsed() < 3)) {
-                    const QString text = takePluginTextProjectionBatch(m_pendingDiagnostics, m_diagnostics->document()->isEmpty(), units);
+                    const QString text = std::move(m_pendingDiagnostics.front());
+                    m_pendingDiagnostics.pop_front();
+                    ++units;
                     m_diagnostics->appendPlainText(text);
                     if (!guard) return;
                 }
@@ -2633,7 +2614,7 @@ namespace
         QLabel* m_statusLabel = nullptr;
         QPushButton* m_diagnosticsButton = nullptr;
         QPushButton* m_retryButton = nullptr;
-        QPlainTextEdit* m_diagnostics = nullptr;
+        ks::ui::AsyncLogTextView* m_diagnostics = nullptr;
         std::unique_ptr<ks::ui::AsyncOperation> m_parseOperation;
         std::shared_ptr<PluginOutputState> m_parserState;
         QTimer* m_outputTimer = nullptr;

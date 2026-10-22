@@ -538,6 +538,7 @@
     <ClCompile Include="UI\CodeEditorWidget.Export.cpp" />
     <ClCompile Include="UI\MemoryWorkbench\WorkbenchFrozenWriteContext.Native.cpp" />
     <ClCompile Include="UI\CodeTextEdit.cpp" />
+    <ClCompile Include="UI\AsyncLogTextView.cpp" />
     <ClCompile Include="UI\CodeEditorFileSession.cpp" />
     <ClCompile Include="UI\EmbeddedRowDelegate.cpp" />
     <ClCompile Include="UI\DetailLayoutHost.cpp" />
@@ -1014,6 +1015,7 @@
     <ClInclude Include="UI\EmbeddedCellLayout.h" />
     <ClInclude Include="UI\EmbeddedRowDelegate.h" />
     <ClInclude Include="UI\CodeTextEdit.h" />
+    <ClInclude Include="UI\CodeTextSurfaceColors.h" />
     <ClInclude Include="UI\CodeEditorFileSession.h" />
     <ClInclude Include="UI\DetailLayoutHost.h" />
     <ClInclude Include="UI\DetailLayoutRegistry.h" />
@@ -1262,6 +1264,7 @@
     <QtMoc Include="ProcessDock\ProcessDock.h" />
     <QtMoc Include="SettingsDock\SettingsDock.h" />
     <QtMoc Include="UI\CodeEditorWidget.h" />
+    <QtMoc Include="UI\AsyncLogTextView.h" />
     <QtMoc Include="UI\StructuredFieldView.h" />
     <ClInclude Include="UI\ValueTableSelection.h" />
     <ClInclude Include="UI\FieldTreeModel.h" />

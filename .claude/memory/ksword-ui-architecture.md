@@ -507,3 +507,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-21 全范围搜索的Memory/Misc嵌套准备按既有工厂逐次推进，返回未完成时由原搜索generation排下一轮；取消停止后续构造，已完成游标可续用。当前页保持所选分支；真实目标激活和Taskbar兼容fallback仍请求完整准备。每页内部构造仍原子、冷正文仍需构造，不能据此宣称全文零实例化或整项关闭。
 
 - 2026-10-21 诊断writer以实际EXE SHA匹配有大小上限的发行build-info，再记录commit/构建边界tracked dirty；没有匹配清单或旧清单没有dirty时明确unavailable，不从运行机器的Git猜身份。ADS记录实际DLL hash。运行条件仅在原Dock/外观事件记录值快照（窗口、DPI、系统报告刷新率、动画/主题/背景/字体与聚焦模型数量），不扫描隐藏页、不回调worker内UI；屏幕刷新率不是FPS，快照不是呈现或完整因果证明，普通宏0移除调用。
+
+- 2026-10-21 插件只读输出/诊断接入共享`AsyncLogTextView`：保留2000段落上限及逐次append顺序，规范化/前缀淘汰与完整QTextLayout均在既有异步worker，GUI按可见QTextLine绘制。不能只将超长字符串分批append而继续让GUI排版完整段落；也不能用私有Qt绘制ABI。搜索沿原QTextDocument::find规则在禁用布局的worker文档执行，复制按操作接纳点快照，旧命中按已知前缀身份映射，已淘汰范围拒绝。普通CodeTextEdit与新视图共用六项surface颜色公式；不变更可编辑器业务/语法。源/布局分别退役，关闭不等待worker；QtCore纯值对照及编译不代表GUI栅格、DPI、选择/拖出、辅助功能或实测帧率验收。连续写入时显示仍可滞后，首版必须由用户手测三处插件日志及原编辑器主题。

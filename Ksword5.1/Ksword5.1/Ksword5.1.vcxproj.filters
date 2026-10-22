@@ -1544,6 +1544,9 @@
     <ClCompile Include="UI\CodeTextEdit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UI\AsyncLogTextView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UI\CodeEditorFileSession.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -2974,6 +2977,9 @@
     <QtMoc Include="UI\CodeEditorWidget.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="UI\AsyncLogTextView.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
     <QtMoc Include="UI\KernelDisassemblyDialog.h">
       <Filter>Header Files</Filter>
     </QtMoc>
@@ -3094,6 +3100,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\CodeTextEdit.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\CodeTextSurfaceColors.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\CodeEditorFileSession.h">

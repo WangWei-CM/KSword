@@ -1,5 +1,6 @@
 #include "CodeTextEdit.h"
 #include "../theme.h"
+#include "CodeTextSurfaceColors.h"
 
 #include <QEvent>
 #include <QApplication>
@@ -94,14 +95,8 @@ namespace
         bool fullyScanned = true;
     };
 
-    struct EditorColors
+    struct EditorColors : ks::ui::CodeTextSurfaceColors
     {
-        QColor base;
-        QColor gutter;
-        QColor gutterText;
-        QColor currentNumber;
-        QColor divider;
-        QColor currentLine;
         QColor bracket;
         QColor bracketError;
         QTextCharFormat keyword;
@@ -125,14 +120,9 @@ namespace
     EditorColors colorsFor(const QPalette& palette)
     {
         EditorColors colors;
-        colors.base = palette.color(QPalette::Base);
+        static_cast<ks::ui::CodeTextSurfaceColors&>(colors) = ks::ui::CodeTextSurfaceColorsFor(palette);
         const QColor text = palette.color(QPalette::Text);
         const QColor accent = palette.color(QPalette::Highlight);
-        colors.gutter = KswordTheme::BlendColors(colors.base, palette.color(QPalette::Window), 100);
-        colors.gutterText = KswordTheme::EnsureTextContrast(KswordTheme::BlendColors(text, colors.gutter, 110), colors.gutter);
-        colors.currentNumber = KswordTheme::EnsureTextContrast(accent, colors.gutter);
-        colors.divider = KswordTheme::BlendColors(text, colors.gutter, 218);
-        colors.currentLine = KswordTheme::BlendColors(colors.base, accent, 18);
         colors.bracket = KswordTheme::BlendColors(colors.base, accent, 65);
         colors.bracketError = KswordTheme::BlendColors(colors.base, KswordTheme::ErrorColor(), 65);
         const std::array<QColor, 2> backgrounds{colors.base, colors.currentLine};
