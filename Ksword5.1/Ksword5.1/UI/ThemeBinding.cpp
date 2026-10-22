@@ -217,9 +217,16 @@ namespace
             if (m_registry != nullptr && event != nullptr &&
                 (event->type() == QEvent::ApplicationPaletteChange ||
                     event->type() == QEvent::LanguageChange ||
-                    (!m_applying && event->type() == QEvent::PaletteChange)))
+                    (!m_applying && (event->type() == QEvent::PaletteChange
+                        || (m_widget && m_widget->property("ksword_flat_button_shared_owner").toBool()
+                            && (event->type() == QEvent::StyleChange || event->type() == QEvent::ParentChange
+                                || event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished))))))
             {
-                m_registry->schedule(this);
+                const QPointer<WidgetThemeBinding> lifetime(this);
+                if (!m_applying && m_widget && m_widget->property("ksword_flat_button_shared_owner").toBool())
+                    m_widget->setProperty("ksword_flat_button_shared_dirty", true);
+                if (!lifetime) return true;
+                if (m_registry) m_registry->schedule(this);
             }
             return QObject::eventFilter(watched, event);
         }

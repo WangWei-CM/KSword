@@ -14,6 +14,7 @@
 #include <QToolButton>
 #include <QVariant>
 #include <QStringView>
+#include <QStyle>
 #include <memory>
 #include <array>
 
@@ -328,6 +329,68 @@ namespace
         return style;
     }
 
+    QPalette sharedMainButtonPalette()
+    {
+        QPalette colors = QApplication::palette();
+        const auto surfaces = ks::ui::MainWindowSurfaceColors();
+        colors.setColor(QPalette::Base, surfaces.content);
+        colors.setColor(QPalette::AlternateBase, surfaces.header);
+        return colors;
+    }
+
+    QString withoutButtonBlock(QString style)
+    {
+        const qsizetype begin = style.indexOf(QLatin1String(beginMarker));
+        const qsizetype end = style.indexOf(QLatin1String(endMarker), begin);
+        if (begin >= 0 && end >= begin) style.remove(begin, end + qstrlen(endMarker) - begin);
+        return style;
+    }
+
+    bool canShareMainButtonStyle(const QAbstractButton* button, ks::ui::FlatButtonTone tone,
+        ks::ui::FlatButtonAppearance appearance, const QPalette& colors)
+    {
+        using namespace ks::ui;
+        if (tone != FlatButtonTone::Neutral || appearance != FlatButtonAppearance::Auto
+            || KswordTheme::ActiveThemePreviewSeeds || !button->objectName().isEmpty()
+            || !UsesMainSurfaceHierarchy(button)) return false;
+        const auto* push = qobject_cast<const QPushButton*>(button);
+        if (push && push->isFlat()) return false;
+        // Compound controls keep their original descendant cascade. Future
+        // child buttons still enroll through FlatButtonFilter's ancestor marker.
+        for (QObject* child : button->children())
+            if (qobject_cast<QWidget*>(child)) return false;
+        for (const char* role : {"ksword_primary_toolbar", "ksword_primary_content_panel",
+            "ksword_workspace_page", "ksword_parameter_surface", "ksword_secondary_window",
+            "ksword_secondary_footer", "ksword_dock_content_root"})
+            if (button->property(role).toBool()) return false;
+        const QWidget* root = button->window();
+        const QString rootStyle = root->property("ksword_shared_button_root_style").toString();
+        if (rootStyle.isEmpty()
+            || root->property("ksword_shared_button_generation").toULongLong() != KswordTheme::ThemeSeedGeneration
+            || rootStyle != root->styleSheet()) return false;
+        const QPalette shared = root->property("ksword_shared_button_palette").value<QPalette>();
+        for (const auto group : {QPalette::Active, QPalette::Disabled})
+            for (const auto role : {QPalette::Base, QPalette::Highlight, QPalette::AlternateBase,
+                QPalette::Text, QPalette::HighlightedText})
+                if (colors.color(group, role) != shared.color(group, role)) return false;
+        for (const QWidget* owner = button; owner && owner != root; owner = owner->parentWidget())
+        {
+            if (owner != button && qobject_cast<const QAbstractButton*>(owner)) return false;
+            if (owner->inherits("ads::CDockAreaTitleBar") || owner->inherits("ads::CDockWidgetTab")) return false;
+            QString style = owner == button ? withoutButtonBlock(owner->styleSheet()) : owner->styleSheet();
+            for (const char* blockName : {"ksword_primary_style_block", "ksword_parameter_surface_style_block",
+                "ksword_secondary_style_block", "ksword_dock_root_surface_style_block", "ksword_page_tabs_owned_pane_style"})
+            {
+                const QString block = owner->property(blockName).toString();
+                if (!block.isEmpty()) style.remove(block);
+            }
+            if (owner->property("ksword_toolbar_control").toBool()) style.remove(ToolbarControlGeometryStyle().trimmed());
+            if (owner->property("ksword_toolbar_icon_only").toBool()) style.remove(ToolbarIconGeometryStyle().trimmed());
+            if (!style.trimmed().isEmpty()) return false;
+        }
+        return true;
+    }
+
     // 只对明确使用本组件标记的本地/父级样式登记绑定，不猜测未审核业务的动作色。
     class FlatButtonFilter final : public QObject
     {
@@ -354,7 +417,8 @@ namespace
             const QString appliedStyle = button->property("ksword_flat_button_applied_style").toString();
             if (!button->property("ksword_flat_button_pending").toBool()
                 && button->property("ksword_flat_button_managed").toBool()
-                && !appliedStyle.isEmpty() && button->styleSheet() == appliedStyle
+                && (!appliedStyle.isEmpty() || button->property("ksword_flat_button_shared_owner").toBool())
+                && button->styleSheet() == appliedStyle
                 && button->property("ksword_flat_button_tone")
                     == button->property("ksword_flat_button_applied_tone")
                 && button->property("ksword_flat_button_appearance")
@@ -372,9 +436,20 @@ namespace
             }
             for (QWidget* owner = button; owner != nullptr; owner = owner->parentWidget())
             {
+                if (owner != button && owner->property("ksword_flat_button_shared_owner").toBool())
+                {
+                    // ChildAdded already dirtied this explicit parent. Restore
+                    // its original compound-control cascade before child polish.
+                    const QPointer<QAbstractButton> target(button);
+                    const QPointer<QWidget> parentOwner(owner);
+                    ks::ui::PrepareWidgetThemeBindingsForShow(owner);
+                    if (!target) return true;
+                    if (!parentOwner) return false;
+                }
                 const auto& ownership = buttonOwnershipStyle(owner);
                 const QString& style = ownership.colorStyle;
-                const int latestTone = ownership.tone;
+                const bool sharedOwner = style.isEmpty() && owner->property("ksword_flat_button_shared_owner").toBool();
+                const int latestTone = sharedOwner ? static_cast<int>(ks::ui::FlatButtonTone::Neutral) : ownership.tone;
                 // 未标记的本地或祖先覆盖属于页面，不跨过它猜更远父级/全局按钮归一。
                 // 例如数据颜色面板可在父 QWidget 给按钮定义底色，而按钮自身 QSS 为空。
                 if (!style.isEmpty() && latestTone < 0)
@@ -383,7 +458,7 @@ namespace
                 }
                 if (latestTone >= 0)
                 {
-                    int latestAppearance = ownership.appearance < 0
+                    int latestAppearance = sharedOwner || ownership.appearance < 0
                         ? static_cast<int>(ks::ui::FlatButtonAppearance::Auto) : ownership.appearance;
                     // 旧工厂的 Auto 标记不能撤销页面明确选择；显式 API 调用仍能重新声明外观。
                     const QVariant declared = button->property("ksword_flat_button_appearance");
@@ -514,6 +589,31 @@ QString ks::ui::BuildFlatButtonStyle(FlatButtonTone tone, FlatButtonAppearance a
     return ownedStyle(tone, appearance, QApplication::palette());
 }
 
+QString ks::ui::BuildSharedMainSurfaceButtonStyle()
+{
+    QString style = buildStyle(FlatButtonTone::Neutral, FlatButtonAppearance::Auto, sharedMainButtonPalette());
+    // The scoped root rules do not declare the entire ancestor a button owner.
+    const qsizetype markerEnd = style.indexOf(QStringLiteral("*/"), style.indexOf(QStringLiteral("*/")) + 2);
+    style.remove(0, markerEnd + 2);
+    style.replace(QStringLiteral("QPushButton"), QStringLiteral("QPushButton[ksword_flat_button_shared_owner=\"true\"]"));
+    style.replace(QStringLiteral("QToolButton"), QStringLiteral("QToolButton[ksword_flat_button_shared_owner=\"true\"]"));
+    return style;
+}
+
+void ks::ui::RegisterSharedMainSurfaceButtonStyle(QWidget* root, const QString& completeStyle)
+{
+    const QPalette colors = sharedMainButtonPalette();
+    if (root->property("ksword_shared_button_root_style").toString() == completeStyle
+        && root->property("ksword_shared_button_generation").toULongLong() == KswordTheme::ThemeSeedGeneration
+        && root->property("ksword_shared_button_palette").value<QPalette>() == colors) return;
+    // A cached floating-host QSS can predate a palette change. Never certify
+    // new colors unless their exact shared rules are present in these bytes.
+    root->setProperty("ksword_shared_button_root_style",
+        completeStyle.contains(BuildSharedMainSurfaceButtonStyle()) ? completeStyle : QString());
+    root->setProperty("ksword_shared_button_palette", QVariant::fromValue(colors));
+    root->setProperty("ksword_shared_button_generation", QVariant::fromValue(KswordTheme::ThemeSeedGeneration));
+}
+
 void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, FlatButtonAppearance appearance)
 {
     if (button == nullptr || button->inherits("QLineEditIconButton") || (!qobject_cast<QPushButton*>(button)
@@ -544,36 +644,60 @@ void ks::ui::ApplyFlatButtonTheme(QAbstractButton* button, FlatButtonTone tone, 
         if (!currentColorStyle.isEmpty() && !currentStyle.contains(QLatin1String(beginMarker))
             && (*applied || currentColorStyle != initialColorStyle))
         {
+            if (guardedButton->property("ksword_flat_button_shared_owner").isValid())
+            {
+                guardedButton->setProperty("ksword_flat_button_shared_owner", QVariant());
+                if (!guardedButton) return;
+                guardedButton->style()->unpolish(guardedButton.data());
+                if (guardedButton) guardedButton->style()->polish(guardedButton.data());
+                if (guardedButton) guardedButton->update();
+            }
+            if (!guardedButton) return;
             guardedButton->setProperty("ksword_flat_button_pending", false);
             return;
         }
         const QPalette colors = buttonPalette(guardedButton.data());
         const auto actualAppearance = resolvedAppearance(tone, appearance, toolPresentation(guardedButton.data()));
-        const QString block = ownedStyle(tone, appearance, colors, guardedButton.data());
-        const QString style = replaceOwnedBlock(currentStyle, block);
+        const bool shared = canShareMainButtonStyle(guardedButton.data(), tone, appearance, colors);
+        const bool ownershipChanged = guardedButton->property("ksword_flat_button_shared_owner").toBool() != shared;
+        if (ownershipChanged)
+            guardedButton->setProperty("ksword_flat_button_shared_owner", shared ? QVariant(true) : QVariant());
+        if (!guardedButton) return;
+        const QString style = shared ? withoutButtonBlock(currentStyle)
+            : replaceOwnedBlock(currentStyle, ownedStyle(tone, appearance, colors, guardedButton.data()));
         *applied = true;
         if (style != guardedButton->styleSheet())
         {
             guardedButton->setStyleSheet(style);
         }
+        else if (ownershipChanged)
+        {
+            guardedButton->style()->unpolish(guardedButton.data());
+            if (guardedButton) guardedButton->style()->polish(guardedButton.data());
+            if (guardedButton) guardedButton->update();
+        }
         if (!guardedButton.isNull() && guardedButton->styleSheet() == style)
         {
             // 排队换肤期间局部 QSS 可能仍是上一主题；图标须按已经真正下发的五态底色校准。
             QVariantList appliedBackgrounds; // 保存真实正常/悬停/按下/选中/禁用底面，而非当前全局种子。
-            for (const auto state : {FlatButtonState::Normal, FlatButtonState::Hover,
-                FlatButtonState::Pressed, FlatButtonState::Checked, FlatButtonState::Disabled})
-            {
-                appliedBackgrounds.append(QVariant::fromValue(
-                    FlatButtonColorsForState(colors, tone, actualAppearance, state).background));
-            }
+            if (!shared)
+                for (const auto state : {FlatButtonState::Normal, FlatButtonState::Hover,
+                    FlatButtonState::Pressed, FlatButtonState::Checked, FlatButtonState::Disabled})
+                {
+                    appliedBackgrounds.append(QVariant::fromValue(
+                        FlatButtonColorsForState(colors, tone, actualAppearance, state).background));
+                }
             // 记录最后实际下发的完整样式及配方，逐帧图标无需再扫描同一祖先 QSS 链。
             // 页面后来追加/替换任意规则时精确字符串不相等，查询立即回到所有权检查。
-            guardedButton->setProperty("ksword_flat_button_applied_style", style);
+            guardedButton->setProperty("ksword_flat_button_applied_style", style.isEmpty() ? QVariant() : QVariant(style));
             guardedButton->setProperty("ksword_flat_button_applied_tone", static_cast<int>(tone));
             guardedButton->setProperty("ksword_flat_button_applied_appearance", static_cast<int>(appearance));
-            guardedButton->setProperty("ksword_flat_button_applied_backgrounds", appliedBackgrounds);
+            guardedButton->setProperty("ksword_flat_button_applied_backgrounds",
+                shared ? QVariant() : QVariant(appliedBackgrounds));
             guardedButton->setProperty("ksword_flat_button_pending", false);
             guardedButton->setProperty("ksword_flat_button_initial_color_style", QVariant());
+            if (guardedButton->property("ksword_flat_button_shared_dirty").isValid())
+                guardedButton->setProperty("ksword_flat_button_shared_dirty", QVariant());
         }
     }, ThemePalettePolicy::PreserveLocal);
 }
@@ -599,7 +723,13 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     int tone = -1; // 只从仍实际存在的拥有标记读取，避免旧 managed 属性覆盖页面数据色。
     FlatButtonAppearance appearance = FlatButtonAppearance::Auto;
     const QString appliedStyle = button->property("ksword_flat_button_applied_style").toString();
-    const bool exactAppliedStyle = !appliedStyle.isEmpty() && button->styleSheet() == appliedStyle;
+    const bool shared = button->property("ksword_flat_button_shared_owner").toBool();
+    const bool exactAppliedStyle = (shared || !appliedStyle.isEmpty()) && button->styleSheet() == appliedStyle;
+    const QWidget* sharedRoot = shared ? button->window() : nullptr;
+    if (shared && (button->property("ksword_flat_button_shared_dirty").toBool()
+        || !exactAppliedStyle || !UsesMainSurfaceHierarchy(button)
+        || sharedRoot->property("ksword_shared_button_generation").toULongLong() != KswordTheme::ThemeSeedGeneration
+        || sharedRoot->property("ksword_shared_button_root_style").toString() != sharedRoot->styleSheet())) return false;
     if (exactAppliedStyle)
     {
         // 完整局部块仍存在且未被页面重写，局部选择器优先于祖先，直接使用实际已下发的配方。
@@ -668,7 +798,7 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
     {
         actualState = FlatButtonState::Disabled;
     }
-    if (exactAppliedStyle)
+    if (exactAppliedStyle && !shared)
     {
         const QVariantList backgrounds = button->property("ksword_flat_button_applied_backgrounds").toList();
         const qsizetype stateIndex = static_cast<qsizetype>(actualState);
@@ -678,7 +808,8 @@ bool ks::ui::TryGetFlatButtonBackground(const QAbstractButton* button,
             return true;
         }
     }
-    const FlatButtonStateColors colors = FlatButtonColorsForState(buttonPalette(button),
+    const FlatButtonStateColors colors = FlatButtonColorsForState(shared
+            ? sharedRoot->property("ksword_shared_button_palette").value<QPalette>() : buttonPalette(button),
         static_cast<FlatButtonTone>(tone), appearance, actualState);
     *background = colors.background;
     return true;

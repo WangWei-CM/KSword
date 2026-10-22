@@ -525,3 +525,5 @@ KSword 主程序位于 `Ksword5.1/Ksword5.1`（Qt 6.9.3 Widgets + Qt Advanced Do
 - 2026-10-22 诊断宏1在既有Tab/ADS selected与实际冷挂载/页壳准备入口记录有界target路径/index、origin和navigation_id；ready限定shell_prepared，business_ready_proven/present_proven均false，warm Dock明确ready_unproven。宏0无新观察器/成员或业务分支。33项QtCore实际值API与3实际TU宏1检查通过，未运行GUI/采样。T00原要求包括真实受验操作链/可观测present/WPR栈与实测；不应扩张为所有无关后台任务接入或光学设备验收，也不能以外壳ready关闭T00。
 
 - 2026-10-22 `Invoke-KSwordBuildCheck.ps1 -EnablePerfTrace`仅通过本次临时props给主工程全部ClCompile传入诊断宏1，不修改PerfTrace.h默认0或工程。普通Build仍宏0；是否禁WPO继续只由既有独立开关决定。构建日志记录BUILD_PERF_TRACE_ENABLED，需按实际构建标识区分普通/诊断产物，不能用VerifyArtifactOnly证明编译宏。真实GUI/WPR采集仍由用户执行。
+
+- 2026-10-22 普通Neutral/Auto按钮在明确不透明主/ADS浮动宿主中，可复用宿主属性选择器的同一配方，不再逐按钮写相同局部QSS或保存五态背景列表。资格检查使用实际完整宿主QSS、主题代次、局部palette及祖先拥有块；主动作/危险色、显式外观、flat QPushButton、命名/复合按钮、未知业务QSS、透明/独立宿主保留原局部拥有者。配方和状态颜色公式保持原函数，宿主规则去除祖先拥有标记，避免误接管未声明按钮；业务QSS接管需清共享属性并重polish。重挂、样式/色板变化和迟到子控件通过原ThemeBinding队列失效；子按钮准备前先恢复已变为复合控件的父级原层叠，沿用弱寿命保护。584项QtCore/QtGui值和QObject替身检查验证拥有者/字符串/回调路径，不能代替QtWidgets层叠、真实热换肤/浮动、内存或FPS实测；真实GUI交用户验收。

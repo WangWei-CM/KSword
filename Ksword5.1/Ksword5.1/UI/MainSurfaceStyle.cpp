@@ -1,5 +1,6 @@
 #include "../Framework.h"
 #include "./MainSurfaceStyle.h"
+#include "./FlatButtonTheme.h"
 #include "../theme.h"
 #include <QWidget>
 
@@ -95,6 +96,6 @@ namespace ks::ui
             "ads--CDockWidget QFrame#card,ads--CDockWidget QWidget#card{"
             "background:%2;border-color:%5;border-radius:8px;}")
             .arg(colors.canvas.name(), colors.content.name(), text.name(),
-                colors.alternate.name(), colors.border.name());
+                colors.alternate.name(), colors.border.name()) + BuildSharedMainSurfaceButtonStyle();
     }
 }

@@ -13248,6 +13248,7 @@ void MainWindow::applyAppearanceSettings(
         QElapsedTimer styleSheetApplyTimer;
         styleSheetApplyTimer.start();
         mainStyleSheetChanged = (styleSheet() != appearanceStyleSheet);
+        ks::ui::RegisterSharedMainSurfaceButtonStyle(this, appearanceStyleSheet);
         if (mainStyleSheetChanged)
         {
             setStyleSheet(appearanceStyleSheet);
@@ -13845,6 +13846,7 @@ void MainWindow::applyFloatingDockContainerAppearance(ads::CFloatingDockContaine
         m_floatingDockAppearanceBaseColor = baseColor;
         m_floatingDockAppearanceTransparency = enableDockContentTransparency;
     }
+    ks::ui::RegisterSharedMainSurfaceButtonStyle(floatingWidget, m_floatingDockAppearanceStyleSheet);
     if (floatingWidget->styleSheet() != m_floatingDockAppearanceStyleSheet)
     {
         floatingWidget->setStyleSheet(m_floatingDockAppearanceStyleSheet);

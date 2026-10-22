@@ -8,6 +8,7 @@
 class QAbstractButton;
 class QApplication;
 class QColor;
+class QWidget;
 
 namespace ks::ui
 {
@@ -51,6 +52,11 @@ namespace ks::ui
     // 页面可继续追加自身 padding/圆角/字号；普通与强调态使用 palette 动态颜色。
     QString BuildFlatButtonStyle(FlatButtonTone tone = FlatButtonTone::Neutral,
         FlatButtonAppearance appearance = FlatButtonAppearance::Auto);
+
+    // Shared main-surface colors apply only to controls that passed the exact
+    // palette/cascade checks; every other control retains its local owner.
+    QString BuildSharedMainSurfaceButtonStyle();
+    void RegisterSharedMainSurfaceButtonStyle(QWidget* root, const QString& completeStyle);
 
     // 安装仅发现明确样式标记的热主题绑定，不遍历改写未审核页面的任意本地 QSS。
     void InstallGlobalFlatButtonTheme(QApplication* app);
