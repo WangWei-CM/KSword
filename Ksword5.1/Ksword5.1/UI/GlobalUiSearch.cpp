@@ -1671,7 +1671,7 @@ namespace ks::ui
                             && m_activeSearchScope == UiSearchScope::Global;
                         if (!searchComplete)
                         {
-                            if (dock && m_dockPreparer) m_dockPreparer(dock.data());
+                            if (dock && m_dockPreparer) m_dockPreparer(dock.data(), m_preparingHasBodyCatalog);
                             if (!alive || searchGeneration != m_searchGeneration || !m_searchInProgress) return;
                             m_preparingSearchDock = dock;
                             m_preparingSearchContent = dock ? dock->widget() : nullptr;
@@ -2048,7 +2048,7 @@ namespace ks::ui
 
         if (dockWidget != nullptr && m_dockPreparer)
         {
-            m_dockPreparer(dockWidget);
+            m_dockPreparer(dockWidget, false);
         }
         if (!lifetime) return;
         const bool descriptorHit = !hitEntry.navigationDescriptorId.isEmpty();

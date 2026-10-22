@@ -90,7 +90,9 @@ namespace ks::ui
         // DockListProvider：返回参与搜索的 Dock 列表（按展示顺序）。
         using DockListProvider = std::function<QList<ads::CDockWidget*>()>;
         // DockPreparer：确保 Dock 懒加载内容已初始化（重入安全）。
-        using DockPreparer = std::function<void(ads::CDockWidget*)>;
+        // The bool is true only for Global search with a resolved cold-body
+        // catalog/navigator. Actual activation always requests normal content.
+        using DockPreparer = std::function<void(ads::CDockWidget*, bool)>;
         // CurrentPage prepares the selected branch; Global retains complete
         // discovery until a source proves searchable body coverage.
         // MorePages schedules the next factory; Waiting is resumed once by the

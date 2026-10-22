@@ -11,6 +11,7 @@
 #include "../../Framework.h"
 
 #include <QMap>
+#include "../../UI/PageNavigationCatalog.h"
 #include <functional>
 #include <QWidget>
 
@@ -39,6 +40,8 @@ class BootEditorTab final : public QWidget
     Q_OBJECT
 
 public:
+    static QVector<ks::ui::PageSearchBodyText> coldSearchBody();
+
     // 构造函数：
     // - 作用：只初始化引导编辑器 UI 与信号连接，不做任何 BCD 枚举。
     // - 参数 parent：Qt 父控件。

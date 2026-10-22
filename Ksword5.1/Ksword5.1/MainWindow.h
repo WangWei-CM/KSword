@@ -354,7 +354,7 @@ private:
     bool enableSeDebugPrivilege(std::string& errorTextOut) const;
     void initDockWidgets();
     QWidget* createDockPlaceholderWidget(const QString& titleText) const;
-    void ensureDockContentInitialized(ads::CDockWidget* dockWidget);
+    void ensureDockContentInitialized(ads::CDockWidget* dockWidget, bool useColdBodies = false);
     ks::ui::PageSearchPreparation prepareNestedDockContentForNavigation(ads::CDockWidget* dockWidget,
         bool currentPageOnly = false, bool singleStep = false, bool useColdBodies = false,
         std::function<void()> resume = {});

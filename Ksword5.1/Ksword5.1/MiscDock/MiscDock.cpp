@@ -30,6 +30,7 @@
 #include "../Internationalization/LanguageManager.h"
 #include <QIcon>
 #include <QPointer>
+#include <QShowEvent>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -100,10 +101,10 @@ namespace
     }
 }
 
-MiscDock::MiscDock(QWidget* parent)
-    : QWidget(parent)
+MiscDock::MiscDock(QWidget* parent, const bool initializeCurrentPage)
+    : QWidget(parent), m_initializeCurrentPageOnShow(!initializeCurrentPage)
 {
-    initializeUi();
+    initializeUi(initializeCurrentPage);
 
     kLogEvent initEvent;
     info << initEvent << "[MiscDock] 杂项页面初始化完成。" << eol;
@@ -116,7 +117,7 @@ MiscDock::~MiscDock()
     if (m_windowInjectionSearchOperation) m_windowInjectionSearchOperation->close();
 }
 
-void MiscDock::initializeUi()
+void MiscDock::initializeUi(const bool initializeCurrentPage)
 {
     // 根布局负责承载整个“杂项”容器。
     m_rootLayout = new QVBoxLayout(this);
@@ -256,6 +257,7 @@ void MiscDock::initializeUi()
     // 首屏页必须同步初始化：
     // - ADS 可能直接把“杂项”恢复为当前 Dock，此时不会再触发一次 currentChanged；
     // - 只初始化当前页，其余页面仍然保持懒加载。
+    if (!initializeCurrentPage) return; // Full search retains only proven cold body shells.
     ensureTabInitialized(m_mainTabWidget->currentIndex());
 
     // 再补一次 0ms 兜底，覆盖主题/ADS 延迟恢复导致 currentIndex 稍后才变化的情况。
@@ -263,6 +265,14 @@ void MiscDock::initializeUi()
         {
             ensureTabInitialized(m_mainTabWidget != nullptr ? m_mainTabWidget->currentIndex() : -1);
         });
+}
+
+void MiscDock::showEvent(QShowEvent* event)
+{
+    const QPointer<MiscDock> owner(this);
+    QWidget::showEvent(event);
+    if (owner && std::exchange(m_initializeCurrentPageOnShow, false) && m_mainTabWidget)
+        ensureTabInitialized(m_mainTabWidget->currentIndex());
 }
 
 void MiscDock::ensureTabInitialized(const int tabIndex, const bool activatePage)
@@ -601,7 +611,8 @@ ks::ui::PageSearchPreparation MiscDock::prepareNavigationPages(const bool curren
                 m_navigationPagePreparing = false;
                 return Preparation::Waiting;
             }
-            if (useColdBodies && ((m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
+            if (useColdBodies && ((m_navigationPrepareCursor == m_bootEditorTabIndex && !m_bootEditorTab)
+                || (m_navigationPrepareCursor == m_minidumpTabIndex && !m_minidumpPage)
                 || (m_navigationPrepareCursor == m_themeCheckTabIndex && !m_themeCheckPage)
                 || (m_navigationPrepareCursor == m_systemTimeTabIndex && !m_systemTimePage)
                 || (m_navigationPrepareCursor == m_virtualLocationTabIndex && !m_virtualLocationPage)
@@ -668,7 +679,9 @@ void MiscDock::initializeBootEditorTab()
 
     QVBoxLayout* const hostLayout = buildHostLayout(m_bootEditorHostWidget);
     m_bootEditorTab = new BootEditorTab(m_bootEditorHostWidget);
+    const QPointer<QWidget> host(m_bootEditorHostWidget);
     hostLayout->addWidget(m_bootEditorTab, 1);
+    if (host) host->setProperty("ksword_search_body_page_id", QVariant());
 }
 
 void MiscDock::initializeSoundSourcePage()
@@ -993,6 +1006,11 @@ ks::ui::PageNavigationCatalog MiscDock::navigationCatalog(const MiscDock* existi
 {
     ks::ui::PageNavigationCatalog main;
     for (const auto& definition : kMiscNavigation) main.append(ks::ui::PageNavigationTabDescriptor(definition));
+    if (includeColdSearchBody && (!existing || !existing->m_bootEditorTab))
+    {
+        main[0].coldBodyTexts = BootEditorTab::coldSearchBody();
+        main[0].coldBodyComplete = true;
+    }
     if (includeColdSearchBody && (!existing || !existing->m_soundSourcePage))
     {
         main[1].coldBodyTexts = ks::misc::SoundSourcePage::coldSearchBody();

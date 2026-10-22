@@ -7460,8 +7460,8 @@ void MainWindow::initGlobalUiSearchController()
     m_globalUiSearchController->setDockListProvider([this, navigationAdmission]() {
         return navigationAdmission() ? collectSearchableDockWidgets() : QList<ads::CDockWidget*>{};
     });
-    m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget) {
-        if (navigationAdmission()) ensureDockContentInitialized(dockWidget);
+    m_globalUiSearchController->setDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget, const bool useColdBodies) {
+        if (navigationAdmission()) ensureDockContentInitialized(dockWidget, useColdBodies);
     });
     m_globalUiSearchController->setNestedDockPreparer([this, navigationAdmission](ads::CDockWidget* dockWidget,
         ks::ui::UiSearchScope scope, const bool singleStep, const bool useColdBodies, std::function<void()> resume) {
@@ -10982,7 +10982,7 @@ QWidget* MainWindow::createDockPlaceholderWidget(const QString& titleText) const
     return placeholderWidget;
 }
 
-void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
+void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget, const bool useColdBodies)
 {
     if (dockWidget == nullptr)
     {
@@ -11146,7 +11146,7 @@ void MainWindow::ensureDockContentInitialized(ads::CDockWidget* dockWidget)
     {
         // 扫描器 / 转储分析 / 插件已并入杂项页，不再各自占用顶层 Dock，
         // 它们随杂项页内部的页签懒加载，这里只需构造杂项容器本身。
-        if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this); }
+        if (m_miscWidget == nullptr) { m_miscWidget = new MiscDock(this, !useColdBodies); }
         m_miscWidget->setBugcheckDiagnosticsVisible(
             m_currentAppearanceSettings.bugcheckDiagnosticsAutoInstallEnabled ||
             m_bugcheckDiagnosticsInstalledForSession ||

@@ -53,6 +53,77 @@
 
 namespace
 {
+
+    enum class BootSearchText
+    {
+        Filter, Admin, NonAdmin, Basic, Identifier, Type, PolicyUnchanged, PolicyStandard, PolicyLegacy, IdentifierCaption, TypeCaption, DescriptionCaption, DeviceCaption, OsDeviceCaption, PathCaption, SystemRootCaption, LocaleCaption, PolicyCaption, TimeoutCaption, ApplyTimeout, LegacySection, FlagsSection, TestSigning, NoIntegrity, Debug, BootLog, BaseVideo, Recovery, SafeOff, SafeMinimal, SafeNetwork, SafeShell, SafeCaption, CustomSection, ApplyEntry, Reload, HeaderIdentifier, HeaderDescription, HeaderType, HeaderDevice, HeaderPath, HeaderState, Output, Status
+    };
+    struct BootSearchEntry { const char* target; const char* source; bool mnemonic; };
+    constexpr BootSearchEntry kBootSearchTexts[] = {
+        {"ks_boot_filter", "筛选：标识符/描述/路径/类型", false},
+        {"ks_boot_admin", "权限：管理员（可编辑）", false},
+        {"ks_boot_admin", "权限：非管理员（多数写操作会失败）", false},
+        {"ks_boot_basic", "基础字段", false},
+        {"ks_boot_identifier", "-", false},
+        {"ks_boot_type", "-", false},
+        {"ks_boot_policy", "不修改", false},
+        {"ks_boot_policy", "Standard", false},
+        {"ks_boot_policy", "Legacy", false},
+        {"ks_boot_identifier_caption", "标识符", false},
+        {"ks_boot_type_caption", "对象类型", false},
+        {"ks_boot_description_caption", "描述 description", false},
+        {"ks_boot_device_caption", "设备 device", false},
+        {"ks_boot_osdevice_caption", "OS 设备 osdevice", false},
+        {"ks_boot_path_caption", "加载路径 path", false},
+        {"ks_boot_systemroot_caption", "系统根 systemroot", false},
+        {"ks_boot_locale_caption", "区域 locale", false},
+        {"ks_boot_policy_caption", "启动菜单策略", false},
+        {"ks_boot_timeout_caption", "菜单等待超时", false},
+        {"ks_boot_apply_timeout", "应用 bootmgr 超时", true},
+        {"ks_boot_legacy_section", "传统引导（Legacy/F8）", true},
+        {"ks_boot_flags_section", "高级开关", true},
+        {"ks_boot_testsigning", "开启测试签名 (testsigning)", true},
+        {"ks_boot_nointegrity", "关闭完整性检查 (nointegritychecks)", true},
+        {"ks_boot_debug", "开启内核调试 (debug)", true},
+        {"ks_boot_bootlog", "开启启动日志 (bootlog)", true},
+        {"ks_boot_basevideo", "使用基础视频驱动 (basevideo)", true},
+        {"ks_boot_recovery", "启用恢复环境 (recoveryenabled)", true},
+        {"ks_boot_safeboot", "关闭安全模式", false},
+        {"ks_boot_safeboot", "最小安全模式", false},
+        {"ks_boot_safeboot", "网络安全模式", false},
+        {"ks_boot_safeboot", "命令行安全模式", false},
+        {"ks_boot_safeboot_caption", "safeboot 模式", false},
+        {"ks_boot_custom_section", "自定义命令", true},
+        {"ks_boot_apply_entry", "应用当前条目", true},
+        {"ks_boot_reload", "重读当前条目", true},
+        {"ks_boot_entries", "标识符", false},
+        {"ks_boot_entries", "描述", false},
+        {"ks_boot_entries", "类型", false},
+        {"ks_boot_entries", "设备", false},
+        {"ks_boot_entries", "路径", false},
+        {"ks_boot_entries", "状态", false},
+        {"ks_boot_output", "原始输出", false},
+        {"ks_boot_status", "状态：尚未加载 BCD 数据", false},
+    };
+    const BootSearchEntry& bootSearchEntry(BootSearchText id)
+    {
+        return kBootSearchTexts[static_cast<int>(id)];
+    }
+    QString bootSearchSource(BootSearchText id)
+    {
+        return QString::fromUtf8(bootSearchEntry(id).source);
+    }
+    QString bootSearchTarget(BootSearchText id)
+    {
+        return QString::fromLatin1(bootSearchEntry(id).target);
+    }
+    QStringList bootSearchHeaders()
+    {
+        return {bootSearchSource(BootSearchText::HeaderIdentifier), bootSearchSource(BootSearchText::HeaderDescription),
+            bootSearchSource(BootSearchText::HeaderType), bootSearchSource(BootSearchText::HeaderDevice),
+            bootSearchSource(BootSearchText::HeaderPath), bootSearchSource(BootSearchText::HeaderState)};
+    }
+
     // 列索引常量：
     // - 统一定义条目表格列顺序；
     // - 避免代码中散落魔法数字。
@@ -121,6 +192,40 @@ namespace
     }
 }
 
+QVector<ks::ui::PageSearchBodyText> BootEditorTab::coldSearchBody()
+{
+    QVector<ks::ui::PageSearchBodyText> body;
+    body.reserve(43);
+    const auto text = [](BootSearchText id) { return ks::i18n::sourceText(bootSearchSource(id)); };
+    const auto append = [&body, &text](BootSearchText id, const QStringList& groups = {}) {
+        body.append({text(id), bootSearchTarget(id), groups, bootSearchEntry(id).mnemonic});
+    };
+    append(BootSearchText::Filter);
+    append(isCurrentProcessElevated() ? BootSearchText::Admin : BootSearchText::NonAdmin);
+    // Follow the original QObject order after ParameterWorkspace reparents the
+    // two parameter columns, fixed actions and result splitter. Collapsed
+    // Legacy/custom contents are not revealable under the old search rules.
+    append(BootSearchText::Basic);
+    const QStringList basic{text(BootSearchText::Basic)};
+    for (const auto id : {BootSearchText::Identifier, BootSearchText::Type,
+        BootSearchText::PolicyUnchanged, BootSearchText::PolicyStandard, BootSearchText::PolicyLegacy,
+        BootSearchText::IdentifierCaption, BootSearchText::TypeCaption, BootSearchText::DescriptionCaption,
+        BootSearchText::DeviceCaption, BootSearchText::OsDeviceCaption, BootSearchText::PathCaption,
+        BootSearchText::SystemRootCaption, BootSearchText::LocaleCaption, BootSearchText::PolicyCaption,
+        BootSearchText::TimeoutCaption, BootSearchText::ApplyTimeout}) append(id, basic);
+    append(BootSearchText::LegacySection);
+    append(BootSearchText::FlagsSection);
+    for (const auto id : {BootSearchText::TestSigning, BootSearchText::NoIntegrity, BootSearchText::Debug,
+        BootSearchText::BootLog, BootSearchText::BaseVideo, BootSearchText::Recovery,
+        BootSearchText::SafeOff, BootSearchText::SafeMinimal, BootSearchText::SafeNetwork,
+        BootSearchText::SafeShell, BootSearchText::SafeCaption, BootSearchText::CustomSection,
+        BootSearchText::ApplyEntry, BootSearchText::Reload, BootSearchText::HeaderIdentifier,
+        BootSearchText::HeaderDescription, BootSearchText::HeaderType, BootSearchText::HeaderDevice,
+        BootSearchText::HeaderPath, BootSearchText::HeaderState, BootSearchText::Output,
+        BootSearchText::Status}) append(id);
+    return body;
+}
+
 BootEditorTab::BootEditorTab(QWidget* parent)
     : QWidget(parent)
 {
@@ -175,7 +280,8 @@ void BootEditorTab::initializeUi()
     initializeToolbar();
     initializeCenterPane();
 
-    m_statusLabel = new QLabel(QStringLiteral("状态：尚未加载 BCD 数据"), this);
+    m_statusLabel = new QLabel(bootSearchSource(BootSearchText::Status), this);
+    m_statusLabel->setObjectName(bootSearchTarget(BootSearchText::Status));
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setContentsMargins(16, 0, 16, 0);
     m_rootLayout->addWidget(m_statusLabel);
@@ -224,7 +330,8 @@ void BootEditorTab::initializeToolbar()
     m_toolbarLayout->addWidget(m_copyRowButton);
 
     m_filterEdit = new QLineEdit(m_toolbarWidget);
-    m_filterEdit->setPlaceholderText(QStringLiteral("筛选：标识符/描述/路径/类型"));
+    m_filterEdit->setObjectName(bootSearchTarget(BootSearchText::Filter));
+    m_filterEdit->setPlaceholderText(bootSearchSource(BootSearchText::Filter));
     m_filterEdit->setClearButtonEnabled(true);
     m_filterEdit->setToolTip(QStringLiteral("输入关键字实时过滤引导条目"));
     ks::ui::StyleSearchField(m_filterEdit);
@@ -234,11 +341,12 @@ void BootEditorTab::initializeToolbar()
     // - 明确提示 bcdedit 是否具备执行前提；
     // - 降低“点击后命令失败”的困惑。
     m_adminHintLabel = new QLabel(m_toolbarWidget);
+    m_adminHintLabel->setObjectName(bootSearchTarget(BootSearchText::Admin));
     const bool elevated = isCurrentProcessElevated();
     m_adminHintLabel->setText(
         elevated
-        ? QStringLiteral("权限：管理员（可编辑）")
-        : QStringLiteral("权限：非管理员（多数写操作会失败）"));
+        ? bootSearchSource(BootSearchText::Admin)
+        : bootSearchSource(BootSearchText::NonAdmin));
     // 管理员态改用 palette(highlight) 动态取色，主题切换时自动跟随；
     // 非管理员态保留语义警告橙，它本来就该在深浅色下都是同一个橙。
     m_adminHintLabel->setStyleSheet(
@@ -263,17 +371,11 @@ void BootEditorTab::initializeCenterPane()
 
     // 上方表格：展示当前 BCD 条目列表。
     m_entryTable = new ks::ui::VisibleTableWidget(m_mainSplitter);
+    m_entryTable->setObjectName(bootSearchTarget(BootSearchText::HeaderIdentifier));
     // BCD 条目是编辑选择器，页面已有存储导入导出与行复制，不增快照栏。
     ks::ui::SetTableActionBarMode(m_entryTable, ks::ui::TableActionBarMode::None);
     m_entryTable->setColumnCount(6);
-    m_entryTable->setHorizontalHeaderLabels(QStringList{
-        QStringLiteral("标识符"),
-        QStringLiteral("描述"),
-        QStringLiteral("类型"),
-        QStringLiteral("设备"),
-        QStringLiteral("路径"),
-        QStringLiteral("状态")
-        });
+    m_entryTable->setHorizontalHeaderLabels(bootSearchHeaders());
     m_entryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_entryTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_entryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -307,16 +409,19 @@ void BootEditorTab::initializeCenterPane()
     outputEditorLayout->setSpacing(6);
 
     // 基础字段编辑组。
-    QGroupBox* basicGroup = new QGroupBox(QStringLiteral("基础字段"), leftEditorColumn);
+    QGroupBox* basicGroup = new QGroupBox(bootSearchSource(BootSearchText::Basic), leftEditorColumn);
+    basicGroup->setObjectName(bootSearchTarget(BootSearchText::Basic));
     ks::ui::StylePrimaryGroup(basicGroup);
     QFormLayout* basicLayout = new QFormLayout(basicGroup);
     basicLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     basicLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
-    m_identifierValueLabel = new QLabel(QStringLiteral("-"), basicGroup);
+    m_identifierValueLabel = new QLabel(bootSearchSource(BootSearchText::Identifier), basicGroup);
+    m_identifierValueLabel->setObjectName(bootSearchTarget(BootSearchText::Identifier));
     m_identifierValueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_identifierValueLabel->setWordWrap(true);
-    m_typeValueLabel = new QLabel(QStringLiteral("-"), basicGroup);
+    m_typeValueLabel = new QLabel(bootSearchSource(BootSearchText::Type), basicGroup);
+    m_typeValueLabel->setObjectName(bootSearchTarget(BootSearchText::Type));
     m_typeValueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_typeValueLabel->setWordWrap(true);
     m_descriptionEdit = new QLineEdit(basicGroup);
@@ -326,10 +431,11 @@ void BootEditorTab::initializeCenterPane()
     m_systemRootEdit = new QLineEdit(basicGroup);
     m_localeEdit = new QLineEdit(basicGroup);
     m_bootMenuPolicyCombo = new QComboBox(basicGroup);
+    m_bootMenuPolicyCombo->setObjectName(bootSearchTarget(BootSearchText::PolicyUnchanged));
     ks::ui::StylePrimaryCombo(m_bootMenuPolicyCombo);
-    m_bootMenuPolicyCombo->addItem(QStringLiteral("不修改"), QString());
-    m_bootMenuPolicyCombo->addItem(QStringLiteral("Standard"), QStringLiteral("Standard"));
-    m_bootMenuPolicyCombo->addItem(QStringLiteral("Legacy"), QStringLiteral("Legacy"));
+    m_bootMenuPolicyCombo->addItem(bootSearchSource(BootSearchText::PolicyUnchanged), QString());
+    m_bootMenuPolicyCombo->addItem(bootSearchSource(BootSearchText::PolicyStandard), QStringLiteral("Standard"));
+    m_bootMenuPolicyCombo->addItem(bootSearchSource(BootSearchText::PolicyLegacy), QStringLiteral("Legacy"));
     m_timeoutSpin = new QSpinBox(basicGroup);
     m_timeoutSpin->setRange(0, 999);
     m_timeoutSpin->setSuffix(QStringLiteral(" 秒"));
@@ -342,16 +448,26 @@ void BootEditorTab::initializeCenterPane()
     }
     ks::ui::StyleStandaloneInput(m_timeoutSpin);
 
-    basicLayout->addRow(QStringLiteral("标识符"), m_identifierValueLabel);
-    basicLayout->addRow(QStringLiteral("对象类型"), m_typeValueLabel);
-    basicLayout->addRow(QStringLiteral("描述 description"), m_descriptionEdit);
-    basicLayout->addRow(QStringLiteral("设备 device"), m_deviceEdit);
-    basicLayout->addRow(QStringLiteral("OS 设备 osdevice"), m_osDeviceEdit);
-    basicLayout->addRow(QStringLiteral("加载路径 path"), m_pathEdit);
-    basicLayout->addRow(QStringLiteral("系统根 systemroot"), m_systemRootEdit);
-    basicLayout->addRow(QStringLiteral("区域 locale"), m_localeEdit);
-    basicLayout->addRow(QStringLiteral("启动菜单策略"), m_bootMenuPolicyCombo);
-    basicLayout->addRow(QStringLiteral("菜单等待超时"), m_timeoutSpin);
+    basicLayout->addRow(bootSearchSource(BootSearchText::IdentifierCaption), m_identifierValueLabel);
+    basicLayout->labelForField(m_identifierValueLabel)->setObjectName(bootSearchTarget(BootSearchText::IdentifierCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::TypeCaption), m_typeValueLabel);
+    basicLayout->labelForField(m_typeValueLabel)->setObjectName(bootSearchTarget(BootSearchText::TypeCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::DescriptionCaption), m_descriptionEdit);
+    basicLayout->labelForField(m_descriptionEdit)->setObjectName(bootSearchTarget(BootSearchText::DescriptionCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::DeviceCaption), m_deviceEdit);
+    basicLayout->labelForField(m_deviceEdit)->setObjectName(bootSearchTarget(BootSearchText::DeviceCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::OsDeviceCaption), m_osDeviceEdit);
+    basicLayout->labelForField(m_osDeviceEdit)->setObjectName(bootSearchTarget(BootSearchText::OsDeviceCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::PathCaption), m_pathEdit);
+    basicLayout->labelForField(m_pathEdit)->setObjectName(bootSearchTarget(BootSearchText::PathCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::SystemRootCaption), m_systemRootEdit);
+    basicLayout->labelForField(m_systemRootEdit)->setObjectName(bootSearchTarget(BootSearchText::SystemRootCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::LocaleCaption), m_localeEdit);
+    basicLayout->labelForField(m_localeEdit)->setObjectName(bootSearchTarget(BootSearchText::LocaleCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::PolicyCaption), m_bootMenuPolicyCombo);
+    basicLayout->labelForField(m_bootMenuPolicyCombo)->setObjectName(bootSearchTarget(BootSearchText::PolicyCaption));
+    basicLayout->addRow(bootSearchSource(BootSearchText::TimeoutCaption), m_timeoutSpin);
+    basicLayout->labelForField(m_timeoutSpin)->setObjectName(bootSearchTarget(BootSearchText::TimeoutCaption));
 
     ks::ui::StyleParameterSection(basicGroup);
     leftEditorLayout->addWidget(basicGroup);
@@ -359,7 +475,7 @@ void BootEditorTab::initializeCenterPane()
     // 传统引导快捷组：
     // - 传统引导 = bootmenupolicy Legacy（可用 F8 菜单）；
     // - 不等同于 BIOS/UEFI 固件模式切换（后者需在主板固件设置中操作）。
-    QGroupBox* legacyGroup = new QGroupBox(QStringLiteral("传统引导（Legacy/F8）"), leftEditorColumn);
+    QGroupBox* legacyGroup = new QGroupBox(bootSearchSource(BootSearchText::LegacySection), leftEditorColumn);
     ks::ui::StylePrimaryGroup(legacyGroup);
     QVBoxLayout* legacyLayout = new QVBoxLayout(legacyGroup);
     legacyLayout->setContentsMargins(8, 8, 8, 8);
@@ -398,29 +514,37 @@ void BootEditorTab::initializeCenterPane()
         ks::ui::NormalizeToolbarControl(button);
     legacyLayout->addWidget(legacyActionWidget);
     QWidget* legacySection = ks::ui::FoldParameterSection(legacyGroup); // 低频 Legacy 操作仍可折叠。
+    legacySection->findChild<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)->setObjectName(bootSearchTarget(BootSearchText::LegacySection));
     leftEditorLayout->addWidget(legacySection);
 
     // 高级开关组。
-    QGroupBox* flagGroup = new QGroupBox(QStringLiteral("高级开关"), middleEditorColumn);
+    QGroupBox* flagGroup = new QGroupBox(bootSearchSource(BootSearchText::FlagsSection), middleEditorColumn);
     ks::ui::StylePrimaryGroup(flagGroup);
     QVBoxLayout* flagLayout = new QVBoxLayout(flagGroup);
     // 标题与内容之间保留额外顶部空间，避免全局 QGroupBox 标题压住第一个复选框。
     flagLayout->setContentsMargins(8, 14, 8, 8);
     flagLayout->setSpacing(4);
 
-    m_testSigningCheck = new QCheckBox(QStringLiteral("开启测试签名 (testsigning)"), flagGroup);
-    m_noIntegrityCheck = new QCheckBox(QStringLiteral("关闭完整性检查 (nointegritychecks)"), flagGroup);
-    m_debugCheck = new QCheckBox(QStringLiteral("开启内核调试 (debug)"), flagGroup);
-    m_bootLogCheck = new QCheckBox(QStringLiteral("开启启动日志 (bootlog)"), flagGroup);
-    m_baseVideoCheck = new QCheckBox(QStringLiteral("使用基础视频驱动 (basevideo)"), flagGroup);
-    m_recoveryEnabledCheck = new QCheckBox(QStringLiteral("启用恢复环境 (recoveryenabled)"), flagGroup);
+    m_testSigningCheck = new QCheckBox(bootSearchSource(BootSearchText::TestSigning), flagGroup);
+    m_testSigningCheck->setObjectName(bootSearchTarget(BootSearchText::TestSigning));
+    m_noIntegrityCheck = new QCheckBox(bootSearchSource(BootSearchText::NoIntegrity), flagGroup);
+    m_noIntegrityCheck->setObjectName(bootSearchTarget(BootSearchText::NoIntegrity));
+    m_debugCheck = new QCheckBox(bootSearchSource(BootSearchText::Debug), flagGroup);
+    m_debugCheck->setObjectName(bootSearchTarget(BootSearchText::Debug));
+    m_bootLogCheck = new QCheckBox(bootSearchSource(BootSearchText::BootLog), flagGroup);
+    m_bootLogCheck->setObjectName(bootSearchTarget(BootSearchText::BootLog));
+    m_baseVideoCheck = new QCheckBox(bootSearchSource(BootSearchText::BaseVideo), flagGroup);
+    m_baseVideoCheck->setObjectName(bootSearchTarget(BootSearchText::BaseVideo));
+    m_recoveryEnabledCheck = new QCheckBox(bootSearchSource(BootSearchText::Recovery), flagGroup);
+    m_recoveryEnabledCheck->setObjectName(bootSearchTarget(BootSearchText::Recovery));
     m_safeBootCombo = new QComboBox(flagGroup);
+    m_safeBootCombo->setObjectName(bootSearchTarget(BootSearchText::SafeOff));
     ks::ui::StylePrimaryCombo(m_safeBootCombo);
     m_safeBootCombo->setToolTip(QStringLiteral("设置 safeboot 模式。关闭会删除 safeboot 字段。"));
-    m_safeBootCombo->addItem(QStringLiteral("关闭安全模式"), QStringLiteral("off"));
-    m_safeBootCombo->addItem(QStringLiteral("最小安全模式"), QStringLiteral("minimal"));
-    m_safeBootCombo->addItem(QStringLiteral("网络安全模式"), QStringLiteral("network"));
-    m_safeBootCombo->addItem(QStringLiteral("命令行安全模式"), QStringLiteral("alternateshell"));
+    m_safeBootCombo->addItem(bootSearchSource(BootSearchText::SafeOff), QStringLiteral("off"));
+    m_safeBootCombo->addItem(bootSearchSource(BootSearchText::SafeMinimal), QStringLiteral("minimal"));
+    m_safeBootCombo->addItem(bootSearchSource(BootSearchText::SafeNetwork), QStringLiteral("network"));
+    m_safeBootCombo->addItem(bootSearchSource(BootSearchText::SafeShell), QStringLiteral("alternateshell"));
 
     flagLayout->addWidget(m_testSigningCheck);
     flagLayout->addWidget(m_noIntegrityCheck);
@@ -428,22 +552,28 @@ void BootEditorTab::initializeCenterPane()
     flagLayout->addWidget(m_bootLogCheck);
     flagLayout->addWidget(m_baseVideoCheck);
     flagLayout->addWidget(m_recoveryEnabledCheck);
-    flagLayout->addWidget(new QLabel(QStringLiteral("safeboot 模式"), flagGroup));
+    auto* safeCaption = new QLabel(bootSearchSource(BootSearchText::SafeCaption), flagGroup);
+    safeCaption->setObjectName(bootSearchTarget(BootSearchText::SafeCaption));
+    flagLayout->addWidget(safeCaption);
     flagLayout->addWidget(m_safeBootCombo);
     QWidget* flagSection = ks::ui::FoldParameterSection(flagGroup, true); // 常用引导开关默认可见。
+    flagSection->findChild<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)->setObjectName(bootSearchTarget(BootSearchText::FlagsSection));
     middleEditorLayout->addWidget(flagSection);
 
     // 应用动作区：分离“当前条目修改”和“bootmgr 全局参数”。
     QWidget* actionWidget = workspace;
     QHBoxLayout* actionLayout = workspace->actions();
 
-    m_applyEntryButton = new QPushButton(QStringLiteral("应用当前条目"), actionWidget);
+    m_applyEntryButton = new QPushButton(bootSearchSource(BootSearchText::ApplyEntry), actionWidget);
+    m_applyEntryButton->setObjectName(bootSearchTarget(BootSearchText::ApplyEntry));
     m_applyEntryButton->setToolTip(QStringLiteral("按基础字段与高级开关写回当前选中的 BCD 条目"));
     m_applyEntryButton->setIcon(QIcon(QStringLiteral(":/Icon/process_start.svg")));
-    m_applyBootMgrButton = new QPushButton(QStringLiteral("应用 bootmgr 超时"), actionWidget);
+    m_applyBootMgrButton = new QPushButton(bootSearchSource(BootSearchText::ApplyTimeout), actionWidget);
+    m_applyBootMgrButton->setObjectName(bootSearchTarget(BootSearchText::ApplyTimeout));
     m_applyBootMgrButton->setToolTip(QStringLiteral("仅写入 bcdedit /timeout 参数"));
     m_applyBootMgrButton->setIcon(QIcon(QStringLiteral(":/Icon/process_priority.svg")));
-    m_reloadOneButton = new QPushButton(QStringLiteral("重读当前条目"), actionWidget);
+    m_reloadOneButton = new QPushButton(bootSearchSource(BootSearchText::Reload), actionWidget);
+    m_reloadOneButton->setObjectName(bootSearchTarget(BootSearchText::Reload));
     m_reloadOneButton->setToolTip(QStringLiteral("按当前选中行重新加载编辑字段（不写入）"));
     m_reloadOneButton->setIcon(QIcon(QStringLiteral(":/Icon/process_refresh.svg")));
 
@@ -454,7 +584,7 @@ void BootEditorTab::initializeCenterPane()
     ks::ui::NormalizeToolbarRow(actionLayout);
 
     // 自定义命令组：支持输入任意 bcdedit 参数。
-    QGroupBox* customGroup = new QGroupBox(QStringLiteral("自定义命令"), middleEditorColumn);
+    QGroupBox* customGroup = new QGroupBox(bootSearchSource(BootSearchText::CustomSection), middleEditorColumn);
     ks::ui::StylePrimaryGroup(customGroup);
     QHBoxLayout* customLayout = new QHBoxLayout(customGroup);
     customLayout->setContentsMargins(8, 8, 8, 8);
@@ -472,10 +602,12 @@ void BootEditorTab::initializeCenterPane()
     customLayout->addWidget(m_runCustomCommandButton, 0);
     ks::ui::NormalizeToolbarRow(customLayout);
     QWidget* customSection = ks::ui::FoldParameterSection(customGroup); // 任意命令保持低频入口。
+    customSection->findChild<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)->setObjectName(bootSearchTarget(BootSearchText::CustomSection));
     middleEditorLayout->addWidget(customSection);
 
     // 原始输出位于右侧条目表下方，不再占用参数栏或产生第三个窄列。
-    QGroupBox* outputGroup = new QGroupBox(QStringLiteral("原始输出"), outputEditorColumn);
+    QGroupBox* outputGroup = new QGroupBox(bootSearchSource(BootSearchText::Output), outputEditorColumn);
+    outputGroup->setObjectName(bootSearchTarget(BootSearchText::Output));
     ks::ui::StylePrimaryGroup(outputGroup);
     QVBoxLayout* outputLayout = new QVBoxLayout(outputGroup);
     outputLayout->setContentsMargins(8, 8, 8, 8);

@@ -18,6 +18,7 @@
 
 namespace ks::window_input { struct InjectionInitialSnapshot; }
 
+class QShowEvent;
 class QTabWidget;
 class QVBoxLayout;
 class BootEditorTab;
@@ -55,7 +56,7 @@ public:
     // 构造函数：
     // - 作用：创建“杂项”根布局与内部 Tab。
     // - 参数 parent：Qt 父控件。
-    explicit MiscDock(QWidget* parent = nullptr);
+    explicit MiscDock(QWidget* parent = nullptr, bool initializeCurrentPage = true);
     ~MiscDock() override;
 
     // activateMinidumpTab 作用：
@@ -78,7 +79,11 @@ public:
     ks::ui::PageSearchPreparation prepareNavigationPages(bool currentPageOnly = false,
         bool singleStep = false, bool useColdBodies = false, std::function<void()> resume = {});
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
+    bool m_initializeCurrentPageOnShow = false;
     int addNavigationTab(int index, QWidget* host, const QIcon& icon = {});
     QWidget* navigationHost(int index) const;
     QWidget* navigationChild(int index) const;
@@ -87,7 +92,7 @@ private:
     // initializeUi：
     // - 作用：初始化“杂项”页的控件树，只把页签占位控件建出来；
     // - 调用：构造函数中调用一次。
-    void initializeUi();
+    void initializeUi(bool initializeCurrentPage);
 
     // ensureTabInitialized：
     // - 作用：按需构造指定页签对应的真实子页，已构造过则直接返回；
