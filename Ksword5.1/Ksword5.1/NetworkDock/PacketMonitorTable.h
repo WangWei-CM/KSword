@@ -39,7 +39,9 @@ struct PacketMonitorValues
 struct PacketMonitorCommit
 {
     std::shared_ptr<const PacketMonitorValues> previous, reordered, survivors, appended, target;
-    bool reorderOld = false, reorderTarget = false, fieldsChanged = false;
+    bool reorderOld = false, reorderTarget = false;
+    int firstChangedRow = -1, lastChangedRow = -1;
+    int firstChangedColumn = -1, lastChangedColumn = -1;
     std::vector<std::uint64_t> metadata;
 };
 
@@ -130,8 +132,9 @@ class PacketMonitorTable final : public ks::ui::TableActionTableView
                 if (!rearrange(commit.target)) return false;
             }
             else values = commit.target;
-            if (commit.fieldsChanged && rowCount() > 0)
-                emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
+            if (commit.firstChangedRow >= 0)
+                emit dataChanged(index(commit.firstChangedRow, commit.firstChangedColumn),
+                    index(commit.lastChangedRow, commit.lastChangedColumn), {Qt::DisplayRole});
             return !alive.isNull();
         }
     };

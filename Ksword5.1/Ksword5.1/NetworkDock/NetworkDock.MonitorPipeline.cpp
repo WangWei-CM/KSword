@@ -867,18 +867,24 @@ void NetworkDock::requestPacketTableProjection()
     input.sortColumn = state.sortColumn;
     input.sortOrder = state.sortOrder;
     const auto generation = state.generation;
-    if (!state.locked)
+    // A live immutable version remains usable while its replacement is prepared.
+    // Disabling the view for every packet/DNS batch also disables its action bar
+    // and changes every icon's state, producing a full-view flash each tick.
+    if (!state.locked && !input.previous)
     {
         state.enabled = m_packetTable->isEnabled(); state.cursor = m_packetTable->cursor(); state.locked = true;
     }
     state.active = true;
     m_packetTableProjectionDirty = false;
-    m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
-    if (!self) return;
-    m_packetTable->setEnabled(false);
-    if (!self) return;
-    m_packetTable->setCursor(Qt::WaitCursor);
-    if (!self) return;
+    if (state.locked)
+    {
+        m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, true);
+        if (!self) return;
+        m_packetTable->setEnabled(false);
+        if (!self) return;
+        m_packetTable->setCursor(Qt::WaitCursor);
+        if (!self) return;
+    }
     m_packetTableProjectionOperation->submit<Input, PacketMonitorCommit>(std::move(input),
         [](const Input& input, const ks::ui::AsyncOperationToken& token)
         {
@@ -954,7 +960,23 @@ void NetworkDock::requestPacketTableProjection()
                 if (target >= 0)
                 {
                     survivors->rows.push_back(result.target->rows[target]);
-                    if (row != result.target->rows[target]) result.fieldsChanged = true;
+                    const auto& changed = result.target->rows[target];
+                    if (row != changed) for (int column = 0; column < changed->cells.size(); ++column)
+                    {
+                        if (row->cells.value(column) == changed->cells[column]) continue;
+                        if (result.firstChangedRow < 0)
+                        {
+                            result.firstChangedRow = result.lastChangedRow = target;
+                            result.firstChangedColumn = result.lastChangedColumn = column;
+                        }
+                        else
+                        {
+                            result.firstChangedRow = std::min(result.firstChangedRow, target);
+                            result.lastChangedRow = std::max(result.lastChangedRow, target);
+                            result.firstChangedColumn = std::min(result.firstChangedColumn, column);
+                            result.lastChangedColumn = std::max(result.lastChangedColumn, column);
+                        }
+                    }
                 }
             }
             reordered->rows = survivors->rows;
@@ -1005,13 +1027,16 @@ void NetworkDock::requestPacketTableProjection()
             { self->m_packetTableProjectionDirty = true; self->requestPacketTableProjection(); return true; }
             if (!metadata.empty()) self->m_packetMetadataBatches.push_back(std::move(metadata));
             self->drainPacketMetadata();
-            state.locked = false;
-            table->setCursor(state.cursor);
-            if (!self) return true;
-            table->setProperty(ks::ui::TablePresentationPreparingProperty, false);
-            if (!self) return true;
-            table->setEnabled(state.enabled);
-            if (!self) return true;
+            if (state.locked)
+            {
+                state.locked = false;
+                table->setCursor(state.cursor);
+                if (!self) return true;
+                table->setProperty(ks::ui::TablePresentationPreparingProperty, false);
+                if (!self) return true;
+                table->setEnabled(state.enabled);
+                if (!self) return true;
+            }
             // Tail follow is once per complete accepted version. Fixed natural
             // section geometry avoids an all-record size pass at this boundary.
             if (followTail && previousVersion != table->values()->version) table->scrollToBottom();
@@ -1029,7 +1054,7 @@ void NetworkDock::requestPacketTableProjection()
             if (!self) return;
             self->m_packetTableProjection.active = false;
             self->m_packetTableProjectionDirty = true;
-            if (self->m_packetTable != nullptr)
+            if (self->m_packetTable != nullptr && self->m_packetTableProjection.locked)
             {
                 self->m_packetTable->setCursor(self->m_packetTableProjection.cursor);
                 self->m_packetTable->setProperty(ks::ui::TablePresentationPreparingProperty, false);
@@ -1146,18 +1171,15 @@ void NetworkDock::refreshPacketTimelineRatePoints()
             self->m_packetTimelineProjectionQueued = false;
             return;
         }
-        struct Sample
-        {
-            ProcessTraceTimelineEventPoint point;
-            std::uint64_t uploadBytes = 0;
-            std::uint64_t downloadBytes = 0;
-        };
+        self->m_packetTimelineProjectionDirty = false;
         struct Input
         {
-            std::vector<Sample> samples;
+            std::vector<ProcessTraceTimelineEventPoint> points;
+            std::unordered_map<std::uint64_t, PacketTimelineRateBucket> buckets;
             ProcessTraceTimelineWidget::EventProjectionParameters projection;
             std::uint64_t epoch = 0;
             std::uint64_t monitorGeneration = 0;
+            TrafficMonitorSource source = TrafficMonitorSource::Stopped;
             std::uint64_t firstSequence = 0;
             std::uint64_t lastSequence = 0;
             std::size_t count = 0;
@@ -1178,20 +1200,29 @@ void NetworkDock::refreshPacketTimelineRatePoints()
             self->m_packetTimelineRangeStart100ns, self->m_packetTimelineRangeEnd100ns);
         input->epoch = self->m_packetTimelineProjectionEpoch;
         input->monitorGeneration = self->m_monitorGeneration.load();
+        input->source = self->m_monitorSource;
         input->count = self->m_packetTimelineEventPoints.size();
         if (!self->m_packetSequenceOrder.empty())
         {
             input->firstSequence = self->m_packetSequenceOrder.front();
             input->lastSequence = self->m_packetSequenceOrder.back();
         }
-        input->samples.reserve(input->count);
+        input->points.reserve(input->count);
+        // These counters already track packet arrival and retention removal.
+        // Snapshot them once instead of looking up every retained packet on GUI
+        // and rebuilding the same per-second sums on each trend refresh.
+        input->buckets = self->m_packetTimelineRateBucketBySecond;
         const QPointer<ProcessTraceTimelineWidget> timeline(self->m_packetTimelineWidget);
-        const auto sourceMatches = [self, timeline, input]()
+        const auto epochMatches = [self, timeline, input]()
         {
             return self && timeline && self->m_packetTimelineWidget == timeline
                 && input->epoch == self->m_packetTimelineProjectionEpoch
                 && input->monitorGeneration == self->m_monitorGeneration.load()
-                && self->m_packetSequenceOrder.size() >= input->count
+                && input->source == self->m_monitorSource;
+        };
+        const auto capturePrefixMatches = [self, input, epochMatches]()
+        {
+            return epochMatches() && self->m_packetSequenceOrder.size() >= input->count
                 && self->m_packetTimelineEventPoints.size() >= input->count
                 && (input->count == 0 || (self->m_packetSequenceOrder.front() == input->firstSequence
                     && self->m_packetSequenceOrder[input->count - 1] == input->lastSequence));
@@ -1200,7 +1231,7 @@ void NetworkDock::refreshPacketTimelineRatePoints()
         // complete partial value through the existing off-GUI retirement lane.
         auto capture = std::make_shared<std::function<void()>>();
         const std::weak_ptr<std::function<void()>> nextCapture(capture);
-        *capture = [self, timeline, input, sourceMatches, nextCapture]()
+        *capture = [self, timeline, input, epochMatches, capturePrefixMatches, nextCapture]()
         {
             if (!self) return;
             const auto retry = [self]()
@@ -1209,35 +1240,28 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                 self->m_packetTimelineProjectionQueued = false;
                 self->refreshPacketTimelineRatePoints();
             };
-            if (!sourceMatches() || !self->isPacketProjectionVisible())
+            if (!capturePrefixMatches() || !self->isPacketProjectionVisible())
             {
                 retry();
                 return;
             }
             QElapsedTimer budget;
             budget.start();
-            const std::size_t stop = std::min(input->count, input->samples.size() + 256);
-            while (input->samples.size() < stop)
+            const std::size_t stop = std::min(input->count, input->points.size() + 256);
+            while (input->points.size() < stop)
             {
-                const auto index = input->samples.size();
-                const auto found = self->m_packetBySequence.find(self->m_packetSequenceOrder[index]);
-                if (found == self->m_packetBySequence.end()) { retry(); return; }
-                Sample sample;
-                sample.point = self->m_packetTimelineEventPoints[index];
-                if (found->second->direction == ks::network::PacketDirection::Outbound)
-                    sample.uploadBytes = found->second->totalPacketSize;
-                else if (found->second->direction == ks::network::PacketDirection::Inbound)
-                    sample.downloadBytes = found->second->totalPacketSize;
-                input->samples.push_back(std::move(sample));
+                input->points.push_back(self->m_packetTimelineEventPoints[input->points.size()]);
                 if (budget.elapsed() >= 3) break;
             }
-            if (input->samples.size() != input->count)
+            if (input->points.size() != input->count)
             {
                 if (const auto next = nextCapture.lock())
                     QTimer::singleShot(0, self.data(), [next]() { (*next)(); });
                 return;
             }
-            self->m_packetTimelineProjectionQueued = false;
+            // Keep the existing gate held through worker completion and any
+            // deferred UI commit. A later tick marks dirty instead of canceling
+            // the in-flight trend snapshot before it can ever be displayed.
             if (self->m_packetTimelineProjectionOperation == nullptr)
                 self->m_packetTimelineProjectionOperation = new ks::ui::AsyncOperation(self.data());
             self->m_packetTimelineProjectionOperation->submit<std::shared_ptr<const Input>,
@@ -1246,23 +1270,13 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                     const ks::ui::AsyncOperationToken& token) -> std::shared_ptr<const Output>
                 {
                     Output output;
-                    std::vector<ProcessTraceTimelineEventPoint> points;
-                    std::unordered_map<std::uint64_t, PacketTimelineRateBucket> buckets;
-                    points.reserve(value->samples.size());
-                    for (const auto& sample : value->samples)
-                    {
-                        if (token.isCanceled()) return {};
-                        points.push_back(sample.point);
-                        auto& bucket = buckets[sample.point.time100ns / kTimelineSecond100ns];
-                        bucket.uploadBytes += sample.uploadBytes;
-                        bucket.downloadBytes += sample.downloadBytes;
-                    }
+                    if (token.isCanceled()) return {};
                     output.events = ProcessTraceTimelineWidget::prepareEventPoints(
-                        std::move(points), value->projection);
+                        value->points, value->projection);
                     const auto endSecond = value->projection.end100ns / kTimelineSecond100ns;
                     std::vector<std::uint64_t> seconds;
-                    seconds.reserve(buckets.size() * 3 + 2);
-                    for (const auto& bucket : buckets)
+                    seconds.reserve(value->buckets.size() * 3 + 2);
+                    for (const auto& bucket : value->buckets)
                     {
                         if (token.isCanceled()) return {};
                         const auto second = bucket.first;
@@ -1279,10 +1293,10 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                     for (const auto second : seconds)
                     {
                         if (token.isCanceled()) return {};
-                        const auto found = buckets.find(second);
+                        const auto found = value->buckets.find(second);
                         ProcessTraceTimelineRatePoint point;
                         point.time100ns = second * kTimelineSecond100ns;
-                        if (found != buckets.end())
+                        if (found != value->buckets.end())
                         {
                             point.uploadBytesPerSecond = static_cast<double>(found->second.uploadBytes);
                             point.downloadBytesPerSecond = static_cast<double>(found->second.downloadBytes);
@@ -1292,14 +1306,26 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                     output.rates = ProcessTraceTimelineWidget::prepareRateOverlayPoints(std::move(rates));
                     return std::make_shared<Output>(std::move(output));
                 },
-                [self, timeline, input, sourceMatches](const std::shared_ptr<const Output>& output,
+                [self, timeline, input, epochMatches](const std::shared_ptr<const Output>& output,
                     const std::uint64_t ticket)
                 {
-                    if (!self || !output) return true;
-                    const auto apply = [self, timeline, input, sourceMatches](const Output& value)
+                    if (!self) return true;
+                    if (!output)
                     {
-                        if (!self || !timeline) return;
-                        if (!sourceMatches() || !self->isPacketProjectionVisible()
+                        self->m_packetTimelineProjectionQueued = false;
+                        self->m_packetTimelineProjectionDirty = true;
+                        return true;
+                    }
+                    const auto apply = [self, timeline, input, epochMatches](const Output& value)
+                    {
+                        if (!self) return;
+                        self->m_packetTimelineProjectionQueued = false;
+                        if (!timeline) return;
+                        // Capture is complete: later appends or retention trims
+                        // must not starve this valid snapshot. A dirty follow-up
+                        // catches up; epoch/source and interactive view checks
+                        // still reject clears, restarts, source/range changes.
+                        if (!epochMatches() || !self->isPacketProjectionVisible()
                             || !timeline->applyPreparedEventPoints(value.events))
                         {
                             self->refreshPacketTimelineRatePoints();
@@ -1308,7 +1334,8 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                         timeline->applyRateOverlayPoints(value.rates);
                         self->m_packetTimelineSelectionStart100ns = timeline->selectionStart100ns();
                         self->m_packetTimelineSelectionEnd100ns = timeline->selectionEnd100ns();
-                        self->m_packetTimelineProjectionDirty = false;
+                        if (self->m_packetTimelineProjectionDirty)
+                            self->refreshPacketTimelineRatePoints();
                     };
                     if (ks::ui::DeferTablePresentationIfValueCaptureOpen(self.data(),
                         QStringLiteral("network-packet-timeline"), {self->m_packetTable},
@@ -1323,7 +1350,11 @@ void NetworkDock::refreshPacketTimelineRatePoints()
                 },
                 [self](std::exception_ptr)
                 {
-                    if (self) self->m_packetTimelineProjectionDirty = true;
+                    if (self)
+                    {
+                        self->m_packetTimelineProjectionQueued = false;
+                        self->m_packetTimelineProjectionDirty = true;
+                    }
                 });
         };
         (*capture)();
@@ -1437,7 +1468,8 @@ void NetworkDock::endPacketTimelineMonitorSession()
 void NetworkDock::resetPacketTimelineClockForCurrentState()
 {
     ++m_packetTimelineProjectionEpoch;
-    if (m_packetTimelineProjectionOperation != nullptr) m_packetTimelineProjectionOperation->cancel();
+    // Epoch validation rejects the old value when its worker completes. Let it
+    // finish so the single in-flight gate is released before a fresh capture.
     // wasRunning 用途：在清理会话列表前捕获当前运行状态，避免下面清空状态后误判。
     const bool wasRunning = m_monitorRunning
         || (m_trafficService != nullptr && m_trafficService->IsRunning());

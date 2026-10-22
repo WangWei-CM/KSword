@@ -1130,6 +1130,10 @@ void NetworkDock::startTrafficMonitor()
         lifetime->r0Touched.store(true);
         const ksword::ark::DriverClient driverClient;
         const auto control = driverClient.controlNetworkTrafficCapture(true);
+        // Failure to open the device means ENABLE was never submitted. Keep
+        // conservative cleanup for an actual IOCTL/protocol failure, but do not
+        // turn a missing driver into an impossible DISABLE cleanup obligation.
+        if (control.io.deviceOpenFailed) lifetime->r0Touched.store(false);
         const bool enabled = control.io.ok && !control.unsupported
             && control.response.status == KSWORD_ARK_NETWORK_STATUS_APPLIED
             && control.response.enabled == 1UL;
@@ -1164,7 +1168,18 @@ void NetworkDock::refreshR0TrafficSnapshotAsync(
     const std::uint64_t generation,
     const bool initialProbe)
 {
-    if (m_r0TrafficRefreshPending.exchange(true))
+    unsigned long requestedRows = 0;
+    {
+        std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+        if (m_pendingPacketQueue.size() < kMaxPendingPacketQueueCount)
+            requestedRows = static_cast<unsigned long>(std::min<std::size_t>(
+                kMaxPendingPacketQueueCount - m_pendingPacketQueue.size(),
+                KSWORD_ARK_NETWORK_TRAFFIC_MAX_REQUESTED_ROWS));
+    }
+    // A single R0 query owns at most the currently free queue slots. While it
+    // runs the GUI consumer can only free more slots; R3 is stopped in R0 mode.
+    // With no room, leave the driver cursor untouched and defer this poll.
+    if (requestedRows == 0 || m_r0TrafficRefreshPending.exchange(true))
     {
         // 用户可能在上一代 R0 查询尚未返回时停止并立即重启。
         // 初始探测不能静默丢弃，否则新一代会永久停在 Starting 状态。
@@ -1214,23 +1229,30 @@ void NetworkDock::refreshR0TrafficSnapshotAsync(
         }
         m_r0LastEventSequence = nextSequence;
         m_r0LastDroppedEventCount = droppedPacketCount;
-        for (auto& packetRecord : packetRecords)
         {
-            packetRecord.sequenceId = m_r0SyntheticSequence++;
-            onPacketCaptured(std::move(packetRecord));
+            // Use the same time-budgeted consumer as R3. The previous
+            // direct loop ran the entire R0 query on GUI and bypassed the batch
+            // projection/timeline refresh when the R3 queue was empty. Query
+            // admission reserved enough free slots; no R0 packet is discarded.
+            std::lock_guard<std::mutex> guard(m_pendingPacketMutex);
+            for (auto& packetRecord : packetRecords)
+            {
+                packetRecord.sequenceId = m_r0SyntheticSequence++;
+                m_pendingPacketQueue.push_back(std::move(packetRecord));
+            }
         }
         if (m_monitorStatusLabel)
             m_monitorStatusLabel->setText(QStringLiteral("状态：运行中；来源：R0 WFP IPv4/IPv6 逐包捕获（报文前缀最长 %1 字节；%2）")
                 .arg(KSWORD_ARK_NETWORK_TRAFFIC_MAX_CAPTURE_BYTES).arg(diagnosticText));
         updateMonitorButtonState();
     };
-    QThreadPool::globalInstance()->start([lifetime, reservation, dispatcher, deliver, afterSequence]() mutable
+    QThreadPool::globalInstance()->start([lifetime, reservation, dispatcher, deliver, afterSequence, requestedRows]() mutable
     {
         const ksword::ark::DriverClient driverClient;
         const ksword::ark::NetworkTrafficPacketResult packetResult =
             driverClient.queryNetworkTrafficPackets(
                 afterSequence,
-                KSWORD_ARK_NETWORK_TRAFFIC_MAX_REQUESTED_ROWS);
+                requestedRows);
         const bool r0Usable =
             packetResult.io.ok &&
             !packetResult.unsupported &&
