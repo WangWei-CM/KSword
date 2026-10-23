@@ -779,6 +779,12 @@ namespace
             const auto source = (*m_indexes)[static_cast<std::size_t>(row)];
             return source < m_entries->size() ? &(*m_entries)[source] : nullptr;
         }
+        std::shared_ptr<const MonitorDock::ArkRiskCenterEntry> snapshotEntryAt(const int row) const
+        {
+            const auto* entry = entryAt(row);
+            return entry ? std::shared_ptr<const MonitorDock::ArkRiskCenterEntry>(m_entries, entry)
+                : std::shared_ptr<const MonitorDock::ArkRiskCenterEntry>{};
+        }
         QVariant data(const QModelIndex& index, const int role) const override
         {
             const auto* entry = index.isValid() ? entryAt(index.row()) : nullptr;
@@ -1563,26 +1569,11 @@ void MonitorDock::navigateToProcessDetailFromArkRiskRow(const int tableRow)
         return;
     }
 
-    // 证据 id 从表格行上取：F-12 要求导航带得上它。
-    const QModelIndex scoreItem = m_arkRiskTable->model()->index(tableRow, riskColumnIndex(RiskColumn::Score));
-    const QString evidenceId = scoreItem.isValid()
-        ? scoreItem.data(kRiskEvidenceIdRole).toString()
-        : QString();
-
-    // 按证据 id 反查当前快照，而不是按行号或缓存下标：
-    // 下标在快照被换掉之后仍然“有效”，会静默指向另一条记录；id 查不到就是查不到。
-    const MonitorDock::ArkRiskCenterEntry* entry = nullptr;
-    if (!evidenceId.isEmpty())
-    {
-        for (const MonitorDock::ArkRiskCenterEntry& candidate : *m_arkRiskCenterEntries)
-        {
-            if (candidate.evidenceId == evidenceId)
-            {
-                entry = &candidate;
-                break;
-            }
-        }
-    }
+    // 采集完成后的规范根可能已经前进，异步投影仍在显示上一版完整快照。
+    // 从可见模型的源索引 O(1) 取得该行，并强持它所属的不可变根直至导航结束。
+    // 证据 id、PID 和创建身份始终来自同一份已发布证据，不能反查较新的规范根。
+    const auto entry = static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model())->snapshotEntryAt(tableRow);
+    const QString evidenceId = entry ? entry->evidenceId : QString();
 
     // outcome / liveDecision：两条判据各自的原始结论，一路带进提示文本，便于对照日志排障。
     evidence::NavigationOutcome outcome = evidence::NavigationOutcome::EvidenceIdMissing;
@@ -1670,7 +1661,7 @@ void MonitorDock::navigateToProcessDetailFromArkRiskRow(const int tableRow)
             // 对象是否还在：以现场探测为准。权限不足读不到创建时间时对象仍然在，
             // 那种情况要落到下面的身份复核去解释，而不是谎称“对象不在”。
             liveProbe.present,
-            // 证据 id 已在当前快照里命中，这段证据确实还在会话中。
+            // 当前可见模型的不可变根仍持有这段证据，整次导航都保留其所有权。
             true);
 
         if (outcome == evidence::NavigationOutcome::Delivered)
