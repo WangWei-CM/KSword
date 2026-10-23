@@ -748,9 +748,23 @@ namespace
         }
     }
 
-    std::vector<std::size_t> buildArkRiskProjection(const std::vector<MonitorDock::ArkRiskCenterEntry>& entries,
-        const QString& filter, const bool highOnly, const int sortColumn, const Qt::SortOrder sortOrder)
+    struct ArkRiskProjection
     {
+        // 模型只保留索引根，不持有本次准备所借用的旧快照。
+        std::shared_ptr<const std::vector<std::size_t>> indexes;
+        std::vector<int> rowsBySource;
+        std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> previousEntries;
+        std::shared_ptr<const std::vector<std::size_t>> previousIndexes;
+        bool sameMembers = false;
+    };
+
+    ArkRiskProjection buildArkRiskProjection(
+        const std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>>& entriesRoot,
+        const QString& filter, const bool highOnly, const int sortColumn, const Qt::SortOrder sortOrder,
+        std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> previousEntries,
+        std::shared_ptr<const std::vector<std::size_t>> previousIndexes)
+    {
+        const auto& entries = *entriesRoot;
         std::vector<std::size_t> indexes;
         indexes.reserve(entries.size());
         for (std::size_t i = 0; i < entries.size(); ++i)
@@ -762,7 +776,25 @@ namespace
                     : QString::localeAwareCompare(arkRiskColumnText(entries[left], sortColumn), arkRiskColumnText(entries[right], sortColumn));
                 return sortOrder == Qt::AscendingOrder ? comparison < 0 : comparison > 0;
             });
-        return indexes;
+        ArkRiskProjection projection;
+        projection.previousEntries = std::move(previousEntries);
+        projection.previousIndexes = std::move(previousIndexes);
+        projection.rowsBySource.assign(entries.size(), -1);
+        for (std::size_t row = 0; row < indexes.size(); ++row)
+            projection.rowsBySource[indexes[row]] = static_cast<int>(row);
+        projection.sameMembers = projection.previousEntries == entriesRoot && projection.previousIndexes
+            && projection.previousIndexes->size() == indexes.size();
+        if (projection.sameMembers)
+            for (const auto source : *projection.previousIndexes)
+                if (source >= projection.rowsBySource.size() || projection.rowsBySource[source] < 0)
+                {
+                    projection.sameMembers = false;
+                    break;
+                }
+        // 已发布索引根与临时旧快照保持独立，避免反复排序保留所有历史准备结果。
+        projection.indexes = ks::ui::RetainCompleteExportSnapshot<std::vector<std::size_t>>(
+            std::make_shared<const std::vector<std::size_t>>(std::move(indexes)));
+        return projection;
     }
 
     class ArkRiskSnapshotModel final : public QAbstractTableModel
@@ -784,6 +816,15 @@ namespace
             const auto* entry = entryAt(row);
             return entry ? std::shared_ptr<const MonitorDock::ArkRiskCenterEntry>(m_entries, entry)
                 : std::shared_ptr<const MonitorDock::ArkRiskCenterEntry>{};
+        }
+        std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> entriesSnapshot() const
+        { return m_entries; }
+        std::shared_ptr<const std::vector<std::size_t>> indexesSnapshot() const
+        { return m_indexes; }
+        std::size_t sourceIndexAt(const int row) const
+        {
+            return m_indexes && row >= 0 && row < rowCount()
+                ? (*m_indexes)[static_cast<std::size_t>(row)] : std::numeric_limits<std::size_t>::max();
         }
         QVariant data(const QModelIndex& index, const int role) const override
         {
@@ -808,15 +849,46 @@ namespace
             return section >= 0 && section < headers.size() ? QVariant(ks::i18n::sourceText(headers[section])) : QVariant();
         }
         void sort(int, Qt::SortOrder) override { m_request(); }
-        void replace(std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> entries,
-            std::shared_ptr<const std::vector<std::size_t>> indexes)
+        bool replace(std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> entries,
+            const std::shared_ptr<const ArkRiskProjection>& projection)
         {
-            beginResetModel();
+            // 结构通知必须成对完成，不能嵌套；同步观察者重入时，调用方复用既有合并准备路径。
+            if (m_publishing || !projection || !projection->indexes) return false;
+            m_publishing = true;
+            const QPointer<ArkRiskSnapshotModel> alive(this);
+            const bool permutation = projection->sameMembers
+                && m_entries == projection->previousEntries && m_indexes == projection->previousIndexes;
+            if (permutation) emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+            else beginResetModel();
+            if (!alive) return false;
+            // 选择模型会在上述信号中创建持久索引，必须等信号返回后再取列表。
+            const auto before = permutation ? persistentIndexList() : QModelIndexList{};
             auto previousEntries = std::move(m_entries); auto previousIndexes = std::move(m_indexes);
-            m_entries = std::move(entries); m_indexes = std::move(indexes);
-            endResetModel();
+            m_entries = std::move(entries); m_indexes = projection->indexes;
+            if (permutation)
+            {
+                QModelIndexList after;
+                after.reserve(before.size());
+                for (const auto& index : before)
+                {
+                    int row = -1;
+                    if (index.isValid() && index.row() >= 0
+                        && static_cast<std::size_t>(index.row()) < previousIndexes->size())
+                    {
+                        const auto source = (*previousIndexes)[static_cast<std::size_t>(index.row())];
+                        if (source < projection->rowsBySource.size()) row = projection->rowsBySource[source];
+                    }
+                    after.push_back(row >= 0 ? this->index(row, index.column()) : QModelIndex{});
+                }
+                changePersistentIndexList(before, after);
+                emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
+            }
+            else endResetModel();
+            if (!alive) return false;
+            m_publishing = false;
             // Both publication roots already own retirement aliases. Releasing
             // these small handles cannot destroy the full archive on this thread.
+            return true;
         }
     protected:
         bool eventFilter(QObject* watched, QEvent* event) override
@@ -828,6 +900,7 @@ namespace
         std::function<void()> m_request;
         std::shared_ptr<const std::vector<MonitorDock::ArkRiskCenterEntry>> m_entries;
         std::shared_ptr<const std::vector<std::size_t>> m_indexes;
+        bool m_publishing = false;
     };
 
     void addStatusEntry(std::vector<MonitorDock::ArkRiskCenterEntry>& entries, QStringList& statusLines, const QString& source, const QString& category, const bool ok, const bool unsupported, const ksword::ark::IoResult& io)
@@ -1507,20 +1580,45 @@ void MonitorDock::rebuildArkRiskCenterTable()
     const int sortColumn = m_arkRiskTable->horizontalHeader()->sortIndicatorSection();
     const auto sortOrder = m_arkRiskTable->horizontalHeader()->sortIndicatorOrder();
     const auto dispatcher = m_arkRiskDispatcher;
-    QThreadPool::globalInstance()->start(QRunnable::create([this, entries, filter, highOnly, sortColumn, sortOrder, ticket, dispatcher]() {
-        const auto indexes = ks::ui::RetainCompleteExportSnapshot<std::vector<std::size_t>>(
-            std::make_shared<const std::vector<std::size_t>>(
-                buildArkRiskProjection(*entries, filter, highOnly, sortColumn, sortOrder)));
-        dispatcher->post([this, entries, indexes, ticket]() {
+    const auto model = static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model());
+    const auto previousEntries = model->entriesSnapshot();
+    const auto previousIndexes = model->indexesSnapshot();
+    QThreadPool::globalInstance()->start(QRunnable::create([this, entries, previousEntries, previousIndexes,
+        filter, highOnly, sortColumn, sortOrder, ticket, dispatcher]() {
+        const auto projection = ks::ui::RetainCompleteExportSnapshot<ArkRiskProjection>(
+            std::make_shared<const ArkRiskProjection>(
+                buildArkRiskProjection(entries, filter, highOnly, sortColumn, sortOrder, previousEntries, previousIndexes)));
+        dispatcher->post([this, entries, projection, ticket]() {
             m_arkRiskProjectionRunning = false;
             if (ticket != m_arkRiskProjectionTicket) { rebuildArkRiskCenterTable(); return; }
             if (!m_arkRiskTable->isVisible()) return;
-            auto commit = [this, entries, indexes, ticket]() {
+            auto commit = [this, entries, projection, ticket]() {
                 if (ticket != m_arkRiskProjectionTicket || !m_arkRiskTable->isVisible()) return;
+                const QPointer<MonitorDock> alive(this);
                 ks::ui::DetailLayoutRegistry::prepareDataRebuild(m_arkRiskDetailEdit);
-                static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model())->replace(entries, indexes);
-                if (m_arkRiskTable->model()->rowCount() > 0 && !m_arkRiskTable->currentIndex().isValid())
-                    m_arkRiskTable->setCurrentIndex(m_arkRiskTable->model()->index(0, riskColumnIndex(RiskColumn::Score)));
+                if (!alive || ticket != m_arkRiskProjectionTicket) return;
+                auto* model = static_cast<ArkRiskSnapshotModel*>(m_arkRiskTable->model());
+                const QPointer<ArkRiskSnapshotModel> modelOwner(model);
+                // 在后台准备和菜单等待结束后的提交时读取当前选择。
+                const auto current = m_arkRiskTable->currentIndex();
+                const auto selectedEntries = model->entriesSnapshot();
+                const auto selectedSource = model->sourceIndexAt(current.row());
+                const int selectedColumn = current.isValid() ? current.column() : riskColumnIndex(RiskColumn::Score);
+                if (!model->replace(entries, projection))
+                {
+                    if (alive && modelOwner && ticket == m_arkRiskProjectionTicket) rebuildArkRiskCenterTable();
+                    return;
+                }
+                if (!alive || !modelOwner || ticket != m_arkRiskProjectionTicket) return;
+                if (!m_arkRiskTable->currentIndex().isValid())
+                {
+                    // 成员变化使用重置；以 O(1) 恢复仍可见的选中源项，保留重置观察者的新选择。
+                    int row = selectedEntries == entries && selectedSource < projection->rowsBySource.size()
+                        ? projection->rowsBySource[selectedSource] : -1;
+                    if (row < 0 && model->rowCount() > 0) row = 0;
+                    if (row >= 0) m_arkRiskTable->setCurrentIndex(model->index(row, selectedColumn));
+                }
+                if (!alive || !modelOwner || ticket != m_arkRiskProjectionTicket) return;
                 showArkRiskCenterDetailForCurrentRow();
             };
             if (!ks::ui::DeferTableUiCommitIfContextMenuOpen(this,
