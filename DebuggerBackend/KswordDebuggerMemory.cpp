@@ -15,35 +15,71 @@ namespace ksword::debugger
             return compare != nullptr && compare(first, second) >= 0;
         }
     }
+
+    bool Backend::queryHandleAccess(HANDLE handle, DWORD& grantedAccess)
+    {
+        // NtQueryObject 的 BasicInformation 前两个字段是 Attributes / GrantedAccess。
+        // 仅在查询成功时解释返回缓冲区；查询不可用时由调用方保留原生回退。
+        using QueryObject = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        static const auto query = reinterpret_cast<QueryObject>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject"));
+        if (handle == nullptr || handle == INVALID_HANDLE_VALUE || query == nullptr) return false;
+        alignas(void*) std::array<unsigned char, 128> information{};
+        ULONG returned = 0;
+        if (query(handle, 0, information.data(), static_cast<ULONG>(information.size()), &returned) < 0)
+            return false;
+        std::memcpy(&grantedAccess, information.data() + sizeof(ULONG), sizeof(grantedAccess));
+        return true;
+    }
+
+    DWORD Backend::concreteAccess(DWORD requestedAccess)
+    {
+        constexpr DWORD selectors = MAXIMUM_ALLOWED | GENERIC_READ | GENERIC_WRITE |
+            GENERIC_EXECUTE | GENERIC_ALL;
+        return requestedAccess & ~selectors;
+    }
+
     HANDLE Backend::openProcess(DWORD access, BOOL inherit, DWORD pid)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (pid == 0) { SetLastError(ERROR_INVALID_PARAMETER); return nullptr; }
-        // Preserve rights for CE operations outside the SDK table (for example
-        // VirtualFreeEx), then fall back to identity-only access when necessary.
-        HANDLE handle = OpenProcess(access | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
-        if (handle == nullptr) handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
-        if (handle != nullptr) return handle;
-        // Win32 OpenProcess refused — a third-party Ob callback has likely
-        // stripped PROCESS_* rights for user-mode opens. Try the R0 broker
-        // path (ObOpenObjectByPointer with PreviousMode=KernelMode) which
-        // bypasses callbacks that gate on KernelHandle==FALSE. The returned
-        // value is a real Windows handle in this process, usable for
-        // ReadProcessMemory / DebugActiveProcess / etc.
-        const DWORD openError = GetLastError();
-        HANDLE brokered = brokerOpenHandle(pid, 0,
-            access | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
-        if (brokered == nullptr)
+        // CE 在函数表之外也使用进程句柄；真实权限必须覆盖请求和身份操作。
+        // Ob 回调可能让 OpenProcess 成功，却从返回句柄中削掉请求权限。
+        const DWORD requiredAccess = access | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+        HANDLE handle = OpenProcess(requiredAccess, inherit, pid);
+        const DWORD openError = handle == nullptr ? GetLastError() : ERROR_ACCESS_DENIED;
+        DWORD grantedAccess = 0;
+        const DWORD explicitAccess = concreteAccess(requiredAccess);
+        if (handle != nullptr)
         {
-            brokered = brokerOpenHandle(pid, 0,
-                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
+            // 无法读取权限时不以未知权限的代理句柄替换已有可用原生句柄。
+            if (!queryHandleAccess(handle, grantedAccess) ||
+                (grantedAccess & explicitAccess) == explicitAccess)
+                return handle;
         }
+
+        HANDLE brokered = brokerOpenHandle(pid, 0, requiredAccess, inherit);
         if (brokered != nullptr)
         {
+            DWORD nativeGranted = 0;
+            DWORD brokerGranted = 0;
+            if (handle != nullptr && queryHandleAccess(handle, nativeGranted) &&
+                queryHandleAccess(brokered, brokerGranted) &&
+                ((nativeGranted & explicitAccess) & ~(brokerGranted & explicitAccess)) != 0)
+            {
+                // 代理句柄不能替换掉原生句柄已经可用的操作权限。
+                CloseHandle(brokered);
+                return handle;
+            }
+            if (handle != nullptr) CloseHandle(handle);
             recordFallback("Win32 OpenProcess", "R0 handle broker", openError,
-                "ObOpenObjectByPointer(KernelMode) bypassed callback-stripped access");
+                "native handle lacked requested rights or could not be opened");
             return brokered;
         }
+        // 保留仍然有效的原生句柄及身份权限回退，不能因代理失败降低服务可用性。
+        if (handle != nullptr) return handle;
+        handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, inherit, pid);
+        if (handle != nullptr) return handle;
         SetLastError(openError);
         for (auto iterator = processIds_.begin(); iterator != processIds_.end();)
         {
@@ -51,7 +87,10 @@ namespace ksword::debugger
             else ++iterator;
         }
         if (processIds_.size() >= 1024) { SetLastError(ERROR_TOO_MANY_OPEN_FILES); return nullptr; }
-        handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        SECURITY_ATTRIBUTES security{};
+        security.nLength = sizeof(security);
+        security.bInheritHandle = inherit;
+        handle = CreateEventW(&security, FALSE, FALSE, nullptr);
         HANDLE identity = nullptr;
         if (handle == nullptr) return nullptr;
         if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &identity, 0, FALSE, DUPLICATE_SAME_ACCESS))
@@ -476,10 +515,38 @@ namespace ksword::debugger
     HANDLE Backend::createThread(HANDLE process, LPSECURITY_ATTRIBUTES attributes, SIZE_T stackBytes,
         LPTHREAD_START_ROUTINE start, LPVOID parameter, DWORD flags, LPDWORD tid)
     {
-        const HANDLE handle = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-            PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, processId(process));
-        if (handle == nullptr) return nullptr;
-        HANDLE result = CreateRemoteThread(handle, attributes, stackBytes, start, parameter, flags, tid);
-        const DWORD error = GetLastError(); CloseHandle(handle); SetLastError(error); return result;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        // 优先使用前端传入的真实进程句柄，避免按裸 PID 再打开另一个对象。
+        HANDLE result = CreateRemoteThread(process, attributes, stackBytes, start, parameter, flags, tid);
+        if (result != nullptr) return result;
+        const DWORD firstError = GetLastError();
+        const DWORD pid = processId(process);
+        if (pid == 0) { SetLastError(firstError); return nullptr; }
+
+        constexpr DWORD threadCreationAccess = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+            PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+        // 被降权的原生句柄与身份代理都可通过同一 PID 请求完整操作句柄。
+        ark::DriverHandle brokered(brokerOpenHandle(pid, 0, threadCreationAccess));
+        if (brokered.isValid())
+        {
+            result = CreateRemoteThread(brokered.native(), attributes, stackBytes, start, parameter, flags, tid);
+            if (result != nullptr)
+            {
+                recordFallback("CreateRemoteThread handle", "R0 handle broker", firstError,
+                    "frontend process handle lacked thread-creation rights");
+                brokered.reset();
+                SetLastError(ERROR_SUCCESS);
+                return result;
+            }
+        }
+        brokered.reset();
+        // 驱动未连接或代理失败时，保留既有 Windows 再打开路径。
+        ark::DriverHandle native(OpenProcess(threadCreationAccess, FALSE, pid));
+        if (!native.isValid()) return nullptr;
+        result = CreateRemoteThread(native.native(), attributes, stackBytes, start, parameter, flags, tid);
+        const DWORD error = GetLastError();
+        native.reset();
+        SetLastError(error);
+        return result;
     }
 }

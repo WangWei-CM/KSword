@@ -75,12 +75,10 @@ namespace ksword::debugger
         void overlayShadowBytes(DWORD pid, std::uint64_t address, void* data, SIZE_T bytes);
         bool shadowPatchByte(DWORD pid, std::uint64_t address, unsigned char& byte);
         DWORD nativeExecutionBreakpointPath(std::uint64_t address);
-        // Open a real Windows handle to a process/thread via the R0 handle broker
-        // (ObOpenObjectByPointer with PreviousMode=KernelMode) so Ob callbacks that
-        // strip access only for UserMode opens are bypassed. tid==0 selects process
-        // kind. Returns nullptr with SetLastError on refusal; the returned handle
-        // is a genuine OS handle in this process and must be closed with CloseHandle.
-        HANDLE brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess);
+        // 通过 R0 代理取得真实进程/线程句柄，并复制到请求者句柄表。
+        // tid==0 表示进程；失败返回 nullptr 并设置 LastError。
+        // 返回句柄属于本进程，由调用方用 CloseHandle 关闭。
+        HANDLE brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit = FALSE);
     private:
 #ifdef KSWORD_DEBUGGER_TESTING
         friend struct BackendTestPeer;
@@ -101,6 +99,12 @@ namespace ksword::debugger
         ark::DriverHandle driver_;
         struct ProcessProxy { DWORD pid = 0; ark::DriverHandle identity; };
         std::unordered_map<HANDLE, ProcessProxy> processIds_;
+        // 查询句柄实际权限，识别 Ob 回调“打开成功但降权”的情况。
+        static bool queryHandleAccess(HANDLE handle, DWORD& grantedAccess);
+        // GENERIC_* / MAXIMUM_ALLOWED 是请求选择器，不出现在 GrantedAccess 中。
+        static DWORD concreteAccess(DWORD requestedAccess);
+        // 原生会话只借用前端事件，仍需持有带查询和等待权限的目标身份句柄。
+        HANDLE openIdentityProcess(DWORD pid);
         std::unordered_map<DWORD, ThreadBreakpoints> breakpoints_;
         bool useHvm_ = false;
         bool ownsResident_ = false;

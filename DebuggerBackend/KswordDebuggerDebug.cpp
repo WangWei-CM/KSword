@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <TlHelp32.h>
 
 namespace ksword::debugger
 {
@@ -25,6 +26,21 @@ namespace ksword::debugger
         std::array<std::uint64_t, 4> debugAddresses(const CONTEXT& context)
         {
             return {context.Dr0, context.Dr1, context.Dr2, context.Dr3};
+        }
+        DWORD threadOwnerFromSnapshot(DWORD tid)
+        {
+            // 仅在原生线程句柄无法查询所属进程时枚举 TID；R0 再次核对归属。
+            ark::DriverHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+            if (!snapshot.isValid()) return 0;
+            THREADENTRY32 entry{};
+            entry.dwSize = sizeof(entry);
+            if (!Thread32First(snapshot.native(), &entry)) return 0;
+            do
+            {
+                if (entry.th32ThreadID == tid) return entry.th32OwnerProcessID;
+                entry.dwSize = sizeof(entry);
+            } while (Thread32Next(snapshot.native(), &entry));
+            return 0;
         }
     }
 
@@ -148,6 +164,32 @@ namespace ksword::debugger
         return error;
     }
 
+    HANDLE Backend::openIdentityProcess(DWORD pid)
+    {
+        // 前端拥有调试事件；这里仅持有 PID 对应对象并验证其生命周期。
+        constexpr DWORD identityAccess = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+        HANDLE identity = OpenProcess(identityAccess, FALSE, pid);
+        const DWORD nativeError = identity == nullptr ? GetLastError() : ERROR_ACCESS_DENIED;
+        DWORD grantedAccess = 0;
+        const DWORD explicitAccess = concreteAccess(identityAccess);
+        if (identity != nullptr &&
+            ((queryHandleAccess(identity, grantedAccess) &&
+                (grantedAccess & explicitAccess) == explicitAccess) ||
+             (GetProcessId(identity) == pid && WaitForSingleObject(identity, 0) != WAIT_FAILED)))
+            return identity;
+        HANDLE brokered = brokerOpenHandle(pid, 0, identityAccess);
+        if (brokered != nullptr)
+        {
+            if (identity != nullptr) CloseHandle(identity);
+            recordFallback("Win32 identity open", "R0 handle broker", nativeError,
+                "native target identity lacked query or wait rights");
+            return brokered;
+        }
+        if (identity != nullptr) CloseHandle(identity);
+        SetLastError(nativeError);
+        return nullptr;
+    }
+
     DWORD Backend::observeNativeSession(DWORD pid, std::uint64_t* generation)
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -164,8 +206,7 @@ namespace ksword::debugger
             if (generation != nullptr) *generation = sessionGeneration_;
             return ERROR_SUCCESS;
         }
-        ark::DriverHandle identity(OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pid));
-        if (!identity.isValid()) identity.reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
+        ark::DriverHandle identity(openIdentityProcess(pid));
         if (!identity.isValid()) return GetLastError();
         if (GetProcessId(identity.native()) != pid || WaitForSingleObject(identity.native(), 0) != WAIT_TIMEOUT)
             return ERROR_INVALID_STATE;
@@ -358,8 +399,49 @@ namespace ksword::debugger
 
     HANDLE Backend::openThread(DWORD access, BOOL inherit, DWORD tid)
     {
-        HANDLE thread = OpenThread(access | THREAD_QUERY_LIMITED_INFORMATION, inherit, tid);
-        if (thread == nullptr) thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, inherit, tid);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (tid == 0) { SetLastError(ERROR_INVALID_PARAMETER); return nullptr; }
+        const DWORD requiredAccess = access | THREAD_QUERY_LIMITED_INFORMATION;
+        HANDLE thread = OpenThread(requiredAccess, inherit, tid);
+        DWORD nativeError = thread == nullptr ? GetLastError() : ERROR_ACCESS_DENIED;
+        DWORD grantedAccess = 0;
+        const DWORD explicitAccess = concreteAccess(requiredAccess);
+        if (thread != nullptr)
+        {
+            // 权限查询不可用时保留原生线程句柄，避免代理结果缩小既有能力。
+            if (!queryHandleAccess(thread, grantedAccess) ||
+                (grantedAccess & explicitAccess) == explicitAccess)
+                return thread;
+        }
+        if (thread == nullptr)
+        {
+            thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, inherit, tid);
+            if (thread == nullptr) nativeError = GetLastError();
+        }
+        DWORD pid = thread == nullptr ? 0 : GetProcessIdOfThread(thread);
+        if (pid == 0) pid = threadOwnerFromSnapshot(tid);
+        if (pid != 0)
+        {
+            HANDLE brokered = brokerOpenHandle(pid, tid, requiredAccess, inherit);
+            if (brokered != nullptr)
+            {
+                DWORD nativeGranted = 0;
+                DWORD brokerGranted = 0;
+                if (thread != nullptr && queryHandleAccess(thread, nativeGranted) &&
+                    queryHandleAccess(brokered, brokerGranted) &&
+                    ((nativeGranted & explicitAccess) & ~(brokerGranted & explicitAccess)) != 0)
+                {
+                    // 不用缺少既有线程权限的代理句柄取代可用原生句柄。
+                    CloseHandle(brokered);
+                    return thread;
+                }
+                if (thread != nullptr) CloseHandle(thread);
+                recordFallback("Win32 OpenThread", "R0 handle broker", nativeError,
+                    "native thread handle lacked requested rights or could not be opened");
+                return brokered;
+            }
+        }
+        if (thread == nullptr) SetLastError(nativeError);
         return thread;
     }
 
@@ -572,22 +654,10 @@ namespace ksword::debugger
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (attachedPid_ != 0)
         { SetLastError(ERROR_BUSY); return FALSE; }
-        ark::DriverHandle identity(OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, pid));
-        if (!identity.isValid()) identity.reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
-        // When OpenProcess is stripped by a third-party Ob callback the attach
-        // never gets off the ground. Request the handle from the R0 broker
-        // (ObOpenObjectByPointer with KernelMode); the result is a real OS
-        // handle the WaitForSingleObject identity check accepts verbatim.
-        if (!identity.isValid())
-        {
-            HANDLE brokered = brokerOpenHandle(pid, 0, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE);
-            if (brokered != nullptr)
-            {
-                identity.reset(brokered);
-                log("Attach identity opened via R0 handle broker for PID " + std::to_string(pid));
-            }
-        }
+        ark::DriverHandle identity(openIdentityProcess(pid));
         if (!identity.isValid()) return FALSE;
+        // Windows 的 DebugActiveProcess 接受 PID 而非已打开句柄；身份代理
+        // 不能替代操作系统建立 debug port 的权限检查。
         if (!DebugActiveProcess(pid)) return FALSE;
         // Detaching or losing the debugger must leave the target alive.
         if (!DebugSetProcessKillOnExit(FALSE))

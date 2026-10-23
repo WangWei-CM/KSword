@@ -450,8 +450,9 @@ namespace ksword::debugger
         return convert == nullptr ? ERROR_GEN_FAILURE : convert(response.status);
     }
 
-    HANDLE Backend::brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess)
+    HANDLE Backend::brokerOpenHandle(DWORD pid, DWORD tid, DWORD desiredAccess, BOOL inherit)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         // Only pursue the broker path when the driver is actually attached — the
         // identity-proxy fallback owned by openProcess is still useful without R0.
         if (!driver_.isValid()) { SetLastError(ERROR_DEVICE_NOT_CONNECTED); return nullptr; }
@@ -472,11 +473,18 @@ namespace ksword::debugger
             SetLastError(convert == nullptr ? ERROR_GEN_FAILURE : convert(response.status));
             return nullptr;
         }
-        // The driver inserts the handle into this process's handle table via
-        // ObOpenObjectByPointer without OBJ_KERNEL_HANDLE; reserved0 therefore holds a
-        // handle that is immediately valid for subsequent Win32 calls here.
+        // 驱动将已打开的内核句柄复制到本次 IOCTL 请求者的用户句柄表；
+        // reserved0 是本进程可直接传给 Win32 并最终由 CloseHandle 关闭的句柄。
         const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(response.reserved0));
         if (handle == nullptr) { SetLastError(ERROR_NOT_SUPPORTED); return nullptr; }
+        // 代理返回的是新插入的用户句柄，继承语义须与 Win32 Open* 一致。
+        if (!SetHandleInformation(handle, HANDLE_FLAG_INHERIT,
+            inherit ? HANDLE_FLAG_INHERIT : 0))
+        {
+            const DWORD error = GetLastError();
+            // 已获得的句柄仍交给前端使用；继承位调整失败不能关闭服务路径。
+            log("Broker handle inherit flag could not be adjusted: " + std::to_string(error));
+        }
         SetLastError(ERROR_SUCCESS);
         return handle;
     }
