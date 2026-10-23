@@ -1,6 +1,7 @@
 #include "LogSurface.h"
 #include "../TitanEnginePlugin/ControlProtocol.h"
 #include "../X96dbgIntegration/NavigationClient.h"
+#include "../DebuggerBackend/KswordRandomizedPayload.h"
 #include <Windows.h>
 #include <objbase.h>
 #include <algorithm>
@@ -28,6 +29,8 @@ namespace
     HWND gWindow = nullptr;
     HANDLE gDebugger = nullptr, gHost = nullptr;
     std::wstring gLogPath, gSessionDirectory;
+    // 随机命名克隆目录；非空时在调试器退出后一并清理。
+    std::wstring gClonedPayloadDirectory;
     std::string gSessionId, gPendingLog;
     std::streamoff gLogOffset = 0;
 
@@ -216,8 +219,26 @@ namespace
     bool launch(DWORD pid, DWORD& debuggerPid, std::string& error, const std::wstring& selectedDebugger = L"", bool freshNavigation = false)
     {
         if ((selectedDebugger.empty() && !payload(error)) || !session(error, selectedDebugger.empty())) return false;
-        const std::wstring exe = selectedDebugger.empty() ? directory() + L"\\payload\\x64dbg\\x64dbg.exe" : selectedDebugger;
-        const std::wstring root = exe.substr(0, exe.find_last_of(L"\\/"));
+        // 使用自带 payload 的分支：整树硬链接克隆到会话专用目录并随机重命名主 exe，
+        // 让进程名/路径对按名匹配的反作弊和日志呈现为陌生身份；用户外挂的 debugger 保留原路径。
+        std::wstring exe;
+        std::wstring root;
+        if (selectedDebugger.empty()) {
+            const std::wstring sourceRoot = directory() + L"\\payload\\x64dbg";
+            auto prepared = ksword::randomized_payload::prepareRandomizedPayload(
+                sourceRoot, L"x64dbg.exe",
+                ksword::randomized_payload::NamingMode::SuffixedPreserveStem);
+            if (!prepared.success) {
+                error = failure(("Cannot prepare randomized payload (" + prepared.failureDescription + ")").c_str(), prepared.lastError);
+                return false;
+            }
+            gClonedPayloadDirectory = prepared.clonedDirectory;
+            exe = prepared.clonedExecutable;
+            root = prepared.clonedDirectory;
+        } else {
+            exe = selectedDebugger;
+            root = exe.substr(0, exe.find_last_of(L"\\/"));
+        }
         std::wstring command = L"\"" + exe + L"\" -userdir \"" + gSessionDirectory + L"\"";
         if (pid != 0) command += L" -p " + std::to_wstring(pid);
         std::vector<wchar_t> mutableCommand(command.begin(), command.end()); mutableCommand.push_back(0);
@@ -226,7 +247,15 @@ namespace
         PROCESS_INFORMATION process{};
         if (!CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, FALSE,
             CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP, block.data(), root.c_str(), &startup, &process))
-        { error = failure("Cannot start standalone x64dbg", GetLastError()); return false; }
+        {
+            error = failure("Cannot start standalone x64dbg", GetLastError());
+            // 启动失败则立即回收刚刚克隆的目录，避免遗留在 LocalAppData 下。
+            if (!gClonedPayloadDirectory.empty()) {
+                ksword::randomized_payload::cleanupRandomizedPayload(gClonedPayloadDirectory);
+                gClonedPayloadDirectory.clear();
+            }
+            return false;
+        }
         CloseHandle(process.hThread); gDebugger = process.hProcess; debuggerPid = process.dwProcessId;
         return true;
     }
@@ -390,12 +419,18 @@ namespace
                 pollLog(); log("x64dbg exited, code " + std::to_string(exitCode) + ".");
                 emit("debugger_exited", "\"exit_code\":" + std::to_string(exitCode));
                 closeHandle(gDebugger); removeSessionFiles(); ksword::x96_log::setSession(L"", "");
+                // 调试器正常退出后回收克隆的 payload 目录。
+                if (!gClonedPayloadDirectory.empty()) {
+                    ksword::randomized_payload::cleanupRandomizedPayload(gClonedPayloadDirectory);
+                    gClonedPayloadDirectory.clear();
+                }
             }
             return 0;
         case WM_DESTROY:
             KillTimer(window, kPollTimer); pollLog();
             // Closing the Tab releases observer handles. It never terminates the debugger.
             closeHandle(gDebugger); closeHandle(gHost); ksword::x96_log::destroy(); gWindow = nullptr;
+            // 关闭 Tab 不会杀死调试器，所以这里不清理克隆目录——留给调试器自己退出路径处理。
             PostQuitMessage(0); return 0;
         default: return DefWindowProcW(window, message, wParam, lParam);
         }

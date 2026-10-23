@@ -33,10 +33,11 @@
     </ClCompile>
     <Link><SubSystem>Console</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><AdditionalDependencies>ole32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="LauncherMain.cpp" /><ClCompile Include="LogSurface.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="LauncherMain.cpp" /><ClCompile Include="LogSurface.cpp" /><ClCompile Include="..\DebuggerBackend\KswordRandomizedPayload.cpp" /></ItemGroup>
   <ItemGroup><ClInclude Include="LogSurface.h" /><ClInclude Include="..\DebuggerBackend\KswordDebuggerFileProtocol.h" /><ClInclude Include="..\TitanEnginePlugin\ControlProtocol.h" /><ClInclude Include="..\DebuggerBackend\KswordDebuggerApi.h" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\DebuggerBackend\KswordPluginTheme.h" />
+    <ClInclude Include="..\DebuggerBackend\KswordRandomizedPayload.h" />
     <ClInclude Include="..\X96dbgIntegration\NavigationClient.h" />
     <ClInclude Include="..\X96dbgIntegration\NavigationProtocol.h" />
   </ItemGroup>

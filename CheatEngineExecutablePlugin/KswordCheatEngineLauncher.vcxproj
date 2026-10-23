@@ -95,11 +95,15 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\string\string.cpp">
       <Link>ksword\string\string.cpp</Link>
     </ClCompile>
+    <ClCompile Include="..\DebuggerBackend\KswordRandomizedPayload.cpp">
+      <Link>DebuggerBackend\KswordRandomizedPayload.cpp</Link>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="LogSurface.h" />
     <ClInclude Include="..\DebuggerBackend\KswordDebuggerFileProtocol.h" />
     <ClInclude Include="..\DebuggerBackend\KswordPluginTheme.h" />
+    <ClInclude Include="..\DebuggerBackend\KswordRandomizedPayload.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="integration\10_ksword_bridge.lua" />

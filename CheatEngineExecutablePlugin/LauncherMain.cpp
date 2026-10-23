@@ -1,4 +1,5 @@
 #include "../Ksword5.1/Ksword5.1/ArkDriverClient/ArkDriverClient.h"
+#include "../DebuggerBackend/KswordRandomizedPayload.h"
 #include "LogSurface.h"
 
 #include <Windows.h>
@@ -48,6 +49,8 @@ namespace
     std::streamoff gLogOffset = 0;
     std::string gPendingLogLine;
     std::string gLaunchFailureMessage;
+    // 随机命名克隆的 CE payload 目录；CE 退出后在 WM_TIMER 分支内清理。
+    std::wstring gClonedCeDirectory;
 
     std::string escapeJson(const std::string& value);
 
@@ -425,10 +428,8 @@ namespace
         {
             logPathOut->clear();
         }
-        const std::wstring ceDirectory =
+        const std::wstring sourceCeDirectory =
             joinPath(pluginDirectory, L"payload\\Cheat Engine");
-        const std::wstring ceExecutable =
-            joinPath(ceDirectory, L"cheatengine-x86_64.exe");
         const std::wstring bridgeDll = joinPath(
             pluginDirectory,
             L"bridge\\x64\\KswordCheatEnginePlugin.dll");
@@ -436,10 +437,36 @@ namespace
         {
             return BridgeStatus::launchFailed;
         }
+        // 整树硬链接克隆 CE payload，并把主 exe 以随机后缀重命名。
+        // bridgeDll 保持原路径（CE 在 autorun 阶段 LoadLibrary 绝对路径加载）。
+        auto prepared = ksword::randomized_payload::prepareRandomizedPayload(
+            sourceCeDirectory, L"cheatengine-x86_64.exe",
+            ksword::randomized_payload::NamingMode::SuffixedPreserveStem);
+        if (!prepared.success)
+        {
+            gLaunchFailureMessage = "Cannot prepare randomized CE payload (" +
+                prepared.failureDescription + ", win32=" +
+                std::to_string(prepared.lastError) + ").";
+            return BridgeStatus::launchFailed;
+        }
+        // 克隆目录由本函数或 WM_TIMER 退出路径择一清理。记录在 gClonedCeDirectory
+        // 直到 CE 进程确实退出后再调 cleanupRandomizedPayload。
+        gClonedCeDirectory = prepared.clonedDirectory;
+        const std::wstring ceDirectory = prepared.clonedDirectory;
+        const std::wstring ceExecutable = prepared.clonedExecutable;
+        // 失败前统一回收克隆目录的小工具；调用后清空全局，避免被后续 WM_TIMER 再清一次。
+        auto discardClonedPayload = [&]() {
+            if (!gClonedCeDirectory.empty())
+            {
+                ksword::randomized_payload::cleanupRandomizedPayload(gClonedCeDirectory);
+                gClonedCeDirectory.clear();
+            }
+        };
         const std::wstring statusPath = makeStatusPath();
         if (statusPath.empty())
         {
             gLaunchFailureMessage = "Cannot obtain the Windows temporary directory for CE bridge status.";
+            discardClonedPayload();
             return BridgeStatus::launchFailed;
         }
 
@@ -478,6 +505,7 @@ namespace
             const DWORD error = ::GetLastError();
             gLaunchFailureMessage = windowsFailure(
                 "Cannot prepare CE bridge environment", ceExecutable, error);
+            discardClonedPayload();
             return BridgeStatus::launchFailed;
         }
 
@@ -506,6 +534,7 @@ namespace
             const DWORD error = ::GetLastError();
             gLaunchFailureMessage = windowsFailure(
                 "Cannot start Cheat Engine", ceExecutable, error);
+            discardClonedPayload();
             return BridgeStatus::launchFailed;
         }
 
@@ -822,6 +851,12 @@ namespace
                     (void)::DeleteFileW((gLogPath + L".state.new").c_str());
                     gLogPath.clear();
                     ksword::ce_log::setSession(L"");
+                    // CE 真正退出后回收随机命名克隆目录；若此前已被清理（启动失败路径）这里是 no-op。
+                    if (!gClonedCeDirectory.empty())
+                    {
+                        ksword::randomized_payload::cleanupRandomizedPayload(gClonedCeDirectory);
+                        gClonedCeDirectory.clear();
+                    }
                 }
             }
             return 0;

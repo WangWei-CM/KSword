@@ -4,10 +4,11 @@
     <Filter Include="Source Files"><UniqueIdentifier>{EE22E28F-1554-46D7-B507-45C01A6B788E}</UniqueIdentifier></Filter>
     <Filter Include="Plugin Files"><UniqueIdentifier>{5DBD4393-F001-493D-8A9C-55D97BF2C94F}</UniqueIdentifier></Filter>
   </ItemGroup>
-  <ItemGroup><ClCompile Include="LauncherMain.cpp"><Filter>Source Files</Filter></ClCompile><ClCompile Include="LogSurface.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="LauncherMain.cpp"><Filter>Source Files</Filter></ClCompile><ClCompile Include="LogSurface.cpp"><Filter>Source Files</Filter></ClCompile><ClCompile Include="..\DebuggerBackend\KswordRandomizedPayload.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClInclude Include="LogSurface.h"><Filter>Source Files</Filter></ClInclude><ClInclude Include="..\DebuggerBackend\KswordDebuggerFileProtocol.h" /><ClInclude Include="..\TitanEnginePlugin\ControlProtocol.h" /><ClInclude Include="..\DebuggerBackend\KswordDebuggerApi.h" /></ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\DebuggerBackend\KswordPluginTheme.h" />
+    <ClInclude Include="..\DebuggerBackend\KswordRandomizedPayload.h"><Filter>Source Files</Filter></ClInclude>
     <ClInclude Include="..\X96dbgIntegration\NavigationClient.h"><Filter>Source Files</Filter></ClInclude>
     <ClInclude Include="..\X96dbgIntegration\NavigationProtocol.h"><Filter>Source Files</Filter></ClInclude>
   </ItemGroup>

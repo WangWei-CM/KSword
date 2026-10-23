@@ -28,10 +28,16 @@
     <ClCompile Include="..\Ksword5.1\Ksword5.1\ksword\string\string.cpp">
       <Filter>ArkDriverClient</Filter>
     </ClCompile>
+    <ClCompile Include="..\DebuggerBackend\KswordRandomizedPayload.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\DebuggerBackend\KswordDebuggerFileProtocol.h" />
     <ClInclude Include="..\DebuggerBackend\KswordPluginTheme.h" />
+    <ClInclude Include="..\DebuggerBackend\KswordRandomizedPayload.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="LogSurface.h">
       <Filter>Source Files</Filter>
     </ClInclude>
